@@ -1,6 +1,5 @@
 import ttnn
 from models.common.lightweightmodule import LightweightModule
-import torch.nn as nn
 
 
 class TTPatchEmbed(LightweightModule):
@@ -37,7 +36,7 @@ class TTPatchEmbed(LightweightModule):
         self.embed_dim = embed_dim
         self.device = device
         self.dtype = dtype
-        self.memory_config = ttnn.DRAM_MEMORY_CONFIG
+        self.memory_config = ttnn.L1_MEMORY_CONFIG
         # Store projection parameters (weight and bias)
         self.proj_weight = parameters["proj"]["weight"]
         self.proj_bias = parameters["proj"]["bias"]
@@ -51,22 +50,20 @@ class TTPatchEmbed(LightweightModule):
         )
         # Initialize conv config with no activation and default output layout
         self.conv_config = ttnn.Conv2dConfig(
-            weights_dtype=ttnn.bfloat16,
+            weights_dtype=self.dtype,
             activation="",
             output_layout=ttnn.TILE_LAYOUT,
             deallocate_activation=True,  # Free input memory after use
             reallocate_halo_output=True,  # Reduce memory fragmentation
-            act_block_h_override=32,  # Use smaller activation blocks
-            shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,  # Use height sharding
+            act_block_h_override=64,  # Use smaller activation blocks
         )
 
-    def forward(self, x, config=None):
-        batch_size, img_c, img_h, img_w = x.shape  # NHWC format
-        x = ttnn.permute(x, (0, 2, 3, 1), memory_config=self.memory_config)
+    def forward(self, x):
+        batch_size, img_h, img_w, _ = x.shape  # NHWC format
 
         # Use DRAM slicing for large inputs
         slice_config = ttnn.Conv2dSliceConfig(
-            slice_type=ttnn.Conv2dSliceHeight, num_slices=4  # Adjust based on memory constraints
+            slice_type=ttnn.Conv2dSliceHeight, num_slices=6  # Adjust based on memory constraints
         )
         # Validate input dimensions
         assert (
@@ -91,53 +88,9 @@ class TTPatchEmbed(LightweightModule):
             compute_config=self.compute_config,
             return_output_dim=True,  # Only return the output tensor for simplest call
             return_weights_and_bias=False,  # Weights and bias are already prepared
-            dtype=ttnn.bfloat16,  # Specify output dtype
+            dtype=self.dtype,  # Specify output dtype
             slice_config=slice_config,
         )
         flattened_output = ttnn.reshape(output, (batch_size, out_height * out_width, self.embed_dim))
-        # transposed_output = ttnn.transpose(flattened_output, 1, 2)
 
-        # return transposed_output
         return flattened_output
-
-
-class PatchEmbed(nn.Module):
-    r"""Image to Patch Embedding
-
-    Args:
-        img_size (int): Image size.  Default: 224.
-        patch_size (int): Patch token size. Default: 4.
-        in_chans (int): Number of input image channels. Default: 3.
-        embed_dim (int): Number of linear projection output channels. Default: 96.
-        norm_layer (nn.Module, optional): Normalization layer. Default: None
-    """
-
-    def __init__(self, img_size=224, patch_size=4, in_chans=3, embed_dim=96, norm_layer=None):
-        super().__init__()
-        img_size = to_2tuple(img_size)
-        patch_size = to_2tuple(patch_size)
-        patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]]
-        self.img_size = img_size
-        self.patch_size = patch_size
-        self.patches_resolution = patches_resolution
-        self.num_patches = patches_resolution[0] * patches_resolution[1]
-
-        self.in_chans = in_chans
-        self.embed_dim = embed_dim
-
-        self.proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        if norm_layer is not None:
-            self.norm = norm_layer(embed_dim)
-        else:
-            self.norm = None
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        # FIXME look at relaxing size constraints
-        assert (
-            H == self.img_size[0] and W == self.img_size[1]
-        ), f"Input image size ({H}*{W}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})."
-        x = self.proj(x).flatten(2).transpose(1, 2)  # B Ph*Pw C
-        if self.norm is not None:
-            x = self.norm(x)
-        return x

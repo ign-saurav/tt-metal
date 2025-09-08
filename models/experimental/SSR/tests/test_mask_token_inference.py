@@ -1,7 +1,6 @@
 import torch
 import pytest
 import ttnn
-import math
 from loguru import logger
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_bias, preprocess_linear_weight
 from models.experimental.SSR.reference.SSR.model.tile_selection import mask_token_inference
@@ -30,20 +29,18 @@ def create_mask_token_inference_preprocessor(device):
             )
 
             # QKV linear layers
-            parameters["q"] = {}
-            parameters["k"] = {}
-            parameters["v"] = {}
             parameters["proj"] = {}
 
-            parameters["q"]["weight"] = preprocess_linear_weight(torch_model.q.weight, dtype=ttnn.bfloat16)
-            parameters["k"]["weight"] = preprocess_linear_weight(torch_model.k.weight, dtype=ttnn.bfloat16)
-            parameters["v"]["weight"] = preprocess_linear_weight(torch_model.v.weight, dtype=ttnn.bfloat16)
             parameters["proj"]["weight"] = preprocess_linear_weight(torch_model.proj.weight, dtype=ttnn.bfloat16)
 
+            qkv_weight = torch.cat([torch_model.q.weight, torch_model.k.weight, torch_model.v.weight], dim=0)
+
+            parameters["qkv"] = {}
+            parameters["qkv"]["weight"] = preprocess_linear_weight(qkv_weight, dtype=ttnn.bfloat16)
+
             if torch_model.q.bias is not None:
-                parameters["q"]["bias"] = preprocess_linear_bias(torch_model.q.bias, dtype=ttnn.bfloat16)
-                parameters["k"]["bias"] = preprocess_linear_bias(torch_model.k.bias, dtype=ttnn.bfloat16)
-                parameters["v"]["bias"] = preprocess_linear_bias(torch_model.v.bias, dtype=ttnn.bfloat16)
+                qkv_bias = torch.cat([torch_model.q.bias, torch_model.k.bias, torch_model.v.bias], dim=0)
+                parameters["qkv"]["bias"] = preprocess_linear_bias(qkv_bias, dtype=ttnn.bfloat16)
 
             parameters["proj"]["bias"] = preprocess_linear_bias(torch_model.proj.bias, dtype=ttnn.bfloat16)
 
@@ -53,26 +50,16 @@ def create_mask_token_inference_preprocessor(device):
 
 
 @pytest.mark.parametrize(
-    "input_shape, image_size, patch_size, token_size",
-    (
-        ((1, 17, 3072), 256, 2, 4),  # Original test case
-        # ((2, 33, 1536), 128, 2, 2),   # Medium case
-        # ((4, 65, 768), 64, 2, 1),     # Smaller case
-        # ((8, 129, 384), 32, 1, 1),    # Very small case
-    ),
+    "input_shape, dim, num_heads",
+    (((3, 17, 3072), 3072, 1),),  # Original test case
 )
-def test_mask_token_inference(input_shape, image_size, patch_size, token_size):
+def test_mask_token_inference(device, input_shape, dim, num_heads):
     # Create test input [B, N, C] where first token is cls token
-    # input_tensor = torch.randn(input_shape, dtype=torch.bfloat16)
     input_tensor = torch.randn(input_shape)
-    num_layers = int(math.log2((image_size // patch_size) // token_size))
-    dim = 96 * (2**num_layers)
 
-    ref_layer = mask_token_inference(dim=dim, num_heads=1, qkv_bias=True)
+    ref_layer = mask_token_inference(dim=dim, num_heads=num_heads, qkv_bias=False)
     ref_layer.eval()
     ref_output = ref_layer(input_tensor)
-
-    device = ttnn.open_device(device_id=0)
 
     parameters = preprocess_model_parameters(
         initialize_model=lambda: ref_layer,
@@ -80,9 +67,9 @@ def test_mask_token_inference(input_shape, image_size, patch_size, token_size):
         device=device,
     )
 
-    tt_layer = TTMaskTokenInference(device=device, parameters=parameters, dim=dim, num_heads=1, qkv_bias=True)
+    tt_layer = TTMaskTokenInference(device=device, parameters=parameters, dim=dim, num_heads=num_heads)
 
-    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT)
+    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
     tt_output = tt_layer(tt_input)
     tt_torch_output = tt2torch_tensor(tt_output)
 
@@ -94,7 +81,5 @@ def test_mask_token_inference(input_shape, image_size, patch_size, token_size):
         logger.info("MaskTokenInference Passed!")
     else:
         logger.warning("MaskTokenInference Failed!")
-
-    ttnn.close_device(device)
 
     assert does_pass

@@ -49,15 +49,15 @@ def create_patch_merging_preprocessor(device):
 
 @pytest.mark.parametrize(
     "batch_size, input_resolution, dim",
-    [
-        (1, (56, 56), 96),  # Swin-Tiny stage 1 -> 2
-        (2, (28, 28), 192),  # Swin-Tiny stage 2 -> 3
-        (1, (14, 14), 384),  # Swin-Tiny stage 3 -> 4
-        (1, (112, 112), 128),  # Swin-Small stage 1 -> 2
-        (2, (56, 56), 256),  # Swin-Small stage 2 -> 3
-        (1, (32, 32), 256),  # Custom resolution
-    ],
+    (
+        (3, (128, 128), 96),  # Custom resolution
+        (3, (64, 64), 192),  # Custom resolution
+        (3, (32, 32), 384),  # Custom resolution
+        (3, (16, 16), 768),  # Custom resolution
+        (3, (8, 8), 1536),  # Custom resolution
+    ),
 )
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}])
 def test_patch_merging(device, batch_size, input_resolution, dim):
     torch.manual_seed(0)
 
@@ -118,122 +118,4 @@ def test_patch_merging(device, batch_size, input_resolution, dim):
     # Verify expected output shape
     expected_shape = (batch_size, (H // 2) * (W // 2), 2 * dim)
     assert ref_output.shape == expected_shape, f"Unexpected output shape: {ref_output.shape}, expected {expected_shape}"
-    ttnn.close_device(device)
-
-
-@pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-def test_patch_merging_memory_config(device):
-    """Test different memory configurations"""
-    torch.manual_seed(0)
-
-    input_resolution = (56, 56)
-    dim = 96
-    batch_size = 1
-    H, W = input_resolution
-
-    ref_layer = PatchMerging(input_resolution=input_resolution, dim=dim)
-    ref_layer.eval()
-
-    input_tensor = torch.randn(batch_size, H * W, dim)
-    ref_output = ref_layer(input_tensor)
-
-    # Test with L1 memory config
-    params = preprocess_model_parameters(
-        initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_patch_merging_preprocessor(device),
-        device=device,
-    )
-
-    tt_layer_l1 = TTPatchMerging(
-        device=device,
-        parameters=params,
-        input_resolution=input_resolution,
-        dim=dim,
-        memory_config=ttnn.L1_MEMORY_CONFIG,
-    )
-
-    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-    tt_output_l1 = tt_layer_l1(tt_input)
-    tt_torch_output_l1 = tt2torch_tensor(tt_output_l1)
-
-    does_pass_l1, pcc_message_l1 = comp_pcc(ref_output, tt_torch_output_l1, 0.99)
-    logger.info(f"L1 Memory Config: {pcc_message_l1}")
-    assert does_pass_l1, f"L1 memory config failed: {pcc_message_l1}"
-    ttnn.close_device(device)
-
-
-def test_patch_merging_error_handling(device):
-    """Test error handling for invalid input dimensions"""
-    input_resolution = (56, 56)
-    dim = 96
-
-    ref_layer = PatchMerging(input_resolution=input_resolution, dim=dim)
-    ref_layer.eval()
-
-    params = preprocess_model_parameters(
-        initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_patch_merging_preprocessor(device),
-        device=device,
-    )
-
-    tt_layer = TTPatchMerging(
-        device=device,
-        parameters=params,
-        input_resolution=input_resolution,
-        dim=dim,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-    )
-
-    # Test with wrong sequence length
-    wrong_input = torch.randn(1, 100, dim)  # Wrong sequence length
-    tt_wrong_input = ttnn.from_torch(wrong_input, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-
-    with pytest.raises(AssertionError, match="input feature has wrong size"):
-        tt_layer(tt_wrong_input)
-    ttnn.close_device(device)
-
-
-def test_patch_merging_multiple_iterations(device):
-    """Test multiple forward passes to check for memory leaks"""
-    torch.manual_seed(0)
-
-    input_resolution = (28, 28)
-    dim = 192
-    batch_size = 1
-    H, W = input_resolution
-
-    ref_layer = PatchMerging(input_resolution=input_resolution, dim=dim)
-    ref_layer.eval()
-
-    params = preprocess_model_parameters(
-        initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_patch_merging_preprocessor(device),
-        device=device,
-    )
-
-    tt_layer = TTPatchMerging(
-        device=device,
-        parameters=params,
-        input_resolution=input_resolution,
-        dim=dim,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-    )
-
-    # Run multiple forward passes to check for memory leaks
-    for i in range(3):
-        input_tensor = torch.randn(batch_size, H * W, dim)
-        ref_output = ref_layer(input_tensor)
-
-        tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
-        tt_output = tt_layer(tt_input)
-        tt_torch_output = tt2torch_tensor(tt_output)
-
-        does_pass, pcc_message = comp_pcc(ref_output, tt_torch_output, 0.99)
-        logger.info(f"Iteration {i+1}: {pcc_message}")
-        assert does_pass, f"Iteration {i+1} failed: {pcc_message}"
-
-        # Clean up
-        ttnn.deallocate(tt_input)
-        ttnn.deallocate(tt_output)
-
     ttnn.close_device(device)

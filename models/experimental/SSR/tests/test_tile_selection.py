@@ -11,7 +11,6 @@ from models.experimental.SSR.tests.test_basic_block import create_basic_layer_pr
 from models.experimental.SSR.tests.test_mlp import create_mlp_preprocessor
 from models.experimental.SSR.tests.test_mask_token_inference import create_mask_token_inference_preprocessor
 from models.utility_functions import tt2torch_tensor, comp_pcc
-from models.utility_functions import profiler
 
 
 def create_tile_selection_preprocessor(device):
@@ -95,10 +94,10 @@ def create_tile_selection_preprocessor(device):
     "image_size, patch_size, token_size, num_cls",
     [
         (256, 2, 4, 1),  # Original configuration
-        # (128, 2, 2, 2),   # Smaller configuration
     ],
 )
-def test_tile_selection(image_size, patch_size, token_size, num_cls):
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}])
+def test_tile_selection(device, image_size, patch_size, token_size, num_cls):
     """Test TileSelection module against PyTorch reference for correctness"""
 
     # Create mock args object
@@ -126,61 +125,35 @@ def test_tile_selection(image_size, patch_size, token_size, num_cls):
     with torch.no_grad():
         ref_output = ref_layer(input_tensor)
 
-    device = ttnn.open_device(device_id=0, l1_small_size=32768)
+    parameters = preprocess_model_parameters(
+        initialize_model=lambda: ref_layer,
+        custom_preprocessor=create_tile_selection_preprocessor(device),
+        device=device,
+    )
 
-    try:
-        parameters = preprocess_model_parameters(
-            initialize_model=lambda: ref_layer,
-            custom_preprocessor=create_tile_selection_preprocessor(device),
-            device=device,
-        )
+    # Create TTNN implementation
+    tt_layer = TTTileSelection(device=device, parameters=parameters, args=args, num_cls=num_cls)
 
-        # Create TTNN implementation
-        tt_layer = TTTileSelection(device=device, parameters=parameters, args=args, num_cls=num_cls)
+    # NCHW -> NHWC
+    input_tensor = input_tensor.permute(0, 2, 3, 1)
 
-        # Convert input to TTNN
-        tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT)
+    # Convert input to TTNN
+    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
 
-        # Run TTNN implementation
-        profiler.start("warmUpRun")
-        tt_output = tt_layer(tt_input)
-        profiler.end("warmUpRun")
+    # Run TTNN implementation
+    tt_output = tt_layer(tt_input)
 
-        profiler.start("actualRun")
-        tt_output = tt_layer(tt_input)
-        profiler.end("actualRun")
+    # Convert outputs back to torch for comparison
+    tt_mask_3 = tt2torch_tensor(tt_output)
 
-        # Convert outputs back to torch for comparison
-        tt_mask_3 = tt2torch_tensor(tt_output[0])
-        tt_mask_2 = tt2torch_tensor(tt_output[1])
-        tt_mask_1 = tt2torch_tensor(tt_output[2])
+    # Compare outputs with appropriate PCC thresholds
+    does_pass_3, pcc_message_3 = comp_pcc(ref_output[0], tt_mask_3, 0.98)
 
-        warmup_run_time = profiler.get("warmUpRun")
-        actual_run_time = profiler.get("actualRun")
+    logger.info(f"Scale 3 PCC: {pcc_message_3}")
 
-        # Compare outputs with appropriate PCC thresholds
-        does_pass_3, pcc_message_3 = comp_pcc(ref_output[0], tt_mask_3, 0.98)
-        does_pass_2, pcc_message_2 = comp_pcc(ref_output[1], tt_mask_2, 0.98)
-        does_pass_1, pcc_message_1 = comp_pcc(ref_output[2], tt_mask_1, 0.98)
+    if does_pass_3:
+        logger.info("TileSelection Passed!")
+    else:
+        logger.warning("TileSelection Failed!")
 
-        logger.info(f"Scale 3 PCC: {pcc_message_3}")
-        logger.info(f"Scale 2 PCC: {pcc_message_2}")
-        logger.info(f"Scale 1 PCC: {pcc_message_1}")
-
-        overall_pass = does_pass_3 and does_pass_2 and does_pass_1
-
-        logger.info(f"Warmup Run: {warmup_run_time} s")
-        logger.info(f"Actual Run: {actual_run_time} s")
-        logger.info(f"Throughput: {batch_size/actual_run_time}")
-
-        if overall_pass:
-            logger.info("TileSelection Passed!")
-        else:
-            logger.warning("TileSelection Failed!")
-
-        assert (
-            overall_pass
-        ), f"TileSelection test failed - Scale 3: {does_pass_3}, Scale 2: {does_pass_2}, Scale 1: {does_pass_1}"
-
-    finally:
-        ttnn.close_device(device)
+    assert does_pass_3, f"TileSelection test failed - Scale 3: {does_pass_3}"

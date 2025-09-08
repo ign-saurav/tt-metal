@@ -62,44 +62,17 @@ class TTTileSelection(LightweightModule):
 
         # Initialize MLPs using existing TTMlp
         final_dim = 96 * (2**self.num_layers)
-
         self.fea_mlp3 = TTMlp(
             device=device,
-            memory_config=memory_config,
             in_features=final_dim,
             hidden_features=final_dim,
             out_features=final_dim,
             parameters=parameters["fea_mlp3"],
         )
 
-        self.fea_mlp2 = TTMlp(
-            device=device,
-            memory_config=memory_config,
-            in_features=96 * (2 ** (self.num_layers - 1)),
-            hidden_features=final_dim,
-            out_features=final_dim,
-            parameters=parameters["fea_mlp2"],
-        )
-
-        self.fea_mlp1 = TTMlp(
-            device=device,
-            memory_config=memory_config,
-            in_features=96 * (2 ** (self.num_layers - 2)),
-            hidden_features=final_dim,
-            out_features=final_dim,
-            parameters=parameters["fea_mlp1"],
-        )
         # Initialize mask token inference modules
         self.mask_pre3 = TTMaskTokenInference(
             device=device, parameters=parameters["mask_pre3"], dim=final_dim, num_heads=1
-        )
-
-        self.mask_pre2 = TTMaskTokenInference(
-            device=device, parameters=parameters["mask_pre2"], dim=final_dim, num_heads=1
-        )
-
-        self.mask_pre1 = TTMaskTokenInference(
-            device=device, parameters=parameters["mask_pre1"], dim=final_dim, num_heads=1
         )
 
         # MLP norm parameters
@@ -113,29 +86,10 @@ class TTTileSelection(LightweightModule):
         # Classification MLPs
         self.mlp3 = TTMlp(
             device=device,
-            memory_config=memory_config,
             in_features=final_dim,
             hidden_features=96,
             out_features=96,
             parameters=parameters["mlp3"],
-        )
-
-        self.mlp2 = TTMlp(
-            device=device,
-            memory_config=memory_config,
-            in_features=final_dim,
-            hidden_features=96,
-            out_features=96,
-            parameters=parameters["mlp2"],
-        )
-
-        self.mlp1 = TTMlp(
-            device=device,
-            memory_config=memory_config,
-            in_features=final_dim,
-            hidden_features=96,
-            out_features=96,
-            parameters=parameters["mlp1"],
         )
 
         # Linear classification layers
@@ -146,7 +100,7 @@ class TTTileSelection(LightweightModule):
         self.linear1_weight = parameters["linear1"]["weight"]
         self.linear1_bias = parameters["linear1"]["bias"]
 
-    def __call__(self, x):
+    def forward(self, x):
         """
         Args:
             x: Input tensor [B, C, H, W]
@@ -164,8 +118,6 @@ class TTTileSelection(LightweightModule):
 
         # Apply layer normalization to different scale features
         x3 = ttnn.layer_norm(x, weight=self.norm3_weight, bias=self.norm3_bias)
-        x2 = ttnn.layer_norm(x_downsample[-1], weight=self.norm2_weight, bias=self.norm2_bias)
-        x1 = ttnn.layer_norm(x_downsample[-2], weight=self.norm1_weight, bias=self.norm1_bias)
 
         # Get mask tokens and expand for batch
         mask_tokens = ttnn.unsqueeze(self.mask_token_weight, 0)
@@ -185,34 +137,7 @@ class TTTileSelection(LightweightModule):
         mask_3 = ttnn.linear(mask_3, self.linear3_weight, bias=self.linear3_bias)
         mask_3 = self._reshape_output(mask_3, B, self.token_size, self.token_size)
 
-        # Process scale 2
-        fea_2_processed = self.fea_mlp2(x2)
-        mask_tokens = ttnn.to_layout(mask_tokens, ttnn.ROW_MAJOR_LAYOUT)
-        fea_2_processed = ttnn.to_layout(fea_2_processed, ttnn.ROW_MAJOR_LAYOUT)
-        fea_2 = ttnn.concat([mask_tokens, fea_2_processed], dim=1)
-        fea_2 = ttnn.to_layout(fea_2, ttnn.TILE_LAYOUT)
-
-        mask_tokens = ttnn.slice(fea_2, [0, 0, 0], [B, 1, fea_2.shape[-1]])
-        mask_2 = self.mask_pre2(fea_2)
-        mask_2 = ttnn.layer_norm(mask_2, weight=self.mlp_norm2_weight, bias=self.mlp_norm2_bias)
-        mask_2 = self.mlp2(mask_2)
-        mask_2 = ttnn.linear(mask_2, self.linear2_weight, bias=self.linear2_bias)
-        mask_2 = self._reshape_output(mask_2, B, self.token_size * 2, self.token_size * 2)
-
-        # Process scale 1 (coarsest scale)
-        fea_1_processed = self.fea_mlp1(x1)
-        mask_tokens = ttnn.to_layout(mask_tokens, ttnn.ROW_MAJOR_LAYOUT)
-        fea_1_processed = ttnn.to_layout(fea_1_processed, ttnn.ROW_MAJOR_LAYOUT)
-        fea_1 = ttnn.concat([mask_tokens, fea_1_processed], dim=1)
-        fea_1 = ttnn.to_layout(fea_1, ttnn.TILE_LAYOUT)
-
-        mask_1 = self.mask_pre1(fea_1)
-        mask_1 = ttnn.layer_norm(mask_1, weight=self.mlp_norm1_weight, bias=self.mlp_norm1_bias)
-        mask_1 = self.mlp1(mask_1)
-        mask_1 = ttnn.linear(mask_1, self.linear1_weight, bias=self.linear1_bias)
-        mask_1 = self._reshape_output(mask_1, B, self.token_size * 4, self.token_size * 4)
-
-        return mask_3, mask_2, mask_1
+        return mask_3
 
     def _reshape_output(self, mask_output, B, H, W):
         """Reshape output to spatial dimensions"""

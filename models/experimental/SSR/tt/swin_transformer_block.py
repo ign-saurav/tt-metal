@@ -20,7 +20,6 @@ class TTSwinTransformerBlock(LightweightModule):
         window_size=7,
         shift_size=0,
         mlp_ratio=4.0,
-        memory_config=None,
     ):
         super().__init__()
         self.parameters = parameters
@@ -31,7 +30,7 @@ class TTSwinTransformerBlock(LightweightModule):
         self.window_size = window_size
         self.shift_size = shift_size
         self.mlp_ratio = mlp_ratio
-        self.memory_config = ttnn.DRAM_MEMORY_CONFIG
+        self.memory_config = ttnn.L1_MEMORY_CONFIG
 
         # Adjust window_size and shift_size if needed
         if min(self.input_resolution) <= self.window_size:
@@ -52,24 +51,11 @@ class TTSwinTransformerBlock(LightweightModule):
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = TTMlp(
             device=device,
-            memory_config=memory_config,
             in_features=dim,
             hidden_features=mlp_hidden_dim,
             out_features=dim,
             parameters=parameters["mlp"],  # Will use parameters instead
         )
-
-        # # Set up MLP weights from parameters
-        # self.mlp.fc1_weight = parameters["mlp"]["fc1"]["weight"]
-        # self.mlp.fc1_bias = parameters["mlp"]["fc1"]["bias"]
-        # self.mlp.fc2_weight = parameters["mlp"]["fc2"]["weight"]
-        # self.mlp.fc2_bias = parameters["mlp"]["fc2"]["bias"]
-
-        # Pre-compute attention mask if needed
-        if self.shift_size > 0:
-            self.attn_mask = self._compute_attention_mask()
-        else:
-            self.attn_mask = None
 
     def _compute_attention_mask(self):
         """Compute attention mask for shifted window attention"""
@@ -100,7 +86,13 @@ class TTSwinTransformerBlock(LightweightModule):
         attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
 
         # Convert to TTNN tensor
-        return ttnn.from_torch(attn_mask, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=self.memory_config)
+        return ttnn.from_torch(
+            attn_mask,
+            device=self.device,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            dtype=ttnn.bfloat4_b,
+        )
 
     def _window_partition_padding(self, x, window_size):
         """Partition into non-overlapping windows with padding if needed"""
@@ -123,43 +115,46 @@ class TTSwinTransformerBlock(LightweightModule):
             pad_h = (window_size - H % window_size) % window_size
             pad_w = (window_size - W % window_size) % window_size
             if pad_h > 0 or pad_w > 0:
-                # x = ttnn.pad(x, ((0, 0), (0, pad_h), (0, pad_w), (0, 0)))
                 x = ttnn.pad(x, ((0, 0), (0, pad_h), (0, pad_w), (0, 0)), 0.0)
             Hp, Wp = H + pad_h, W + pad_w
 
-            x = ttnn.reshape(x, (B, Hp // window_size, window_size, Wp // window_size, window_size, C))
+            x = ttnn.reshape(
+                x,
+                (B, Hp // window_size, window_size, Wp // window_size, window_size, C),
+                memory_config=self.memory_config,
+            )
             x = ttnn.permute(x, (0, 1, 3, 2, 4, 5), memory_config=self.memory_config)
-            windows = ttnn.reshape(x, (-1, window_size, window_size, C))
-            return windows, (Hp, Wp)
+            x = ttnn.reshape(x, (-1, window_size, window_size, C), memory_config=self.memory_config)
+            return x, (Hp, Wp)
 
-    def _window_unpartition(self, windows, window_size, pad_hw, hw):
+    def _window_unpartition(self, x, window_size, pad_hw, hw):
         """Window unpartition into original sequences and removing padding"""
         Hp, Wp = pad_hw
         H, W = hw
-        B = windows.shape[0] // (Hp * Wp // window_size // window_size)
+        B = x.shape[0] // (Hp * Wp // window_size // window_size)
 
-        x = ttnn.reshape(windows, (B, Hp // window_size, Wp // window_size, window_size, window_size, -1))
+        x = ttnn.reshape(
+            x, (B, Hp // window_size, Wp // window_size, window_size, window_size, -1), memory_config=self.memory_config
+        )
         x = ttnn.permute(x, (0, 1, 3, 2, 4, 5), memory_config=self.memory_config)
-        x = ttnn.reshape(x, (B, Hp, Wp, -1))
+        x = ttnn.reshape(x, (B, Hp, Wp, -1), memory_config=self.memory_config)
 
         if Hp > H or Wp > W:
-            # x = ttnn.slice(x, (slice(None), slice(0, H), slice(0, W), slice(None)), memory_config=self.memory_config)
             x = ttnn.slice(x, [0, 0, 0, 0], [x.shape[0], H, W, x.shape[3]], memory_config=self.memory_config)
         return x
 
-    def forward(self, x):
+    def forward(self, input_tensor):
         H, W = self.input_resolution
-        B, L, C = x.shape
+        B, L, C = input_tensor.shape
 
         # Store shortcut connection
-        shortcut = x
+        shortcut = input_tensor
+        shortcut = ttnn.reallocate(shortcut, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
         # Layer normalization 1
         norm1_weight = self.parameters["norm1"]["weight"]
         norm1_bias = self.parameters["norm1"]["bias"]
-        # norm1_weight = ttnn.from_torch(self.parameters["norm1"]["weight"], device=self.device, memory_config=self.memory_config)
-        # norm1_bias = ttnn.from_torch(self.parameters["norm1"]["bias"], device=self.device, memory_config=self.memory_config)
-        x = ttnn.layer_norm(x, weight=norm1_weight, bias=norm1_bias, memory_config=self.memory_config)
+        x = ttnn.layer_norm(input_tensor, weight=norm1_weight, bias=norm1_bias, memory_config=self.memory_config)
 
         # Reshape to spatial format
         x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=self.memory_config)
@@ -168,28 +163,33 @@ class TTSwinTransformerBlock(LightweightModule):
         # Cyclic shift
         if self.shift_size > 0:
             # TTNN doesn't have direct roll operation, so we implement it with slicing and concatenation
-            shifted_x = ttnn.roll(x, [-self.shift_size, -self.shift_size], [1, 2])
-        else:
-            shifted_x = x
+            x = ttnn.roll(x, [-self.shift_size, -self.shift_size], [1, 2])
 
         # Partition windows
-        x_windows, pad_hw = self._window_partition_padding(shifted_x, self.window_size)
-        x_windows = ttnn.reshape(x_windows, (-1, self.window_size * self.window_size, C))
-        x_windows = ttnn.to_layout(x_windows, layout=ttnn.TILE_LAYOUT, memory_config=self.memory_config)
+        x, pad_hw = self._window_partition_padding(x, self.window_size)
+        x = ttnn.reshape(x, (-1, self.window_size * self.window_size, C), memory_config=self.memory_config)
+        x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT, memory_config=self.memory_config)
+
+        # Pre-compute attention mask if needed
+        if self.shift_size > 0:
+            self.attn_mask = self._compute_attention_mask()
+        else:
+            self.attn_mask = None
 
         # Window attention
-        attn_windows = self.attn(x_windows, mask=self.attn_mask)
+        x = self.attn(x, mask=self.attn_mask)
+
+        if self.attn_mask is not None:
+            ttnn.deallocate(self.attn_mask)
 
         # Merge windows
-        attn_windows = ttnn.to_layout(attn_windows, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=self.memory_config)
-        attn_windows = ttnn.reshape(attn_windows, (-1, self.window_size, self.window_size, C))
-        shifted_x = self._window_unpartition(attn_windows, self.window_size, pad_hw, (H, W))
+        x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=self.memory_config)
+        x = ttnn.reshape(x, (-1, self.window_size, self.window_size, C), memory_config=self.memory_config)
+        x = self._window_unpartition(x, self.window_size, pad_hw, (H, W))
 
         # Reverse cyclic shift
         if self.shift_size > 0:
-            x = ttnn.roll(shifted_x, [self.shift_size, self.shift_size], [1, 2])
-        else:
-            x = shifted_x
+            x = ttnn.roll(x, [self.shift_size, self.shift_size], [1, 2])
 
         # Reshape back to sequence format
         x = ttnn.reshape(x, (B, H * W, C))
@@ -198,8 +198,7 @@ class TTSwinTransformerBlock(LightweightModule):
         # First residual connection (no drop_path implementation in TTNN)
         x = ttnn.add(shortcut, x, memory_config=self.memory_config)
 
-        # Store for second residual connection
-        residual = x
+        residual = ttnn.reallocate(x, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
         # Layer normalization 2
         norm2_weight = self.parameters["norm2"]["weight"]
@@ -211,11 +210,5 @@ class TTSwinTransformerBlock(LightweightModule):
 
         # Second residual connection
         x = ttnn.add(residual, x, memory_config=self.memory_config)
-
-        # Cleanup intermediate tensors
-        # ttnn.deallocate(norm1_weight)
-        # ttnn.deallocate(norm1_bias)
-        # ttnn.deallocate(norm2_weight)
-        # ttnn.deallocate(norm2_bias)
 
         return x

@@ -42,8 +42,6 @@ class TTBasicLayer(LightweightModule):
                 window_size=window_size,
                 shift_size=shift_size,
                 mlp_ratio=mlp_ratio,
-                # attn_mask=parameters.get("attn_masks", {}).get(i, None),
-                memory_config=memory_config,
             )
             self.blocks.append(block)
 

@@ -47,68 +47,80 @@ def create_window_attention_preprocessor(device):
 
 
 @pytest.mark.parametrize(
-    "input_shape, window_size, num_heads",
+    "input_shape, window_size, num_heads, input_resolution",
     (
-        ((361, 49, 96), (7, 7), 3),
-        ((100, 49, 192), (7, 7), 3),
-        ((512, 64, 192), (8, 8), 3),
-        ((49, 49, 96), (7, 7), 3),
-        ((49, 49, 96), (7, 7), 8),
-        ((49, 49, 192), (7, 7), 24),
-        ((49, 49, 120), (7, 7), 5),
-        ((24, 24, 120), (4, 6), 5),
-        ((4, 49, 1536), (7, 7), 3),
+        ((1083, 49, 96), (7, 7), 3, (128, 128)),
+        ((1083, 49, 96), (7, 7), 3, None),
+        ((300, 49, 192), (7, 7), 3, (64, 64)),
+        ((300, 49, 192), (7, 7), 3, None),
+        ((75, 49, 384), (7, 7), 3, (32, 32)),
+        ((75, 49, 384), (7, 7), 3, None),
+        ((27, 49, 768), (7, 7), 3, (16, 16)),
+        ((27, 49, 768), (7, 7), 3, None),
+        ((12, 49, 1536), (7, 7), 3, (8, 8)),
+        ((12, 49, 1536), (7, 7), 3, None),
     ),
 )
-def test_window_attn(input_shape, window_size, num_heads):
-    try:
-        x = torch.randn(input_shape)
+def test_window_attn(device, input_shape, window_size, num_heads, input_resolution):
+    x = torch.randn(input_shape)
 
-        qkv_bias = True
-        qk_scale = None
-        attn_drop = 0.0
-        proj_drop = 0.0
-        dim = input_shape[-1]
+    qkv_bias = True
+    qk_scale = None
+    attn_drop = 0.0
+    proj_drop = 0.0
+    dim = input_shape[-1]
 
-        ref_layer = WindowAttention(
-            dim,
-            window_size=to_2tuple(window_size),
-            num_heads=num_heads,
-            qkv_bias=qkv_bias,
-            qk_scale=qk_scale,
-            attn_drop=attn_drop,
-            proj_drop=proj_drop,
-        )
-        ref_output = ref_layer(x)
+    mask_shape_map = {
+        (128, 128): (361, 49, 49),
+        (64, 64): (100, 49, 49),
+        (32, 32): (25, 49, 49),
+        (16, 16): (9, 49, 49),
+        (8, 8): (4, 49, 49),
+    }
 
-        device = ttnn.open_device(device_id=0)
+    mask = None
+    if input_resolution is not None:
+        mask_shape = mask_shape_map[input_resolution]
+        mask = torch.zeros(mask_shape)
 
-        parameters = preprocess_model_parameters(
-            initialize_model=lambda: ref_layer,
-            custom_preprocessor=create_window_attention_preprocessor(device),
-            device=device,
-        )
-        tt_layer = TTWindowAttention(
-            parameters=parameters,
-            device=device,
-            dim=dim,
-            window_size=window_size,
-            num_heads=num_heads,
-        )
-        tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT)
-        tt_output = tt_layer(tt_input)
-        tt_torch_output = tt2torch_tensor(tt_output)
+    ref_layer = WindowAttention(
+        dim,
+        window_size=to_2tuple(window_size),
+        num_heads=num_heads,
+        qkv_bias=qkv_bias,
+        qk_scale=qk_scale,
+        attn_drop=attn_drop,
+        proj_drop=proj_drop,
+    )
+    ref_output = ref_layer(x, mask)
 
-        does_pass, pcc_message = comp_pcc(ref_output, tt_torch_output, 0.99)
+    parameters = preprocess_model_parameters(
+        initialize_model=lambda: ref_layer,
+        custom_preprocessor=create_window_attention_preprocessor(device),
+        device=device,
+    )
+    tt_layer = TTWindowAttention(
+        parameters=parameters,
+        device=device,
+        dim=dim,
+        window_size=window_size,
+        num_heads=num_heads,
+    )
+    tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+    tt_input = ttnn.to_memory_config(tt_input, ttnn.L1_MEMORY_CONFIG)
+    tt_mask = None
+    if mask is not None:
+        tt_mask = ttnn.from_torch(mask, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+    tt_output = tt_layer(tt_input, tt_mask)
+    tt_torch_output = tt2torch_tensor(tt_output)
 
-        logger.info(pcc_message)
+    does_pass, pcc_message = comp_pcc(ref_output, tt_torch_output, 0.99)
 
-        if does_pass:
-            logger.info("WindowAttn Passed!")
-        else:
-            logger.warning("WindowAttn Failed!")
+    logger.info(pcc_message)
 
-        assert does_pass
+    if does_pass:
+        logger.info("WindowAttn Passed!")
+    else:
+        logger.warning("WindowAttn Failed!")
 
-    finally:
-        ttnn.close_device(device)
+    assert does_pass
