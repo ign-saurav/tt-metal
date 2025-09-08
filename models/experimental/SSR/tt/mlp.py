@@ -18,13 +18,8 @@ class TTMlp(LightweightModule):
         self.fc2_bias = parameters["fc2"]["bias"]
 
     def forward(self, x):
-        # Debug prints for forward arguments
         if x.memory_config().buffer_type != ttnn.BufferType.L1:
             x = ttnn.to_memory_config(x, ttnn.L1_MEMORY_CONFIG)
-        # First linear layer
-        # program_config = matmul_config(
-        #     x.shape[-2], x.shape[-1], self.fc1_bias.shape[-1], (8, 8), fused_activation=(ttnn.UnaryOpType.GELU, True)
-        # )
         x = ttnn.linear(
             x,
             self.fc1_weight,
@@ -34,8 +29,6 @@ class TTMlp(LightweightModule):
             activation="gelu",
         )
 
-        # program_config = matmul_config(x.shape[-2], x.shape[-1], self.fc2_bias.shape[-1], (8, 8))
-        # Second linear layer
         x = ttnn.linear(
             x,
             self.fc2_weight,

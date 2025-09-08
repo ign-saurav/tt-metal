@@ -62,7 +62,6 @@ def test_upsample(device, scale, num_feat, batch_size, input_size):
     # Create test input
     torch_input = torch.randn(batch_size, num_feat, input_size, input_size)
     torch_output = torch_model(torch_input)
-    print("LIKEEEEEEEEEE:", torch_output.shape)
 
     # Preprocess model parameters
     parameters = preprocess_model_parameters(
@@ -82,7 +81,6 @@ def test_upsample(device, scale, num_feat, batch_size, input_size):
     tt_torch_output = tt2torch_tensor(ttnn_output)
     tt_torch_output = tt_torch_output.permute(0, 3, 1, 2)
 
-    print(torch_output.shape, tt_torch_output.shape)
     does_pass, pcc_message = comp_pcc(torch_output, tt_torch_output, 0.99)
 
     logger.info(pcc_message)

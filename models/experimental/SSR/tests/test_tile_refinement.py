@@ -248,7 +248,6 @@ def test_tile_refinement(
         tt_torch_features = tt_torch_features.permute(0, 3, 1, 2)
 
         # Compare outputs
-        print("Torch OUT: ", ref_output.shape, tt_torch_output.shape, input_shape)
         output_pass, output_pcc_message = comp_pcc(ref_output, tt_torch_output, 0.90)
         features_pass, features_pcc_message = comp_pcc(ref_features, tt_torch_features, 0.90)
 

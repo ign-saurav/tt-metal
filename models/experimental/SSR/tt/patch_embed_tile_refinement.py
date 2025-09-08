@@ -59,15 +59,9 @@ class TTPatchEmbed(LightweightModule):
         Returns:
             Output tensor of shape [batch, num_patches, embed_dim]
         """
-        # batch_size, channels, height_width = x.shape
 
-        # Flatten spatial dimensions and transpose
-        # x.flatten(2) -> [batch, channels, height*width]
-        # .transpose(1, 2) -> [batch, height*width, channels]
         if x.is_sharded():
             x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-        # x = ttnn.reshape(x, (batch_size, channels, height_width))
-        # x = ttnn.transpose(x, 1, 2)  # [batch, height*width, channels]
 
         # Apply normalization if available
         if self.norm_weight is not None:

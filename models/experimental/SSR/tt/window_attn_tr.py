@@ -137,20 +137,6 @@ class TTWindowAttentionTR(LightweightModule):
             core_grid=ttnn.CoreGrid(y=8, x=8),
         )  # [b_, num_heads, n, head_dim]
 
-        # import pdb; pdb.set_trace()
-        # Transpose and reshape back
-        # x = ttnn.transpose(x, 1, 2, memory_config=self.memory_config)  # [b_, n, num_heads, head_dim]
-        # x = ttnn.reshape(x, [b_, n, c], memory_config=self.memory_config)
-
-        # x = ttnn.pad(x, ((0, 0), (0, 0), (0, 0), (0, 2)), value=0.0)
-        # # TODO: fix this
-        # x = ttnn.transformer.concatenate_heads( x, memory_config=self.memory_config)
-        # original_final_dim = 180
-        # start_indices = [0, 0, 0]
-        # end_indices = [x.shape[0], x.shape[1], original_final_dim]
-        # x = ttnn.slice(x, start_indices, end_indices, memory_config=self.memory_config)
-        # program_config = matmul_config(x.shape[-2], x.shape[-1], self.proj_bias.shape[-1])
-
         # TODO: find a better way to do padding, maybe pad the weights of the prev matmul
         if pad:
             x = ttnn.to_torch(x)

@@ -159,11 +159,9 @@ class TTRHAG(LightweightModule):
 
         # Pass through residual group (AttenBlocks)
         x = self.residual_group(x, x_size, params)
-        # return x
 
         # Patch unembed: convert from sequence to spatial format
         x = self.patch_unembed(x, x_size)
-        # return x
 
         # Apply convolutional layer
         if self.resi_connection == "1conv":
@@ -194,23 +192,10 @@ class TTRHAG(LightweightModule):
         elif self.resi_connection == "identity":
             x = ttnn.permute(x, (0, 2, 3, 1))  # (batch_size, embed_dim, num_patches)
 
-        #     x = ttnn.reshape(x, (x.shape[0], self.input_resolution[0], self.input_resolution[1], self.dim))
-        # Identity - no operation needed
-        # pass
-        # return x
-
         # Patch embed: convert back to sequence format
         x = self.patch_embed(x)
-        # import pdb
-
-        # pdb.set_trace()
 
         x = ttnn.reshape(x, (x.shape[0], self.input_resolution[0] * self.input_resolution[1], self.dim))
-        # return x
-
-        # import pdb
-
-        # pdb.set_trace()
 
         # Add residual connection
         x = ttnn.add(x, shortcut)

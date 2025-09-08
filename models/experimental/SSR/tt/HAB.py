@@ -63,7 +63,6 @@ class TTHAB(LightweightModule):
         )
 
     def forward(self, x, x_size, rpi_sa, attn_mask):
-        print("HAB")
         h, w = x_size
         b, seq_len, c = x.shape
         if x.memory_config().buffer_type != ttnn.BufferType.L1:

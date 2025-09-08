@@ -145,14 +145,6 @@ class TTHAT(LightweightModule):
         """Forward pass through transformer layers"""
         x_size = (self.h, self.w)
 
-        # # Calculate attention mask
-        # attn_mask = self.calculate_mask(x_size)
-        # # params = {
-        # #     "attn_mask": attn_mask,
-        # #     "rpi_sa": self.parameters.relative_position_index_SA,
-        # #     "rpi_oca": self.parameters.relative_position_index_OCA,
-        # # }
-
         # Patch embedding
         x = self.patch_embed(x)
 
@@ -171,7 +163,6 @@ class TTHAT(LightweightModule):
             bias=self.parameters.norm.bias,
             memory_config=self.memory_config,
         )
-        # return x
 
         # Patch unembedding
         x = self.patch_unembed(x, x_size)
@@ -265,7 +256,6 @@ class TTTileRefinement(TTHAT):
         self.mean = ttnn.to_layout(self.mean, ttnn.TILE_LAYOUT)
         x = ttnn.subtract(x, self.mean, memory_config=self.memory_config)
         x = ttnn.multiply(x, self.img_range, memory_config=self.memory_config)
-        # return x
 
         if self.upsampler == "pixelshuffle":
             # Shallow feature extraction
@@ -298,8 +288,6 @@ class TTTileRefinement(TTHAT):
                 batch_size=x.shape[0],
                 input_height=x.shape[1],
                 input_width=x.shape[2],
-                # dilation= [1, 1],
-                # groups = 1,
                 conv_config=self.conv_config,
                 compute_config=self.compute_config,
                 return_output_dim=False,
@@ -338,7 +326,6 @@ class TTTileRefinement(TTHAT):
                 batch_size=fea.shape[0],
                 input_height=fea.shape[1],
                 input_width=fea.shape[2],
-                # dilation= [1, 1],
                 conv_config=self.conv_afterbody_config,
                 compute_config=self.compute_config,
                 return_output_dim=False,
@@ -374,8 +361,6 @@ class TTTileRefinement(TTHAT):
             # LeakyReLU activation
             x = ttnn.leaky_relu(x, negative_slope=0.01, memory_config=ttnn.DRAM_MEMORY_CONFIG)
             x = ttnn.reshape(x, [batch_size, 64, 64, 64])  # TODO
-
-            # x = ttnn.permute(x, (0, 3, 1, 2))
 
             # Upsampling
             x = self.upsample(x, self.parameters["upsample"])

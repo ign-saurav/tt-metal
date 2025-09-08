@@ -41,48 +41,20 @@ class TTChannelAttention(LightweightModule):
                 ends=[original_shape[0], 1, 1, 180],  # End indices - slice to 180 in last dim
                 steps=[1, 1, 1, 1],  # Step size for each dimension
             )
-        # TODO: find ways to generalise for all inputs, setting program config messes up the multi batch runs..
-        # Matrix multiplication 1:  [1, 180] @ [180, 6] = [1, 6]
-        # program_config = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
-        #     compute_with_storage_grid_size=(10, 1),  # or (5, 2) to accommodate 10 batches
-        #     in0_block_w=6,  # Keep same as your calculation
-        #     out_subblock_h=1,
-        #     out_subblock_w=1,
-        #     per_core_M=1,  # Each core handles 1 batch worth of M dimension
-        #     per_core_N=1,
-        #     fuse_batch=True,
-        #     fused_activation=None,
-        #     mcast_in0=False,
-        # )
+
         x = ttnn.linear(
             x,
             self.conv1_weight,
             bias=self.conv1_bias,
             memory_config=self.memory_config,
-            # program_config=program_config,
             activation="relu",
-            # compute_kernel_config=compute_kernel_config,  # set to HiFi2 to improve accuracy
         )
 
-        # Matrix multiplication 2:  [1, 6] @ [6, 180] = [1, 180]
-        # program_config = ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
-        #     compute_with_storage_grid_size=(6, 6),
-        #     in0_block_w=1, # 32(6 padded) / 32(1 tile size) = 1
-        #     out_subblock_h=1,
-        #     out_subblock_w=1,
-        #     per_core_M=1,
-        #     per_core_N=1,
-        #     fuse_batch=True,
-        #     fused_activation=None,
-        #     mcast_in0=False,
-        # )
         x = ttnn.linear(
             x,
             self.conv2_weight,
             bias=self.conv2_bias,
             memory_config=self.memory_config,
-            # program_config=program_config,
-            # compute_kernel_config=compute_kernel_config,  # set to HiFi2 to improve accuracy
         )
 
         # Sigmoid activation

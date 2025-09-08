@@ -10,16 +10,8 @@ class TTCAB(LightweightModule):
     def __init__(self, device, parameters, num_feat, compress_ratio=3, squeeze_factor=30, memory_config=None):
         super().__init__()
 
-        # Debug print for __init__ parameters
-        # print(f"[TTCAB.__init__] device={device}, num_feat={num_feat}, compress_ratio={compress_ratio}, squeeze_factor={squeeze_factor}, memory_config={memory_config}")
-        # print(f"[TTCAB.__init__] parameters keys: {list(parameters.keys())}")
-        # print(f"[TTCAB.__init__] conv1 keys: {list(parameters['conv1'].keys()) if 'conv1' in parameters else 'N/A'}")
-        # print(f"[TTCAB.__init__] conv2 keys: {list(parameters['conv2'].keys()) if 'conv2' in parameters else 'N/A'}")
-        # print(f"[TTCAB.__init__] channel_attention keys: {list(parameters['channel_attention'].keys()) if 'channel_attention' in parameters else 'N/A'}")
-
         self.device = device
         self.memory_config = ttnn.L1_MEMORY_CONFIG
-        # self.memory_config = memory_config or ttnn.DRAM_MEMORY_CONFIG
         self.num_feat = num_feat
         self.compress_ratio = compress_ratio
         self.squeeze_factor = squeeze_factor
@@ -40,9 +32,6 @@ class TTCAB(LightweightModule):
         )
 
     def forward(self, x):
-        # Debug print for forward input
-        # print(f"[TTCAB.forward] x.shape={x.shape}")
-
         # Store original input shape for convolutions
         batch_size, height, width, channels = x.shape
         conv_config = ttnn.Conv2dConfig(
@@ -78,9 +67,6 @@ class TTCAB(LightweightModule):
 
         # Reshape from flattened conv output back to spatial format
         x = ttnn.reshape(x, [batch_size, height, width, self.num_feat // self.compress_ratio])
-
-        # # GELU activation
-        # x = ttnn.gelu(x)
 
         conv_config = ttnn.Conv2dConfig(
             weights_dtype=ttnn.bfloat16,
