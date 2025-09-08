@@ -1,81 +1,11 @@
 import torch
 import ttnn
+import torch.nn.functional as F
 from models.common.lightweightmodule import LightweightModule
 from models.experimental.SSR.tt.tile_refinement import TTTileRefinement
 from models.experimental.SSR.tt.tile_selection import TTTileSelection
 from models.experimental.SSR.tt.upsample import TTUpsample
-
-
-def ttnn_window_reverse(windows, window_size, H, W, device, memory_config=None):
-    """
-    TTNN equivalent of window_reverse
-
-    Args:
-        windows: TTNN tensor with shape (num_windows*B, window_size, window_size, C)
-        window_size (int): Window size
-        H (int): Height of image
-        W (int): Width of image
-        device: TTNN device
-        memory_config: memory configuration for operations
-
-    Returns:
-        x: TTNN tensor with shape (B, H, W, C)
-    """
-    if memory_config is None:
-        memory_config = ttnn.DRAM_MEMORY_CONFIG
-
-    # Calculate batch size
-    B = int(windows.shape[0] / (H * W / window_size / window_size))
-    C = windows.shape[-1]
-
-    # Reshape to separate batch and window dimensions: (B, H//window_size, W//window_size, window_size, window_size, C)
-    intermediate_shape = (B, H // window_size, W // window_size, window_size, window_size, C)
-    x_reshaped = ttnn.reshape(windows, intermediate_shape)
-
-    # Permute to reconstruct spatial dimensions: (B, H//window_size, window_size, W//window_size, window_size, C)
-    # This corresponds to permute(0, 1, 3, 2, 4, 5) from the original
-    x_permuted = ttnn.permute(x_reshaped, (0, 1, 3, 2, 4, 5))
-
-    # Flatten to final shape: (B, H, W, C)
-    final_shape = (B, H, W, C)
-    x = ttnn.reshape(x_permuted, final_shape)
-
-    return x
-
-
-def ttnn_window_partition(x, window_size, device, memory_config=None):
-    """
-    TTNN equivalent of window_partition
-
-    Args:
-        x: TTNN tensor with shape (B, H, W, C)
-        window_size (int): window size
-        device: TTNN device
-        memory_config: memory configuration for operations
-
-    Returns:
-        windows: TTNN tensor with shape (num_windows*B, window_size, window_size, C)
-    """
-    if memory_config is None:
-        memory_config = ttnn.DRAM_MEMORY_CONFIG
-
-    # Get tensor dimensions
-    B, H, W, C = x.shape
-
-    # Reshape to separate window dimensions: (B, H//window_size, window_size, W//window_size, window_size, C)
-    intermediate_shape = (B, H // window_size, window_size, W // window_size, window_size, C)
-    x_reshaped = ttnn.reshape(x, intermediate_shape)
-
-    # Permute to group windows together: (B, H//window_size, W//window_size, window_size, window_size, C)
-    # This corresponds to permute(0, 1, 3, 2, 4, 5) from the original
-    x_permuted = ttnn.permute(x_reshaped, (0, 1, 3, 2, 4, 5))
-
-    # Flatten to final shape: (num_windows*B, window_size, window_size, C)
-    num_windows = (H // window_size) * (W // window_size)
-    final_shape = (num_windows * B, window_size, window_size, C)
-    windows = ttnn.reshape(x_permuted, final_shape)
-
-    return windows
+from models.experimental.SSR.tt.OCAB import window_partition_ttnn, window_reverse_ttnn
 
 
 class TTSSR(LightweightModule):
@@ -126,7 +56,6 @@ class TTSSR(LightweightModule):
             output_layout=ttnn.TILE_LAYOUT,
             deallocate_activation=True,
             reallocate_halo_output=True,
-            # act_block_h_override=32,
             shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
         )
         self.conv_before_upsample_conv_config = ttnn.Conv2dConfig(
@@ -135,8 +64,6 @@ class TTSSR(LightweightModule):
             output_layout=ttnn.TILE_LAYOUT,
             deallocate_activation=True,
             reallocate_halo_output=True,
-            # act_block_h_override=32,
-            # act_block_h_override=16,
             shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
         )
 
@@ -156,9 +83,8 @@ class TTSSR(LightweightModule):
 
         # Calculate selection threshold (top 25%)
         patch_fea3_flat = ttnn.reshape(patch_fea3, (-1,))
-        # Convert to torch for quantile calculation (TTNN doesn't have quantile yet)
+        # Convert to torch for quantile calculation
         patch_fea3_torch = ttnn.to_torch(patch_fea3_flat)
-        # import pdb; pdb.set_trace()
         threshold = torch.quantile(patch_fea3_torch.to(torch.float32), 0.75)
 
         # Create selection mask
@@ -166,37 +92,20 @@ class TTSSR(LightweightModule):
         pi_prime = pi_prime.view(-1)
 
         # Window partition the input image
-        # Convert to torch for window partitioning (using existing utility)
-        # x_torch = ttnn.to_torch(x)
         x_torch = x
         x_torch = ttnn.permute(x, (0, 2, 3, 1))
-        patch_x_torch = ttnn_window_partition(
+        patch_x_torch = window_partition_ttnn(
             x_torch,
             window_size=H // 4,
-            device=self.device,
         )  # B*4*4, H/4, W/4, 3
-        # import pdb; pdb.set_trace()
-        # patch_x_torch = patch_x_torch.permute(0, 3, 1, 2)  # B*4*4, 3, H/4, W/4
 
         # Feature extraction for each patch
         lr_fea_list = []
 
         for i in range(B * 16):
             patch_input = ttnn.unsqueeze(patch_x_torch[i], 0)  # 1, 3, H/4, W/4
-
-            # Convert patch to TTNN tensor
-            # tt_patch = ttnn.from_torch(
-            #     patch_input,
-            #     device=self.device,
-            #     layout=ttnn.TILE_LAYOUT,
-            #     memory_config=self.memory_config
-            # )
-
             if pi_prime[i] == 1:
-                # Use SR model for positive tiles
                 posX, fea = self.sr_model(ttnn.permute(patch_input, (0, 3, 1, 2)))
-                # fea = ttnn.to_dtype(fea, ttnn.bfloat16)
-                # lr_fea_list.append(fea)
                 fea = ttnn.from_device(fea)  # Move to host
                 fea = ttnn.to_dtype(fea, ttnn.bfloat16)  # Convert dtype
                 fea = ttnn.to_device(fea, device=self.device)  # Move back to device
@@ -220,8 +129,6 @@ class TTSSR(LightweightModule):
                     conv_config=self.conv_config,
                 )
                 fea = ttnn.reshape(fea, [1, 64, 64, 180])  # TODO
-                # fea = ttnn.to_dtype(fea, ttnn.bfloat16)
-                # lr_fea_list.append(fea)
                 fea = ttnn.from_device(fea)  # Move to host
                 fea = ttnn.to_dtype(fea, ttnn.bfloat16)  # Convert dtype
                 fea = ttnn.to_device(fea, device=self.device)  # Move back to device
@@ -231,28 +138,13 @@ class TTSSR(LightweightModule):
         lr_fea = ttnn.concat(lr_fea_list, dim=0)
 
         # Window reverse to reconstruct full feature map
-        # Convert to torch for window reverse operation
-        # lr_fea_torch = ttnn.to_torch(lr_fea)
-        # import pdb; pdb.set_trace()
-        lr_fea = ttnn_window_reverse(
+        lr_fea = window_reverse_ttnn(
             lr_fea,
             window_size=H // 4,
-            H=H,
-            W=W,
-            device=self.device,
+            h=H,
+            w=W,
         )
 
-        # Convert back to TTNN
-        # lr_fea = ttnn.from_torch(
-        #     lr_fea_torch,
-        #     device=self.device,
-        #     layout=ttnn.TILE_LAYOUT,
-        #     memory_config=self.memory_config
-        # )
-
-        # Image reconstruction
-        # Conv before upsample
-        # lr_fea = ttnn.to_layout(lr_fea, ttnn.ROW_MAJOR_LAYOUT, memory_config=self.memory_config)
         slice_config = ttnn.Conv2dSliceConfig(
             slice_type=ttnn.Conv2dSliceHeight, num_slices=4  # Adjust based on memory constraints
         )
@@ -269,24 +161,18 @@ class TTSSR(LightweightModule):
             batch_size=lr_fea.shape[0],
             input_height=lr_fea.shape[1],
             input_width=lr_fea.shape[2],
-            # conv_config=self.conv_before_upsample_conv_config,
-            # compute_config=self.compute_config,
             dtype=ttnn.bfloat16,
             return_output_dim=False,
             return_weights_and_bias=False,
-            # memory_config=ttnn.DRAM_MEMORY_CONFIG,
             slice_config=slice_config,
         )
-        # import pdb; pdb.set_trace()
         sr_fea = ttnn.reshape(sr_fea, [B, 256, 256, 64])  # TODO
 
         # LeakyReLU activation
-        # import pdb; pdb.set_trace()
         sr_fea = ttnn.leaky_relu(sr_fea, negative_slope=0.01, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
         # Upsample
         sr_fea = self.upsample(sr_fea, self.parameters.upsample)
-        # return sr_fea, patch_fea3, patch_fea2, patch_fea1
 
         # Final convolution
         slice_config = ttnn.Conv2dSliceConfig(
@@ -308,11 +194,91 @@ class TTSSR(LightweightModule):
             dtype=ttnn.bfloat16,
             return_output_dim=False,
             return_weights_and_bias=False,
-            # memory_config=self.memory_config,
-            # conv_config=self.conv_config,
             slice_config=slice_config,
         )
 
         sr = ttnn.reshape(sr, [B, 1024, 1024, 3])  # TODO
+
+        return sr, patch_fea3, patch_fea2, patch_fea1
+
+
+class TTSSR_wo_conv(LightweightModule):
+    def __init__(self, device, parameters, args, num_cls, memory_config=None):
+        super().__init__()
+        self.device = device
+        self.parameters = parameters
+        self.memory_config = ttnn.DRAM_MEMORY_CONFIG
+
+        # Only need select_model and sr_model - no conv layers
+        self.select_model = TTTileSelection(
+            device=device,
+            parameters=parameters.select_model,
+            args=args,
+            num_cls=num_cls,
+            memory_config=self.memory_config,
+        )
+
+        self.sr_model = TTTileRefinement(
+            device=device,
+            parameters=parameters.sr_model,
+            upscale=4,
+            img_size=64,
+            window_size=16,
+            img_range=1.0,
+            depths=[6, 6, 6, 6, 6, 6],
+            embed_dim=180,
+            num_heads=[6, 6, 6, 6, 6, 6],
+            mlp_ratio=2,
+            upsampler="pixelshuffle",
+            memory_config=self.memory_config,
+        )
+
+    def forward(self, x):
+        B, C, H, W = x.shape
+
+        # Same tile selection logic
+        patch_fea3, patch_fea2, patch_fea1 = self.select_model(x)
+
+        # Calculate selection threshold (top 25%)
+        patch_fea3_flat = ttnn.reshape(patch_fea3, (-1,))
+        # Convert to torch for quantile calculation
+        patch_fea3_torch = ttnn.to_torch(patch_fea3_flat)
+        threshold = torch.quantile(patch_fea3_torch.to(torch.float32), 0.75)
+        pi_prime = patch_fea3_torch > threshold
+
+        # Window partition
+        x_torch = x
+        x_torch = ttnn.permute(x, (0, 2, 3, 1))
+        patch_x = window_partition_ttnn(x_torch, window_size=H // 4)
+
+        # Process each patch
+        sr_patches = []
+        for i in range(B * 16):
+            patch_input = ttnn.unsqueeze(patch_x[i], 0)
+
+            if pi_prime[i] == 1:
+                # Use SR model for positive tiles
+                posX, _ = self.sr_model(ttnn.permute(patch_input, (0, 3, 1, 2)))
+                sr_patches.append(posX)
+            else:
+                # Move tensor to host and convert to torch
+                patch_host = ttnn.to_torch(patch_input)  # Shape: (1, H/4, W/4, C)
+
+                # Convert to NCHW format for PyTorch upsample
+                patch_nchw = patch_host.permute(0, 3, 1, 2)  # (1, H/4, W/4, C) -> (1, C, H/4, W/4)
+
+                # Use PyTorch's upsample (bicubic like the reference)
+                negX_torch = F.upsample(patch_nchw, scale_factor=4, mode="bicubic")
+
+                # Convert back to NHWC and to TTNN tensor
+                negX_torch = negX_torch.permute(0, 2, 3, 1)  # Back to (1, H, W, C)
+                negX = ttnn.from_torch(negX_torch, device=self.device, dtype=ttnn.bfloat16)
+                if negX.layout == ttnn.ROW_MAJOR_LAYOUT:
+                    negX = ttnn.to_layout(negX, ttnn.TILE_LAYOUT)
+                sr_patches.append(negX)
+
+        # Concatenate and reconstruct
+        sr = ttnn.concat(sr_patches, dim=0)
+        sr = window_reverse_ttnn(sr, window_size=H, h=H * 4, w=W * 4)
 
         return sr, patch_fea3, patch_fea2, patch_fea1

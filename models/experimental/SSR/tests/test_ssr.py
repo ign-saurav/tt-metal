@@ -4,8 +4,8 @@ import ttnn
 from loguru import logger
 
 # Import reference and TTNN models
-from models.experimental.SSR.reference.SSR.model.ssr import SSR
-from models.experimental.SSR.tt.ssr import TTSSR
+from models.experimental.SSR.reference.SSR.model.ssr import SSR, SSR_wo_conv
+from models.experimental.SSR.tt.ssr import TTSSR, TTSSR_wo_conv
 from models.experimental.SSR.tests.test_upsample import create_upsample_preprocessor
 from models.experimental.SSR.tests.test_tile_selection import create_tile_selection_preprocessor
 from models.experimental.SSR.tests.test_tile_refinement import create_tile_refinement_preprocessor
@@ -24,7 +24,7 @@ def create_ssr_preprocessor(device, args, num_cls):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
 
-        if isinstance(torch_model, SSR):
+        if isinstance(torch_model, SSR) or isinstance(torch_model, SSR_wo_conv):
             # Preprocess tile selection model
             select_params = preprocess_model_parameters(
                 initialize_model=lambda: torch_model.select_model,
@@ -37,7 +37,6 @@ def create_ssr_preprocessor(device, args, num_cls):
 
             rpi_sa = create_relative_position_index((16, 16))
 
-            # Create attention mask for shifted windows (simplified for testing)
             attn_mask = None
 
             # Create RPI for OCAB
@@ -51,13 +50,6 @@ def create_ssr_preprocessor(device, args, num_cls):
             tt_rpi_oca = ttnn.from_torch(rpi_oca, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.uint32)
 
             forward_params = {"rpi_sa": tt_rpi_sa, "attn_mask": attn_mask, "rpi_oca": tt_rpi_oca}
-            # forward_params = {
-            #     "img_size": 64,
-            #     "window_size": 16,
-            #     "embed_dim": 180,
-            #     "depths": [6, 6, 6, 6, 6, 6],
-            #     "num_heads": [6, 6, 6, 6, 6, 6],
-            # }
             sr_params = preprocess_model_parameters(
                 initialize_model=lambda: torch_model.sr_model,
                 custom_preprocessor=create_tile_refinement_preprocessor(device, forward_params),
@@ -110,15 +102,14 @@ class MockArgs:
 
 
 @pytest.mark.parametrize(
-    "input_shape, num_cls",
+    "input_shape, num_cls, with_conv",
     [
-        # ((2, 3, 256, 256), 1),  # Standard test case
-        ((1, 3, 256, 256), 1),  # Standard test case
+        ((1, 3, 256, 256), 1, True),
+        ((1, 3, 256, 256), 1, False),
     ],
 )
-def test_ssr_model(input_shape, num_cls):
+def test_ssr_model(input_shape, num_cls, with_conv):
     """Test TTSSR model against PyTorch reference"""
-
     # Create input tensor
     x = torch.randn(input_shape)
 
@@ -126,7 +117,10 @@ def test_ssr_model(input_shape, num_cls):
     args = MockArgs()
 
     # Create reference PyTorch model
-    ref_model = SSR(args, num_cls)
+    if with_conv:
+        ref_model = SSR(args, num_cls)
+    else:
+        ref_model = SSR_wo_conv(args, num_cls)
     ref_model.eval()
 
     # Get reference output
@@ -142,14 +136,21 @@ def test_ssr_model(input_shape, num_cls):
             custom_preprocessor=create_ssr_preprocessor(device, args, num_cls),
             device=device,
         )
-
         # Create TTNN model
-        tt_model = TTSSR(
-            device=device,
-            parameters=parameters,
-            args=args,
-            num_cls=num_cls,
-        )
+        if with_conv:
+            tt_model = TTSSR(
+                device=device,
+                parameters=parameters,
+                args=args,
+                num_cls=num_cls,
+            )
+        else:
+            tt_model = TTSSR_wo_conv(
+                device=device,
+                parameters=parameters,
+                args=args,
+                num_cls=num_cls,
+            )
 
         # Convert input to TTNN tensor
         tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT)
@@ -162,14 +163,10 @@ def test_ssr_model(input_shape, num_cls):
         tt_torch_patch_fea3 = tt2torch_tensor(tt_patch_fea3)
         tt_torch_patch_fea2 = tt2torch_tensor(tt_patch_fea2)
         tt_torch_patch_fea1 = tt2torch_tensor(tt_patch_fea1)
-
         tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
-        # tt_torch_patch_fea3 = tt_torch_patch_fea3.permute(0, 3, 1, 2)
-        # tt_torch_patch_fea2 = tt_torch_patch_fea2.permute(0, 3, 1, 2)
-        # tt_torch_patch_fea1 = tt_torch_patch_fea1.permute(0, 3, 1, 2)
 
         # Compare outputs
-        sr_pass, sr_pcc_message = comp_pcc(ref_sr, tt_torch_sr, 0.90)
+        sr_pass, sr_pcc_message = comp_pcc(ref_sr, tt_torch_sr, 0.95)
         fea3_pass, fea3_pcc_message = comp_pcc(ref_patch_fea3, tt_torch_patch_fea3, 0.95)
         fea2_pass, fea2_pcc_message = comp_pcc(ref_patch_fea2, tt_torch_patch_fea2, 0.95)
         fea1_pass, fea1_pcc_message = comp_pcc(ref_patch_fea1, tt_torch_patch_fea1, 0.95)

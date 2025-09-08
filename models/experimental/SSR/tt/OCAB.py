@@ -3,6 +3,38 @@ import torch
 from models.common.lightweightmodule import LightweightModule
 
 
+def window_partition_ttnn(x, window_size):
+    """TTNN implementation of window partitioning"""
+    b, h, w, c = x.shape
+
+    # Reshape: (b, h, w, c) -> (b, h//ws, ws, w//ws, ws, c)
+    reshaped = ttnn.reshape(x, (b, h // window_size, window_size, w // window_size, window_size, c))
+
+    # Permute: (0, 1, 3, 2, 4, 5) -> group windows together
+    permuted = ttnn.permute(reshaped, (0, 1, 3, 2, 4, 5))
+
+    # Final reshape to get windows
+    windows = ttnn.reshape(permuted, (-1, window_size, window_size, c))
+
+    return windows
+
+
+def window_reverse_ttnn(windows, window_size, h, w):
+    """TTNN implementation of window reverse"""
+    b = int(windows.shape[0] / (h * w / window_size / window_size))
+
+    # Reshape windows back to grid
+    reshaped = ttnn.reshape(windows, (b, h // window_size, w // window_size, window_size, window_size, -1))
+
+    # Permute back to original order
+    permuted = ttnn.permute(reshaped, (0, 1, 3, 2, 4, 5))
+
+    # Final reshape to original spatial dimensions
+    output = ttnn.reshape(permuted, (b, h, w, -1))
+
+    return output
+
+
 class TTOCAB(LightweightModule):
     def __init__(
         self,
@@ -83,36 +115,6 @@ class TTOCAB(LightweightModule):
 
         return tensor
 
-    def window_partition_ttnn(self, x, window_size):
-        """TTNN implementation of window partitioning"""
-        b, h, w, c = x.shape
-
-        # Reshape: (b, h, w, c) -> (b, h//ws, ws, w//ws, ws, c)
-        reshaped = ttnn.reshape(x, (b, h // window_size, window_size, w // window_size, window_size, c))
-
-        # Permute: (0, 1, 3, 2, 4, 5) -> group windows together
-        permuted = ttnn.permute(reshaped, (0, 1, 3, 2, 4, 5))
-
-        # Final reshape to get windows
-        windows = ttnn.reshape(permuted, (-1, window_size, window_size, c))
-
-        return windows
-
-    def window_reverse_ttnn(self, windows, window_size, h, w):
-        """TTNN implementation of window reverse"""
-        b = int(windows.shape[0] / (h * w / window_size / window_size))
-
-        # Reshape windows back to grid
-        reshaped = ttnn.reshape(windows, (b, h // window_size, w // window_size, window_size, window_size, -1))
-
-        # Permute back to original order
-        permuted = ttnn.permute(reshaped, (0, 1, 3, 2, 4, 5))
-
-        # Final reshape to original spatial dimensions
-        output = ttnn.reshape(permuted, (b, h, w, -1))
-
-        return output
-
     def forward(self, x, x_size, rpi):
         h, w = x_size
         b, _, c = x.shape
@@ -146,7 +148,7 @@ class TTOCAB(LightweightModule):
         kv = ttnn.concat([k, v], dim=1)  # b, 2*c, h, w
 
         # Window partition for Q
-        q_windows = self.window_partition_ttnn(q, self.window_size)
+        q_windows = window_partition_ttnn(q, self.window_size)
         q_windows = ttnn.reshape(q_windows, (-1, self.window_size * self.window_size, c))
 
         # Host-side unfold operation for KV
@@ -208,11 +210,6 @@ class TTOCAB(LightweightModule):
         k_transposed = ttnn.transpose(k, -2, -1)
         attn = ttnn.matmul(q, k_transposed)
 
-        # Add relative position bias
-        # Note: This is simplified - you may need to handle the indexing more carefully
-        # relative_position_bias = self.relative_position_bias_table[rpi.view(-1)]
-        # attn = ttnn.add(attn, relative_position_bias)
-
         # Apply softmax
         attn = ttnn.softmax(attn, dim=-1)
 
@@ -223,7 +220,7 @@ class TTOCAB(LightweightModule):
 
         # Merge windows
         attn_windows = ttnn.reshape(attn_output, (-1, self.window_size, self.window_size, self.dim))
-        x = self.window_reverse_ttnn(attn_windows, self.window_size, h, w)
+        x = window_reverse_ttnn(attn_windows, self.window_size, h, w)
         x = ttnn.reshape(x, (b, h * w, self.dim))
 
         # Projection and residual connection
