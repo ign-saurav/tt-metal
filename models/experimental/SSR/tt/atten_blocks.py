@@ -73,11 +73,8 @@ class TTAttenBlocks(LightweightModule):
             mlp_ratio=mlp_ratio,
         )
 
-        # Downsample layer (if provided)
         self.downsample = None
         if downsample is not None:
-            # Note: You'll need to implement the downsample layer in TTNN
-            # This depends on what type of downsampling is used
             self.downsample = downsample
 
     def forward(self, x, x_size, params):

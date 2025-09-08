@@ -36,9 +36,6 @@ class TTPatchEmbed(LightweightModule):
         self.patches_resolution = [self.img_size[0] // self.patch_size[0], self.img_size[1] // self.patch_size[1]]
         self.num_patches = self.patches_resolution[0] * self.patches_resolution[1]
 
-        self.in_chans = in_chans
-        self.embed_dim = embed_dim
-        self.device = device
         self.memory_config = memory_config or ttnn.DRAM_MEMORY_CONFIG
 
         # Store normalization parameters if provided

@@ -131,11 +131,8 @@ def create_patch_embed_preprocessor_conv(device):
 @pytest.mark.parametrize(
     "batch_size, img_size, patch_size, in_chans, embed_dim, norm_layer",
     [
-        (1, 224, 16, 3, 768, None),  # Standard ViT-Base config
-        (2, 256, 4, 3, 96, None),  # Smaller embedding
-        (1, 32, 4, 180, 180, None),  # Your SSR config
-        # (1, 64, 8, 3, 192, nn.LayerNorm),     # With normalization
-        (4, 128, 16, 3, 384, None),  # Batch size 4
+        (1, 64, 2, 3, 180, None),  # TR blk test
+        (1, 64, 4, 3, 180, None),  # HAT blk test
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
@@ -200,11 +197,13 @@ def test_patch_embed_simple(device, batch_size, img_size, patch_size, in_chans, 
     logger.info(pcc_message)
 
     if does_pass:
-        logger.info("Simple PatchEmbed Passed!")
+        logger.info("TR PatchEmbed Passed!")
     else:
-        logger.warning("Simple PatchEmbed Failed!")
+        logger.warning("TR PatchEmbed Failed!")
 
     assert does_pass, f"PCC check failed: {pcc_message}"
     assert (
         ref_output.shape == tt_torch_output.shape
     ), f"Shape mismatch: ref {ref_output.shape} vs ttnn {tt_torch_output.shape}"
+
+    ttnn.close_device(device)

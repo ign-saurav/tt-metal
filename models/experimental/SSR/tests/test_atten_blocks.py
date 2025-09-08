@@ -37,11 +37,7 @@ def create_atten_blocks_preprocessor(device, depth, window_size, rpi_sa):
 @pytest.mark.parametrize(
     "batch_size, height, width, dim, num_heads, window_size, depth, overlap_ratio, mlp_ratio",
     [
-        (1, 64, 64, 180, 6, 16, 2, 0.5, 2.0),  # Standard configuration
-        # (1, 32, 32, 96, 3, 8, 3, 0.25, 4.0),  # Smaller resolution, more blocks
-        # (2, 64, 64, 180, 6, 16, 1, 0.5, 2.0),  # Batch size 2, single block
-        # (1, 128, 128, 192, 6, 16, 2, 0.75, 3.0),  # Larger resolution
-        # (2, 64, 64, 180, 6, 16, 6, 0.5, 2),  # Network config
+        (1, 64, 64, 180, 6, 16, 6, 0.5, 2),  # SSR config
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)

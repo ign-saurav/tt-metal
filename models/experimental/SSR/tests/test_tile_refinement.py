@@ -118,7 +118,7 @@ def create_tile_refinement_preprocessor(device, forward_params, window_size, rpi
         # Test configuration - adjust based on your requirements
         # (64, 1, 96, (2, 2), (6, 6), 7, 4, 2, (1, 3, 64, 64)),
         # (64, 1, 180, (2, 2, 2), (6, 6, 6), 16, 2, 4, (1, 3, 64, 64)),
-        (64, 1, 180, (6, 6, 6, 6, 6, 6), (6, 6, 6, 6, 6, 6), 16, 2, 4, (3, 3, 64, 64)),
+        (64, 2, 180, (6, 6, 6, 6, 6, 6), (6, 6, 6, 6, 6, 6), 16, 2, 4, (3, 3, 64, 64)),
     ],
 )
 def test_tile_refinement(

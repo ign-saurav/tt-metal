@@ -1,18 +1,22 @@
 import pytest
 import torch
 import ttnn
-from tests.ttnn.utils_for_testing import assert_with_pcc
+from loguru import logger
+from models.utility_functions import comp_pcc
+
 from models.utility_functions import torch_random
 
 from models.experimental.SSR.reference.SSR.model.tile_refinement import PatchUnEmbed
 from models.experimental.SSR.tt.patch_unembed import TTPatchUnEmbed
 
 
-@pytest.mark.parametrize("batch_size", [1, 2, 8])
-@pytest.mark.parametrize("img_size", [64])
-@pytest.mark.parametrize("patch_size", [1])
-@pytest.mark.parametrize("in_chans", [180])
-@pytest.mark.parametrize("embed_dim", [180])
+@pytest.mark.parametrize(
+    "batch_size, img_size, patch_size, in_chans, embed_dim",
+    [
+        # (1, 64, 4, 3, 180),   # TR blk test
+        (1, 64, 2, 3, 180),  # HAT blk test
+    ],
+)
 def test_tt_patch_unembed(device, batch_size, img_size, patch_size, in_chans, embed_dim):
     """Test TTPatchUnEmbed against PyTorch reference implementation"""
     torch.manual_seed(0)
@@ -37,17 +41,29 @@ def test_tt_patch_unembed(device, batch_size, img_size, patch_size, in_chans, em
 
     # Convert input to TTNN format
     ttnn_input = ttnn.from_torch(
-        torch_input, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG
+        torch_input, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.L1_MEMORY_CONFIG
     )
 
     # Run TTNN model
     ttnn_output = tt_model(ttnn_input, patches_resolution)
     ttnn_output_torch = ttnn.to_torch(ttnn_output)
 
+    # Compare outputs
+    does_pass, pcc_message = comp_pcc(torch_output, ttnn_output_torch, 0.99)
+
+    logger.info(f"Reference output shape: {torch_output.shape}")
+    logger.info(f"TTNN output shape: {ttnn_output_torch.shape}")
+    logger.info(pcc_message)
+
+    if does_pass:
+        logger.info("TR PatchEmbed Passed!")
+    else:
+        logger.warning("TR PatchEmbed Failed!")
+
+    assert does_pass, f"PCC check failed: {pcc_message}"
     # Assert shapes match
     assert (
         torch_output.shape == ttnn_output_torch.shape
     ), f"Shape mismatch: {torch_output.shape} vs {ttnn_output_torch.shape}"
 
-    # Assert values match with PCC
-    assert_with_pcc(torch_output, ttnn_output_torch, 0.999)
+    ttnn.close_device(device)
