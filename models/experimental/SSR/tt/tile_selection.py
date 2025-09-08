@@ -105,6 +105,7 @@ class TTTileSelection(LightweightModule):
         Args:
             x: Input tensor [B, C, H, W]
         """
+        x = ttnn.permute(x, (0, 2, 3, 1))
         B, C, H, W = x.shape
 
         # Patch embedding using existing TTPatchEmbed

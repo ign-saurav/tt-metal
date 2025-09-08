@@ -79,7 +79,7 @@ class TTSSR(LightweightModule):
         B, C, H, W = x.shape
 
         # Get tile selection features
-        patch_fea3, patch_fea2, patch_fea1 = self.select_model(x)
+        patch_fea3 = self.select_model(x)
 
         # Calculate selection threshold (top 25%)
         patch_fea3_flat = ttnn.reshape(patch_fea3, (-1,))
@@ -199,7 +199,7 @@ class TTSSR(LightweightModule):
 
         sr = ttnn.reshape(sr, [B, 1024, 1024, 3])  # TODO
 
-        return sr, patch_fea3, patch_fea2, patch_fea1
+        return sr, patch_fea3
 
 
 class TTSSR_wo_conv(LightweightModule):
@@ -237,7 +237,7 @@ class TTSSR_wo_conv(LightweightModule):
         B, C, H, W = x.shape
 
         # Same tile selection logic
-        patch_fea3, patch_fea2, patch_fea1 = self.select_model(x)
+        patch_fea3 = self.select_model(x)
 
         # Calculate selection threshold (top 25%)
         patch_fea3_flat = ttnn.reshape(patch_fea3, (-1,))
@@ -281,4 +281,4 @@ class TTSSR_wo_conv(LightweightModule):
         sr = ttnn.concat(sr_patches, dim=0)
         sr = window_reverse_ttnn(sr, window_size=H, h=H * 4, w=W * 4)
 
-        return sr, patch_fea3, patch_fea2, patch_fea1
+        return sr, patch_fea3
