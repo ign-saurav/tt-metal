@@ -5,7 +5,7 @@ from loguru import logger
 
 # Import the reference models (adjust import paths as needed)
 from models.experimental.SSR.reference.SSR.model.tile_refinement import TileRefinement
-from models.experimental.SSR.tests.test_patch_embed_tile_selection import create_patch_embed_preprocessor_conv
+from models.experimental.SSR.tests.test_patch_embed_tile_refinement import create_patch_embed_preprocessor_conv
 from models.experimental.SSR.tests.test_RHAG import create_rhag_preprocessor
 from models.experimental.SSR.tests.test_upsample import create_upsample_preprocessor
 from models.experimental.SSR.tt.tile_refinement import TTTileRefinement

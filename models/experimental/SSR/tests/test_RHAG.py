@@ -12,7 +12,7 @@ from models.experimental.SSR.tests.test_HAB import create_relative_position_inde
 from models.experimental.SSR.tests.test_atten_blocks import create_atten_blocks_preprocessor
 
 # from models.experimental.SSR.tests.test_patch_embed import create_patch_embed_preprocessor
-from models.experimental.SSR.tests.test_patch_embed_tile_selection import create_patch_embed_preprocessor_conv
+from models.experimental.SSR.tests.test_patch_embed_tile_refinement import create_patch_embed_preprocessor_conv
 from models.utility_functions import comp_pcc
 from ttnn.model_preprocessing import preprocess_model_parameters
 
