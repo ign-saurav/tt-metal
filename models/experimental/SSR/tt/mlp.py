@@ -1,6 +1,5 @@
 import ttnn
 from models.common.lightweightmodule import LightweightModule
-from models.demos.deepseek_v3.utils.config_helpers import matmul_config
 
 
 class TTMlp(LightweightModule):
@@ -19,18 +18,30 @@ class TTMlp(LightweightModule):
         self.fc2_bias = parameters["fc2"]["bias"]
 
     def forward(self, x):
+        # Debug prints for forward arguments
+        if x.memory_config().buffer_type != ttnn.BufferType.L1:
+            x = ttnn.to_memory_config(x, ttnn.L1_MEMORY_CONFIG)
         # First linear layer
-        program_config = matmul_config(
-            x.shape[-2], x.shape[-1], self.fc1_bias.shape[-1], (8, 8), fused_activation=(ttnn.UnaryOpType.GELU, True)
-        )
+        # program_config = matmul_config(
+        #     x.shape[-2], x.shape[-1], self.fc1_bias.shape[-1], (8, 8), fused_activation=(ttnn.UnaryOpType.GELU, True)
+        # )
         x = ttnn.linear(
-            x, self.fc1_weight, bias=self.fc1_bias, memory_config=ttnn.L1_MEMORY_CONFIG, program_config=program_config
+            x,
+            self.fc1_weight,
+            bias=self.fc1_bias,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            core_grid=ttnn.CoreGrid(y=8, x=8),
+            activation="gelu",
         )
 
-        program_config = matmul_config(x.shape[-2], x.shape[-1], self.fc2_bias.shape[-1], (8, 8))
+        # program_config = matmul_config(x.shape[-2], x.shape[-1], self.fc2_bias.shape[-1], (8, 8))
         # Second linear layer
         x = ttnn.linear(
-            x, self.fc2_weight, bias=self.fc2_bias, memory_config=ttnn.L1_MEMORY_CONFIG, program_config=program_config
+            x,
+            self.fc2_weight,
+            bias=self.fc2_bias,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            core_grid=ttnn.CoreGrid(y=8, x=8),
         )
 
         return x

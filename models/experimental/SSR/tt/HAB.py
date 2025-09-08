@@ -57,7 +57,6 @@ class TTHAB(LightweightModule):
 
         self.mlp = TTMlp(
             device=device,
-            memory_config=memory_config,
             in_features=dim,
             hidden_features=int(dim * mlp_ratio),
             parameters=parameters["mlp"],
