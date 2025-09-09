@@ -4,35 +4,15 @@ from models.common.lightweightmodule import LightweightModule
 
 
 def window_partition_ttnn(x, window_size):
-    """TTNN implementation of window partitioning"""
-    b, h, w, c = x.shape
-
-    # Reshape: (b, h, w, c) -> (b, h//ws, ws, w//ws, ws, c)
-    reshaped = ttnn.reshape(x, (b, h // window_size, window_size, w // window_size, window_size, c))
-
-    # Permute: (0, 1, 3, 2, 4, 5) -> group windows together
-    permuted = ttnn.permute(reshaped, (0, 1, 3, 2, 4, 5))
-
-    # Final reshape to get windows
-    windows = ttnn.reshape(permuted, (-1, window_size, window_size, c))
-
-    return windows
+    """Partition into non-overlapping windows"""
+    B, H, W, C = x.shape
+    num_windows = (H // window_size) * (W // window_size)
+    return ttnn.reshape(x, [B * num_windows, window_size, window_size, C], memory_config=ttnn.L1_MEMORY_CONFIG)
 
 
-def window_reverse_ttnn(windows, window_size, h, w):
-    """TTNN implementation of window reverse"""
-    b = int(windows.shape[0] / (h * w / window_size / window_size))
-
-    # Reshape windows back to grid
-    reshaped = ttnn.reshape(windows, (b, h // window_size, w // window_size, window_size, window_size, -1))
-
-    # Permute back to original order
-    permuted = ttnn.permute(reshaped, (0, 1, 3, 2, 4, 5))
-
-    # Final reshape to original spatial dimensions
-    output = ttnn.reshape(permuted, (b, h, w, -1))
-
-    return output
+def window_reverse_ttnn(windows, window_size, H, W):
+    B = windows.shape[0] // (H * W // window_size // window_size)
+    return ttnn.reshape(windows, [B, H, W, -1], memory_config=ttnn.L1_MEMORY_CONFIG)
 
 
 class TTOCAB(LightweightModule):
@@ -118,124 +98,125 @@ class TTOCAB(LightweightModule):
     def forward(self, x, x_size, rpi):
         h, w = x_size
         b, _, c = x.shape
-
-        # Store shortcut connection
         shortcut = x
 
-        # Layer normalization - handle padded dimensions
-        x = ttnn.layer_norm(x, weight=self.norm1_weight, bias=self.norm1_bias)
+        # Layer normalization
+        x = ttnn.layer_norm(x, weight=self.norm1_weight, bias=self.norm1_bias, memory_config=ttnn.L1_MEMORY_CONFIG)
 
-        # Reshape to spatial format
-        x = ttnn.reshape(x, (b, h, w, c))
+        # Fused QKV projection - use single linear operation
+        qkv = ttnn.linear(
+            x,
+            self.qkv_weight,
+            bias=self.qkv_bias,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            dtype=ttnn.bfloat8_b,
+            core_grid=ttnn.CoreGrid(y=8, x=8),
+        )
+        tile_size = 32
+        # for 180 dim, 540 qkvshape[-1] :- head_size = 30, padded_head_size = 32
+        head_size = qkv.shape[-1] // (3 * self.num_heads)
+        padded_head_size = ((head_size + tile_size - 1) // tile_size) * tile_size
+        pad = padded_head_size != head_size
+        if pad:
+            qkv_torch = ttnn.to_torch(qkv)
+            input_tensor_heads = torch.split(qkv_torch, head_size, dim=-1)
+            input_tensor_heads = [
+                torch.nn.functional.pad(head, (0, padded_head_size - head_size), "constant", 0)
+                for head in input_tensor_heads
+            ]
+            qkv = torch.cat(input_tensor_heads, dim=-1)
+            qkv = ttnn.from_torch(
+                qkv,
+                device=self.device,
+                dtype=ttnn.bfloat16,
+                memory_config=ttnn.L1_MEMORY_CONFIG,
+                layout=ttnn.TILE_LAYOUT,
+            )
+        # Use transformer function for QKV splitting
+        query, key, value = ttnn.transformer.split_query_key_value_and_split_heads(
+            qkv, memory_config=ttnn.DRAM_MEMORY_CONFIG, num_heads=self.num_heads, transpose_key=False
+        )
+        ttnn.deallocate(qkv)
 
-        # QKV projection
-        qkv = ttnn.linear(x, self.qkv_weight, bias=self.qkv_bias)
-        qkv = ttnn.reshape(qkv, (b, h, w, 3, c))
-        qkv = ttnn.permute(qkv, (3, 0, 4, 1, 2))  # 3, b, c, h, w
+        sdpa_program_config = ttnn.SDPAProgramConfig(
+            compute_with_storage_grid_size=[8, 7],
+            q_chunk_size=512,
+            k_chunk_size=512,
+            exp_approx_mode=False,
+        )
+        compute_kernel_config = ttnn.init_device_compute_kernel_config(
+            self.device.arch(),
+            math_fidelity=ttnn.MathFidelity.LoFi,
+            math_approx_mode=True,
+            fp32_dest_acc_en=False,
+            packer_l1_acc=False,
+        )
 
-        # Split Q, K, V using slicing
-        q = ttnn.slice(qkv, (0, 0, 0, 0, 0), (1, b, c, h, w))
-        q = ttnn.squeeze(q, 0)  # Remove first dimension
-        q = ttnn.permute(q, (0, 2, 3, 1))  # b, h, w, c
+        # Use optimized scaled dot product attention
+        attention_output = ttnn.transformer.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            is_causal=False,
+            scale=self.scale,
+            program_config=sdpa_program_config,
+            compute_kernel_config=compute_kernel_config,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
 
-        k = ttnn.slice(qkv, (1, 0, 0, 0, 0), (2, b, c, h, w))
-        k = ttnn.squeeze(k, 0)
+        # Deallocate intermediate tensors
+        ttnn.deallocate(query)
+        ttnn.deallocate(key)
+        ttnn.deallocate(value)
+        # Use transformer function for head concatenation
+        context_layer = ttnn.transformer.concatenate_heads(
+            attention_output,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
+        ttnn.deallocate(attention_output)
 
-        v = ttnn.slice(qkv, (2, 0, 0, 0, 0), (3, b, c, h, w))
-        v = ttnn.squeeze(v, 0)
-
-        # Concatenate K and V for unfold operation
-        kv = ttnn.concat([k, v], dim=1)  # b, 2*c, h, w
-
-        # Window partition for Q
-        q_windows = window_partition_ttnn(q, self.window_size)
-        q_windows = ttnn.reshape(q_windows, (-1, self.window_size * self.window_size, c))
-
-        # Host-side unfold operation for KV
-        kv_torch = ttnn.to_torch(kv)
-        kv_windows_torch = self._unfold(kv_torch)  # b, c*w*w, nw
-        kv_windows = ttnn.from_torch(
-            kv_windows_torch,
-            dtype=kv.dtype,
-            layout=ttnn.ROW_MAJOR_LAYOUT,
+        # import pdb; pdb.set_trace()
+        if pad:
+            # remove padding
+            context_layer = ttnn.to_torch(context_layer)[..., : self.dim]  # slice to 180 and remove padding
+        context_layer = ttnn.from_torch(
+            context_layer,
             device=self.device,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            dtype=ttnn.bfloat16,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            layout=ttnn.TILE_LAYOUT,
         )
+        # Reshape back to original format
+        x = ttnn.reshape(context_layer, (b, h * w, self.dim), memory_config=ttnn.L1_MEMORY_CONFIG)
 
-        # Rearrange KV windows using host implementation
-        kv_windows = self.ttnn_rearrange_host(
-            kv_windows,
-            "b (nc ch owh oww) nw",
-            "nc (b nw) (owh oww) ch",
-            nc=2,
-            ch=c,
-            owh=self.overlap_win_size,
-            oww=self.overlap_win_size,
+        # Output projection and residual
+        x = ttnn.linear(
+            x,
+            self.proj_weight,
+            bias=self.proj_bias,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            core_grid=ttnn.CoreGrid(y=8, x=8),
         )
-
-        # Split K and V windows
-        k_windows = ttnn.slice(
-            kv_windows, (0, 0, 0, 0), (1, kv_windows.shape[1], kv_windows.shape[2], kv_windows.shape[3])
-        )
-        k_windows = ttnn.squeeze(k_windows, 0)
-
-        v_windows = ttnn.slice(
-            kv_windows, (1, 0, 0, 0), (2, kv_windows.shape[1], kv_windows.shape[2], kv_windows.shape[3])
-        )
-        v_windows = ttnn.squeeze(v_windows, 0)
-
-        # Multi-head attention computation
-        b_, nq, _ = q_windows.shape
-        _, n, _ = k_windows.shape
-        d = self.dim // self.num_heads
-
-        # Reshape for multi-head attention
-        q = ttnn.reshape(q_windows, (b_, nq, self.num_heads, d))
-        q = ttnn.permute(q, (0, 2, 1, 3))  # nw*b, nH, nq, d
-
-        k = ttnn.reshape(k_windows, (b_, n, self.num_heads, d))
-        k = ttnn.permute(k, (0, 2, 1, 3))  # nw*b, nH, n, d
-
-        v = ttnn.reshape(v_windows, (b_, n, self.num_heads, d))
-        v = ttnn.permute(v, (0, 2, 1, 3))  # nw*b, nH, n, d
-
-        q = ttnn.to_layout(q, ttnn.TILE_LAYOUT)
-        k = ttnn.to_layout(k, ttnn.TILE_LAYOUT)
-        v = ttnn.to_layout(v, ttnn.TILE_LAYOUT)
-
-        # Scale queries
-        q = ttnn.multiply(q, self.scale)
-
-        # Attention computation
-        k_transposed = ttnn.transpose(k, -2, -1)
-        attn = ttnn.matmul(q, k_transposed)
-
-        # Apply softmax
-        attn = ttnn.softmax(attn, dim=-1)
-
-        # Apply attention to values
-        attn_output = ttnn.matmul(attn, v)
-        attn_output = ttnn.transpose(attn_output, 1, 2)
-        attn_output = ttnn.reshape(attn_output, (b_, nq, self.dim))
-
-        # Merge windows
-        attn_windows = ttnn.reshape(attn_output, (-1, self.window_size, self.window_size, self.dim))
-        x = window_reverse_ttnn(attn_windows, self.window_size, h, w)
-        x = ttnn.reshape(x, (b, h * w, self.dim))
-
-        # Projection and residual connection
-        x = ttnn.linear(x, self.proj_weight, bias=self.proj_bias)
         x = ttnn.add(x, shortcut)
 
-        # MLP block
-        x = ttnn.layer_norm(x, weight=self.norm2_weight, bias=self.norm2_bias)
+        x = ttnn.layer_norm(x, weight=self.norm2_weight, bias=self.norm2_bias, memory_config=ttnn.L1_MEMORY_CONFIG)
 
-        # MLP forward pass
-        mlp_out = ttnn.linear(x, self.mlp_fc1_weight, bias=self.mlp_fc1_bias)
-        mlp_out = ttnn.gelu(mlp_out)
-        mlp_out = ttnn.linear(mlp_out, self.mlp_fc2_weight, bias=self.mlp_fc2_bias)
+        mlp_out = ttnn.linear(
+            x,
+            self.mlp_fc1_weight,
+            bias=self.mlp_fc1_bias,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            dtype=ttnn.bfloat8_b,
+            core_grid=ttnn.CoreGrid(y=8, x=8),
+            activation="gelu",
+        )
+        mlp_out = ttnn.linear(
+            mlp_out,
+            self.mlp_fc2_weight,
+            bias=self.mlp_fc2_bias,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            core_grid=ttnn.CoreGrid(y=8, x=8),
+        )
 
-        # Final residual connection
         x = ttnn.add(x, mlp_out)
-
         return x
