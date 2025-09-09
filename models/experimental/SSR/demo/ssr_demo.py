@@ -55,6 +55,10 @@ def save_tensor_as_image(tensor, output_path):
     if tensor.dim() == 4:
         tensor = tensor.squeeze(0)  # Remove batch dimension
 
+    # Convert BFloat16 to Float32 if needed
+    if tensor.dtype == torch.bfloat16:
+        tensor = tensor.to(torch.float32)
+
     # Clamp values to [0, 1] range
     tensor = torch.clamp(tensor, 0, 1)
 
