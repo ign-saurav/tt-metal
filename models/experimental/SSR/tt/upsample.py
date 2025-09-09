@@ -1,6 +1,7 @@
 import ttnn
 import math
 from models.common.lightweightmodule import LightweightModule
+import torch
 
 
 class TTUpsample(LightweightModule):
@@ -75,12 +76,33 @@ class TTUpsample(LightweightModule):
 
         return x
 
+    def pixel_shuffle_torch(self, x, upscale_factor):
+        """Implement PixelShuffle operation using PyTorch for better performance"""
+        # PyTorch pixel_shuffle expects NCHW format, but our tensor is NHWC
+        # Convert from NHWC to NCHW
+        torch_tensor = x.permute(0, 3, 1, 2)
+
+        # Apply PyTorch pixel shuffle
+        torch_output = torch.nn.functional.pixel_shuffle(torch_tensor, upscale_factor)
+
+        # Convert back from NCHW to NHWC
+        torch_output = torch_output.permute(0, 2, 3, 1)
+
+        # Convert back to TTNN tensor
+        ttnn_output = ttnn.from_torch(
+            torch_output,
+            device=self.device,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            memory_config=self.memory_config,
+        )
+
+        return ttnn_output
+
     def forward(self, x, parameters):
         current = x
-        current_channels = self.num_feat  # Start with 4 channels
-        slice_config = ttnn.Conv2dSliceConfig(
-            slice_type=ttnn.Conv2dSliceHeight, num_slices=4  # Adjust based on memory constraints
-        )
+        current_channels = self.num_feat
+        slice_config = ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dSliceHeight, num_slices=4)
         for i in range(self.num_ops):
             # Calculate output channels for this specific convolution
             out_channels = current_channels * (self.scale_factor * self.scale_factor)
@@ -91,8 +113,8 @@ class TTUpsample(LightweightModule):
                 input_tensor=current,
                 weight_tensor=parameters[f"conv_{i}"]["weight"],
                 bias_tensor=parameters[f"conv_{i}"]["bias"] if parameters[f"conv_{i}"]["bias"] else None,
-                in_channels=current_channels,  # Use dynamic channel count
-                out_channels=out_channels,  # Use calculated output channels
+                in_channels=current_channels,
+                out_channels=out_channels,
                 device=self.device,
                 kernel_size=(3, 3),
                 stride=(1, 1),
@@ -103,25 +125,20 @@ class TTUpsample(LightweightModule):
                 conv_config=self.conv_config,
                 compute_config=self.compute_config,
                 dtype=ttnn.bfloat16,
-                return_output_dim=False,  # Only return the output tensor for simplest call
+                return_output_dim=False,
                 return_weights_and_bias=False,
                 slice_config=slice_config,
             )
 
+            current = ttnn.to_torch(current)
             # reshape B,1,H*W, C to B, H, W, C
-            current = ttnn.reshape(
-                current,
-                (
-                    batch_size,
-                    current.shape[2] // (height * batch_size),
-                    current.shape[2] // (height * batch_size),
-                    out_channels,
-                ),
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            current = current.reshape(
+                batch_size,
+                current.shape[2] // (height * batch_size),
+                current.shape[2] // (height * batch_size),
+                out_channels,
             )
-            # Apply pixel shuffle
-            current = self.pixel_shuffle(current, self.scale_factor)
-
+            current = self.pixel_shuffle_torch(current, self.scale_factor)
             # After pixel shuffle, channels return to original count
             current_channels = self.num_feat
 
