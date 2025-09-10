@@ -7,7 +7,7 @@ from loguru import logger
 from models.experimental.SSR.reference.SSR.model.ssr import SSR, SSR_wo_conv
 from models.experimental.SSR.tt.ssr import TTSSR, TTSSR_wo_conv
 from models.experimental.SSR.tests.test_upsample import create_upsample_preprocessor
-from models.experimental.SSR.tests.test_tile_selection import create_tile_selection_preprocessor
+from models.experimental.SSR.tests.tile_selection.test_tile_selection import create_tile_selection_preprocessor
 from models.experimental.SSR.tests.test_tile_refinement import create_tile_refinement_preprocessor
 from models.experimental.SSR.tests.test_HAB import create_relative_position_index
 

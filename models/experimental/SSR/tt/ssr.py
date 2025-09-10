@@ -2,10 +2,13 @@ import torch
 import ttnn
 import torch.nn.functional as F
 from models.common.lightweightmodule import LightweightModule
-from models.experimental.SSR.tt.tile_refinement import TTTileRefinement
-from models.experimental.SSR.tt.tile_selection import TTTileSelection
-from models.experimental.SSR.tt.upsample import TTUpsample
-from models.experimental.SSR.tt.OCAB import window_partition_ttnn, window_reverse_ttnn
+from models.experimental.SSR.tt.tile_refinement.tile_refinement import TTTileRefinement
+from models.experimental.SSR.tt.tile_selection.tile_selection import TTTileSelection
+from models.experimental.SSR.tt.tile_refinement.upsample import TTUpsample
+from models.experimental.SSR.tt.tile_refinement.RHAG.ATTEN_BLK.OCAB.OCAB import (
+    window_partition_ttnn,
+    window_reverse_ttnn,
+)
 
 
 class TTSSR(LightweightModule):

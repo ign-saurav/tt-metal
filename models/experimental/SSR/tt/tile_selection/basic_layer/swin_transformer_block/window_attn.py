@@ -3,7 +3,6 @@
 
 import ttnn
 import torch.nn as nn
-import torch
 
 
 class TTWindowAttention(nn.Module):
@@ -23,37 +22,6 @@ class TTWindowAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
-
-    def _compute_attention_mask(self):
-        """Compute attention mask for shifted window attention"""
-        H, W = self.input_resolution
-
-        # Create mask on CPU first
-        img_mask = torch.zeros((1, H, W, 1))
-        h_slices = (
-            slice(0, -self.window_size),
-            slice(-self.window_size, -self.shift_size),
-            slice(-self.shift_size, None),
-        )
-        w_slices = (
-            slice(0, -self.window_size),
-            slice(-self.window_size, -self.shift_size),
-            slice(-self.shift_size, None),
-        )
-        cnt = 0
-        for h in h_slices:
-            for w in w_slices:
-                img_mask[:, h, w, :] = cnt
-                cnt += 1
-
-        # Partition into windows
-        mask_windows, _ = self._window_partition_padding(img_mask, self.window_size)
-        mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
-        attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-        attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
-
-        # Convert to TTNN tensor
-        return ttnn.from_torch(attn_mask, device=self.device, layout=ttnn.TILE_LAYOUT, memory_config=self.memory_config)
 
     def forward(self, input_tensor, mask=None):
         """
