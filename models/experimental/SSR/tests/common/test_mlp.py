@@ -11,8 +11,8 @@ from models.experimental.SSR.tt.common import TTMlp
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_bias, preprocess_linear_weight
 from models.utility_functions import (
     tt2torch_tensor,
-    comp_pcc,
 )
+from tests.ttnn.utils_for_testing import check_with_pcc
 
 
 def create_mlp_preprocessor(device):
@@ -74,7 +74,7 @@ def test_mlp(device, in_features, hidden_features, out_features, input_shape):
     tt_output = tt_layer(tt_input)
     tt_torch_output = tt2torch_tensor(tt_output)
 
-    does_pass, pcc_message = comp_pcc(ref_output, tt_torch_output, 0.99)
+    does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
 
     logger.info(pcc_message)
 
