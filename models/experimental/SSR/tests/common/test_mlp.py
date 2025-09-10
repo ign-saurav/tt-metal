@@ -6,7 +6,7 @@ import ttnn
 from loguru import logger
 
 from models.experimental.SSR.reference.SSR.model.net_blocks import Mlp
-from models.experimental.SSR.tt import TTMlp
+from models.experimental.SSR.tt.common import TTMlp
 
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_bias, preprocess_linear_weight
 from models.utility_functions import (

@@ -4,7 +4,8 @@
 import ttnn
 from models.common.lightweightmodule import LightweightModule
 
-from models.experimental.SSR.tt import TTSwinTransformerBlock, TTPatchMerging
+from .swin_transformer_block import TTSwinTransformerBlock
+from .patch_merging import TTPatchMerging
 
 
 class TTBasicLayer(LightweightModule):

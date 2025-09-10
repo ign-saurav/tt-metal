@@ -5,7 +5,7 @@ from loguru import logger
 
 # Fix the imports based on the codebase patterns
 from models.experimental.SSR.reference.SSR.model.net_blocks import PatchEmbed
-from models.experimental.SSR.tt.patch_embed import TTPatchEmbed  # Updated path
+from models.experimental.SSR.tt.tile_selection import TTPatchEmbed  # Updated path
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.utility_functions import tt2torch_tensor, comp_pcc
 

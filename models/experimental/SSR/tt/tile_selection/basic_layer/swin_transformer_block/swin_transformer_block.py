@@ -6,7 +6,7 @@ import torch
 from models.common.lightweightmodule import LightweightModule
 
 from .window_attn import TTWindowAttention
-from .mlp import TTMlp
+from models.experimental.SSR.tt.common import TTMlp
 
 
 class TTSwinTransformerBlock(LightweightModule):

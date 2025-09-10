@@ -6,22 +6,15 @@ import torch
 from loguru import logger
 
 import ttnn
-from models.experimental.SSR.tt import TTBasicLayer
-from models.experimental.SSR.tt.patch_merging import TTPatchMerging
+from models.experimental.SSR.tt.tile_selection import TTBasicLayer, TTPatchMerging
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.utility_functions import tt2torch_tensor, comp_pcc
 
-from models.experimental.SSR.tests.test_swin_transformer_block import create_swin_transformer_block_preprocessor
-from models.experimental.SSR.tests.test_patch_merging import create_patch_merging_preprocessor
+from models.experimental.SSR.tests.tile_selection.test_swin_transformer_block import (
+    create_swin_transformer_block_preprocessor,
+)
+from models.experimental.SSR.tests.tile_selection.test_patch_merging import create_patch_merging_preprocessor
 from models.experimental.SSR.reference.SSR.model.net_blocks import PatchMerging, BasicLayer
-
-import collections
-
-
-def to_2tuple(x):
-    if isinstance(x, collections.abc.Iterable):
-        return x
-    return (x, x)
 
 
 def create_basic_layer_preprocessor(device, dim):

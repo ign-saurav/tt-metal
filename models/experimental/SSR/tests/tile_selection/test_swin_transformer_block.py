@@ -4,9 +4,9 @@ import ttnn
 from loguru import logger
 
 from models.experimental.SSR.reference.SSR.model.net_blocks import SwinTransformerBlock
-from models.experimental.SSR.tt import TTSwinTransformerBlock
-from models.experimental.SSR.tests.test_mlp import create_mlp_preprocessor
-from models.experimental.SSR.tests.test_window_attn import create_window_attention_preprocessor
+from models.experimental.SSR.tt.tile_selection import TTSwinTransformerBlock
+from models.experimental.SSR.tests.common.test_mlp import create_mlp_preprocessor
+from models.experimental.SSR.tests.tile_selection.test_window_attn import create_window_attention_preprocessor
 from ttnn.model_preprocessing import preprocess_model_parameters
 
 from models.utility_functions import (
@@ -71,6 +71,7 @@ def create_swin_transformer_block_preprocessor(device):
         (3, 8, 8, 96, 3, 7, 3, 4.0),
     ),
 )
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}])
 def test_swin_transformer_block(device, batch_size, height, width, dim, num_heads, window_size, shift_size, mlp_ratio):
     # Create input tensor
     input_shape = (batch_size, height * width, dim)

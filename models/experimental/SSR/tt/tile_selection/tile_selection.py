@@ -3,11 +3,12 @@
 
 import ttnn
 import math
-from models.experimental.SSR.tt.patch_embed import TTPatchEmbed
-from models.experimental.SSR.tt.basic_block import TTBasicLayer
-from models.experimental.SSR.tt.mlp import TTMlp
-from models.experimental.SSR.tt.mask_token_inference import TTMaskTokenInference
 from models.common.lightweightmodule import LightweightModule
+
+from .patch_embed import TTPatchEmbed
+from .basic_layer import TTBasicLayer
+from .mask_token_inference import TTMaskTokenInference
+from ..common import TTMlp
 
 
 class TTTileSelection(LightweightModule):

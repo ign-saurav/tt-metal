@@ -9,7 +9,7 @@ import ttnn
 from models.experimental.SSR.reference.SSR.model.net_blocks import PatchMerging
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.utility_functions import tt2torch_tensor, comp_pcc
-from models.experimental.SSR.tt.patch_merging import TTPatchMerging
+from models.experimental.SSR.tt.tile_selection import TTPatchMerging
 
 
 def create_patch_merging_preprocessor(device, dim):

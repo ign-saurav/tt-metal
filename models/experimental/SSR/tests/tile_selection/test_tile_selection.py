@@ -6,10 +6,12 @@ from loguru import logger
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_bias, preprocess_linear_weight
 from models.experimental.SSR.reference.SSR.model.tile_selection import TileSelection
 from models.experimental.SSR.tt.tile_selection import TTTileSelection
-from models.experimental.SSR.tests.test_patch_embed import create_patch_embed_preprocessor
-from models.experimental.SSR.tests.test_basic_block import create_basic_layer_preprocessor
-from models.experimental.SSR.tests.test_mlp import create_mlp_preprocessor
-from models.experimental.SSR.tests.test_mask_token_inference import create_mask_token_inference_preprocessor
+from models.experimental.SSR.tests.tile_selection.test_patch_embed import create_patch_embed_preprocessor
+from models.experimental.SSR.tests.tile_selection.test_basic_block import create_basic_layer_preprocessor
+from models.experimental.SSR.tests.common.test_mlp import create_mlp_preprocessor
+from models.experimental.SSR.tests.tile_selection.test_mask_token_inference import (
+    create_mask_token_inference_preprocessor,
+)
 from models.utility_functions import tt2torch_tensor, comp_pcc
 
 

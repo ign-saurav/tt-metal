@@ -4,7 +4,7 @@ import ttnn
 from loguru import logger
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_bias, preprocess_linear_weight
 from models.experimental.SSR.reference.SSR.model.tile_selection import mask_token_inference
-from models.experimental.SSR.tt.mask_token_inference import TTMaskTokenInference
+from models.experimental.SSR.tt.tile_selection import TTMaskTokenInference
 
 from models.utility_functions import tt2torch_tensor, comp_pcc
 

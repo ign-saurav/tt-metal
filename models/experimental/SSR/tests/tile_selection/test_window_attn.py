@@ -8,7 +8,7 @@ from loguru import logger
 from models.experimental.SSR.reference.SSR.model.net_blocks import WindowAttention
 from timm.models.layers import to_2tuple
 
-from models.experimental.SSR.tt import TTWindowAttention
+from models.experimental.SSR.tt.tile_selection import TTWindowAttention
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_bias, preprocess_linear_weight
 from models.utility_functions import (
     tt2torch_tensor,
