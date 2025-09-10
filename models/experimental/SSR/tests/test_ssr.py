@@ -155,7 +155,7 @@ def test_ssr_model(input_shape, num_cls, with_conv):
             )
 
         # Convert input to TTNN tensor
-        tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT)
+        tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
 
         # Run TTNN model
         tt_sr, tt_patch_fea3 = tt_model(tt_input)

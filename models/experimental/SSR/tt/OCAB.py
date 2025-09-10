@@ -4,15 +4,35 @@ from models.common.lightweightmodule import LightweightModule
 
 
 def window_partition_ttnn(x, window_size):
-    """Partition into non-overlapping windows"""
-    B, H, W, C = x.shape
-    num_windows = (H // window_size) * (W // window_size)
-    return ttnn.reshape(x, [B * num_windows, window_size, window_size, C], memory_config=ttnn.L1_MEMORY_CONFIG)
+    """TTNN implementation of window partitioning"""
+    b, h, w, c = x.shape
+
+    # Reshape: (b, h, w, c) -> (b, h//ws, ws, w//ws, ws, c)
+    reshaped = ttnn.reshape(x, (b, h // window_size, window_size, w // window_size, window_size, c))
+
+    # Permute: (0, 1, 3, 2, 4, 5) -> group windows together
+    permuted = ttnn.permute(reshaped, (0, 1, 3, 2, 4, 5))
+
+    # Final reshape to get windows
+    windows = ttnn.reshape(permuted, (-1, window_size, window_size, c))
+
+    return windows
 
 
-def window_reverse_ttnn(windows, window_size, H, W):
-    B = windows.shape[0] // (H * W // window_size // window_size)
-    return ttnn.reshape(windows, [B, H, W, -1], memory_config=ttnn.L1_MEMORY_CONFIG)
+def window_reverse_ttnn(windows, window_size, h, w):
+    """TTNN implementation of window reverse"""
+    b = int(windows.shape[0] / (h * w / window_size / window_size))
+
+    # Reshape windows back to grid
+    reshaped = ttnn.reshape(windows, (b, h // window_size, w // window_size, window_size, window_size, -1))
+
+    # Permute back to original order
+    permuted = ttnn.permute(reshaped, (0, 1, 3, 2, 4, 5))
+
+    # Final reshape to original spatial dimensions
+    output = ttnn.reshape(permuted, (b, h, w, -1))
+
+    return output
 
 
 class TTOCAB(LightweightModule):
