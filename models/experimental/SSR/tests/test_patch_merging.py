@@ -12,9 +12,30 @@ from models.utility_functions import tt2torch_tensor, comp_pcc
 from models.experimental.SSR.tt.patch_merging import TTPatchMerging
 
 
-def create_patch_merging_preprocessor(device):
+def create_patch_merging_preprocessor(device, dim):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         params = {}
+
+        # Create conv kernels for patch merging (same as in forward pass)
+        kernel_top_left = torch.zeros(dim, 1, 2, 2, dtype=torch.bfloat16)
+        kernel_top_left[:, 0, 0, 0] = 1.0
+
+        kernel_bottom_left = torch.zeros(dim, 1, 2, 2, dtype=torch.bfloat16)
+        kernel_bottom_left[:, 0, 1, 0] = 1.0
+
+        kernel_top_right = torch.zeros(dim, 1, 2, 2, dtype=torch.bfloat16)
+        kernel_top_right[:, 0, 0, 1] = 1.0
+
+        kernel_bottom_right = torch.zeros(dim, 1, 2, 2, dtype=torch.bfloat16)
+        kernel_bottom_right[:, 0, 1, 1] = 1.0
+
+        # Convert to TTNN tensors
+        params["conv_kernels"] = {
+            "top_left": ttnn.from_torch(kernel_top_left, device=device),
+            "bottom_left": ttnn.from_torch(kernel_bottom_left, device=device),
+            "top_right": ttnn.from_torch(kernel_top_right, device=device),
+            "bottom_right": ttnn.from_torch(kernel_bottom_right, device=device),
+        }
 
         # Linear reduction layer
         params["reduction"] = {
@@ -76,7 +97,7 @@ def test_patch_merging(device, batch_size, input_resolution, dim):
     # Create ttnn model
     params = preprocess_model_parameters(
         initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_patch_merging_preprocessor(device),
+        custom_preprocessor=create_patch_merging_preprocessor(device, dim),
         device=device,
     )
 

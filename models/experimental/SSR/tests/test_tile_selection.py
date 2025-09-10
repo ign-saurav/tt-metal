@@ -13,7 +13,7 @@ from models.experimental.SSR.tests.test_mask_token_inference import create_mask_
 from models.utility_functions import tt2torch_tensor, comp_pcc
 
 
-def create_tile_selection_preprocessor(device):
+def create_tile_selection_preprocessor(device, dim=96):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
 
@@ -36,9 +36,10 @@ def create_tile_selection_preprocessor(device):
         # Handle encoder layers - delegate to existing TTBasicLayer preprocessor
         if hasattr(torch_model, "layers"):
             for i, layer in enumerate(torch_model.layers):
+                layer_dim = int(dim * 2**i)
                 layer_params = preprocess_model_parameters(
                     initialize_model=lambda l=layer: l,
-                    custom_preprocessor=create_basic_layer_preprocessor(device),
+                    custom_preprocessor=create_basic_layer_preprocessor(device, layer_dim),
                     device=device,
                 )
                 parameters[f"layers.{i}"] = layer_params
@@ -127,15 +128,12 @@ def test_tile_selection(device, image_size, patch_size, token_size, num_cls):
 
     parameters = preprocess_model_parameters(
         initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_tile_selection_preprocessor(device),
+        custom_preprocessor=create_tile_selection_preprocessor(device, dim),
         device=device,
     )
 
     # Create TTNN implementation
     tt_layer = TTTileSelection(device=device, parameters=parameters, args=args, num_cls=num_cls)
-
-    # NCHW -> NHWC
-    input_tensor = input_tensor.permute(0, 2, 3, 1)
 
     # Convert input to TTNN
     tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)

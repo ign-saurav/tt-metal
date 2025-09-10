@@ -24,13 +24,12 @@ def to_2tuple(x):
     return (x, x)
 
 
-def create_basic_layer_preprocessor(device):
+def create_basic_layer_preprocessor(device, dim):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         params = {"blocks": {}}
 
         # Process each transformer block
         for i, block in enumerate(torch_model.blocks):
-            # relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous().unsqueeze(0)
             params["blocks"][i] = preprocess_model_parameters(
                 initialize_model=lambda: block,
                 custom_preprocessor=create_swin_transformer_block_preprocessor(device),
@@ -41,7 +40,7 @@ def create_basic_layer_preprocessor(device):
         if torch_model.downsample is not None:
             params["downsample"] = preprocess_model_parameters(
                 initialize_model=lambda: torch_model.downsample,
-                custom_preprocessor=create_patch_merging_preprocessor(device),
+                custom_preprocessor=create_patch_merging_preprocessor(device, dim),
                 device=device,
             )
 
@@ -88,7 +87,7 @@ def test_basic_layer(device, batch_size, input_resolution, dim, depth, num_heads
     # Create ttnn model
     params = preprocess_model_parameters(
         initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_basic_layer_preprocessor(device),
+        custom_preprocessor=create_basic_layer_preprocessor(device, dim),
         device=device,
     )
 

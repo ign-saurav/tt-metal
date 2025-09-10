@@ -3,7 +3,6 @@
 
 import ttnn
 from models.common.lightweightmodule import LightweightModule
-import torch
 from models.demos.deepseek_v3.utils.config_helpers import matmul_config
 
 
@@ -27,6 +26,11 @@ class TTPatchMerging(LightweightModule):
         self.norm_weight = parameters["norm"]["weight"]
         self.norm_bias = parameters["norm"]["bias"]
 
+        self.kernel_top_left = parameters["conv_kernels"]["top_left"]
+        self.kernel_bottom_left = parameters["conv_kernels"]["bottom_left"]
+        self.kernel_top_right = parameters["conv_kernels"]["top_right"]
+        self.kernel_bottom_right = parameters["conv_kernels"]["bottom_right"]
+
     def forward(self, input_tensor):
         """
         Args:
@@ -44,96 +48,29 @@ class TTPatchMerging(LightweightModule):
         input_tensor = ttnn.reshape(input_tensor, (B, H, W, C))
         x = ttnn.to_layout(input_tensor, ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
 
-        kernel_top_left = torch.zeros(C, 1, 2, 2, dtype=torch.bfloat16)
-        kernel_top_left[:, 0, 0, 0] = 1.0
+        # Common convolution parameters
+        conv_params = {
+            "input_tensor": x,
+            "in_channels": C,
+            "out_channels": C,
+            "device": self.device,
+            "kernel_size": (2, 2),
+            "stride": (2, 2),
+            "padding": (0, 0),
+            "groups": C,  # Grouped convolution
+            "batch_size": B,
+            "input_height": H,
+            "input_width": W,
+            "conv_config": None,
+            "dtype": ttnn.bfloat16,
+            "memory_config": ttnn.DRAM_MEMORY_CONFIG,
+        }
 
-        kernel_bottom_left = torch.zeros(C, 1, 2, 2, dtype=torch.bfloat16)
-        kernel_bottom_left[:, 0, 1, 0] = 1.0
-
-        kernel_top_right = torch.zeros(C, 1, 2, 2, dtype=torch.bfloat16)
-        kernel_top_right[:, 0, 0, 1] = 1.0
-
-        kernel_bottom_right = torch.zeros(C, 1, 2, 2, dtype=torch.bfloat16)
-        kernel_bottom_right[:, 0, 1, 1] = 1.0
-
-        # Convert to TTNN tensors
-        tt_kernel_top_left = ttnn.from_torch(kernel_top_left, device=self.device)
-        tt_kernel_bottom_left = ttnn.from_torch(kernel_bottom_left, device=self.device)
-        tt_kernel_top_right = ttnn.from_torch(kernel_top_right, device=self.device)
-        tt_kernel_bottom_right = ttnn.from_torch(kernel_bottom_right, device=self.device)
-
-        # Apply grouped convolutions for each patch
-        x0 = ttnn.conv2d(
-            input_tensor=x,
-            weight_tensor=tt_kernel_top_left,
-            in_channels=C,
-            out_channels=C,
-            device=self.device,
-            kernel_size=(2, 2),
-            stride=(2, 2),
-            padding=(0, 0),
-            groups=C,  # Grouped convolution
-            batch_size=B,
-            input_height=H,
-            input_width=W,
-            conv_config=None,
-            dtype=ttnn.bfloat16,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
-
-        x1 = ttnn.conv2d(
-            input_tensor=x,
-            weight_tensor=tt_kernel_bottom_left,
-            in_channels=C,
-            out_channels=C,
-            device=self.device,
-            kernel_size=(2, 2),
-            stride=(2, 2),
-            padding=(0, 0),
-            groups=C,
-            batch_size=B,
-            input_height=H,
-            input_width=W,
-            conv_config=None,
-            dtype=ttnn.bfloat16,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
-
-        x2 = ttnn.conv2d(
-            input_tensor=x,
-            weight_tensor=tt_kernel_top_right,
-            in_channels=C,
-            out_channels=C,
-            device=self.device,
-            kernel_size=(2, 2),
-            stride=(2, 2),
-            padding=(0, 0),
-            groups=C,
-            batch_size=B,
-            input_height=H,
-            input_width=W,
-            conv_config=None,
-            dtype=ttnn.bfloat16,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
-
-        x3 = ttnn.conv2d(
-            input_tensor=x,
-            weight_tensor=tt_kernel_bottom_right,
-            in_channels=C,
-            out_channels=C,
-            device=self.device,
-            kernel_size=(2, 2),
-            stride=(2, 2),
-            padding=(0, 0),
-            groups=C,
-            batch_size=B,
-            input_height=H,
-            input_width=W,
-            conv_config=None,
-            dtype=ttnn.bfloat16,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
+        # Apply grouped convolutions for each patch, this is instead of a slice operation
+        x0 = ttnn.conv2d(weight_tensor=self.kernel_top_left, **conv_params)
+        x1 = ttnn.conv2d(weight_tensor=self.kernel_bottom_left, **conv_params)
+        x2 = ttnn.conv2d(weight_tensor=self.kernel_top_right, **conv_params)
+        x3 = ttnn.conv2d(weight_tensor=self.kernel_bottom_right, **conv_params)
 
         ttnn.deallocate(x)
 
