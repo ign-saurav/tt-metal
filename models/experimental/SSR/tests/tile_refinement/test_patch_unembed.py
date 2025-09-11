@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 import torch
 import ttnn
@@ -57,5 +60,3 @@ def test_tt_patch_unembed(device, batch_size, img_size, patch_size, in_chans, em
         logger.warning("TR PatchEmbed Failed!")
 
     assert does_pass, f"PCC check failed: {pcc_message}"
-
-    ttnn.close_device(device)

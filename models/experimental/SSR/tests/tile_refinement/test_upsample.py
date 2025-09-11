@@ -41,10 +41,10 @@ def create_upsample_preprocessor(device):
 
 
 @pytest.mark.parametrize(
-    "device_params,scale,num_feat,batch_size,input_size",
-    [({"l1_small_size": 32768}, 4, 64, 1, 256)],
-    indirect=["device_params"],
+    "scale,num_feat,batch_size,input_size",
+    [(4, 64, 1, 256)],
 )
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
 def test_upsample(device, scale, num_feat, batch_size, input_size):
     """Test Upsample block against PyTorch reference"""
     torch.manual_seed(0)
@@ -55,9 +55,6 @@ def test_upsample(device, scale, num_feat, batch_size, input_size):
 
     # Create PyTorch reference model
     torch_model = Upsample(scale, num_feat).eval()
-
-    # test breaks
-    # device = ttnn.open_device(device_id=0, l1_small_size=32768)
 
     # Create test input
     torch_input = torch.randn(batch_size, num_feat, input_size, input_size)
@@ -90,6 +87,4 @@ def test_upsample(device, scale, num_feat, batch_size, input_size):
     else:
         logger.warning("Upsample Failed!")
 
-    ttnn.close_device(device)
-
-    assert does_pass
+    assert does_pass, f"PCC check failed: {pcc_message}"

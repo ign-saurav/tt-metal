@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 import ttnn
 import torch
 from models.common.lightweightmodule import LightweightModule

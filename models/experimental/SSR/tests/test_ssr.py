@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 import pytest
 import ttnn
@@ -12,10 +15,8 @@ from models.experimental.SSR.tests.tile_refinement.test_tile_refinement import c
 from models.experimental.SSR.tests.tile_refinement.test_HAB import create_relative_position_index
 
 from ttnn.model_preprocessing import preprocess_model_parameters
-from models.utility_functions import (
-    tt2torch_tensor,
-    comp_pcc,
-)
+from models.utility_functions import tt2torch_tensor
+from tests.ttnn.utils_for_testing import check_with_pcc
 
 
 def create_ssr_preprocessor(device, args, num_cls):
@@ -166,11 +167,8 @@ def test_ssr_model(input_shape, num_cls, with_conv):
         tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
 
         # Compare outputs
-        sr_pass, sr_pcc_message = comp_pcc(ref_sr, tt_torch_sr, 0.95)
-        fea3_pass, fea3_pcc_message = comp_pcc(ref_patch_fea3, tt_torch_patch_fea3, 0.95)
-
-        logger.info(f"SR Output PCC: {sr_pcc_message}")
-        logger.info(f"Patch Fea3 PCC: {fea3_pcc_message}")
+        sr_pass, sr_pcc_message = check_with_pcc(ref_sr, tt_torch_sr, 0.95)
+        fea3_pass, fea3_pcc_message = check_with_pcc(ref_patch_fea3, tt_torch_patch_fea3, 0.95)
 
         all_pass = sr_pass and fea3_pass
 
@@ -179,8 +177,8 @@ def test_ssr_model(input_shape, num_cls, with_conv):
         else:
             logger.warning("TTSSR Test Failed!")
 
-        assert sr_pass, f"SR output comparison failed: {sr_pcc_message}"
-        assert fea3_pass, f"Patch fea3 comparison failed: {fea3_pcc_message}"
+        assert sr_pass, f"SR output failed PCC check: {sr_pcc_message}"
+        assert fea3_pass, f"Patch fea3 failed PCC check: {fea3_pcc_message}"
 
     finally:
         ttnn.close_device(device)

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 import pytest
 
@@ -10,10 +13,8 @@ from timm.models.layers import to_2tuple
 
 from models.experimental.SSR.tt.tile_selection import TTWindowAttention
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_bias, preprocess_linear_weight
-from models.utility_functions import (
-    tt2torch_tensor,
-    comp_pcc,
-)
+from models.utility_functions import tt2torch_tensor
+from tests.ttnn.utils_for_testing import check_with_pcc
 
 
 def create_window_attention_preprocessor(device):
@@ -114,13 +115,11 @@ def test_window_attn(device, input_shape, window_size, num_heads, input_resoluti
     tt_output = tt_layer(tt_input, tt_mask)
     tt_torch_output = tt2torch_tensor(tt_output)
 
-    does_pass, pcc_message = comp_pcc(ref_output, tt_torch_output, 0.99)
-
-    logger.info(pcc_message)
+    does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
 
     if does_pass:
         logger.info("WindowAttn Passed!")
     else:
-        logger.warning("WindowAttn Failed!")
+        logger.error("WindowAttn Failed!")
 
-    assert does_pass
+    assert does_pass, f"PCC check failed: {pcc_message}"

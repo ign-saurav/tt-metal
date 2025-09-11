@@ -118,20 +118,9 @@ def test_cab_block(device, batch_size, num_feat, height, width, compress_ratio, 
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.97)
 
-    logger.info(f"Batch: {batch_size}, Features: {num_feat}, Size: {height}x{width}")
-    logger.info(f"Compress ratio: {compress_ratio}, Squeeze factor: {squeeze_factor}")
-    logger.info(f"Reference output shape: {ref_output.shape}")
-    logger.info(f"TTNN output shape: {tt_torch_output.shape}")
-    logger.info(pcc_message)
-
     if does_pass:
         logger.info("CAB Block Passed!")
     else:
         logger.warning("CAB Block Failed!")
 
     assert does_pass, f"PCC check failed: {pcc_message}"
-
-    # Verify output shapes match
-    assert (
-        ref_output.shape == tt_torch_output.shape
-    ), f"Shape mismatch: ref {ref_output.shape} vs ttnn {tt_torch_output.shape}"

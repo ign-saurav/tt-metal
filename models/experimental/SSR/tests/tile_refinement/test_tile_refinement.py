@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 import pytest
 import ttnn
@@ -118,8 +121,9 @@ def create_tile_refinement_preprocessor(device, forward_params, window_size, rpi
         (64, 2, 180, (6, 6, 6, 6, 6, 6), (6, 6, 6, 6, 6, 6), 16, 2, 4, (3, 3, 64, 64)),
     ],
 )
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
 def test_tile_refinement(
-    img_size, patch_size, embed_dim, depths, num_heads, window_size, mlp_ratio, upscale, input_shape
+    device, img_size, patch_size, embed_dim, depths, num_heads, window_size, mlp_ratio, upscale, input_shape
 ):
     """Test TTTileRefinement model against PyTorch reference"""
 
@@ -166,8 +170,6 @@ def test_tile_refinement(
     # Create params dictionary
     params = {"rpi_sa": rpi_sa, "attn_mask": attn_mask, "rpi_oca": rpi_oca}
 
-    device = ttnn.open_device(device_id=0, l1_small_size=32768)
-
     tt_rpi_sa = ttnn.from_torch(rpi_sa, device=device, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.uint32)
 
     tt_rpi_oca = ttnn.from_torch(rpi_oca, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.uint32)
@@ -179,11 +181,7 @@ def test_tile_refinement(
     # Get reference output (both image and features)
     with torch.no_grad():
         ref_output, ref_features = ref_model(x)
-        # ref_output = ref_model(x)
 
-    # Open TTNN device
-
-    try:
         # Preprocess model parameters
         parameters = preprocess_model_parameters(
             initialize_model=lambda: ref_model,
@@ -247,6 +245,3 @@ def test_tile_refinement(
 
         assert output_pass, f"Output comparison failed: {output_pcc_message}"
         assert features_pass, f"Features comparison failed: {features_pcc_message}"
-
-    finally:
-        ttnn.close_device(device)

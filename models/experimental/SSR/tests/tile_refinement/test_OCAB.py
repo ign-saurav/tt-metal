@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 import torch
 import torch.nn as nn
@@ -97,7 +100,8 @@ def create_ocab_preprocessor(device):
     "dim, input_resolution, window_size, overlap_ratio, num_heads, input_shape",
     ((180, (64, 64), 16, 0.5, 6, (1, 4096, 180)),),
 )
-def test_ocab(dim, input_resolution, window_size, overlap_ratio, num_heads, input_shape):
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
+def test_ocab(device, dim, input_resolution, window_size, overlap_ratio, num_heads, input_shape):
     x = torch.randn(input_shape)
 
     # Create reference OCAB layer
@@ -121,41 +125,36 @@ def test_ocab(dim, input_resolution, window_size, overlap_ratio, num_heads, inpu
 
     ref_output = ref_layer(x, x_size, rpi)
 
-    device = ttnn.open_device(device_id=0, l1_small_size=32768)
     ttnn.synchronize_device(device)
 
-    try:
-        parameters = preprocess_model_parameters(
-            initialize_model=lambda: ref_layer, custom_preprocessor=create_ocab_preprocessor(device), device=device
-        )
+    parameters = preprocess_model_parameters(
+        initialize_model=lambda: ref_layer, custom_preprocessor=create_ocab_preprocessor(device), device=device
+    )
 
-        tt_layer = TTOCAB(
-            device=device,
-            dim=dim,
-            input_resolution=input_resolution,
-            window_size=window_size,
-            overlap_ratio=overlap_ratio,
-            num_heads=num_heads,
-            parameters=parameters,
-        )
+    tt_layer = TTOCAB(
+        device=device,
+        dim=dim,
+        input_resolution=input_resolution,
+        window_size=window_size,
+        overlap_ratio=overlap_ratio,
+        num_heads=num_heads,
+        parameters=parameters,
+    )
 
-        tt_input = ttnn.from_torch(
-            x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.L1_MEMORY_CONFIG
-        )
-        tt_rpi = ttnn.from_torch(rpi, device=device, layout=ttnn.TILE_LAYOUT)
-        tt_output = tt_layer.forward(tt_input, x_size, tt_rpi)
-        tt_torch_output = tt2torch_tensor(tt_output)
+    tt_input = ttnn.from_torch(
+        x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.L1_MEMORY_CONFIG
+    )
+    tt_rpi = ttnn.from_torch(rpi, device=device, layout=ttnn.TILE_LAYOUT)
+    tt_output = tt_layer.forward(tt_input, x_size, tt_rpi)
+    tt_torch_output = tt2torch_tensor(tt_output)
 
-        does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
+    does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
 
-        logger.info(pcc_message)
+    logger.info(pcc_message)
 
-        if does_pass:
-            logger.info("OCAB Layer Passed!")
-        else:
-            logger.warning("OCAB Layer Failed!")
+    if does_pass:
+        logger.info("OCAB Layer Passed!")
+    else:
+        logger.warning("OCAB Layer Failed!")
 
-    finally:
-        ttnn.close_device(device)
-
-    assert does_pass
+    assert does_pass, f"PCC check failed: {pcc_message}"

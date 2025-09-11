@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 import pytest
 import ttnn
@@ -9,10 +12,8 @@ from models.experimental.SSR.tests.common.test_mlp import create_mlp_preprocesso
 from models.experimental.SSR.tests.tile_selection.test_window_attn import create_window_attention_preprocessor
 from ttnn.model_preprocessing import preprocess_model_parameters
 
-from models.utility_functions import (
-    tt2torch_tensor,
-    comp_pcc,
-)
+from models.utility_functions import tt2torch_tensor
+from tests.ttnn.utils_for_testing import check_with_pcc
 
 
 def create_swin_transformer_block_preprocessor(device):
@@ -125,18 +126,13 @@ def test_swin_transformer_block(device, batch_size, height, width, dim, num_head
     tt_torch_output = tt2torch_tensor(tt_output)
 
     # Compare outputs
-    does_pass, pcc_message = comp_pcc(
+    does_pass, pcc_message = check_with_pcc(
         ref_output, tt_torch_output, 0.98
     )  # Slightly lower threshold due to accumulated precision differences
-
-    logger.info(
-        f"Test configuration: B={batch_size}, H={height}, W={width}, dim={dim}, heads={num_heads}, ws={window_size}, shift={shift_size}"
-    )
-    logger.info(pcc_message)
 
     if does_pass:
         logger.info("SwinTransformerBlock Passed!")
     else:
         logger.warning("SwinTransformerBlock Failed!")
 
-    assert does_pass
+    assert does_pass, f"PCC check failed: {pcc_message}"

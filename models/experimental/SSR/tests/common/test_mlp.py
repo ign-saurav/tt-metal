@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 import pytest
 
@@ -83,4 +86,4 @@ def test_mlp(device, in_features, hidden_features, out_features, input_shape):
     else:
         logger.warning("SSR MLP Failed!")
 
-    assert does_pass
+    assert does_pass, f"PCC check failed: {pcc_message}"

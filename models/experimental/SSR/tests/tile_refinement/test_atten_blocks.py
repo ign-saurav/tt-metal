@@ -136,19 +136,9 @@ def test_atten_blocks(device, batch_size, height, width, dim, num_heads, window_
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.90)
 
-    logger.info(f"Batch: {batch_size}, Size: {height}x{width}, Dim: {dim}")
-    logger.info(f"Heads: {num_heads}, Window: {window_size}, Depth: {depth}")
-    logger.info(f"Overlap ratio: {overlap_ratio}, MLP ratio: {mlp_ratio}")
-    logger.info(f"Reference output shape: {ref_output.shape}")
-    logger.info(f"TTNN output shape: {tt_torch_output.shape}")
-    logger.info(pcc_message)
-
     if does_pass:
         logger.info("AttenBlocks Passed!")
     else:
         logger.warning("AttenBlocks Failed!")
 
     assert does_pass, f"PCC check failed: {pcc_message}"
-    assert (
-        ref_output.shape == tt_torch_output.shape
-    ), f"Shape mismatch: ref {ref_output.shape} vs ttnn {tt_torch_output.shape}"

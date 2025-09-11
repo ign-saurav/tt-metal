@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 import pytest
 import torch
 import ttnn
@@ -7,7 +10,8 @@ from loguru import logger
 from models.experimental.SSR.reference.SSR.model.net_blocks import PatchEmbed
 from models.experimental.SSR.tt.tile_selection import TTPatchEmbed  # Updated path
 from ttnn.model_preprocessing import preprocess_model_parameters
-from models.utility_functions import tt2torch_tensor, comp_pcc
+from models.utility_functions import tt2torch_tensor
+from tests.ttnn.utils_for_testing import check_with_pcc
 
 
 def create_patch_embed_preprocessor(device):
@@ -75,7 +79,7 @@ def test_patch_embed(device, img_size, ch, patch_size, embed_dim, norm_layer):
     tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=dtype)
     tt_output = tt_layer(tt_input)
     tt_torch_output = tt2torch_tensor(tt_output)
-    does_pass, pcc_message = comp_pcc(ref_output, tt_torch_output, 0.99)
+    does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
 
     logger.info(pcc_message)
 
@@ -84,4 +88,4 @@ def test_patch_embed(device, img_size, ch, patch_size, embed_dim, norm_layer):
     else:
         logger.warning("PatchEmbed Failed!")
 
-    assert does_pass
+    assert does_pass, f"PCC check failed: {pcc_message}"

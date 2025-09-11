@@ -161,5 +161,3 @@ def test_patch_embed_simple(device, batch_size, img_size, patch_size, in_chans, 
         logger.warning("TR PatchEmbed Failed!")
 
     assert does_pass, f"PCC check failed: {pcc_message}"
-
-    ttnn.close_device(device)

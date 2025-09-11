@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 import pytest
 import ttnn
@@ -6,7 +9,8 @@ from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_lin
 from models.experimental.SSR.reference.SSR.model.tile_selection import mask_token_inference
 from models.experimental.SSR.tt.tile_selection import TTMaskTokenInference
 
-from models.utility_functions import tt2torch_tensor, comp_pcc
+from models.utility_functions import tt2torch_tensor
+from tests.ttnn.utils_for_testing import check_with_pcc
 
 
 def create_mask_token_inference_preprocessor(device):
@@ -73,7 +77,7 @@ def test_mask_token_inference(device, input_shape, dim, num_heads):
     tt_output = tt_layer(tt_input)
     tt_torch_output = tt2torch_tensor(tt_output)
 
-    does_pass, pcc_message = comp_pcc(ref_output, tt_torch_output, 0.99)
+    does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
 
     logger.info(pcc_message)
 
@@ -82,4 +86,4 @@ def test_mask_token_inference(device, input_shape, dim, num_heads):
     else:
         logger.warning("MaskTokenInference Failed!")
 
-    assert does_pass
+    assert does_pass, f"PCC check failed: {pcc_message}"

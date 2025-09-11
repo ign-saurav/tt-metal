@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
 import torch
 import pytest
 import ttnn
@@ -12,7 +15,8 @@ from models.experimental.SSR.tests.common.test_mlp import create_mlp_preprocesso
 from models.experimental.SSR.tests.tile_selection.test_mask_token_inference import (
     create_mask_token_inference_preprocessor,
 )
-from models.utility_functions import tt2torch_tensor, comp_pcc
+from models.utility_functions import tt2torch_tensor
+from tests.ttnn.utils_for_testing import check_with_pcc
 
 
 def create_tile_selection_preprocessor(device, dim=96):
@@ -147,13 +151,11 @@ def test_tile_selection(device, image_size, patch_size, token_size, num_cls):
     tt_mask_3 = tt2torch_tensor(tt_output)
 
     # Compare outputs with appropriate PCC thresholds
-    does_pass_3, pcc_message_3 = comp_pcc(ref_output[0], tt_mask_3, 0.98)
-
-    logger.info(f"Scale 3 PCC: {pcc_message_3}")
+    does_pass_3, pcc_message_3 = check_with_pcc(ref_output[0], tt_mask_3, 0.98)
 
     if does_pass_3:
         logger.info("TileSelection Passed!")
     else:
         logger.warning("TileSelection Failed!")
 
-    assert does_pass_3, f"TileSelection test failed - Scale 3: {does_pass_3}"
+    assert does_pass_3, f"PCC check failed: {pcc_message_3}"

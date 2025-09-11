@@ -8,7 +8,8 @@ from loguru import logger
 import ttnn
 from models.experimental.SSR.reference.SSR.model.net_blocks import PatchMerging
 from ttnn.model_preprocessing import preprocess_model_parameters
-from models.utility_functions import tt2torch_tensor, comp_pcc
+from models.utility_functions import tt2torch_tensor
+from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.SSR.tt.tile_selection import TTPatchMerging
 
 
@@ -117,12 +118,7 @@ def test_patch_merging(device, batch_size, input_resolution, dim):
     tt_torch_output = tt2torch_tensor(tt_output)
 
     # Compare outputs
-    does_pass, pcc_message = comp_pcc(ref_output, tt_torch_output, 0.99)
-
-    logger.info(f"Input resolution: {input_resolution}, Dim: {dim}, Batch: {batch_size}")
-    logger.info(f"Reference output shape: {ref_output.shape}")
-    logger.info(f"TTNN output shape: {tt_torch_output.shape}")
-    logger.info(pcc_message)
+    does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
 
     if does_pass:
         logger.info("PatchMerging Passed!")
@@ -130,13 +126,3 @@ def test_patch_merging(device, batch_size, input_resolution, dim):
         logger.warning("PatchMerging Failed!")
 
     assert does_pass, f"PCC check failed: {pcc_message}"
-
-    # Verify output shapes match
-    assert (
-        ref_output.shape == tt_torch_output.shape
-    ), f"Shape mismatch: ref {ref_output.shape} vs ttnn {tt_torch_output.shape}"
-
-    # Verify expected output shape
-    expected_shape = (batch_size, (H // 2) * (W // 2), 2 * dim)
-    assert ref_output.shape == expected_shape, f"Unexpected output shape: {ref_output.shape}, expected {expected_shape}"
-    ttnn.close_device(device)
