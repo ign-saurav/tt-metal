@@ -15,15 +15,13 @@ def window_partition_ttnn(x, window_size):
     b, h, w, c = x.shape
 
     # Reshape: (b, h, w, c) -> (b, h//ws, ws, w//ws, ws, c)
-    x = ttnn.reshape(
-        x, (b, h // window_size, window_size, w // window_size, window_size, c), memory_config=ttnn.L1_MEMORY_CONFIG
-    )
+    x = ttnn.reshape(x, (b, h // window_size, window_size, w // window_size, window_size, c))
 
     # Permute: (0, 1, 3, 2, 4, 5) -> group windows together
-    x = ttnn.permute(x, (0, 1, 3, 2, 4, 5), memory_config=ttnn.L1_MEMORY_CONFIG)
+    x = ttnn.permute(x, (0, 1, 3, 2, 4, 5))
 
     # Final reshape to get windows
-    x = ttnn.reshape(x, (-1, window_size, window_size, c), memory_config=ttnn.L1_MEMORY_CONFIG)
+    x = ttnn.reshape(x, (-1, window_size, window_size, c))
 
     return x
 
@@ -36,14 +34,13 @@ def window_reverse_ttnn(windows, window_size, h, w):
     windows = ttnn.reshape(
         windows,
         (b, h // window_size, w // window_size, window_size, window_size, -1),
-        memory_config=ttnn.L1_MEMORY_CONFIG,
     )
 
     # Permute back to original order
-    windows = ttnn.permute(windows, (0, 1, 3, 2, 4, 5), memory_config=ttnn.L1_MEMORY_CONFIG)
+    windows = ttnn.permute(windows, (0, 1, 3, 2, 4, 5))
 
     # Final reshape to original spatial dimensions
-    windows = ttnn.reshape(windows, (b, h, w, -1), memory_config=ttnn.L1_MEMORY_CONFIG)
+    windows = ttnn.reshape(windows, (b, h, w, -1))
 
     return windows
 
@@ -137,7 +134,7 @@ class TTSSR(LightweightModule):
         patch_x_torch = window_partition_ttnn(
             x_torch,
             window_size=H // 4,
-        )  # B*4*4, H/4, W/4, 3
+        )
 
         # Feature extraction for each patch
         lr_fea_list = []
@@ -185,9 +182,7 @@ class TTSSR(LightweightModule):
             w=W,
         )
 
-        slice_config = ttnn.Conv2dSliceConfig(
-            slice_type=ttnn.Conv2dSliceHeight, num_slices=4  # Adjust based on memory constraints
-        )
+        slice_config = ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dSliceHeight, num_slices=4)
         sr_fea = ttnn.conv2d(
             input_tensor=lr_fea,
             weight_tensor=self.parameters.conv_before_upsample.weight,
@@ -215,9 +210,7 @@ class TTSSR(LightweightModule):
         sr_fea = self.upsample(sr_fea, self.parameters.upsample)
 
         # Final convolution
-        slice_config = ttnn.Conv2dSliceConfig(
-            slice_type=ttnn.Conv2dSliceHeight, num_slices=4  # Adjust based on memory constraints
-        )
+        slice_config = ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dSliceHeight, num_slices=4)
         sr = ttnn.conv2d(
             input_tensor=sr_fea,
             weight_tensor=self.parameters.conv_last.weight,
