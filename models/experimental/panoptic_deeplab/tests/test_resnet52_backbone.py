@@ -108,7 +108,7 @@ class BackboneTestInfra:
             tt_output_tensor, device=self.device, mesh_composer=self.output_mesh_composer
         )
         ttnn.deallocate(tt_output_tensor)
-        expected_shape = self.torch_output_tensor.shape
+        expected_shape = self.torch_output_tensor["res_5"].shape
         tt_output_tensor_torch = torch.reshape(
             tt_output_tensor_torch, (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1])
         )
@@ -118,7 +118,7 @@ class BackboneTestInfra:
 
         valid_pcc = 0.97
         self.pcc_passed, self.pcc_message = check_with_pcc(
-            self.torch_output_tensor, tt_output_tensor_torch, pcc=valid_pcc
+            self.torch_output_tensor["res_5"], tt_output_tensor_torch, pcc=valid_pcc
         )
 
         assert self.pcc_passed, logger.error(f"PCC check failed: {self.pcc_message}")
