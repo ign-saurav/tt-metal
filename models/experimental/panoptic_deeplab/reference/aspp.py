@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+
 # SPDX-License-Identifier: Apache-2.0
 
 import torch.nn as nn
@@ -7,12 +8,7 @@ from torch import Tensor
 
 
 class ASPPModel(torch.nn.Module):
-    """
-    ASPP MODULE
-    The input and output of `forward()` method must be NCHW tensors.
-    """
-
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
         self.ASPP_0_Conv = nn.Sequential(nn.Conv2d(2048, 256, 1, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU())
         self.ASPP_1_Depthwise = nn.Sequential(
