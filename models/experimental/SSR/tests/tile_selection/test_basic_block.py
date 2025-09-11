@@ -46,11 +46,11 @@ def create_basic_layer_preprocessor(device, dim):
 @pytest.mark.parametrize(
     "batch_size, input_resolution, dim, depth, num_heads, window_size, has_downsample",
     [
-        (3, (128, 128), 96, 2, 3, 7, True),  # Custom configuration
-        (3, (64, 64), 192, 2, 3, 7, True),  # Custom configuration
-        (3, (32, 32), 384, 2, 3, 7, True),  # Custom configuration
-        (3, (16, 16), 768, 2, 3, 7, True),  # Custom configuration
-        (3, (8, 8), 1536, 2, 3, 7, True),  # Custom configuration
+        (3, (128, 128), 96, 2, 3, 7, True),
+        (3, (64, 64), 192, 2, 3, 7, True),
+        (3, (32, 32), 384, 2, 3, 7, True),
+        (3, (16, 16), 768, 2, 3, 7, True),
+        (3, (8, 8), 1536, 2, 3, 7, True),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}])
@@ -107,6 +107,7 @@ def test_basic_layer(device, batch_size, input_resolution, dim, depth, num_heads
 
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.98)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("BasicLayer Passed!")

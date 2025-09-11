@@ -55,10 +55,10 @@ def create_mask_token_inference_preprocessor(device):
 
 @pytest.mark.parametrize(
     "input_shape, dim, num_heads",
-    (((3, 17, 3072), 3072, 1),),  # Original test case
+    (((3, 17, 3072), 3072, 1),),
 )
 def test_mask_token_inference(device, input_shape, dim, num_heads):
-    # Create test input [B, N, C] where first token is cls token
+    # Create test input [B, N, C]
     input_tensor = torch.randn(input_shape)
 
     ref_layer = mask_token_inference(dim=dim, num_heads=num_heads, qkv_bias=False)
@@ -79,7 +79,7 @@ def test_mask_token_inference(device, input_shape, dim, num_heads):
 
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
 
-    logger.info(pcc_message)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("MaskTokenInference Passed!")

@@ -122,6 +122,8 @@ def test_window_attention(device, batch_size, num_windows, window_size, dim, num
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.97)
 
+    logger.info(f"pcc: {pcc_message}")
+
     if does_pass:
         logger.info("Window Attention Passed!")
     else:

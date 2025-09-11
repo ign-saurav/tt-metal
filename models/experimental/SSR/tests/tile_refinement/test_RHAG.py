@@ -133,7 +133,7 @@ def test_rhag(
     # Create relative position indices
     rpi_sa = create_relative_position_index((window_size, window_size))
 
-    # Create attention mask for shifted windows (simplified for testing)
+    # attention mask for shifted windows
     attn_mask = None
 
     # Create RPI for OCAB
@@ -188,10 +188,10 @@ def test_rhag(
 
     # Convert back to PyTorch format
     tt_torch_output = ttnn.to_torch(tt_output)
-    # tt_torch_output = tt_torch_output.permute(0, 3, 1, 2)  # NHWC -> NCHW
 
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.85)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("RHAG Passed!")

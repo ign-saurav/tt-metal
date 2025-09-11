@@ -18,7 +18,6 @@ def create_patch_embed_preprocessor_simple(device):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         params = {}
 
-        # If the model has normalization
         if hasattr(torch_model, "norm") and torch_model.norm is not None:
             params["norm"] = {
                 "weight": ttnn.from_torch(torch_model.norm.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT),
@@ -36,7 +35,6 @@ def create_patch_embed_preprocessor_conv(device):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         params = {}
 
-        # If the model has a projection layer (conv2d)
         if hasattr(torch_model, "proj"):
             conv_config = ttnn.Conv2dConfig(weights_dtype=ttnn.bfloat16)
 
@@ -81,7 +79,6 @@ def create_patch_embed_preprocessor_conv(device):
                 ),
             }
 
-        # If the model has normalization
         if hasattr(torch_model, "norm") and torch_model.norm is not None:
             params["norm"] = {
                 "weight": ttnn.from_torch(torch_model.norm.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT),
@@ -129,6 +126,7 @@ def test_patch_embed_simple(device, batch_size, img_size, patch_size, in_chans, 
         device=device,
     )
 
+    memory_config = ttnn.L1_MEMORY_CONFIG
     tt_model = TTPatchEmbed(
         img_size=img_size,
         patch_size=patch_size,
@@ -154,6 +152,7 @@ def test_patch_embed_simple(device, batch_size, img_size, patch_size, in_chans, 
 
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("TR PatchEmbed Passed!")

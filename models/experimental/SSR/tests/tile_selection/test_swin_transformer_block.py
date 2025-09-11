@@ -20,7 +20,7 @@ def create_swin_transformer_block_preprocessor(device):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
 
-        if hasattr(torch_model, "attn"):  # SwinTransformerBlock model
+        if hasattr(torch_model, "attn"):
             # Preprocess attention parameters
             parameters["attn"] = preprocess_model_parameters(
                 initialize_model=lambda: torch_model.attn,
@@ -59,7 +59,6 @@ def create_swin_transformer_block_preprocessor(device):
 @pytest.mark.parametrize(
     "batch_size, height, width, dim, num_heads, window_size, shift_size, mlp_ratio",
     (
-        # Tile selection testcases
         (3, 128, 128, 96, 3, 7, 0, 4.0),
         (3, 128, 128, 96, 3, 7, 3, 4.0),
         (3, 64, 64, 96, 3, 7, 0, 4.0),
@@ -126,9 +125,8 @@ def test_swin_transformer_block(device, batch_size, height, width, dim, num_head
     tt_torch_output = tt2torch_tensor(tt_output)
 
     # Compare outputs
-    does_pass, pcc_message = check_with_pcc(
-        ref_output, tt_torch_output, 0.98
-    )  # Slightly lower threshold due to accumulated precision differences
+    does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.98)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("SwinTransformerBlock Passed!")

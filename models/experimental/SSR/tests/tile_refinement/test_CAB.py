@@ -3,30 +3,13 @@
 
 import pytest
 import torch
-import torch.nn as nn
 import ttnn
 from loguru import logger
 
+from models.experimental.SSR.reference.SSR.model.tile_refinement import CAB
 from models.experimental.SSR.tt.tile_refinement import TTCAB
 from tests.ttnn.utils_for_testing import check_with_pcc
-from models.experimental.SSR.reference.SSR.model.tile_refinement import ChannelAttention
 from models.experimental.SSR.tests.tile_refinement.test_channel_attention import create_channel_attention_preprocessor
-
-
-class CAB(nn.Module):
-    """Reference PyTorch CAB implementation"""
-
-    def __init__(self, num_feat, compress_ratio=3, squeeze_factor=30):
-        super(CAB, self).__init__()
-        self.cab = nn.Sequential(
-            nn.Conv2d(num_feat, num_feat // compress_ratio, 3, 1, 1),
-            nn.GELU(),
-            nn.Conv2d(num_feat // compress_ratio, num_feat, 3, 1, 1),
-            ChannelAttention(num_feat, squeeze_factor),
-        )
-
-    def forward(self, x):
-        return self.cab(x)
 
 
 def create_cab_preprocessor(device):
@@ -90,33 +73,32 @@ def test_cab_block(device, batch_size, num_feat, height, width, compress_ratio, 
         run_model=lambda model: model(input_tensor),
     )
 
+    memory_config = ttnn.L1_MEMORY_CONFIG
     tt_model = TTCAB(
         device=device,
         parameters=parameters,
         num_feat=num_feat,
         compress_ratio=compress_ratio,
         squeeze_factor=squeeze_factor,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        memory_config=memory_config,
     )
 
-    # Convert input to TTNN format (NHWC)
     tt_input = ttnn.from_torch(
         input_tensor.permute(0, 2, 3, 1),
         device=device,
         layout=ttnn.TILE_LAYOUT,
         dtype=ttnn.bfloat16,
-        memory_config=ttnn.L1_MEMORY_CONFIG,  # NCHW -> NHWC
+        memory_config=memory_config,
     )
 
     # TTNN forward pass
     tt_output = tt_model(tt_input)
 
-    # Convert back to PyTorch format
     tt_torch_output = ttnn.to_torch(tt_output)
     tt_torch_output = tt_torch_output.permute(0, 3, 1, 2)  # NHWC -> NCHW
 
-    # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.97)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("CAB Block Passed!")

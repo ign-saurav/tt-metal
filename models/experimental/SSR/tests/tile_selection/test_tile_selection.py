@@ -4,7 +4,6 @@
 import torch
 import pytest
 import ttnn
-import math
 from loguru import logger
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_bias, preprocess_linear_weight
 from models.experimental.SSR.reference.SSR.model.tile_selection import TileSelection
@@ -23,14 +22,14 @@ def create_tile_selection_preprocessor(device, dim=96):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
 
-        # Handle mask token embedding
+        # mask token embedding parameters
         if hasattr(torch_model, "mask_token"):
             parameters["mask_token"] = {}
             parameters["mask_token"]["weight"] = ttnn.from_torch(
                 torch_model.mask_token.weight, dtype=ttnn.bfloat16, device=device, layout=ttnn.TILE_LAYOUT
             )
 
-        # Handle patch embedding - delegate to existing TTPatchEmbed preprocessor
+        # patch embedding parameters
         if hasattr(torch_model, "patch_embed"):
             patch_embed_params = preprocess_model_parameters(
                 initialize_model=lambda: torch_model.patch_embed,
@@ -39,7 +38,7 @@ def create_tile_selection_preprocessor(device, dim=96):
             )
             parameters["patch_embed"] = patch_embed_params
 
-        # Handle encoder layers - delegate to existing TTBasicLayer preprocessor
+        # encoder layers parameters
         if hasattr(torch_model, "layers"):
             for i, layer in enumerate(torch_model.layers):
                 layer_dim = int(dim * 2**i)
@@ -50,7 +49,7 @@ def create_tile_selection_preprocessor(device, dim=96):
                 )
                 parameters[f"layers.{i}"] = layer_params
 
-        # Handle layer norms for different scales
+        # layer norm parameters
         for norm_name in ["norm1", "norm2", "norm3", "mlp_norm1", "mlp_norm2", "mlp_norm3"]:
             if hasattr(torch_model, norm_name):
                 norm_layer = getattr(torch_model, norm_name)
@@ -62,7 +61,7 @@ def create_tile_selection_preprocessor(device, dim=96):
                     norm_layer.bias, dtype=ttnn.bfloat16, device=device, layout=ttnn.TILE_LAYOUT
                 )
 
-        # Handle MLPs - delegate to existing TTMlp preprocessor
+        # MLP parameters
         for mlp_name in ["fea_mlp1", "fea_mlp2", "fea_mlp3", "mlp1", "mlp2", "mlp3"]:
             if hasattr(torch_model, mlp_name):
                 mlp = getattr(torch_model, mlp_name)
@@ -73,7 +72,7 @@ def create_tile_selection_preprocessor(device, dim=96):
                 )
                 parameters[mlp_name] = mlp_params
 
-        # Handle linear classification layers
+        # linear classification layer parameters
         for linear_name in ["linear1", "linear2", "linear3"]:
             if hasattr(torch_model, linear_name):
                 linear_layer = getattr(torch_model, linear_name)
@@ -81,7 +80,7 @@ def create_tile_selection_preprocessor(device, dim=96):
                 parameters[linear_name]["weight"] = preprocess_linear_weight(linear_layer.weight, dtype=ttnn.bfloat16)
                 parameters[linear_name]["bias"] = preprocess_linear_bias(linear_layer.bias, dtype=ttnn.bfloat16)
 
-        # Handle mask token inference modules
+        # mask token inference modules parameters
         for mask_name in ["mask_pre1", "mask_pre2", "mask_pre3"]:
             if hasattr(torch_model, mask_name):
                 mask_module = getattr(torch_model, mask_name)
@@ -100,7 +99,7 @@ def create_tile_selection_preprocessor(device, dim=96):
 @pytest.mark.parametrize(
     "image_size, patch_size, token_size, num_cls",
     [
-        (256, 2, 4, 1),  # Original configuration
+        (256, 2, 4, 1),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}])
@@ -115,8 +114,6 @@ def test_tile_selection(device, image_size, patch_size, token_size, num_cls):
             self.token_size = token_size
             self.dim = dim
 
-    # Calculate dimensions
-    num_layers = int(math.log2((image_size // patch_size) // token_size))
     dim = 96
 
     args = Args(image_size, patch_size, token_size, dim)
@@ -152,6 +149,7 @@ def test_tile_selection(device, image_size, patch_size, token_size, num_cls):
 
     # Compare outputs with appropriate PCC thresholds
     does_pass_3, pcc_message_3 = check_with_pcc(ref_output[0], tt_mask_3, 0.98)
+    logger.info(f"pcc: {pcc_message_3}")
 
     if does_pass_3:
         logger.info("TileSelection Passed!")

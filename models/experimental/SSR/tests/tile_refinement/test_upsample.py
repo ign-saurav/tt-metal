@@ -80,7 +80,7 @@ def test_upsample(device, scale, num_feat, batch_size, input_size):
 
     does_pass, pcc_message = check_with_pcc(torch_output, tt_torch_output, 0.99)
 
-    logger.info(pcc_message)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("Upsample Passed!")

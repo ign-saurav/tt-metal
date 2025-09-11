@@ -72,11 +72,11 @@ def create_patch_merging_preprocessor(device, dim):
 @pytest.mark.parametrize(
     "batch_size, input_resolution, dim",
     (
-        (3, (128, 128), 96),  # Custom resolution
-        (3, (64, 64), 192),  # Custom resolution
-        (3, (32, 32), 384),  # Custom resolution
-        (3, (16, 16), 768),  # Custom resolution
-        (3, (8, 8), 1536),  # Custom resolution
+        (3, (128, 128), 96),
+        (3, (64, 64), 192),
+        (3, (32, 32), 384),
+        (3, (16, 16), 768),
+        (3, (8, 8), 1536),
     ),
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}])
@@ -119,6 +119,7 @@ def test_patch_merging(device, batch_size, input_resolution, dim):
 
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("PatchMerging Passed!")

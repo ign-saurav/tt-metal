@@ -53,6 +53,7 @@ def test_tt_patch_unembed(device, batch_size, img_size, patch_size, in_chans, em
 
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(torch_output, ttnn_output_torch, 0.99)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("TR PatchEmbed Passed!")

@@ -172,6 +172,7 @@ def test_channel_attention(device, batch_size, num_feat, height, width, squeeze_
 
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.98)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("ChannelAttention Passed!")

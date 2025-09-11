@@ -27,7 +27,7 @@ def create_tile_refinement_preprocessor(device, forward_params, window_size, rpi
         parameters = {}
         parameters["forward_params"] = forward_params
         if isinstance(torch_model, TileRefinement):
-            # Preprocess conv layers using ttnn.prepare_conv_weights
+            # Preprocess conv layers
             conv_layers = ["conv_first", "conv_after_body", "conv_last"]
 
             for conv_name in conv_layers:
@@ -40,20 +40,17 @@ def create_tile_refinement_preprocessor(device, forward_params, window_size, rpi
                             "bias": ttnn.from_torch(conv_layer.bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16),
                         }
 
-            # Handle conv_before_upsample (Sequential layer)
             if hasattr(torch_model, "conv_before_upsample") and torch_model.conv_before_upsample is not None:
                 conv_layer = torch_model.conv_before_upsample[0]  # Conv2d layer
                 conv_config = ttnn.Conv2dConfig(weights_dtype=ttnn.bfloat16)
                 parameters["conv_before_upsample"] = {
-                    "weight": ttnn.from_torch(conv_layer.weight, dtype=ttnn.bfloat16),  # ttnn.prepare_conv_weights(
-                    "bias": ttnn.from_torch(  # ttnn.prepare_conv_bias(
-                        conv_layer.bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16
-                    ),
+                    "weight": ttnn.from_torch(conv_layer.weight, dtype=ttnn.bfloat16),
+                    "bias": ttnn.from_torch(conv_layer.bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16),
                 }
 
             # Preprocess layer norm
             if hasattr(torch_model, "norm"):
-                dim = torch_model.norm.weight.size(0)  # 180
+                dim = torch_model.norm.weight.size(0)
                 padded_dim = ((dim + 31) // 32) * 32  # Round up to nearest multiple of 32 = 192
 
                 norm_weight_padded = torch.nn.functional.pad(torch_model.norm.weight, (0, padded_dim - dim))
@@ -158,7 +155,7 @@ def test_tile_refinement(
 
     rpi_sa = create_relative_position_index((window_size, window_size))
 
-    # Create attention mask for shifted windows (simplified for testing)
+    # attention mask for shifted windows
     attn_mask = None
 
     # Create RPI for OCAB
@@ -229,6 +226,8 @@ def test_tile_refinement(
         # Compare outputs
         output_pass, output_pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.90)
         features_pass, features_pcc_message = check_with_pcc(ref_features, tt_torch_features, 0.90)
+        logger.info(f"output_pcc: {output_pcc_message}")
+        logger.info(f"features_pcc: {features_pcc_message}")
 
         if output_pass and features_pass:
             logger.info("TTTileRefinement Test Passed!")

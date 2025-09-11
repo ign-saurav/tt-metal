@@ -17,12 +17,12 @@ def create_patch_embed_preprocessor(device):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
         if isinstance(torch_model, PatchEmbed):
-            # Extract Conv2d weights - keep them in 4D format for conv2d
+            # Extract Conv2d weights
             conv_weight = torch_model.proj.weight  # Shape: [out_channels, in_channels, kernel_height, kernel_width]
             conv_bias = torch_model.proj.bias  # Shape: [out_channels]
 
             parameters["proj"] = {}
-            # Keep weights in 4D format and use ROW_MAJOR layout
+            # Keep weights in 4D format
             parameters["proj"]["weight"] = ttnn.from_torch(
                 conv_weight, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
             )
@@ -80,7 +80,7 @@ def test_patch_embed(device, img_size, ch, patch_size, embed_dim, norm_layer):
     tt_torch_output = tt2torch_tensor(tt_output)
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
 
-    logger.info(pcc_message)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("PatchEmbed Passed!")

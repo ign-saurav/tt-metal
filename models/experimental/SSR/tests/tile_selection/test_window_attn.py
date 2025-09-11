@@ -116,6 +116,7 @@ def test_window_attn(device, input_shape, window_size, num_heads, input_resoluti
     tt_torch_output = tt2torch_tensor(tt_output)
 
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("WindowAttn Passed!")

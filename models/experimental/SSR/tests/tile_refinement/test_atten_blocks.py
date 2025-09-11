@@ -78,7 +78,7 @@ def test_atten_blocks(device, batch_size, height, width, dim, num_heads, window_
     # Create relative position indices
     rpi_sa = create_relative_position_index((window_size, window_size))
 
-    # Create attention mask for shifted windows (simplified for testing)
+    # attention mask for shifted windows
     attn_mask = None
 
     # Create RPI for OCAB
@@ -133,6 +133,7 @@ def test_atten_blocks(device, batch_size, height, width, dim, num_heads, window_
 
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.90)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("AttenBlocks Passed!")

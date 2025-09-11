@@ -20,8 +20,8 @@ def create_ocab_preprocessor(device):
     def custom_preprocessor(model, name):
         parameters = {}
         if isinstance(model, OCAB):
-            # Layer norm parameters (keep existing padding logic)
-            dim = model.norm1.weight.size(0)  # 180
+            # Layer norm parameters
+            dim = model.norm1.weight.size(0)
             padded_dim = ((dim + 31) // 32) * 32  # Round up to nearest multiple of 32 = 192
 
             norm1_weight_padded = torch.nn.functional.pad(model.norm1.weight, (0, padded_dim - dim))
@@ -37,7 +37,7 @@ def create_ocab_preprocessor(device):
                 "bias": ttnn.from_torch(norm1_bias, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=device),
             }
 
-            # QKV linear layer - ENSURE TILE LAYOUT
+            # QKV linear layer
             qkv_weight = model.qkv.weight.T  # Transpose for linear operation
             parameters["qkv"] = {
                 "weight": ttnn.from_torch(qkv_weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device),
@@ -46,19 +46,19 @@ def create_ocab_preprocessor(device):
                 else None,
             }
 
-            # Relative position bias table - ENSURE TILE LAYOUT
+            # Relative position bias table
             parameters["relative_position_bias_table"] = ttnn.from_torch(
                 model.relative_position_bias_table, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
             )
 
-            # Output projection - ENSURE TILE LAYOUT
+            # Output projection
             proj_weight = model.proj.weight.T
             parameters["proj"] = {
                 "weight": ttnn.from_torch(proj_weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device),
                 "bias": ttnn.from_torch(model.proj.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device),
             }
 
-            # Layer norm 2 (same padding logic as norm1)
+            # Layer norm 2
             norm2_weight_padded = torch.nn.functional.pad(model.norm2.weight, (0, padded_dim - dim))
             norm2_bias_padded = torch.nn.functional.pad(model.norm2.bias, (0, padded_dim - dim))
 
@@ -72,7 +72,7 @@ def create_ocab_preprocessor(device):
                 "bias": ttnn.from_torch(norm2_bias, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=device),
             }
 
-            # MLP parameters - ENSURE TILE LAYOUT
+            # MLP parameters
             parameters["mlp"] = {
                 "fc1": {
                     "weight": ttnn.from_torch(
@@ -117,7 +117,6 @@ def test_ocab(device, dim, input_resolution, window_size, overlap_ratio, num_hea
         norm_layer=nn.LayerNorm,
     )
 
-    # Create dummy inputs for forward pass
     h, w = input_resolution
     x_size = (h, w)
     overlap_win_size = int(window_size * overlap_ratio) + window_size
@@ -150,7 +149,7 @@ def test_ocab(device, dim, input_resolution, window_size, overlap_ratio, num_hea
 
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
 
-    logger.info(pcc_message)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("OCAB Layer Passed!")
