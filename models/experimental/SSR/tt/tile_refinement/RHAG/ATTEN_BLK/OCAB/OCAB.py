@@ -53,13 +53,6 @@ class TTOCAB(LightweightModule):
         self.mlp_fc2_weight = parameters["mlp"]["fc2"]["weight"]
         self.mlp_fc2_bias = parameters["mlp"]["fc2"]["bias"]
 
-        # Host-side unfold operation (PyTorch for complex operations)
-        self._unfold = torch.nn.Unfold(
-            kernel_size=(self.overlap_win_size, self.overlap_win_size),
-            stride=window_size,
-            padding=(self.overlap_win_size - window_size) // 2,
-        )
-
     def ttnn_rearrange_host(self, tensor, pattern_from, pattern_to, **kwargs):
         """Host-side implementation of rearrange using TTNN operations"""
         # Convert to torch for complex rearrangement, then back to TTNN
@@ -166,7 +159,6 @@ class TTOCAB(LightweightModule):
         )
         ttnn.deallocate(attention_output)
 
-        # import pdb; pdb.set_trace()
         if pad:
             # remove padding
             context_layer = ttnn.to_torch(context_layer)[..., : self.dim]  # slice to 180 and remove padding
@@ -177,7 +169,6 @@ class TTOCAB(LightweightModule):
             memory_config=ttnn.L1_MEMORY_CONFIG,
             layout=ttnn.TILE_LAYOUT,
         )
-        # Reshape back to original format
         x = ttnn.reshape(context_layer, (b, h * w, self.dim), memory_config=ttnn.L1_MEMORY_CONFIG)
 
         # Output projection and residual
