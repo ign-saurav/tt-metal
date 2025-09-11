@@ -65,15 +65,12 @@ class TTPatchEmbed(LightweightModule):
         batch_size, img_h, img_w, _ = x.shape  # NHWC format
 
         # Use DRAM slicing for large inputs
-        slice_config = ttnn.Conv2dSliceConfig(
-            slice_type=ttnn.Conv2dSliceHeight, num_slices=6  # Adjust based on memory constraints
-        )
+        slice_config = ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dSliceHeight, num_slices=6)
         # Validate input dimensions
         assert (
             img_h == self.img_size[0] and img_w == self.img_size[1]
         ), f"Input image size ({img_h}*{img_w}) doesn't match model ({self.img_size[0]}*{self.img_size[1]})"
 
-        # Corrected unpacking: only expect output tensor and output dimensions
         output, (out_height, out_width) = ttnn.conv2d(
             input_tensor=x,
             weight_tensor=self.proj_weight,

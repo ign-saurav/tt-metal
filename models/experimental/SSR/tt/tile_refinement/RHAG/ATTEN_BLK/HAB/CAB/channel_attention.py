@@ -10,7 +10,6 @@ class TTChannelAttention(LightweightModule):
         super().__init__()
 
         self.device = device
-        # self.memory_config = memory_config or ttnn.DRAM_MEMORY_CONFIG
         self.memory_config = ttnn.L1_MEMORY_CONFIG
         self.num_feat = num_feat
         self.squeeze_factor = squeeze_factor
@@ -22,18 +21,13 @@ class TTChannelAttention(LightweightModule):
         self.conv2_bias = parameters["conv2"]["bias"]
 
     def forward(self, x):
-        # Store original input for multiplication
         original_x = x
         original_shape = x.shape
 
-        # NOTE: if the input is not in L1, convert it to L1, convertion takes 20 us hence only makes sense for the input to be already in L1
         if x.memory_config().buffer_type != ttnn.BufferType.L1:
             x = ttnn.to_memory_config(x, ttnn.L1_MEMORY_CONFIG)
-        # Global Average Pooling (AdaptiveAvgPool2d(1) equivalent)
         x = ttnn.global_avg_pool2d(x, memory_config=self.memory_config)
 
-        # 180 -> 192 -> 180
-        # if math.log(original_shape[-1], 2) != 0:
         if original_shape[-1] == 180:
             x = ttnn.slice(
                 x,
@@ -58,15 +52,13 @@ class TTChannelAttention(LightweightModule):
         )
 
         # Sigmoid activation
-        x = ttnn.sigmoid(x)  # sigmoid in conv2d config, return invalid activation fn error
+        x = ttnn.sigmoid(x)
 
         batch_size, height, width, channels = original_shape
         attention_weights = ttnn.reshape(x, [batch_size, 1, 1, channels])
-        # NOTE: float16 or float32 only supported for repeat
         attention_weights = ttnn.repeat(attention_weights, [1, height, width, 1], memory_config=self.memory_config)
 
         # Element-wise multiplication with original input
-        # setting the dtype of the output to bfloat16 is not improving the performance, maybe affected by BF16 => BFP4 overhead
         output = ttnn.multiply(original_x, attention_weights, memory_config=self.memory_config)
 
         return output

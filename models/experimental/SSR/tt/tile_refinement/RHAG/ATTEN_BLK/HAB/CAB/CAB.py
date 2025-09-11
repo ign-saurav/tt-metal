@@ -99,7 +99,7 @@ class TTCAB(LightweightModule):
         )
 
         # Reshape from flattened conv output back to spatial format
-        x = ttnn.reshape(x, [batch_size, height, width, self.num_feat])
+        x = ttnn.reshape(x, [batch_size, height, width, self.num_feat], memory_config=self.memory_config)
 
         # Apply channel attention
         x = self.channel_attention(x)

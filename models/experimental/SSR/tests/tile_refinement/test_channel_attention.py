@@ -145,12 +145,13 @@ def test_channel_attention(device, batch_size, num_feat, height, width, squeeze_
         device=device,
     )
 
+    memory_config = ttnn.L1_MEMORY_CONFIG
     tt_model = TTChannelAttention(
         device=device,
         parameters=parameters,
         num_feat=num_feat,
         squeeze_factor=squeeze_factor,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        memory_config=memory_config,
     )
 
     # Convert input to TTNN format (NHWC)
@@ -159,7 +160,7 @@ def test_channel_attention(device, batch_size, num_feat, height, width, squeeze_
         device=device,
         layout=ttnn.TILE_LAYOUT,
         dtype=ttnn.bfloat16,
-        memory_config=ttnn.L1_MEMORY_CONFIG,  # NCHW -> NHWC
+        memory_config=memory_config,
     )
 
     # TTNN forward pass

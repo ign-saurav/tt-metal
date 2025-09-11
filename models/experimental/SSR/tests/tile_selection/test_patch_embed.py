@@ -6,9 +6,8 @@ import torch
 import ttnn
 from loguru import logger
 
-# Fix the imports based on the codebase patterns
 from models.experimental.SSR.reference.SSR.model.net_blocks import PatchEmbed
-from models.experimental.SSR.tt.tile_selection import TTPatchEmbed  # Updated path
+from models.experimental.SSR.tt.tile_selection import TTPatchEmbed
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.utility_functions import tt2torch_tensor
 from tests.ttnn.utils_for_testing import check_with_pcc

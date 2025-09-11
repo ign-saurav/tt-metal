@@ -7,6 +7,7 @@ import torch.nn as nn
 import ttnn
 from loguru import logger
 
+from models.experimental.SSR.reference.SSR.model.tile_refinement import AttenBlocks
 from models.experimental.SSR.tt.tile_refinement import TTAttenBlocks
 from models.experimental.SSR.tests.tile_refinement.test_HAB import (
     create_hab_preprocessor,
@@ -46,9 +47,6 @@ def create_atten_blocks_preprocessor(device, depth, window_size, rpi_sa):
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
 def test_atten_blocks(device, batch_size, height, width, dim, num_heads, window_size, depth, overlap_ratio, mlp_ratio):
     torch.manual_seed(0)
-
-    # Import reference model
-    from models.experimental.SSR.reference.SSR.model.tile_refinement import AttenBlocks
 
     # Create reference model
     ref_model = AttenBlocks(

@@ -32,7 +32,6 @@ class TTSwinTransformerBlock(LightweightModule):
         self.mlp_ratio = mlp_ratio
         self.memory_config = ttnn.L1_MEMORY_CONFIG
 
-        # Adjust window_size and shift_size if needed
         if min(self.input_resolution) <= self.window_size:
             self.shift_size = 0
             self.window_size = min(self.input_resolution)
@@ -54,7 +53,7 @@ class TTSwinTransformerBlock(LightweightModule):
             in_features=dim,
             hidden_features=mlp_hidden_dim,
             out_features=dim,
-            parameters=parameters["mlp"],  # Will use parameters instead
+            parameters=parameters["mlp"],
         )
 
     def _compute_attention_mask(self):

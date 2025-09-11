@@ -8,6 +8,7 @@ import ttnn
 from loguru import logger
 
 from models.experimental.SSR.tt.tile_refinement import TTRHAG
+from models.experimental.SSR.reference.SSR.model.tile_refinement import RHAG
 from models.experimental.SSR.tests.tile_refinement.test_HAB import create_relative_position_index
 from models.experimental.SSR.tests.tile_refinement.test_atten_blocks import create_atten_blocks_preprocessor
 from models.experimental.SSR.tests.tile_refinement.test_patch_embed_tile_refinement import (
@@ -74,10 +75,6 @@ def create_rhag_preprocessor(device, depth, window_size, rpi_sa):
                 ),
             }
 
-        # Import and use PatchEmbed preprocessor
-        # patch_embed_preprocessor = create_patch_embed_preprocessor(device)
-        # params["patch_embed"] = patch_embed_preprocessor(torch_model.patch_embed, "patch_embed", ttnn_module_args)
-
         if hasattr(torch_model, "patch_embed"):
             patch_embed_params = preprocess_model_parameters(
                 initialize_model=lambda: torch_model.patch_embed,
@@ -102,9 +99,6 @@ def test_rhag(
     device, batch_size, height, width, dim, num_heads, window_size, depth, overlap_ratio, mlp_ratio, resi_connection
 ):
     torch.manual_seed(0)
-
-    # Import reference model
-    from models.experimental.SSR.reference.SSR.model.tile_refinement import RHAG
 
     # Create reference model
     ref_model = RHAG(

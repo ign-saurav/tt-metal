@@ -43,55 +43,17 @@ class TTUpsample(LightweightModule):
             shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,  # Use height sharding
         )
 
-    def pixel_shuffle(self, x, upscale_factor):
-        """Implement PixelShuffle operation in TTNN"""
-        # Convert to interleaved layout before reshape to avoid sharding issues
-        if x.is_sharded():
-            x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-
-        # Ensure we're in ROW_MAJOR layout for reshape operations
-        if x.layout != ttnn.ROW_MAJOR_LAYOUT:
-            x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-
-        # x shape: [B, H, W, C] where C = input_channels * upscale_factor^2
-        batch_size, height, width, channels = x.shape
-        out_channels = channels // (upscale_factor * upscale_factor)
-
-        # Reshape to separate the upscale dimensions - CORRECT NHWC ORDER
-        # [B, H, W, out_channels, upscale_factor, upscale_factor]
-        x = ttnn.reshape(
-            x,
-            (batch_size, height, width, out_channels, upscale_factor, upscale_factor),
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
-
-        # Permute to rearrange dimensions for upsampling
-        # [B, H, upscale_factor, W, upscale_factor, out_channels]
-        x = ttnn.permute(x, (0, 1, 4, 2, 5, 3), memory_config=ttnn.DRAM_MEMORY_CONFIG)
-
-        # Reshape to final upsampled size
-        # [B, H*upscale_factor, W*upscale_factor, out_channels]
-        output_height = height * upscale_factor
-        output_width = width * upscale_factor
-        x = ttnn.reshape(
-            x, (batch_size, output_height, output_width, out_channels), memory_config=ttnn.DRAM_MEMORY_CONFIG
-        )
-
-        return x
-
     def pixel_shuffle_torch(self, x, upscale_factor):
         """Implement PixelShuffle operation using PyTorch for better performance"""
         # PyTorch pixel_shuffle expects NCHW format, but our tensor is NHWC
         # Convert from NHWC to NCHW
         torch_tensor = x.permute(0, 3, 1, 2)
 
-        # Apply PyTorch pixel shuffle
         torch_output = torch.nn.functional.pixel_shuffle(torch_tensor, upscale_factor)
 
         # Convert back from NCHW to NHWC
         torch_output = torch_output.permute(0, 2, 3, 1)
 
-        # Convert back to TTNN tensor
         ttnn_output = ttnn.from_torch(
             torch_output,
             device=self.device,

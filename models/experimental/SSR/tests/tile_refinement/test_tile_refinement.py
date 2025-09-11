@@ -6,7 +6,6 @@ import pytest
 import ttnn
 from loguru import logger
 
-# Import the reference models (adjust import paths as needed)
 from models.experimental.SSR.reference.SSR.model.tile_refinement import TileRefinement
 from models.experimental.SSR.tests.tile_refinement.test_patch_embed_tile_refinement import (
     create_patch_embed_preprocessor_conv,
@@ -117,7 +116,6 @@ def create_tile_refinement_preprocessor(device, forward_params, window_size, rpi
 @pytest.mark.parametrize(
     "img_size, patch_size, embed_dim, depths, num_heads, window_size, mlp_ratio, upscale, input_shape",
     [
-        # Test configuration - adjust based on your requirements
         (64, 2, 180, (6, 6, 6, 6, 6, 6), (6, 6, 6, 6, 6, 6), 16, 2, 4, (3, 3, 64, 64)),
     ],
 )
@@ -182,11 +180,9 @@ def test_tile_refinement(
         # Preprocess model parameters
         parameters = preprocess_model_parameters(
             initialize_model=lambda: ref_model,
-            # custom_preprocessor=create_tile_refinement_preprocessor(device, params),
             custom_preprocessor=create_tile_refinement_preprocessor(device, tt_params, window_size, rpi_sa),
             device=device,
         )
-        # import pdb; pdb.set_trace()
 
         # Create TTNN model
         tt_model = TTTileRefinement(
@@ -235,7 +231,6 @@ def test_tile_refinement(
         features_pass, features_pcc_message = check_with_pcc(ref_features, tt_torch_features, 0.90)
 
         if output_pass and features_pass:
-            # if output_pass:  # and features_pass:
             logger.info("TTTileRefinement Test Passed!")
         else:
             logger.warning("TTTileRefinement Test Failed!")

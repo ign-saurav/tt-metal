@@ -165,7 +165,7 @@ class TTSSR(LightweightModule):
                     memory_config=self.memory_config,
                     conv_config=self.conv_config,
                 )
-                fea = ttnn.reshape(fea, [1, 64, 64, 180])  # TODO
+                fea = ttnn.reshape(fea, [1, 64, 64, 180])
                 fea = ttnn.from_device(fea)  # Move to host
                 fea = ttnn.to_dtype(fea, ttnn.bfloat16)  # Convert dtype
                 fea = ttnn.to_device(fea, device=self.device)  # Move back to device
@@ -201,7 +201,7 @@ class TTSSR(LightweightModule):
             return_weights_and_bias=False,
             slice_config=slice_config,
         )
-        sr_fea = ttnn.reshape(sr_fea, [B, 256, 256, 64])  # TODO
+        sr_fea = ttnn.reshape(sr_fea, [B, 256, 256, 64])
 
         # LeakyReLU activation
         sr_fea = ttnn.leaky_relu(sr_fea, negative_slope=0.01, memory_config=ttnn.DRAM_MEMORY_CONFIG)
@@ -230,7 +230,7 @@ class TTSSR(LightweightModule):
             slice_config=slice_config,
         )
 
-        sr = ttnn.reshape(sr, [B, 1024, 1024, 3])  # TODO
+        sr = ttnn.reshape(sr, [B, 1024, 1024, 3])
 
         return sr, patch_fea3
 

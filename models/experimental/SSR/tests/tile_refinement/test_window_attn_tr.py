@@ -95,18 +95,20 @@ def test_window_attention(device, batch_size, num_windows, window_size, dim, num
         run_model=lambda model: model(input_tensor, rpi=rpi, mask=None),
     )
 
+    memory_config = ttnn.L1_MEMORY_CONFIG
+
     tt_model = TTWindowAttentionTR(
         device=device,
         parameters=parameters,
         dim=dim,
         window_size=window_size,
         num_heads=num_heads,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        memory_config=memory_config,
     )
 
     # Convert inputs to TTNN format
     tt_input = ttnn.from_torch(
-        input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.L1_MEMORY_CONFIG
+        input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=memory_config
     )
 
     tt_rpi = ttnn.from_torch(rpi, device=device, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.uint32)

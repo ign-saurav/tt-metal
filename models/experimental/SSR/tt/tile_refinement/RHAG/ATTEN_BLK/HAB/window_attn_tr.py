@@ -140,7 +140,6 @@ class TTWindowAttentionTR(LightweightModule):
             core_grid=ttnn.CoreGrid(y=8, x=8),
         )  # [b_, num_heads, n, head_dim]
 
-        # TODO: find a better way to do padding, maybe pad the weights of the prev matmul
         if pad:
             x = ttnn.to_torch(x)
             padded_head_size = 32
@@ -177,6 +176,5 @@ class TTWindowAttentionTR(LightweightModule):
             bias=self.proj_bias,
             memory_config=self.memory_config,
             core_grid=ttnn.CoreGrid(y=8, x=8),
-            # program_config=program_config,
         )
         return x

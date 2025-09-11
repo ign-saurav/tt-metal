@@ -10,7 +10,9 @@ from models.experimental.SSR.reference.SSR.model.tile_refinement import HAB
 from models.experimental.SSR.tt.tile_refinement import TTHAB
 from ttnn.model_preprocessing import preprocess_linear_bias, preprocess_linear_weight
 from tests.ttnn.utils_for_testing import check_with_pcc
-from models.utility_functions import profiler
+from models.experimental.SSR.tests.tile_refinement.test_window_attn_tr import create_window_attention_preprocessor
+from models.experimental.SSR.tests.tile_refinement.test_CAB import create_cab_preprocessor
+from models.experimental.SSR.tests.common.test_mlp import create_mlp_preprocessor
 
 
 def create_hab_preprocessor(device, window_size, rpi):
@@ -34,157 +36,16 @@ def create_hab_preprocessor(device, window_size, rpi):
             relative_position_bias.unsqueeze(0), dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
         )
         # Window attention parameters
-        params["attn"] = {
-            "qkv": {
-                "weight": preprocess_linear_weight(
-                    torch_model.attn.qkv.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
-                ),
-                "bias": preprocess_linear_bias(torch_model.attn.qkv.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
-                if torch_model.attn.qkv.bias is not None
-                else None,
-            },
-            "proj": {
-                "weight": preprocess_linear_weight(
-                    torch_model.attn.proj.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
-                ),
-                "bias": preprocess_linear_bias(torch_model.attn.proj.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
-                if torch_model.attn.proj.bias is not None
-                else None,
-            },
-            "relative_position_bias": ttnn.from_torch(
-                relative_position_bias.unsqueeze(0), dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
-            ),
-        }
+        window_attention_preprocessor = create_window_attention_preprocessor(device, (window_size, window_size), rpi)
+        params["attn"] = window_attention_preprocessor(torch_model.attn, "attn", ttnn_module_args)
 
-        # Conv block (CAB) parameters - Fixed to match your channel attention structure
-        cab_layers = list(torch_model.conv_block.cab.children())
-        conv1 = cab_layers[0]  # First Conv2d layer
-        conv2 = cab_layers[2]  # Second Conv2d layer (after GELU)
-        channel_attention = cab_layers[3]  # ChannelAttention module
-
-        # Extract the sequential layers from ChannelAttention (matching your test pattern)
-        attention_layers = list(channel_attention.attention.children())
-        attention_conv1 = attention_layers[1]  # First Conv2d layer in attention
-        attention_conv2 = attention_layers[3]  # Second Conv2d layer in attention
-
-        conv_config = ttnn.Conv2dConfig(weights_dtype=ttnn.bfloat16)
-
-        params["conv_block"] = {
-            "conv1": {
-                "weight": ttnn.from_torch(conv1.weight, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT),
-                "bias": ttnn.from_torch(
-                    conv1.bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
-                ),
-            },
-            "conv2": {
-                "weight": ttnn.from_torch(conv2.weight, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT),
-                "bias": ttnn.from_torch(
-                    conv2.bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
-                ),
-            },
-            "channel_attention": {
-                "conv1": {
-                    "weight": ttnn.prepare_conv_weights(
-                        weight_tensor=ttnn.from_torch(attention_conv1.weight, dtype=ttnn.bfloat16),
-                        input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                        input_layout=ttnn.TILE_LAYOUT,
-                        weights_format="OIHW",
-                        in_channels=attention_conv1.in_channels,
-                        out_channels=attention_conv1.out_channels,
-                        batch_size=1,
-                        input_height=1,
-                        input_width=1,
-                        kernel_size=(1, 1),
-                        stride=(1, 1),
-                        padding=(0, 0),
-                        dilation=(1, 1),
-                        has_bias=True,
-                        groups=1,
-                        device=device,
-                        input_dtype=ttnn.bfloat16,
-                        conv_config=conv_config,
-                    ),
-                    "bias": ttnn.prepare_conv_bias(
-                        bias_tensor=ttnn.from_torch(attention_conv1.bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16),
-                        input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                        input_layout=ttnn.TILE_LAYOUT,
-                        in_channels=attention_conv1.in_channels,
-                        out_channels=attention_conv1.out_channels,
-                        batch_size=1,
-                        input_height=1,
-                        input_width=1,
-                        kernel_size=(1, 1),
-                        stride=(1, 1),
-                        padding=(0, 0),
-                        dilation=(1, 1),
-                        groups=1,
-                        device=device,
-                        input_dtype=ttnn.bfloat16,
-                        conv_config=conv_config,
-                    ),
-                },
-                "conv2": {
-                    "weight": ttnn.prepare_conv_weights(
-                        weight_tensor=ttnn.from_torch(attention_conv2.weight, dtype=ttnn.bfloat16),
-                        input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                        input_layout=ttnn.TILE_LAYOUT,
-                        weights_format="OIHW",
-                        in_channels=attention_conv2.in_channels,
-                        out_channels=attention_conv2.out_channels,
-                        batch_size=1,
-                        input_height=1,
-                        input_width=1,
-                        kernel_size=(1, 1),
-                        stride=(1, 1),
-                        padding=(0, 0),
-                        dilation=(1, 1),
-                        has_bias=True,
-                        groups=1,
-                        device=device,
-                        input_dtype=ttnn.bfloat16,
-                        conv_config=conv_config,
-                    ),
-                    "bias": ttnn.prepare_conv_bias(
-                        bias_tensor=ttnn.from_torch(attention_conv2.bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16),
-                        input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                        input_layout=ttnn.TILE_LAYOUT,
-                        in_channels=attention_conv2.in_channels,
-                        out_channels=attention_conv2.out_channels,
-                        batch_size=1,
-                        input_height=1,
-                        input_width=1,
-                        kernel_size=(1, 1),
-                        stride=(1, 1),
-                        padding=(0, 0),
-                        dilation=(1, 1),
-                        groups=1,
-                        device=device,
-                        input_dtype=ttnn.bfloat16,
-                        conv_config=conv_config,
-                    ),
-                },
-            },
-        }
+        # Conv block parameters
+        cab_preprocessor = create_cab_preprocessor(device)
+        params["conv_block"] = cab_preprocessor(torch_model.conv_block, "conv_block", ttnn_module_args)
 
         # MLP parameters
-        params["mlp"] = {
-            "fc1": {
-                "weight": preprocess_linear_weight(
-                    torch_model.mlp.fc1.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
-                ),
-                "bias": preprocess_linear_bias(torch_model.mlp.fc1.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
-                if torch_model.mlp.fc1.bias is not None
-                else None,
-            },
-            "fc2": {
-                "weight": preprocess_linear_weight(
-                    torch_model.mlp.fc2.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
-                ),
-                "bias": preprocess_linear_bias(torch_model.mlp.fc2.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
-                if torch_model.mlp.fc2.bias is not None
-                else None,
-            },
-        }
+        mlp_preprocessor = create_mlp_preprocessor(device)
+        params["mlp"] = mlp_preprocessor(torch_model.mlp, "mlp", ttnn_module_args)
 
         # Conv scale
         params["conv_scale"] = torch_model.conv_scale
@@ -273,6 +134,8 @@ def test_hab_block(device, batch_size, height, width, dim, num_heads, window_siz
         run_model=lambda model: model(input_tensor, x_size, rpi_sa, attn_mask),
     )
 
+    memory_config = ttnn.L1_MEMORY_CONFIG
+
     tt_model = TTHAB(
         device=device,
         parameters=parameters,
@@ -282,37 +145,34 @@ def test_hab_block(device, batch_size, height, width, dim, num_heads, window_siz
         window_size=window_size,
         shift_size=shift_size,
         mlp_ratio=mlp_ratio,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        memory_config=memory_config,
     )
 
     # Convert inputs to TTNN format
     tt_input = ttnn.from_torch(
-        input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.L1_MEMORY_CONFIG
+        input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=memory_config
     )
 
     tt_rpi = ttnn.from_torch(
-        rpi_sa, device=device, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.L1_MEMORY_CONFIG
+        rpi_sa, device=device, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.bfloat16, memory_config=memory_config
     )
 
     tt_attn_mask = None
     if attn_mask is not None:
         tt_attn_mask = ttnn.from_torch(
-            attn_mask, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.L1_MEMORY_CONFIG
+            attn_mask, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=memory_config
         )
 
     # TTNN forward pass
-    profiler.start("actualRun")
     tt_output = tt_model(tt_input, x_size, tt_rpi, tt_attn_mask)
-    profiler.end("actualRun")
 
     # Convert back to PyTorch format
     tt_torch_output = ttnn.to_torch(tt_output)
 
-    actual_run_time = profiler.get("actualRun")
-
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.95)
 
+    logger.info(f"pcc: {pcc_message}")
     if does_pass:
         logger.info("HAB Block Passed!")
     else:

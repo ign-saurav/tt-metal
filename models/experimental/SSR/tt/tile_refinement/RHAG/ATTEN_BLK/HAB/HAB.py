@@ -32,7 +32,6 @@ class TTHAB(LightweightModule):
         self.shift_size = shift_size
         self.mlp_ratio = mlp_ratio
 
-        # Adjust window size and shift size if needed
         if min(self.input_resolution) <= self.window_size:
             self.shift_size = 0
             self.window_size = min(self.input_resolution)

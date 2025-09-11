@@ -17,11 +17,11 @@ class TTMaskTokenInference(LightweightModule):
         self.head_dim = dim // num_heads
         self.scale = qk_scale or (self.head_dim**-0.5)
 
-        # Layer norm parameters (would need to be loaded from state dict)
+        # Layer norm parameters
         self.norm_weight = parameters["norm"]["weight"]  # ttnn tensor for layer norm weight
         self.norm_bias = parameters["norm"]["bias"]  # ttnn tensor for layer norm bias
 
-        # Linear layer weights (would need to be preprocessed and loaded)
+        # Linear layer weights
         self.proj_weight = parameters["proj"]["weight"]  # ttnn tensor for output projection
 
         self.proj_bias = parameters["proj"]["bias"]

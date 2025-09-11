@@ -297,7 +297,7 @@ class TTTileRefinement(TTHAT):
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 # slice_config=slice_config,
             )
-            x = ttnn.reshape(x, [batch_size, 64, 64, 180])  # TODO
+            x = ttnn.reshape(x, [batch_size, 64, 64, 180])
             x = ttnn.permute(x, (0, 3, 1, 2))
 
             # Deep feature extraction - store as fea
@@ -334,7 +334,7 @@ class TTTileRefinement(TTHAT):
                 dtype=ttnn.bfloat16,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
-            x_after_body = ttnn.reshape(x_after_body, [batch_size, 64, 64, 180])  # TODO
+            x_after_body = ttnn.reshape(x_after_body, [batch_size, 64, 64, 180])
             x = ttnn.permute(x, (0, 2, 3, 1))
             x = ttnn.add(x, x_after_body, memory_config=self.memory_config)
 
@@ -361,7 +361,7 @@ class TTTileRefinement(TTHAT):
 
             # LeakyReLU activation
             x = ttnn.leaky_relu(x, negative_slope=0.01, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-            x = ttnn.reshape(x, [batch_size, 64, 64, 64])  # TODO
+            x = ttnn.reshape(x, [batch_size, 64, 64, 64])
 
             # Upsampling
             x = self.upsample(x, self.parameters["upsample"])
@@ -387,7 +387,7 @@ class TTTileRefinement(TTHAT):
                 return_weights_and_bias=False,
             )
 
-            x = ttnn.reshape(x, [batch_size, 256, 256, 3])  # TODO
+            x = ttnn.reshape(x, [batch_size, 256, 256, 3])
         # Denormalize output
         x = ttnn.divide(x, self.img_range, memory_config=self.memory_config)
         self.mean = ttnn.permute(self.mean, (0, 2, 3, 1))

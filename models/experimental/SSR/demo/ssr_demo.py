@@ -4,11 +4,11 @@
 import os
 import torch
 import ttnn
+import argparse
 from loguru import logger
 from PIL import Image
 import torchvision.transforms as transforms
 
-# Import reference and TTNN models
 from models.experimental.SSR.reference.SSR.model.ssr import SSR, SSR_wo_conv
 from models.experimental.SSR.tt.ssr import TTSSR, TTSSR_wo_conv
 
@@ -173,8 +173,6 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
 
 
 if __name__ == "__main__":
-    import argparse
-
     parser = argparse.ArgumentParser(description="SSR Super-Resolution Inference")
     parser.add_argument(
         "--input",
