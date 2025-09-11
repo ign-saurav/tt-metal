@@ -6,38 +6,6 @@ import torch
 from models.common.lightweightmodule import LightweightModule
 
 
-def window_partition_ttnn(x, window_size):
-    """TTNN implementation of window partitioning"""
-    b, h, w, c = x.shape
-
-    # Reshape: (b, h, w, c) -> (b, h//ws, ws, w//ws, ws, c)
-    reshaped = ttnn.reshape(x, (b, h // window_size, window_size, w // window_size, window_size, c))
-
-    # Permute: (0, 1, 3, 2, 4, 5) -> group windows together
-    permuted = ttnn.permute(reshaped, (0, 1, 3, 2, 4, 5))
-
-    # Final reshape to get windows
-    windows = ttnn.reshape(permuted, (-1, window_size, window_size, c))
-
-    return windows
-
-
-def window_reverse_ttnn(windows, window_size, h, w):
-    """TTNN implementation of window reverse"""
-    b = int(windows.shape[0] / (h * w / window_size / window_size))
-
-    # Reshape windows back to grid
-    reshaped = ttnn.reshape(windows, (b, h // window_size, w // window_size, window_size, window_size, -1))
-
-    # Permute back to original order
-    permuted = ttnn.permute(reshaped, (0, 1, 3, 2, 4, 5))
-
-    # Final reshape to original spatial dimensions
-    output = ttnn.reshape(permuted, (b, h, w, -1))
-
-    return output
-
-
 class TTOCAB(LightweightModule):
     def __init__(
         self,

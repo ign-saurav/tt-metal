@@ -8,10 +8,44 @@ from models.common.lightweightmodule import LightweightModule
 from models.experimental.SSR.tt.tile_refinement.tile_refinement import TTTileRefinement
 from models.experimental.SSR.tt.tile_selection.tile_selection import TTTileSelection
 from models.experimental.SSR.tt.tile_refinement.upsample import TTUpsample
-from models.experimental.SSR.tt.tile_refinement.RHAG.ATTEN_BLK.OCAB.OCAB import (
-    window_partition_ttnn,
-    window_reverse_ttnn,
-)
+
+
+def window_partition_ttnn(x, window_size):
+    """TTNN implementation of window partitioning"""
+    b, h, w, c = x.shape
+
+    # Reshape: (b, h, w, c) -> (b, h//ws, ws, w//ws, ws, c)
+    x = ttnn.reshape(
+        x, (b, h // window_size, window_size, w // window_size, window_size, c), memory_config=ttnn.L1_MEMORY_CONFIG
+    )
+
+    # Permute: (0, 1, 3, 2, 4, 5) -> group windows together
+    x = ttnn.permute(x, (0, 1, 3, 2, 4, 5), memory_config=ttnn.L1_MEMORY_CONFIG)
+
+    # Final reshape to get windows
+    x = ttnn.reshape(x, (-1, window_size, window_size, c), memory_config=ttnn.L1_MEMORY_CONFIG)
+
+    return x
+
+
+def window_reverse_ttnn(windows, window_size, h, w):
+    """TTNN implementation of window reverse"""
+    b = int(windows.shape[0] / (h * w / window_size / window_size))
+
+    # Reshape windows back to grid
+    windows = ttnn.reshape(
+        windows,
+        (b, h // window_size, w // window_size, window_size, window_size, -1),
+        memory_config=ttnn.L1_MEMORY_CONFIG,
+    )
+
+    # Permute back to original order
+    windows = ttnn.permute(windows, (0, 1, 3, 2, 4, 5), memory_config=ttnn.L1_MEMORY_CONFIG)
+
+    # Final reshape to original spatial dimensions
+    windows = ttnn.reshape(windows, (b, h, w, -1), memory_config=ttnn.L1_MEMORY_CONFIG)
+
+    return windows
 
 
 class TTSSR(LightweightModule):
@@ -282,6 +316,8 @@ class TTSSR_wo_conv(LightweightModule):
                 if negX.layout == ttnn.ROW_MAJOR_LAYOUT:
                     negX = ttnn.to_layout(negX, ttnn.TILE_LAYOUT)
                 sr_patches.append(negX)
+
+        ttnn.deallocate(patch_x)
 
         # Concatenate and reconstruct
         sr = ttnn.concat(sr_patches, dim=0)
