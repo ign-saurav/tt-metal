@@ -23,7 +23,7 @@ decoder_layer_optimisations = {
         head_layer_optimisations=head_layer_optimisations["default"],
         shape=(0, 0, 0, 0),
     ),
-    "Semantics_head": DecoderOptimizer(
+    "semantics_head": DecoderOptimizer(
         res_layer_optimisations={
             "res3": res_layer_optimisations["semantics_Res3"],
             "res2": res_layer_optimisations["semantics_Res2"],
@@ -77,7 +77,7 @@ class TTDecoder:
                 model_config,
                 layer_optimisations=layer_optimisations.head_layer_optimisations["head_2"],
             )
-        if self.name == "Semantics_head":
+        if self.name == "semantics_head":
             self.res3_upsample_channels = 256
             self.res2_upsample_channels = 256
         else:
