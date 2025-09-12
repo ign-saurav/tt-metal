@@ -285,6 +285,7 @@ class PanopticDeepLabTestInfra:
         width,
         model_config,
         weights_path,
+        real_input_path=None,
     ):
         super().__init__()
         if not hasattr(self, "_model_initialized"):
@@ -303,7 +304,7 @@ class PanopticDeepLabTestInfra:
         self.width = width
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
         self.weights_path = os.path.join(os.path.dirname(__file__), "weights", f"{weights_path}")
-
+        self.real_input_path = real_input_path
         # Initialize torch model
         torch_model = TorchPanopticDeepLab()
         torch_model = load_torch_model_state(torch_model, "panoptic_deeplab")
@@ -479,9 +480,48 @@ class PanopticDeepLabTestInfra:
 
         #########################################################
 
-        # Create input tensor
-        input_shape = (batch_size * self.num_devices, in_channels, height, width)
-        self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float)
+        #############################
+
+        #########################################################
+
+        # Create or load input tensor
+        if self.real_input_path and os.path.exists(self.real_input_path):
+            logger.info(f"Loading real input from: {self.real_input_path}")
+            self.torch_input_tensor = self.load_real_input(self.real_input_path)
+
+            # Verify shape matches expected dimensions
+            expected_shape = (batch_size * self.num_devices, in_channels, height, width)
+            if self.torch_input_tensor.shape != expected_shape:
+                logger.warning(
+                    f"Input shape mismatch. Expected: {expected_shape}, Got: {self.torch_input_tensor.shape}"
+                )
+                # Optionally resize or adjust
+                # if self.torch_input_tensor.shape[0] < batch_size * self.num_devices:
+                #     # Repeat batch to match expected batch size
+                #     repeats = (batch_size * self.num_devices) // self.torch_input_tensor.shape[0]
+                #     self.torch_input_tensor = self.torch_input_tensor.repeat(repeats, 1, 1, 1)
+                #     logger.info(f"Repeated input to match batch size: {self.torch_input_tensor.shape}")
+        else:
+            logger.info("Using random input tensor (no real input provided)")
+            input_shape = (batch_size * self.num_devices, in_channels, height, width)
+            self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float32)
+
+        # Log input statistics
+        logger.info(f"Input tensor stats:")
+        logger.info(f"  Shape: {self.torch_input_tensor.shape}")
+        logger.info(f"  Mean: {self.torch_input_tensor.mean():.4f}")
+        logger.info(f"  Std: {self.torch_input_tensor.std():.4f}")
+        logger.info(f"  Min: {self.torch_input_tensor.min():.4f}")
+        logger.info(f"  Max: {self.torch_input_tensor.max():.4f}")
+        #############################
+        # # Create input tensor
+        # input_shape = (batch_size * self.num_devices, in_channels, height, width)
+        # self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float32)
+
+        #############################
+        # import onnx
+        # onnx.export(torch_model, self.torch_input_tensor, "/home/ubuntu/ign-tt-sm/tt-metal/models/experimental/panoptic_deeplab/panoptic_deeplab_torch_model.onnx")
+        #############################
 
         # Preprocess model parameters
         parameters = preprocess_model_parameters(
@@ -712,6 +752,32 @@ class PanopticDeepLabTestInfra:
 
         return self.pcc_passed, self.pcc_message
 
+    def load_real_input(self, input_path: str) -> torch.Tensor:
+        """Load real input from saved file"""
+
+        if input_path.endswith(".pt"):
+            # Load PyTorch tensor
+            data = torch.load(input_path, map_location="cpu")
+            if isinstance(data, dict):
+                tensor = data["tensor"]
+                logger.info(f"Loaded input metadata: {data.keys()}")
+                if "stats" in data:
+                    logger.info(f"Original input stats: {data['stats']}")
+            else:
+                tensor = data
+        elif input_path.endswith(".npy"):
+            # Load numpy array
+            np_array = np.load(input_path)
+            tensor = torch.from_numpy(np_array)
+        else:
+            raise ValueError(f"Unsupported input file format: {input_path}")
+
+        # Ensure tensor is float32
+        if tensor.dtype != torch.float32:
+            tensor = tensor.to(torch.float32)
+
+        return tensor
+
 
 model_config = {
     "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
@@ -722,7 +788,7 @@ model_config = {
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
 @pytest.mark.parametrize(
-    "batch_size, in_channels, height, width, weights_path",
+    "batch_size, in_channels, height, width, weights_path, real_input_path",
     [
         (
             1,
@@ -730,6 +796,7 @@ model_config = {
             512,
             1024,
             "/home/ubuntu/ign-tt-sm/tt-metal/models/experimental/panoptic_deeplab/model_final_23d03a.pkl",
+            "/home/ubuntu/ign-tt-sm/tt-metal/models/experimental/panoptic_deeplab/result/fullnet/test_inputs/frankfurt_000000_005543_leftImg8bit_torch_input.pt",
         ),
     ],
 )
@@ -740,6 +807,7 @@ def test_panoptic_deeplab(
     height,
     width,
     weights_path,
+    real_input_path,
 ):
     PanopticDeepLabTestInfra(
         device,
@@ -749,4 +817,5 @@ def test_panoptic_deeplab(
         width,
         model_config,
         weights_path,
+        real_input_path,
     )
