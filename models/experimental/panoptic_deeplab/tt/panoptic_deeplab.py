@@ -28,8 +28,8 @@ class TTPanopticDeepLab:
         self.semantic_decoder = TTDecoder(
             parameters.semantic_decoder,
             model_config,
-            layer_optimisations=decoder_layer_optimisations["Semantics_head"],
-            name="Semantics_head",
+            layer_optimisations=decoder_layer_optimisations["semantics_head"],
+            name="semantics_head",
         )
 
         # Initialize instance segmentation decoder
@@ -54,37 +54,32 @@ class TTPanopticDeepLab:
 
         Returns:
             semantic_logits: Semantic segmentation logits
-            instance_logit: Instance segmentation logits - offset head
-            instance_logit_2: Instance segmentation logits - center head
+            instance_offset_head_logit: Instance segmentation logits - offset head
+            instance_center_head_logit: Instance segmentation logits - center head
         """
 
         # Extract features from backbone
         features = self.backbone(x, device)
 
-        # Extract the specific feature maps the decoders expect
-        backbone_features = features["res_5"]
-        res3_features = features["res_3"]
-        res2_features = features["res_2"]
-
-        backbone_feature_instance_decoder = ttnn.clone(backbone_features)
-        res3_feature_instance_decoder = ttnn.clone(res3_features)
-        res2_feature_instance_decoder = ttnn.clone(res2_features)
+        # clone the specific feature maps the instance decoders expect
+        backbone_features = ttnn.clone(features["res_5"])
+        res3_features = ttnn.clone(features["res_3"])
+        res2_features = ttnn.clone(features["res_2"])
 
         # Semantic segmentation branch
         semantic_logit, _ = self.semantic_decoder(
-            backbone_features,
-            res3_features,
-            res2_features,
+            features["res_5"],
+            features["res_3"],
+            features["res_2"],
             upsample_channels=256,
             device=device,
         )
 
         # Instance segmentation branch
-
         instance_offset_head_logit, instance_center_head_logit = self.instance_decoder(
-            backbone_feature_instance_decoder,
-            res3_feature_instance_decoder,
-            res2_feature_instance_decoder,
+            backbone_features,
+            res3_features,
+            res2_features,
             upsample_channels=256,
             device=device,
         )

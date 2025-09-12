@@ -228,7 +228,7 @@ model_config = {
 @pytest.mark.parametrize(
     "batch_size, in_channels, res3_intermediate_channels, res2_intermediate_channels, out_channels, upsample_channels, height, width, name",
     [
-        (1, 2048, 320, 288, (19,), 256, 32, 64, "Semantics_head"),  # semantic head
+        (1, 2048, 320, 288, (19,), 256, 32, 64, "semantics_head"),  # semantic head
         (1, 2048, 320, 160, (2, 1), 256, 32, 64, "instance_head"),  # instance offset head
     ],
 )

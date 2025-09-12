@@ -20,6 +20,9 @@ class AsppTestInfra:
         self,
         device,
         batch_size,
+        input_channels,
+        height,
+        width,
         model_config,
     ):
         super().__init__()
@@ -37,7 +40,7 @@ class AsppTestInfra:
 
         # torch model
         torch_model = ASPPModel().eval()
-        self.torch_input_tensor = torch.randn((1, 2048, 32, 64), dtype=torch.float16)
+        self.torch_input_tensor = torch.randn((batch_size, input_channels, height, width), dtype=torch.float16)
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
             custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
@@ -113,17 +116,17 @@ model_config = {
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
 @pytest.mark.parametrize(
-    "batch_size",
+    "batch_size, input_channels, height, width",
     [
-        (1),
+        (1, 2048, 32, 64),
     ],
 )
-def test_aspp(
-    device,
-    batch_size,
-):
+def test_aspp(device, batch_size, input_channels, height, width):
     AsppTestInfra(
         device,
         batch_size,
+        input_channels,
+        height,
+        width,
         model_config,
     )

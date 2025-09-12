@@ -11,12 +11,6 @@ from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLab
 from models.experimental.panoptic_deeplab.tt.stem import resnet52Stem, neck_optimisations
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 
-model_config = {
-    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
-    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
-    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
-}
-
 
 class Resnet52StemTestInfra:
     def __init__(self, device, batch_size, inplanes, planes, height, width, stride, model_config):
@@ -125,6 +119,13 @@ class Resnet52StemTestInfra:
         )
 
         return self.pcc_passed, self.pcc_message
+
+
+model_config = {
+    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
+    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
+    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
+}
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)

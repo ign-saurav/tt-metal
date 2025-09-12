@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import tracy
 from loguru import logger
 import ttnn
 from ttnn.model_preprocessing import preprocess_model_parameters
@@ -66,13 +65,11 @@ class BackboneTestInfra:
         )
 
         # First run configures convs JIT
-        tracy.signpost(f"Backbone_{input_shape}_compile")
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
         self.run()
         self.validate()
 
         # Optimized run
-        tracy.signpost(f"Backbone_{input_shape}_perf")
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
         self.run()
         self.validate()
