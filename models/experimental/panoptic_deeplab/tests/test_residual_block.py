@@ -18,14 +18,8 @@ from models.experimental.panoptic_deeplab.reference.res_block import (
     ResModel,
 )
 
-model_config = {
-    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
-    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
-    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
-}
 
-
-class HeadResInfra:
+class ResTestInfra:
     def __init__(
         self,
         device,
@@ -154,6 +148,13 @@ class HeadResInfra:
         return self.pcc_passed, self.pcc_message
 
 
+model_config = {
+    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
+    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
+    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
+}
+
+
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
 @pytest.mark.parametrize(
     "batch_size, in_channels, upsample_channels, intermediate_channels, out_channels, height_res, width_res, height, width, name",
@@ -177,7 +178,7 @@ def test_res(
     width,
     name,
 ):
-    HeadResInfra(
+    ResTestInfra(
         device,
         batch_size,
         model_config,

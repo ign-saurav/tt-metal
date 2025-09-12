@@ -10,15 +10,9 @@ from ttnn.model_preprocessing import preprocess_model_parameters
 from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from models.experimental.panoptic_deeplab.reference.aspp import (
-    PanopticDeeplabASPPModel,
+    ASPPModel,
 )
-from models.experimental.panoptic_deeplab.tt.aspp import PanopticDeeplabASPP
-
-model_config = {
-    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
-    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
-    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
-}
+from models.experimental.panoptic_deeplab.tt.aspp import TTASPP
 
 
 class AsppTestInfra:
@@ -30,7 +24,7 @@ class AsppTestInfra:
     ):
         super().__init__()
         if not hasattr(self, "_model_initialized"):
-            torch.manual_seed(42)  # Only seed once
+            torch.manual_seed(42)
             self._model_initialized = True
             torch.cuda.manual_seed_all(42)
             torch.backends.cudnn.deterministic = True
@@ -42,30 +36,30 @@ class AsppTestInfra:
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
 
         # torch model
-        torch_model = PanopticDeeplabASPPModel().eval()
-        self.fake_tensor_1 = torch.randn((1, 2048, 32, 64), dtype=torch.float16)
+        torch_model = ASPPModel().eval()
+        self.torch_input_tensor = torch.randn((1, 2048, 32, 64), dtype=torch.float16)
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
             custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
             device=None,
         )
         torch_model.to(torch.bfloat16)
-        self.fake_tensor_1 = self.fake_tensor_1.to(torch.bfloat16)
+        self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
 
         # golden
-        self.torch_output_tensor = torch_model(self.fake_tensor_1)
+        self.torch_output_tensor = torch_model(self.torch_input_tensor)
 
         # ttnn
-        tt_host_tensor_1 = ttnn.from_torch(
-            self.fake_tensor_1.permute(0, 2, 3, 1),
+        tt_host_tensor = ttnn.from_torch(
+            self.torch_input_tensor.permute(0, 2, 3, 1),
             dtype=ttnn.bfloat8_b,
             device=device,
             mesh_mapper=self.inputs_mesh_mapper,
         )
 
-        self.ttnn_model = PanopticDeeplabASPP(parameters, model_config)
-        self.input_tensor_1 = ttnn.to_layout(tt_host_tensor_1, ttnn.TILE_LAYOUT)
-        self.input_tensor_1 = ttnn.to_device(tt_host_tensor_1, device, memory_config=ttnn.L1_MEMORY_CONFIG)
+        self.ttnn_model = TTASPP(parameters, model_config)
+        self.input_tensor = ttnn.to_layout(tt_host_tensor, ttnn.TILE_LAYOUT)
+        self.input_tensor = ttnn.to_device(tt_host_tensor, device, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         # run and validate
         self.run()
@@ -84,10 +78,10 @@ class AsppTestInfra:
         return inputs_mesh_mapper, weights_mesh_mapper, output_mesh_composer
 
     def run(self):
-        self.output_tensor = self.ttnn_model(self.input_tensor_1, self.device)
+        self.output_tensor = self.ttnn_model(self.input_tensor, self.device)
         return self.output_tensor
 
-    def validate(self, output_tensor=None, output_tensor1=None):
+    def validate(self, output_tensor=None):
         """Validate outputs"""
 
         output_tensor = self.output_tensor if output_tensor is None else output_tensor
@@ -108,6 +102,13 @@ class AsppTestInfra:
         )
 
         return self.pcc_passed, self.pcc_message
+
+
+model_config = {
+    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
+    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
+    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
+}
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)

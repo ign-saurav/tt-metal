@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from torch import nn
+from torch import Tensor
 
 
 class CNNBlockBase(nn.Module):
@@ -17,7 +18,7 @@ class CNNBlockBase(nn.Module):
         stride (int):
     """
 
-    def __init__(self, in_channels, out_channels, stride):
+    def __init__(self, in_channels, out_channels, stride) -> None:
         """
         The `__init__` method of any subclass should also contain these arguments.
 
@@ -60,7 +61,7 @@ class DeepLabStem(CNNBlockBase):
         and increased channel depth.
     """
 
-    def __init__(self, in_channels=3, out_channels=128, stride=1):
+    def __init__(self, in_channels=3, out_channels=128, stride=1) -> None:
         """
         Initialize the DeepLabStem module.
 
@@ -98,7 +99,7 @@ class DeepLabStem(CNNBlockBase):
         self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)

@@ -1,14 +1,24 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopoutrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
-from models.experimental.panoptic_deeplab.reference.aspp import PanopticDeeplabASPPModel as ASPPModel
+from models.experimental.panoptic_deeplab.reference.aspp import ASPPModel
 from models.experimental.panoptic_deeplab.reference.head import HeadModel
 from models.experimental.panoptic_deeplab.reference.res_block import ResModel
+from torch import Tensor
+from typing import Tuple
 
 
 class DecoderModel(torch.nn.Module):
-    def __init__(self, in_channels, res3_intermediate_channels, res2_intermediate_channels, out_channels, name):
+    """
+    Modular decoder architecture.
+    The input and output of `forward()` method must be NCHW tensors.
+
+    Args:
+            name (string): name of segmentation head
+    """
+
+    def __init__(self, name) -> None:
         super().__init__()
         self.name = name
         self.aspp = ASPPModel()
@@ -22,13 +32,24 @@ class DecoderModel(torch.nn.Module):
             self.head_1 = HeadModel(128, 32, 2)
             self.head_2 = HeadModel(128, 32, 1)
 
-    def forward(self, x, res3, res2):
-        y = self.aspp(x)
-        y = self.res3(y, res3)
-        y = self.res2(y, res2)
-        out = self.head_1(y)
+    def forward(self, x: Tensor, res3: Tensor, res2: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        Forward pass of Decoder Module.
+
+        Args:
+            x: Input tensor of shape [N, C, H, W]
+
+        Returns:
+            out:
+            out_2:
+        """
+        out = self.aspp(x)
+        out = self.res3(out, res3)
+        out_ = self.res2(out, res2)
+        out = self.head_1(out_)
 
         if self.name == "instance_head":
-            y_2 = self.head_2(y)
-            return out, y_2
-        return out, None
+            out_2 = self.head_2(out_)
+        else:
+            out_2 = None
+        return out, out_2

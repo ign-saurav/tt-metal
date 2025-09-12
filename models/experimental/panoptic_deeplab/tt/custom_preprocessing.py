@@ -16,7 +16,7 @@ from models.experimental.panoptic_deeplab.reference.res_block import (
     ResModel,
 )
 from models.experimental.panoptic_deeplab.reference.aspp import (
-    PanopticDeeplabASPPModel,
+    ASPPModel,
 )
 from models.experimental.panoptic_deeplab.reference.decoder import (
     DecoderModel,
@@ -114,7 +114,7 @@ def custom_preprocessor(
             parameters[name]["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
             parameters[name]["bias"] = ttnn.from_torch(torch.reshape(bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
 
-    elif isinstance(model, PanopticDeeplabASPPModel):
+    elif isinstance(model, ASPPModel):
         for name, module in model.named_children():
             # For each submodule (e.g., ASPP_0_Conv, ASPP_1_Depthwise, etc.)
             if hasattr(module, "__getitem__"):

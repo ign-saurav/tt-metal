@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-from loguru import logger
-
 import ttnn
 from models.experimental.panoptic_deeplab.tt.common import TTConv2D
 from dataclasses import dataclass
@@ -11,10 +9,10 @@ from typing import Optional
 
 @dataclass
 class BottleneckOptimizer:
-    conv1: dict()
-    conv2: dict()
-    conv3: dict()
-    downsample: dict()
+    conv1: dict
+    conv2: dict
+    conv3: dict
+    downsample: dict
 
 
 bottleneck_layer_optimisations = {
@@ -225,25 +223,21 @@ class TTBottleneck:
             x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
 
         # conv1 is 1x1 conv
-        logger.debug(f"Running conv1")
         out, shape = self.conv1(device, x, in_shape)
 
         if self.name in ["layer_1_d", "layer_2_d", "layer_3_d", "layer_4_d"]:
             out = ttnn.to_memory_config(out, ttnn.DRAM_MEMORY_CONFIG)
 
         # conv2 is 3x3 conv
-        logger.debug(f"Running conv2")
         out, shape = self.conv2(device, out, shape)
 
         # conv3 is 1x1 conv
-        logger.debug(f"Running conv3")
         out, shape = self.conv3(device, out, shape)
 
         # run downsample conv 1x1 if required
         if self.downsample:
             if self.name == "layer_1_d":  # Fix for L1 OOM
                 out = ttnn.to_memory_config(out, ttnn.DRAM_MEMORY_CONFIG)
-            logger.debug(f"Running downsample")
             ds_out, _ = self.downsample_conv(device, x, in_shape)
         else:
             ds_out = x

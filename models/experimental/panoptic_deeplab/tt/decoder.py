@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-from models.experimental.panoptic_deeplab.tt.aspp import PanopticDeeplabASPP as TTASPP
+from models.experimental.panoptic_deeplab.tt.aspp import TTASPP
 from models.experimental.panoptic_deeplab.tt.head import TTHead
 from models.experimental.panoptic_deeplab.tt.res_block import TTRes
 from models.experimental.panoptic_deeplab.tt.res_block import res_layer_optimisations
@@ -53,6 +53,8 @@ class TTDecoder:
     ) -> None:
         super().__init__()
         self.shape = layer_optimisations.shape
+        self.name = name
+
         self.aspp = TTASPP(parameters.aspp, model_config, layer_optimisations=None)
         self.res3 = TTRes(
             parameters.res3,
@@ -69,8 +71,6 @@ class TTDecoder:
             model_config,
             layer_optimisations=layer_optimisations.head_layer_optimisations["head_1"],
         )
-        self.name = name
-
         if self.shape[-1] == 128:
             self.head_2 = TTHead(
                 parameters.head_2,
@@ -85,16 +85,17 @@ class TTDecoder:
             self.res2_upsample_channels = 128
 
     def __call__(self, x, res3, res2, upsample_channels, device):
-        y = self.aspp(x, device)
-        y = self.res3(y, res3, self.res3_upsample_channels, device)
-        y = self.res2(y, res2, self.res2_upsample_channels, device)
+        out = self.aspp(x, device)
+        out = self.res3(out, res3, self.res3_upsample_channels, device)
+        out = self.res2(out, res2, self.res2_upsample_channels, device)
 
         if self.name == "instance_head":
-            activation_copy = ttnn.clone(y)
-        out = self.head(y, device)
+            activation_copy = ttnn.clone(out)
+        out = self.head(out, device)
 
         if self.name == "instance_head":
-            y = self.head_2(activation_copy, device)
-            return out, y
+            out_ = self.head_2(activation_copy, device)
+        else:
+            out_ = None
 
-        return out, None
+        return out, out_

@@ -2,11 +2,10 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-from loguru import logger
 from models.experimental.panoptic_deeplab.tt.common import TTConv2D, TTUpsample
 
 
-class PanopticDeeplabASPP:
+class TTASPP:
     def __init__(self, parameters, model_config, layer_optimisations=None) -> None:
         self.model_config = model_config
 
@@ -105,7 +104,6 @@ class PanopticDeeplabASPP:
             activation="relu",
             act_block_h=512,
             shard_layout=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
-            # deallocate_activation=True,
             enable_split_reader=True,
             reallocate_halo_output=True,
             enable_act_double_buffer=True,
@@ -172,28 +170,20 @@ class PanopticDeeplabASPP:
         device,
     ):
         # ASPP branch
-        logger.debug("Running ASPP_0_Conv")
         aspp0, shape = self.ASPP_0_Conv(device, x, (1, 32, 64, 2048))
 
-        logger.debug("Running ASPP_1_Depthwise")
         aspp1_dw, shape = self.ASPP_1_Depthwise(device, x, (1, 32, 64, 2048))
 
-        logger.debug("Running ASPP_1_pointwise")
         aspp1, shape = self.ASPP_1_pointwise(device, aspp1_dw, shape)
 
-        logger.debug("Running ASPP_2_Depthwise")
         aspp2_dw, shape = self.ASPP_2_Depthwise(device, x, (1, 32, 64, 2048))
 
-        logger.debug("Running ASPP_2_pointwise")
         aspp2, shape = self.ASPP_2_pointwise(device, aspp2_dw, shape)
 
-        logger.debug("Running ASPP_3_Depthwise")
         aspp3_dw, shape = self.ASPP_3_Depthwise(device, x, (1, 32, 64, 2048))
 
-        logger.debug("Running ASPP_3_pointwise")
         aspp3, shape = self.ASPP_3_pointwise(device, aspp3_dw, shape)
 
-        logger.debug("Running ASPP_4_avg_pool")
         x = ttnn.reshape(x, [1, 1, x.shape[0] * x.shape[1] * x.shape[2], x.shape[-1]])
 
         aspp4 = ttnn.avg_pool2d(
@@ -213,28 +203,22 @@ class PanopticDeeplabASPP:
 
         ttnn.deallocate(x, force=True)
 
-        logger.debug("Running ASPP_4_Conv_1")
         shape = (1, 1, 1, 2048)
         aspp4_conv, shape = self.ASPP_4_Conv_1(device, aspp4, shape)
         ttnn.deallocate(aspp4, force=True)
 
-        logger.debug("Running ASPP_4_upsample")
         aspp4_conv_upsample = self.ASPP4_upsample(
             device, aspp4_conv, [1, 1, 1, 256], reshape_output=True, dtype=ttnn.bfloat8_b
         )
 
         ttnn.deallocate(aspp4_conv, force=True)
 
-        logger.debug("Running ASPP_concat")
         aspp_concat = ttnn.concat(
             [aspp0, aspp1, aspp2, aspp3, aspp4_conv_upsample],
             dim=3,
         )
 
-        logger.debug("Running ASPP_project")
         shape = (1, 32, 64, 1280)
-        output, shape = self.ASPP_project(device, aspp_concat, shape)
+        out, shape = self.ASPP_project(device, aspp_concat, shape)
 
-        logger.debug("finished with ttnn imp")
-
-        return output
+        return out

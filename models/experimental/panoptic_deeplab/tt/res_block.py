@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-from loguru import logger
 from models.experimental.panoptic_deeplab.tt.common import TTConv2D, TTUpsample
 from dataclasses import dataclass
 from typing import Dict, Any
@@ -142,8 +141,8 @@ class TTRes:
         model_config,
         layer_optimisations=res_layer_optimisations["default"],
     ) -> None:
-        # conv1_upsample
-        self.conv1_upsample = TTUpsample(
+        # upsample
+        self.upsample = TTUpsample(
             scale_factor=(2),
             mode="bilinear",
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
@@ -195,23 +194,16 @@ class TTRes:
         upsample_channels,
         device,
     ):
-        # Decoder: upsample and fuse with res3
-        logger.debug("Running upsample after ASPP project")
         shape = [self.shape[-4], self.shape[-3] // 2, self.shape[-2] // 2, upsample_channels]
 
-        output = self.conv1_upsample(device, x, shape, sent_to_dram=True, reshape_output=True)
+        output = self.upsample(device, x, shape, sent_to_dram=True, reshape_output=True)
 
-        logger.debug("Running conv1")
         output_res, shape = self.conv1(device, res, self.shape)
 
-        logger.debug("Running concat for res and ASPP upsampled")
         output = ttnn.concat([output_res, output], dim=3)
 
-        logger.debug("Running conv2")
         shape = (self.shape[-4], self.shape[-3], self.shape[-2], upsample_channels + shape[-1])
         output, shape = self.conv2(device, output, shape)
-
-        logger.debug("Running conv3")
 
         output, shape = self.conv3(device, output, shape)
         return output

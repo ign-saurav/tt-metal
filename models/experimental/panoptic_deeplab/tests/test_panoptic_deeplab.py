@@ -13,12 +13,6 @@ from models.experimental.panoptic_deeplab.tt.panoptic_deeplab import TTPanopticD
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from ttnn.model_preprocessing import infer_ttnn_module_args, preprocess_model_parameters
 
-model_config = {
-    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
-    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
-    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
-}
-
 
 class PanopticDeepLabTestInfra:
     def __init__(
@@ -62,41 +56,41 @@ class PanopticDeepLabTestInfra:
         )
 
         parameters.conv_args = {}
-        sample_x = torch.randn(1, 2048, 32, 64)
-        sample_res3 = torch.randn(1, 512, 64, 128)
-        sample_res2 = torch.randn(1, 256, 128, 256)
+        input_tensor = torch.randn(1, 2048, 32, 64)
+        res3_tensor = torch.randn(1, 512, 64, 128)
+        res2_tensor = torch.randn(1, 256, 128, 256)
 
         # For semantic decoder
         if hasattr(parameters, "semantic_decoder"):
             # ASPP
             aspp_args = infer_ttnn_module_args(
-                model=torch_model.semantic_decoder.aspp, run_model=lambda model: model(sample_x), device=None
+                model=torch_model.semantic_decoder.aspp, run_model=lambda model: model(input_tensor), device=None
             )
             if hasattr(parameters.semantic_decoder, "aspp"):
                 parameters.semantic_decoder.aspp.conv_args = aspp_args
 
             # Res3
-            aspp_out = torch_model.semantic_decoder.aspp(sample_x)
+            aspp_out = torch_model.semantic_decoder.aspp(input_tensor)
             res3_args = infer_ttnn_module_args(
                 model=torch_model.semantic_decoder.res3,
-                run_model=lambda model: model(aspp_out, sample_res3),
+                run_model=lambda model: model(aspp_out, res3_tensor),
                 device=None,
             )
             if hasattr(parameters.semantic_decoder, "res3"):
                 parameters.semantic_decoder.res3.conv_args = res3_args
 
             # Res2
-            res3_out = torch_model.semantic_decoder.res3(aspp_out, sample_res3)
+            res3_out = torch_model.semantic_decoder.res3(aspp_out, res3_tensor)
             res2_args = infer_ttnn_module_args(
                 model=torch_model.semantic_decoder.res2,
-                run_model=lambda model: model(res3_out, sample_res2),
+                run_model=lambda model: model(res3_out, res2_tensor),
                 device=None,
             )
             if hasattr(parameters.semantic_decoder, "res2"):
                 parameters.semantic_decoder.res2.conv_args = res2_args
 
             # Head
-            res2_out = torch_model.semantic_decoder.res2(res3_out, sample_res2)
+            res2_out = torch_model.semantic_decoder.res2(res3_out, res2_tensor)
             head_args = infer_ttnn_module_args(
                 model=torch_model.semantic_decoder.head_1, run_model=lambda model: model(res2_out), device=None
             )
@@ -107,33 +101,33 @@ class PanopticDeepLabTestInfra:
         if hasattr(parameters, "instance_decoder"):
             # ASPP
             aspp_args = infer_ttnn_module_args(
-                model=torch_model.instance_decoder.aspp, run_model=lambda model: model(sample_x), device=None
+                model=torch_model.instance_decoder.aspp, run_model=lambda model: model(input_tensor), device=None
             )
             if hasattr(parameters.instance_decoder, "aspp"):
                 parameters.instance_decoder.aspp.conv_args = aspp_args
 
             # Res3
-            aspp_out = torch_model.instance_decoder.aspp(sample_x)
+            aspp_out = torch_model.instance_decoder.aspp(input_tensor)
             res3_args = infer_ttnn_module_args(
                 model=torch_model.instance_decoder.res3,
-                run_model=lambda model: model(aspp_out, sample_res3),
+                run_model=lambda model: model(aspp_out, res3_tensor),
                 device=None,
             )
             if hasattr(parameters.instance_decoder, "res3"):
                 parameters.instance_decoder.res3.conv_args = res3_args
 
             # Res2
-            res3_out = torch_model.instance_decoder.res3(aspp_out, sample_res3)
+            res3_out = torch_model.instance_decoder.res3(aspp_out, res3_tensor)
             res2_args = infer_ttnn_module_args(
                 model=torch_model.instance_decoder.res2,
-                run_model=lambda model: model(res3_out, sample_res2),
+                run_model=lambda model: model(res3_out, res2_tensor),
                 device=None,
             )
             if hasattr(parameters.instance_decoder, "res2"):
                 parameters.instance_decoder.res2.conv_args = res2_args
 
             # Head
-            res2_out = torch_model.instance_decoder.res2(res3_out, sample_res2)
+            res2_out = torch_model.instance_decoder.res2(res3_out, res2_tensor)
             head_args_1 = infer_ttnn_module_args(
                 model=torch_model.instance_decoder.head_1, run_model=lambda model: model(res2_out), device=None
             )
@@ -256,6 +250,13 @@ class PanopticDeepLabTestInfra:
         )
 
         return self.pcc_passed, self.pcc_message
+
+
+model_config = {
+    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
+    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
+    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
+}
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)

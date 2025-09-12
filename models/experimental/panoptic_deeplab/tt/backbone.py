@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-from loguru import logger
-
 import ttnn
 from typing import List, Optional
 from models.experimental.panoptic_deeplab.tt.bottleneck import TTBottleneck, bottleneck_layer_optimisations
@@ -106,12 +104,10 @@ class TTBackbone:
         return layers
 
     def __call__(self, x, device):
-        logger.debug(f"Running RN52_backbone Stem")
         x = self.stem(x, device)
         shape = x.shape
 
-        logger.debug(f"Running RN52_backbone Layer1")
-        for index, block in enumerate(self.layer1):
+        for block in self.layer1:
             x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
             x = ttnn.reallocate(x)
             x, shape = block(x, device, shape)
@@ -119,8 +115,7 @@ class TTBackbone:
         res_2 = x
         res_2 = ttnn.to_memory_config(res_2, ttnn.DRAM_MEMORY_CONFIG)
 
-        logger.debug(f"Running RN52_backbone Layer2")
-        for index, block in enumerate(self.layer2):
+        for block in self.layer2:
             if self.reshard_block_inputs:
                 x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
             x = ttnn.reallocate(x)
@@ -129,8 +124,7 @@ class TTBackbone:
         res_3 = x
         res_3 = ttnn.to_memory_config(res_3, ttnn.DRAM_MEMORY_CONFIG)
 
-        logger.debug(f"Running RN52_backbone Layer3")
-        for index, block in enumerate(self.layer3):
+        for block in self.layer3:
             x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
             x = ttnn.reallocate(x)
             x, shape = block(x, device, shape)
@@ -138,8 +132,7 @@ class TTBackbone:
         res_4 = x
         res_4 = ttnn.to_memory_config(res_4, ttnn.DRAM_MEMORY_CONFIG)
 
-        logger.debug(f"Running RN52_backbone Layer4")
-        for index, block in enumerate(self.layer4):
+        for block in self.layer4:
             x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
             x = ttnn.reallocate(x)
             x, shape = block(x, device, shape)

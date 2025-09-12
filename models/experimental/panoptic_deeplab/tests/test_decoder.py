@@ -17,14 +17,8 @@ from models.experimental.panoptic_deeplab.reference.decoder import (
     DecoderModel,
 )
 
-model_config = {
-    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
-    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
-    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
-}
 
-
-class HeadTestInfra:
+class DecoderTestInfra:
     def __init__(
         self,
         device,
@@ -75,13 +69,7 @@ class HeadTestInfra:
         )
 
         # torch model
-        torch_model = DecoderModel(
-            self.in_channels,
-            self.res3_intermediate_channels,
-            self.res2_intermediate_channels,
-            self.out_channels,
-            self.name,
-        ).eval()
+        torch_model = DecoderModel(self.name).eval()
 
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
@@ -229,6 +217,13 @@ class HeadTestInfra:
         return self.pcc_passed, self.pcc_message
 
 
+model_config = {
+    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
+    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
+    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
+}
+
+
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
 @pytest.mark.parametrize(
     "batch_size, in_channels, res3_intermediate_channels, res2_intermediate_channels, out_channels, upsample_channels, height, width, name",
@@ -249,7 +244,7 @@ def test_decoder(
     width,
     name,
 ):
-    HeadTestInfra(
+    DecoderTestInfra(
         device,
         batch_size,
         model_config,

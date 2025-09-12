@@ -2,16 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-from loguru import logger
 from models.experimental.panoptic_deeplab.tt.common import TTConv2D, TTUpsample
 from dataclasses import dataclass
 
 
 @dataclass
 class HeadOptimizer:
-    conv1: dict()
-    conv2: dict()
-    conv3: dict()
+    conv1: dict
+    conv2: dict
+    conv3: dict
     shape: tuple
 
 
@@ -53,7 +52,6 @@ head_layer_optimisations = {
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            #  "memory_config": ttnn.DRAM_MEMORY_CONFIG,
         },
         shape=(1, 128, 256, 256),
     ),
@@ -162,17 +160,12 @@ class TTHead:
         device,
     ):
         shape = self.layer_optimisations.shape
-        logger.debug("Running conv1")
 
         out, shape = self.conv1(device, x, shape)
 
-        logger.debug("Running conv2")
         out, shape = self.conv2(device, out, shape)
 
-        logger.debug("Running conv3")
         out, shape = self.conv3(device, out, shape)
-
-        logger.debug("Running final upsample")
 
         out = self.upsample(device, out, shape, reshape_output=False, pad_ch_to_32=True, sent_to_dram=False)
         out = ttnn.to_memory_config(out, ttnn.DRAM_MEMORY_CONFIG)

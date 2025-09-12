@@ -3,10 +3,16 @@
 
 import torch.nn as nn
 import torch
+from torch import Tensor
 
 
-class PanopticDeeplabASPPModel(torch.nn.Module):
-    def __init__(self):
+class ASPPModel(torch.nn.Module):
+    """
+    ASPP MODULE
+    The input and output of `forward()` method must be NCHW tensors.
+    """
+
+    def __init__(self) -> None:
         super().__init__()
         self.ASPP_0_Conv = nn.Sequential(nn.Conv2d(2048, 256, 1, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU())
         self.ASPP_1_Depthwise = nn.Sequential(
@@ -31,7 +37,16 @@ class PanopticDeeplabASPPModel(torch.nn.Module):
         )
         self.ASPP_project = nn.Sequential(nn.Conv2d(1280, 256, 1, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU())
 
-    def forward(self, x):
+    def forward(self, x: Tensor) -> Tensor:
+        """
+        Forward pass of ASPP Module.
+
+        Args:
+            x: Input tensor of shape [N, C, H, W]
+
+        Returns:
+            out: ASPP output
+        """
         t0 = self.ASPP_0_Conv(x)
         t1 = self.ASPP_1_Depthwise(x)
         t2 = self.ASPP_2_Depthwise(x)
@@ -45,7 +60,7 @@ class PanopticDeeplabASPPModel(torch.nn.Module):
         t2 = self.ASPP_2_pointwise(t2)
         t3 = self.ASPP_3_pointwise(t3)
 
-        y = torch.cat((t0, t1, t2, t3, t4), dim=1)
-        y = self.ASPP_project(y)
+        out = torch.cat((t0, t1, t2, t3, t4), dim=1)
+        out = self.ASPP_project(out)
 
-        return y
+        return out

@@ -3,7 +3,7 @@
 
 import torch
 import torch.nn as nn
-from typing import Dict
+from typing import Tuple
 
 from models.experimental.panoptic_deeplab.reference.resnet52_backbone import ResNet52BackBone
 from models.experimental.panoptic_deeplab.reference.decoder import DecoderModel
@@ -17,7 +17,7 @@ class TorchPanopticDeepLab(nn.Module):
 
     def __init__(
         self,
-    ):
+    ) -> None:
         super().__init__()
 
         # Backbone
@@ -25,23 +25,15 @@ class TorchPanopticDeepLab(nn.Module):
 
         # Semantic segmentation decoder
         self.semantic_decoder = DecoderModel(
-            in_channels=2048,
-            res3_intermediate_channels=320,
-            res2_intermediate_channels=288,
-            out_channels=19,
             name="Semantics_head",
         )
 
         # Instance segmentation decoders
         self.instance_decoder = DecoderModel(
-            in_channels=2048,
-            res3_intermediate_channels=320,
-            res2_intermediate_channels=160,
-            out_channels=(2, 1),
             name="instance_head",
         )
 
-    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Forward pass of Panoptic DeepLab.
 
@@ -50,8 +42,8 @@ class TorchPanopticDeepLab(nn.Module):
 
         Returns:
             semantic_logits: Semantic segmentation logits
-            instance_logits: Instance segmentation logits - offset head
-            instance_logits_2: Instance segmentation logits - center head
+            instance_offset_head_logits: Instance segmentation logits - offset head
+            instance_center_head_logits: Instance segmentation logits - center head
         """
 
         # Extract features from backbone
@@ -66,6 +58,8 @@ class TorchPanopticDeepLab(nn.Module):
         semantic_logits, _ = self.semantic_decoder(backbone_features, res3_features, res2_features)
 
         # Instance segmentation branch
-        instance_logits, instance_logits_2 = self.instance_decoder(backbone_features, res3_features, res2_features)
+        instance_offset_head_logits, instance_center_head_logits = self.instance_decoder(
+            backbone_features, res3_features, res2_features
+        )
 
-        return semantic_logits, instance_logits, instance_logits_2
+        return semantic_logits, instance_offset_head_logits, instance_center_head_logits
