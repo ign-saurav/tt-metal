@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-from loguru import logger
 from typing import Dict
 
 from models.experimental.panoptic_deeplab.tt.backbone import TTBackbone
@@ -59,10 +58,7 @@ class TTPanopticDeepLab:
             instance_logit_2: Instance segmentation logits - center head
         """
 
-        logger.debug("Running TT Panoptic DeepLab forward pass")
-
         # Extract features from backbone
-        logger.debug("Running TTBackbone")
         features = self.backbone(x, device)
 
         # Extract the specific feature maps the decoders expect
@@ -74,13 +70,7 @@ class TTPanopticDeepLab:
         res3_feature_instance_decoder = ttnn.clone(res3_features)
         res2_feature_instance_decoder = ttnn.clone(res2_features)
 
-        logger.debug(
-            f"Backbone features shapes - res_5: {backbone_features.shape}, "
-            f"res_3: {res3_features.shape}, res_2: {res2_features.shape}"
-        )
-
         # Semantic segmentation branch
-        logger.debug("Running semantic segmentation decoder")
         semantic_logit, _ = self.semantic_decoder(
             backbone_features,
             res3_features,
@@ -90,9 +80,8 @@ class TTPanopticDeepLab:
         )
 
         # Instance segmentation branch
-        logger.debug("Running instance segmentation decoder")
 
-        instance_logit, instance_logit_2 = self.instance_decoder(
+        instance_offset_head_logit, instance_center_head_logit = self.instance_decoder(
             backbone_feature_instance_decoder,
             res3_feature_instance_decoder,
             res2_feature_instance_decoder,
@@ -100,6 +89,4 @@ class TTPanopticDeepLab:
             device=device,
         )
 
-        logger.debug("TT Panoptic DeepLab forward pass completed")
-
-        return semantic_logit, instance_logit, instance_logit_2
+        return semantic_logit, instance_offset_head_logit, instance_center_head_logit

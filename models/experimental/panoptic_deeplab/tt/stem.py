@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-from loguru import logger
-
 import ttnn
 from models.experimental.panoptic_deeplab.tt.common import TTConv2D
 from dataclasses import dataclass
@@ -10,9 +8,9 @@ from dataclasses import dataclass
 
 @dataclass
 class NeckOptimizer:
-    conv1: dict()
-    conv2: dict()
-    conv3: dict()
+    conv1: dict
+    conv2: dict
+    conv3: dict
 
 
 neck_optimisations = {
@@ -129,13 +127,10 @@ class resnet52Stem:
         device,
     ):
         # conv1 is stride 2 conv 3x3
-        logger.debug(f"Running 3x3 conv1")
         out, shape = self.conv1(device, x, x.shape)
 
         # conv2 and 3 are 3x3 conv's with stride 1
-        logger.debug(f"Running 3x3 conv2")
         out, shape = self.conv2(device, out, shape)
-        logger.debug(f"Running 3x3 conv3")
         out, shape = self.conv3(device, out, shape)
 
         out = ttnn.max_pool2d(

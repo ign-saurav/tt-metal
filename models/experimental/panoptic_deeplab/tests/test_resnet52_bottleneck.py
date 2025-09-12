@@ -7,19 +7,11 @@ from loguru import logger
 from ttnn.model_preprocessing import preprocess_model_parameters
 
 import ttnn
-import tracy
-import time
 
 from tests.ttnn.utils_for_testing import check_with_pcc
 from torchvision.models.resnet import Bottleneck
 from models.experimental.panoptic_deeplab.tt.bottleneck import TTBottleneck, bottleneck_layer_optimisations
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
-
-model_config = {
-    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
-    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
-    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
-}
 
 
 class BottleneckTestInfra:
@@ -39,7 +31,11 @@ class BottleneckTestInfra:
         reduced_dims=False,
     ):
         super().__init__()
-        torch.manual_seed(0)
+        if not hasattr(self, "_model_initialized"):
+            torch.manual_seed(42)  # Only seed once
+            self._model_initialized = True
+            torch.cuda.manual_seed_all(42)
+            torch.backends.cudnn.deterministic = True
         self.pcc_passed = False
         self.pcc_message = "call validate()?"
         self.device = device
@@ -75,15 +71,10 @@ class BottleneckTestInfra:
 
         # golden
         torch_model.to(torch.bfloat16)
-        try:
-            self.torch_input_tensor = torch.load(f"{name}_{input_shape}_input_tensor.pt")
-            self.torch_output_tensor = torch.load(f"{name}_{input_shape}_output_tensor.pt")
-        except:
-            self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float32)
-            self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
-            self.torch_output_tensor = torch_model(self.torch_input_tensor)
-            torch.save(self.torch_input_tensor, f"{name}_{input_shape}_input_tensor.pt")
-            torch.save(self.torch_output_tensor, f"{name}_{input_shape}_output_tensor.pt")
+
+        self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float32)
+        self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
+        self.torch_output_tensor = torch_model(self.torch_input_tensor)
 
         # ttnn
         tt_host_tensor = ttnn.from_torch(
@@ -103,23 +94,14 @@ class BottleneckTestInfra:
         )
 
         # First run configures convs JIT
-        tracy.signpost(f"{name}_{input_shape}_compile")
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
         self.run()
         self.validate()
 
         # Optimized run
-        tracy.signpost(f"{name}_{input_shape}_perf")
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
-        t0 = time.time()
         self.run()
-        t1 = time.time()
         self.validate()
-
-        inference_time_avg = round((t1 - t0), 6)
-        logger.info(
-            f"Model: ttnn_bottleneck - batch_size: {batch_size}. One inference iteration time (sec): {inference_time_avg}, FPS: {round((batch_size) / inference_time_avg)}"
-        )
 
     def get_mesh_mappers(self, device):
         if device.get_num_devices() != 1:
@@ -165,6 +147,13 @@ class BottleneckTestInfra:
         )
 
         return self.pcc_passed, self.pcc_message
+
+
+model_config = {
+    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
+    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
+    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
+}
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)

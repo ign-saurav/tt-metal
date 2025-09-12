@@ -17,7 +17,6 @@ class ResNet52BackBone(nn.Module):
         width_per_group: int = 64,
         dialate_layer_config: Optional[List[List[int]]] = None,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
-        out_features: Optional[List[str]] = None,
     ) -> None:
         super().__init__()
 

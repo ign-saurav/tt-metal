@@ -3,7 +3,6 @@
 
 import pytest
 import torch
-import tracy
 from loguru import logger
 from ttnn.model_preprocessing import preprocess_model_parameters
 import ttnn
@@ -22,7 +21,11 @@ model_config = {
 class Resnet52StemTestInfra:
     def __init__(self, device, batch_size, inplanes, planes, height, width, stride, model_config):
         super().__init__()
-        torch.manual_seed(0)
+        if not hasattr(self, "_model_initialized"):
+            torch.manual_seed(42)  # Only seed once
+            self._model_initialized = True
+            torch.cuda.manual_seed_all(42)
+            torch.backends.cudnn.deterministic = True
         self.pcc_passed = False
         self.pcc_message = "call validate()?"
         self.device = device
@@ -47,15 +50,9 @@ class Resnet52StemTestInfra:
 
         # golden
         torch_model.to(torch.bfloat16)
-        try:
-            self.torch_input_tensor = torch.load(f"stem_{input_shape}_input_tensor.pt")
-            self.torch_output_tensor = torch.load(f"stem_{input_shape}_output_tensor.pt")
-        except:
-            self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float32)
-            self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
-            self.torch_output_tensor = torch_model(self.torch_input_tensor)
-            torch.save(self.torch_input_tensor, f"stem_{input_shape}_input_tensor.pt")
-            torch.save(self.torch_output_tensor, f"stem_{input_shape}_output_tensor.pt")
+        self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float32)
+        self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
+        self.torch_output_tensor = torch_model(self.torch_input_tensor)
 
         # ttnn
         tt_host_tensor = ttnn.from_torch(
@@ -76,13 +73,11 @@ class Resnet52StemTestInfra:
         )
 
         # First run configures convs JIT
-        tracy.signpost(f"Stem_{input_shape}_compile")
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
         self.run()
         self.validate()
 
         # Optimized run
-        tracy.signpost(f"Stem_{input_shape}_perf")
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
         self.run()
         self.validate()

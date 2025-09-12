@@ -17,12 +17,6 @@ from models.experimental.panoptic_deeplab.reference.head import (
     HeadModel,
 )
 
-model_config = {
-    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
-    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
-    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
-}
-
 
 class HeadTestInfra:
     def __init__(
@@ -134,6 +128,13 @@ class HeadTestInfra:
         )
 
         return self.pcc_passed, self.pcc_message
+
+
+model_config = {
+    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
+    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
+    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
+}
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)

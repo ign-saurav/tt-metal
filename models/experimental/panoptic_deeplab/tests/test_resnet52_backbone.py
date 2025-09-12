@@ -12,12 +12,6 @@ from models.experimental.panoptic_deeplab.reference.resnet52_backbone import Res
 from models.experimental.panoptic_deeplab.tt.backbone import TTBackbone
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 
-model_config = {
-    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
-    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
-    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
-}
-
 
 class BackboneTestInfra:
     def __init__(
@@ -30,7 +24,11 @@ class BackboneTestInfra:
         model_config,
     ):
         super().__init__()
-        torch.manual_seed(0)
+        if not hasattr(self, "_model_initialized"):
+            torch.manual_seed(42)  # Only seed once
+            self._model_initialized = True
+            torch.cuda.manual_seed_all(42)
+            torch.backends.cudnn.deterministic = True
         self.pcc_passed = False
         self.pcc_message = "call validate()?"
         self.device = device
@@ -50,15 +48,10 @@ class BackboneTestInfra:
 
         # golden
         torch_model.to(torch.bfloat16)
-        try:
-            self.torch_input_tensor = torch.load(f"backbone_{input_shape}_input_tensor.pt")
-            self.torch_output_tensor = torch.load(f"backbone_{input_shape}_output_tensor.pt")
-        except:
-            self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float32)
-            self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
-            self.torch_output_tensor = torch_model(self.torch_input_tensor)
-            torch.save(self.torch_input_tensor, f"backbone_{input_shape}_input_tensor.pt")
-            torch.save(self.torch_output_tensor, f"backbone_{input_shape}_output_tensor.pt")
+
+        self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float32)
+        self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
+        self.torch_output_tensor = torch_model(self.torch_input_tensor)
 
         tt_host_tensor = ttnn.from_torch(
             self.torch_input_tensor.permute(0, 2, 3, 1),
@@ -87,7 +80,7 @@ class BackboneTestInfra:
     def get_mesh_mappers(self, device):
         if device.get_num_devices() != 1:
             inputs_mesh_mapper = ttnn.ShardTensorToMesh(device, dim=0)
-            weights_mesh_mapper = None  # ttnn.ReplicateTensorToMesh(device) causes unnecessary replication/takes more time on the first pass
+            weights_mesh_mapper = None
             output_mesh_composer = ttnn.ConcatMeshToTensor(device, dim=0)
         else:
             inputs_mesh_mapper = None
@@ -127,6 +120,13 @@ class BackboneTestInfra:
         )
 
         return self.pcc_passed, self.pcc_message
+
+
+model_config = {
+    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
+    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
+    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
+}
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
