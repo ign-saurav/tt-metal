@@ -69,7 +69,7 @@ def test_upsample(device, scale, num_feat, batch_size, input_size):
 
     # Convert input to TTNN format (NHWC)
     ttnn_input = torch.permute(torch_input, (0, 2, 3, 1))
-    ttnn_input = ttnn.from_torch(ttnn_input, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_input = ttnn.from_torch(ttnn_input, dtype=ttnn.bfloat8_b, layout=ttnn.TILE_LAYOUT, device=device)
 
     # Create TTNN model and run inference
     ttnn_model = TTUpsample(scale, num_feat, device)

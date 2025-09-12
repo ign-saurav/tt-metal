@@ -48,6 +48,7 @@ def create_mlp_preprocessor(device):
         (384, 1536, 384, (3, 1024, 384)),  # TTSwinTransformerBlock[4], TTSwinTransformerBlock[5] -> mlp
         (768, 3072, 768, (3, 256, 768)),  # TTSwinTransformerBlock[6], TTSwinTransformerBlock[7] -> mlp
         (1536, 6144, 1536, (3, 64, 1536)),  # TTSwinTransformerBlock[6], TTSwinTransformerBlock[7] -> mlp
+        (180, 360, None, (1, 4096, 180)),  # TR
     ),
 )
 def test_mlp(device, in_features, hidden_features, out_features, input_shape):
@@ -72,14 +73,14 @@ def test_mlp(device, in_features, hidden_features, out_features, input_shape):
         out_features=out_features,
         parameters=parameters,
     )
-    tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+    tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
     tt_input = ttnn.to_memory_config(tt_input, memory_config=ttnn.L1_MEMORY_CONFIG)
     tt_output = tt_layer(tt_input)
     tt_torch_output = tt2torch_tensor(tt_output)
 
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
 
-    logger.info(pcc_message)
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("SSR MLP Passed!")

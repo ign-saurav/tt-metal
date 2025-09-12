@@ -117,7 +117,7 @@ def test_atten_blocks(device, batch_size, height, width, dim, num_heads, window_
     )
 
     # Convert inputs to TTNN format
-    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
 
     tt_rpi_sa = ttnn.from_torch(rpi_sa, device=device, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.uint32)
 

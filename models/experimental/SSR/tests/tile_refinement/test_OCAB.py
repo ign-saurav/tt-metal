@@ -141,7 +141,7 @@ def test_ocab(device, dim, input_resolution, window_size, overlap_ratio, num_hea
     )
 
     tt_input = ttnn.from_torch(
-        x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=ttnn.L1_MEMORY_CONFIG
+        x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, memory_config=ttnn.L1_MEMORY_CONFIG
     )
     tt_rpi = ttnn.from_torch(rpi, device=device, layout=ttnn.TILE_LAYOUT)
     tt_output = tt_layer.forward(tt_input, x_size, tt_rpi)

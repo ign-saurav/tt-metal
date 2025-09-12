@@ -211,7 +211,7 @@ def test_tile_refinement(
         )
 
         # Convert input to TTNN tensor
-        tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT)
+        tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
 
         # Run TTNN model
         tt_output, tt_features = tt_model(tt_input)

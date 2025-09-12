@@ -159,7 +159,7 @@ def test_channel_attention(device, batch_size, num_feat, height, width, squeeze_
         input_tensor.permute(0, 2, 3, 1),
         device=device,
         layout=ttnn.TILE_LAYOUT,
-        dtype=ttnn.bfloat16,
+        dtype=ttnn.bfloat8_b,
         memory_config=memory_config,
     )
 

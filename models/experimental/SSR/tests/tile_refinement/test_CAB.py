@@ -87,7 +87,7 @@ def test_cab_block(device, batch_size, num_feat, height, width, compress_ratio, 
         input_tensor.permute(0, 2, 3, 1),
         device=device,
         layout=ttnn.TILE_LAYOUT,
-        dtype=ttnn.bfloat16,
+        dtype=ttnn.bfloat8_b,
         memory_config=memory_config,
     )
 

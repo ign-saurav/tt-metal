@@ -108,7 +108,7 @@ def test_window_attention(device, batch_size, num_windows, window_size, dim, num
 
     # Convert inputs to TTNN format
     tt_input = ttnn.from_torch(
-        input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=memory_config
+        input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, memory_config=memory_config
     )
 
     tt_rpi = ttnn.from_torch(rpi, device=device, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.uint32)

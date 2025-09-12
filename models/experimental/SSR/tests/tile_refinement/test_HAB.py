@@ -150,7 +150,7 @@ def test_hab_block(device, batch_size, height, width, dim, num_heads, window_siz
 
     # Convert inputs to TTNN format
     tt_input = ttnn.from_torch(
-        input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, memory_config=memory_config
+        input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, memory_config=memory_config
     )
 
     tt_rpi = ttnn.from_torch(
