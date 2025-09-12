@@ -10,10 +10,11 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
 from models.experimental.panoptic_deeplab.tt.stem import resnet52Stem, neck_optimisations
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
+from models.experimental.panoptic_deeplab.common import load_torch_model_state
 
 
 class Resnet52StemTestInfra:
-    def __init__(self, device, batch_size, inplanes, planes, height, width, stride, model_config):
+    def __init__(self, device, batch_size, inplanes, planes, height, width, stride, model_config, name):
         super().__init__()
         if not hasattr(self, "_model_initialized"):
             torch.manual_seed(42)  # Only seed once
@@ -26,13 +27,15 @@ class Resnet52StemTestInfra:
         self.num_devices = device.get_num_devices()
         self.batch_size = batch_size
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
+        self.name = name
 
         # torch model
         torch_model = DeepLabStem(
             in_channels=inplanes,
             out_channels=planes,
             stride=stride,
-        ).eval()
+        )
+        torch_model = load_torch_model_state(torch_model, name)
 
         input_shape = (batch_size * self.num_devices, inplanes, height, width)
 
@@ -43,9 +46,7 @@ class Resnet52StemTestInfra:
         )
 
         # golden
-        torch_model.to(torch.bfloat16)
-        self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float32)
-        self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
+        self.torch_input_tensor = torch.randn(input_shape, dtype=torch.float)
         self.torch_output_tensor = torch_model(self.torch_input_tensor)
 
         # ttnn
@@ -99,7 +100,10 @@ class Resnet52StemTestInfra:
         tt_output_tensor_torch = ttnn.to_torch(
             tt_output_tensor, device=self.device, mesh_composer=self.output_mesh_composer
         )
+
+        # Deallocate output tesnors
         ttnn.deallocate(tt_output_tensor)
+
         expected_shape = self.torch_output_tensor.shape
         tt_output_tensor_torch = torch.reshape(
             tt_output_tensor_torch, (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1])
@@ -130,8 +134,8 @@ model_config = {
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
 @pytest.mark.parametrize(
-    "batch_size, inplanes, planes, height, width, stride",
-    ((1, 3, 128, 512, 1024, 1),),
+    "batch_size, inplanes, planes, height, width, stride, name",
+    ((1, 3, 128, 512, 1024, 1, "stem"),),
 )
 def test_stem(
     device,
@@ -141,6 +145,7 @@ def test_stem(
     height,
     width,
     stride,
+    name,
 ):
     Resnet52StemTestInfra(
         device,
@@ -151,4 +156,5 @@ def test_stem(
         width,
         stride,
         model_config,
+        name,
     )

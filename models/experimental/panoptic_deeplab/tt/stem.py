@@ -25,6 +25,7 @@ neck_optimisations = {
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
             "slice_config": ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dSliceHeight, num_slices=4),
+            "dtype": ttnn.bfloat16,
         },
         conv2={
             "act_block_h": 128,
@@ -36,6 +37,7 @@ neck_optimisations = {
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
             "slice_config": ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dSliceHeight, num_slices=4),
+            "dtype": ttnn.bfloat16,
         },
         conv3={
             "act_block_h": 32,
@@ -47,6 +49,7 @@ neck_optimisations = {
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
             "slice_config": ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dSliceHeight, num_slices=4),
+            "dtype": ttnn.bfloat16,
         },
     ),
     "optimization_small_tensor": NeckOptimizer(
@@ -59,6 +62,7 @@ neck_optimisations = {
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
             "slice_config": ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dSliceHeight, num_slices=2),
+            "dtype": ttnn.bfloat16,
         },
         conv2={
             "act_block_h": 512,
@@ -69,6 +73,7 @@ neck_optimisations = {
             "enable_split_reader": True,
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
+            "dtype": ttnn.bfloat16,
         },
         conv3={
             "act_block_h": 128,
@@ -80,6 +85,7 @@ neck_optimisations = {
             "enable_split_reader": True,
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
+            "dtype": ttnn.bfloat16,
         },
     ),
 }

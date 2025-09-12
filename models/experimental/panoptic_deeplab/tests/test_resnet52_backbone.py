@@ -10,6 +10,7 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.panoptic_deeplab.reference.resnet52_backbone import ResNet52BackBone as TorchBackbone
 from models.experimental.panoptic_deeplab.tt.backbone import TTBackbone
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
+from models.experimental.panoptic_deeplab.common import load_torch_model_state
 
 
 class BackboneTestInfra:
@@ -21,6 +22,7 @@ class BackboneTestInfra:
         height,
         width,
         model_config,
+        name,
     ):
         super().__init__()
         if not hasattr(self, "_model_initialized"):
@@ -33,11 +35,14 @@ class BackboneTestInfra:
         self.device = device
         self.num_devices = device.get_num_devices()
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
+        self.name = name
+        self.batch_size = batch_size * self.num_devices
 
         # torch model
-        torch_model = TorchBackbone().eval()
+        torch_model = TorchBackbone()
+        torch_model = load_torch_model_state(torch_model, name)
 
-        input_shape = (batch_size * self.num_devices, in_channels, height, width)
+        input_shape = (self.batch_size, in_channels, height, width)
 
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
@@ -46,11 +51,8 @@ class BackboneTestInfra:
         )
 
         # golden
-        torch_model.to(torch.bfloat16)
-
-        self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float32)
-        self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
-        self.torch_output_tensor = torch_model(self.torch_input_tensor)
+        self.torch_input_tensor = torch.randn(input_shape, dtype=torch.float)
+        self.torch_output = torch_model(self.torch_input_tensor)
 
         tt_host_tensor = ttnn.from_torch(
             self.torch_input_tensor.permute(0, 2, 3, 1),
@@ -93,30 +95,43 @@ class BackboneTestInfra:
         return self.output_tensor
 
     def validate(self, output_tensor=None):
-        tt_output_tensor = self.output_tensor["res_5"] if output_tensor is None else output_tensor
-        tt_output_tensor_torch = ttnn.to_torch(
-            tt_output_tensor, device=self.device, mesh_composer=self.output_mesh_composer
-        )
-        ttnn.deallocate(tt_output_tensor)
-        expected_shape = self.torch_output_tensor["res_5"].shape
-        tt_output_tensor_torch = torch.reshape(
-            tt_output_tensor_torch, (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1])
-        )
-        tt_output_tensor_torch = torch.permute(tt_output_tensor_torch, (0, 3, 1, 2))
+        tt_output = self.output_tensor if output_tensor is None else output_tensor
+        valid_pcc = {
+            "res_2": 0.99,
+            "res_3": 0.99,
+            "res_4": 0.99,
+            "res_5": 0.98,
+        }
+        self.pcc_passed_all = []
+        self.pcc_message_all = []
 
-        batch_size = tt_output_tensor_torch.shape[0]
+        for key in tt_output:
+            tt_output_tensor_torch = ttnn.to_torch(
+                tt_output[key],
+                dtype=self.torch_output[key].dtype,
+                device=self.device,
+                mesh_composer=self.output_mesh_composer,
+            )
 
-        valid_pcc = 0.97
-        self.pcc_passed, self.pcc_message = check_with_pcc(
-            self.torch_output_tensor["res_5"], tt_output_tensor_torch, pcc=valid_pcc
-        )
+            # Deallocate output tesnors
+            ttnn.deallocate(tt_output[key])
 
-        assert self.pcc_passed, logger.error(f"PCC check failed: {self.pcc_message}")
+            expected_shape = self.torch_output[key].shape
+            tt_output_tensor_torch = torch.reshape(
+                tt_output_tensor_torch, (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1])
+            )
+            tt_output_tensor_torch = torch.permute(tt_output_tensor_torch, (0, 3, 1, 2))
+
+            pcc_passed, pcc_message = check_with_pcc(self.torch_output[key], tt_output_tensor_torch, pcc=valid_pcc[key])
+            self.pcc_passed_all.append(pcc_passed)
+            self.pcc_message_all.append(pcc_message)
+
+        assert all(self.pcc_passed_all), logger.error(f"PCC check failed: {self.pcc_message_all}")
         logger.info(
-            f"ResNet52 Backbone batch_size={batch_size}, act_dtype={model_config['ACTIVATIONS_DTYPE']}, weight_dtype={model_config['WEIGHTS_DTYPE']}, math_fidelity={model_config['MATH_FIDELITY']}, PCC={self.pcc_message}"
+            f"ResNet52 Backbone batch_size={self.batch_size}, act_dtype={model_config['ACTIVATIONS_DTYPE']}, weight_dtype={model_config['WEIGHTS_DTYPE']}, math_fidelity={model_config['MATH_FIDELITY']}, PCC={self.pcc_message_all}"
         )
 
-        return self.pcc_passed, self.pcc_message
+        return self.pcc_passed_all, self.pcc_message_all
 
 
 model_config = {
@@ -126,11 +141,11 @@ model_config = {
 }
 
 
-@pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
 @pytest.mark.parametrize(
-    "batch_size, in_channels, height, width",
+    "batch_size, in_channels, height, width, name",
     [
-        (1, 3, 512, 1024),
+        (1, 3, 512, 1024, "backbone"),
     ],
 )
 def test_backbone(
@@ -139,6 +154,7 @@ def test_backbone(
     in_channels,
     height,
     width,
+    name,
 ):
     BackboneTestInfra(
         device,
@@ -147,4 +163,5 @@ def test_backbone(
         height,
         width,
         model_config,
+        name,
     )

@@ -78,6 +78,7 @@ class DeepLabStem(CNNBlockBase):
             kernel_size=3,
             stride=2,
             padding=1,
+            bias=False,
         )
         self.bn1 = nn.BatchNorm2d(out_channels // 2)
         self.conv2 = nn.Conv2d(
@@ -86,6 +87,7 @@ class DeepLabStem(CNNBlockBase):
             kernel_size=3,
             stride=stride,
             padding=1,
+            bias=False,
         )
         self.bn2 = nn.BatchNorm2d(out_channels // 2)
         self.conv3 = nn.Conv2d(
@@ -94,6 +96,7 @@ class DeepLabStem(CNNBlockBase):
             kernel_size=3,
             stride=stride,
             padding=1,
+            bias=False,
         )
         self.bn3 = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
