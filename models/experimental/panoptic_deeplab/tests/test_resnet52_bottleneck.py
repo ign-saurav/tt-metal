@@ -12,6 +12,7 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from torchvision.models.resnet import Bottleneck
 from models.experimental.panoptic_deeplab.tt.bottleneck import TTBottleneck, bottleneck_layer_optimisations
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
+from models.experimental.panoptic_deeplab.common import load_torch_model_state
 
 
 class BottleneckTestInfra:
@@ -28,7 +29,6 @@ class BottleneckTestInfra:
         downsample,
         name,
         model_config,
-        reduced_dims=False,
     ):
         super().__init__()
         if not hasattr(self, "_model_initialized"):
@@ -56,12 +56,10 @@ class BottleneckTestInfra:
         # torch model
         torch_model = Bottleneck(
             inplanes=inplanes, planes=planes, stride=stride, dilation=dilation, downsample=downsample_conv
-        ).eval()
+        )
+        torch_model = load_torch_model_state(torch_model, name)
 
-        if reduced_dims:
-            input_shape = (batch_size * self.num_devices, inplanes, height // 2, width // 2)
-        else:
-            input_shape = (batch_size * self.num_devices, inplanes, height, width)
+        input_shape = (batch_size * self.num_devices, inplanes, height, width)
 
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
@@ -70,16 +68,13 @@ class BottleneckTestInfra:
         )
 
         # golden
-        torch_model.to(torch.bfloat16)
-
-        self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float32)
-        self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
+        self.torch_input_tensor = torch.randn(input_shape, dtype=torch.float)
         self.torch_output_tensor = torch_model(self.torch_input_tensor)
 
-        # ttnn
+        ## ttnn
         tt_host_tensor = ttnn.from_torch(
             self.torch_input_tensor.permute(0, 2, 3, 1),
-            dtype=ttnn.bfloat8_b,
+            dtype=ttnn.bfloat16,
             mesh_mapper=self.inputs_mesh_mapper,
         )
 
@@ -90,7 +85,7 @@ class BottleneckTestInfra:
             model_config=model_config,
             dilation=dilation,
             name=name,
-            layer_optimisations=bottleneck_layer_optimisations[name[:7]],
+            layer_optimisations=bottleneck_layer_optimisations[name[:6]],
         )
 
         # First run configures convs JIT
@@ -127,7 +122,10 @@ class BottleneckTestInfra:
         tt_output_tensor_torch = ttnn.to_torch(
             tt_output_tensor, device=self.device, mesh_composer=self.output_mesh_composer
         )
+
+        # Deallocate output tesnors
         ttnn.deallocate(tt_output_tensor)
+
         expected_shape = self.torch_output_tensor.shape
         tt_output_tensor_torch = torch.reshape(
             tt_output_tensor_torch, (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1])
@@ -136,7 +134,7 @@ class BottleneckTestInfra:
 
         batch_size = tt_output_tensor_torch.shape[0]
 
-        valid_pcc = 0.97
+        valid_pcc = 0.99
         self.pcc_passed, self.pcc_message = check_with_pcc(
             self.torch_output_tensor, tt_output_tensor_torch, pcc=valid_pcc
         )
@@ -161,18 +159,18 @@ model_config = {
     "batch_size, inplanes, planes, height, width, stride, dilation, downsample, name",
     (
         # Layer 1
-        (1, 128, 64, 256, 512, 1, 1, True, "layer_1_d"),
-        (1, 256, 64, 256, 512, 1, 1, False, "layer_1_nd"),
+        (1, 128, 64, 128, 256, 1, 1, True, "layer1.0"),
+        (1, 256, 64, 128, 256, 1, 1, False, "layer1.1"),
         # Layer 2
-        (1, 256, 128, 256, 512, 2, 1, True, "layer_2_d"),
-        (1, 512, 128, 128, 256, 1, 1, False, "layer_2_nd"),
+        (1, 256, 128, 128, 256, 2, 1, True, "layer2.0"),
+        (1, 512, 128, 64, 128, 1, 1, False, "layer2.1"),
         # Layer 3
-        (1, 512, 256, 128, 256, 2, 1, True, "layer_3_d"),
-        (1, 1024, 256, 64, 128, 1, 1, False, "layer_3_nd"),
+        (1, 512, 256, 64, 128, 2, 1, True, "layer3.0"),
+        (1, 1024, 256, 32, 64, 1, 1, False, "layer3.1"),
         # Layer 4
-        (1, 1024, 512, 64, 128, 1, 2, True, "layer_4_d"),
-        (1, 2048, 512, 64, 128, 1, 4, False, "layer_4_nd_1"),
-        (1, 2048, 512, 64, 128, 1, 8, False, "layer_4_nd_2"),
+        (1, 1024, 512, 32, 64, 1, 2, True, "layer4.0"),
+        (1, 2048, 512, 32, 64, 1, 4, False, "layer4.1"),
+        (1, 2048, 512, 32, 64, 1, 8, False, "layer4.2"),
     ),
 )
 def test_bottleneck(device, batch_size, inplanes, planes, height, width, stride, dilation, downsample, name):
@@ -188,5 +186,4 @@ def test_bottleneck(device, batch_size, inplanes, planes, height, width, stride,
         downsample,
         name,
         model_config,
-        reduced_dims=True,
     )
