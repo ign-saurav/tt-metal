@@ -25,8 +25,8 @@ decoder_layer_optimisations = {
     ),
     "semantics_head": DecoderOptimizer(
         res_layer_optimisations={
-            "res3": res_layer_optimisations["semantics_Res3"],
-            "res2": res_layer_optimisations["semantics_Res2"],
+            "res3": res_layer_optimisations["semantics_res3"],
+            "res2": res_layer_optimisations["semantics_res2"],
         },
         head_layer_optimisations={
             "head_1": head_layer_optimisations["semantic_head"],
@@ -35,8 +35,8 @@ decoder_layer_optimisations = {
     ),
     "instance_head": DecoderOptimizer(
         res_layer_optimisations={
-            "res3": res_layer_optimisations["instance_Res3"],
-            "res2": res_layer_optimisations["instance_Res2"],
+            "res3": res_layer_optimisations["instance_res3"],
+            "res2": res_layer_optimisations["instance_res2"],
         },
         head_layer_optimisations={
             "head_1": head_layer_optimisations["instance_offset_head"],

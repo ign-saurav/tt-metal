@@ -30,7 +30,7 @@ res_layer_optimisations = {
         },
         shape=(0, 0, 0, 0),
     ),
-    "instance_Res3": ResOptimizer(
+    "instance_res3": ResOptimizer(
         conv1={
             "memory_config": ttnn.L1_MEMORY_CONFIG,
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
@@ -55,7 +55,7 @@ res_layer_optimisations = {
         },
         shape=(1, 64, 128, 512),
     ),
-    "instance_Res2": ResOptimizer(
+    "instance_res2": ResOptimizer(
         conv1={
             "act_block_h": 128,
             "memory_config": ttnn.DRAM_MEMORY_CONFIG,
@@ -80,7 +80,7 @@ res_layer_optimisations = {
         },
         shape=(1, 128, 256, 256),
     ),
-    "semantics_Res3": ResOptimizer(
+    "semantics_res3": ResOptimizer(
         conv1={
             "act_block_h": 32,
             "memory_config": ttnn.L1_MEMORY_CONFIG,
@@ -106,7 +106,7 @@ res_layer_optimisations = {
         },
         shape=(1, 64, 128, 512),
     ),
-    "semantics_Res2": ResOptimizer(
+    "semantics_res2": ResOptimizer(
         conv1={
             "act_block_h": 32,
             "memory_config": ttnn.L1_MEMORY_CONFIG,
@@ -196,14 +196,14 @@ class TTRes:
     ):
         shape = [self.shape[-4], self.shape[-3] // 2, self.shape[-2] // 2, upsample_channels]
 
-        output = self.upsample(device, x, shape, sent_to_dram=True, reshape_output=True)
+        out = self.upsample(device, x, shape, sent_to_dram=True, reshape_output=True)
 
-        output_res, shape = self.conv1(device, res, self.shape)
+        out_res, shape = self.conv1(device, res, self.shape)
 
-        output = ttnn.concat([output_res, output], dim=3)
+        out = ttnn.concat([out_res, out], dim=3)
 
         shape = (self.shape[-4], self.shape[-3], self.shape[-2], upsample_channels + shape[-1])
-        output, shape = self.conv2(device, output, shape)
+        out, shape = self.conv2(device, out, shape)
 
-        output, shape = self.conv3(device, output, shape)
-        return output
+        out, shape = self.conv3(device, out, shape)
+        return out

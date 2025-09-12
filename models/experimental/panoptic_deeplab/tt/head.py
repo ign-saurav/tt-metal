@@ -72,7 +72,7 @@ head_layer_optimisations = {
             "reallocate_halo_output": True,
         },
         conv3={
-            "memory_config": ttnn.DRAM_MEMORY_CONFIG,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "deallocate_activation": True,
         },
@@ -96,7 +96,7 @@ head_layer_optimisations = {
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "deallocate_activation": True,
             "input_channels_alignment": 32,
-            "memory_config": ttnn.DRAM_MEMORY_CONFIG,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
         },
         shape=(1, 128, 256, 128),
     ),
