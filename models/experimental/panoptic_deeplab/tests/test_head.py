@@ -131,8 +131,14 @@ class HeadTestInfra:
         )
 
         assert self.pcc_passed, logger.error(f"PCC check failed: {self.pcc_message}")
+        if self.name == "instance_decoder.head_2":
+            self.name = "Instance Center Head"
+        elif self.name == "instance_decoder.head_1":
+            self.name = "Instance Offset Head"
+        else:
+            self.name = "Semantic Head"
         logger.info(
-            f"Head {self.name},  batch_size={batch_size}, act_dtype={model_config['ACTIVATIONS_DTYPE']}, weight_dtype={model_config['WEIGHTS_DTYPE']}, math_fidelity={model_config['MATH_FIDELITY']}, PCC={self.pcc_message}"
+            f"Head {self.name},  batch_size={batch_size}, act_dtype={model_config['ACTIVATIONS_DTYPE']}, weight_dtype={model_config['WEIGHTS_DTYPE']}, math_fidelity={model_config['MATH_FIDELITY']}, PCC={self.pcc_message}, shape={self.output_tensor.shape}"
         )
 
         return self.pcc_passed, self.pcc_message

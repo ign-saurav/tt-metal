@@ -1,5 +1,4 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
-
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
@@ -10,16 +9,9 @@ from ttnn.model_preprocessing import preprocess_model_parameters
 
 from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
-from models.experimental.panoptic_deeplab.reference.aspp import (
-    ASPPModel,
-)
+from models.experimental.panoptic_deeplab.reference.aspp import ASPPModel
 from models.experimental.panoptic_deeplab.tt.aspp import TTASPP
-
-model_config = {
-    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
-    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
-    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
-}
+from models.experimental.panoptic_deeplab.common import load_torch_model_state
 
 
 class AsppTestInfra:
@@ -48,8 +40,9 @@ class AsppTestInfra:
         self.name = name
 
         # torch model
-        torch_model = ASPPModel().eval()
-        self.fake_tensor_1 = torch.randn((1, 2048, 32, 64), dtype=torch.float16)
+        torch_model = ASPPModel()
+        torch_model = load_torch_model_state(torch_model, name)
+
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
             custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
@@ -69,8 +62,8 @@ class AsppTestInfra:
         )
 
         self.ttnn_model = TTASPP(parameters, model_config)
-        self.input_tensor_1 = ttnn.to_layout(tt_host_tensor, ttnn.TILE_LAYOUT)
-        self.input_tensor_1 = ttnn.to_device(tt_host_tensor, device, memory_config=ttnn.L1_MEMORY_CONFIG)
+        self.input_tensor = ttnn.to_layout(tt_host_tensor, ttnn.TILE_LAYOUT)
+        self.input_tensor = ttnn.to_device(tt_host_tensor, device, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         # run and validate
         self.run()

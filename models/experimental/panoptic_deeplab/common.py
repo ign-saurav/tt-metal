@@ -209,7 +209,6 @@ def load_torch_model_state(torch_model: torch.nn.Module = None, layer_name: str 
         if isinstance(v, np.ndarray) or isinstance(v, np.array):
             state_dict[k] = torch.from_numpy(v)
             converted_count += 1
-    logger.debug(f"Converted {converted_count} numpy arrays to torch tensors")
 
     # Get keys
     checkpoint_keys = set(state_dict.keys())
@@ -225,6 +224,9 @@ def load_torch_model_state(torch_model: torch.nn.Module = None, layer_name: str 
     mapped_state_dict = {}
     for checkpoint_key, model_key in key_mapping.items():
         mapped_state_dict[model_key] = state_dict[checkpoint_key]
+    del mapped_state_dict["pixel_mean"]
+    del mapped_state_dict["pixel_std"]
+    logger.debug(f"Mapped {len(mapped_state_dict)} weights")
 
     if isinstance(
         torch_model,
@@ -240,10 +242,100 @@ def load_torch_model_state(torch_model: torch.nn.Module = None, layer_name: str 
     ):
         torch_model = load_partial_state(torch_model, mapped_state_dict, layer_name)
     elif isinstance(torch_model, TorchPanopticDeepLab):
-        del mapped_state_dict["pixel_mean"]
-        del mapped_state_dict["pixel_std"]
         torch_model.load_state_dict(mapped_state_dict, strict=True)
     else:
         raise NotImplementedError("Unknown torch model. Weight loading not implemented")
 
     return torch_model.eval()
+
+
+def parameter_conv_args(torch_model: torch.nn.Module = None, parameters: dict = None):
+    from ttnn.model_preprocessing import infer_ttnn_module_args
+
+    if isinstance(torch_model, TorchPanopticDeepLab):
+        parameters.conv_args = {}
+        sample_x = torch.randn(1, 2048, 32, 64)
+        sample_res3 = torch.randn(1, 512, 64, 128)
+        sample_res2 = torch.randn(1, 256, 128, 256)
+
+        # For semantic decoder
+        if hasattr(parameters, "semantic_decoder"):
+            # ASPP
+            aspp_args = infer_ttnn_module_args(
+                model=torch_model.semantic_decoder.aspp, run_model=lambda model: model(sample_x), device=None
+            )
+            if hasattr(parameters.semantic_decoder, "aspp"):
+                parameters.semantic_decoder.aspp.conv_args = aspp_args
+
+            # Res3
+            aspp_out = torch_model.semantic_decoder.aspp(sample_x)
+            res3_args = infer_ttnn_module_args(
+                model=torch_model.semantic_decoder.res3,
+                run_model=lambda model: model(aspp_out, sample_res3),
+                device=None,
+            )
+            if hasattr(parameters.semantic_decoder, "res3"):
+                parameters.semantic_decoder.res3.conv_args = res3_args
+
+            # Res2
+            res3_out = torch_model.semantic_decoder.res3(aspp_out, sample_res3)
+            res2_args = infer_ttnn_module_args(
+                model=torch_model.semantic_decoder.res2,
+                run_model=lambda model: model(res3_out, sample_res2),
+                device=None,
+            )
+            if hasattr(parameters.semantic_decoder, "res2"):
+                parameters.semantic_decoder.res2.conv_args = res2_args
+
+            # Head
+            res2_out = torch_model.semantic_decoder.res2(res3_out, sample_res2)
+            head_args = infer_ttnn_module_args(
+                model=torch_model.semantic_decoder.head_1, run_model=lambda model: model(res2_out), device=None
+            )
+            if hasattr(parameters.semantic_decoder, "head_1"):
+                parameters.semantic_decoder.head_1.conv_args = head_args
+
+        # For instance decoder
+        if hasattr(parameters, "instance_decoder"):
+            # ASPP
+            aspp_args = infer_ttnn_module_args(
+                model=torch_model.instance_decoder.aspp, run_model=lambda model: model(sample_x), device=None
+            )
+            if hasattr(parameters.instance_decoder, "aspp"):
+                parameters.instance_decoder.aspp.conv_args = aspp_args
+
+            # Res3
+            aspp_out = torch_model.instance_decoder.aspp(sample_x)
+            res3_args = infer_ttnn_module_args(
+                model=torch_model.instance_decoder.res3,
+                run_model=lambda model: model(aspp_out, sample_res3),
+                device=None,
+            )
+            if hasattr(parameters.instance_decoder, "res3"):
+                parameters.instance_decoder.res3.conv_args = res3_args
+
+            # Res2
+            res3_out = torch_model.instance_decoder.res3(aspp_out, sample_res3)
+            res2_args = infer_ttnn_module_args(
+                model=torch_model.instance_decoder.res2,
+                run_model=lambda model: model(res3_out, sample_res2),
+                device=None,
+            )
+            if hasattr(parameters.instance_decoder, "res2"):
+                parameters.instance_decoder.res2.conv_args = res2_args
+
+            # Head
+            res2_out = torch_model.instance_decoder.res2(res3_out, sample_res2)
+            head_args_1 = infer_ttnn_module_args(
+                model=torch_model.instance_decoder.head_1, run_model=lambda model: model(res2_out), device=None
+            )
+            head_args_2 = infer_ttnn_module_args(
+                model=torch_model.instance_decoder.head_2, run_model=lambda model: model(res2_out), device=None
+            )
+            if hasattr(parameters.instance_decoder, "head_1"):
+                parameters.instance_decoder.head_1.conv_args = head_args_1
+            if hasattr(parameters.instance_decoder, "head_2"):
+                parameters.instance_decoder.head_2.conv_args = head_args_2
+    else:
+        raise NotImplementedError("Unknown torch model. Parameter conv args not implemented")
+    return parameters
