@@ -24,6 +24,9 @@ pytest models/experimental/panoptic_deeplab/tests/test_panoptic_deeplab.py
   ```
 
 ### Demo
+```
+python models/experimental/panoptic_deeplab/demo/panoptic_deeplab_demo.py --input <input image path> --output <output image to be stored path>
+```
 **Note:** Output images will be saved in the `panoptic_deeplab_predictions/` folder.
 
 #### Single Device (BS=1):
