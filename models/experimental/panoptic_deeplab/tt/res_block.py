@@ -30,7 +30,7 @@ res_layer_optimisations = {
         },
         shape=(0, 0, 0, 0),
     ),
-    "instance_res3": ResOptimizer(
+    "instance_decoder.res3": ResOptimizer(
         conv1={
             "memory_config": ttnn.L1_MEMORY_CONFIG,
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
@@ -55,7 +55,7 @@ res_layer_optimisations = {
         },
         shape=(1, 64, 128, 512),
     ),
-    "instance_res2": ResOptimizer(
+    "instance_decoder.res2": ResOptimizer(
         conv1={
             "act_block_h": 128,
             "memory_config": ttnn.DRAM_MEMORY_CONFIG,
@@ -80,7 +80,7 @@ res_layer_optimisations = {
         },
         shape=(1, 128, 256, 256),
     ),
-    "semantics_res3": ResOptimizer(
+    "semantic_decoder.res3": ResOptimizer(
         conv1={
             "act_block_h": 32,
             "memory_config": ttnn.L1_MEMORY_CONFIG,
@@ -106,7 +106,7 @@ res_layer_optimisations = {
         },
         shape=(1, 64, 128, 512),
     ),
-    "semantics_res2": ResOptimizer(
+    "semantic_decoder.res2": ResOptimizer(
         conv1={
             "act_block_h": 32,
             "memory_config": ttnn.L1_MEMORY_CONFIG,

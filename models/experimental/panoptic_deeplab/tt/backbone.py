@@ -139,6 +139,7 @@ class TTBackbone:
             x, shape = block(x, device, shape)
 
         res_5 = x
-        # res_5 = ttnn.to_memory_config(res_5, ttnn.DRAM_MEMORY_CONFIG)
-
+        res_5 = ttnn.to_memory_config(res_5, ttnn.DRAM_MEMORY_CONFIG)
+        res_5 = ttnn.reallocate(res_5)
+        ttnn.deallocate(x, force=True)
         return {"res_2": res_2, "res_3": res_3, "res_5": res_5}

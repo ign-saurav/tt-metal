@@ -20,17 +20,24 @@ class TorchPanopticDeepLab(nn.Module):
     ) -> None:
         super().__init__()
 
+        # self.pixel_std = nn.Parameter(torch.randn((3, 1, 1)))
+        # self.pixel_mean = nn.Parameter(torch.randn((3, 1, 1)))
+        # self.register_buffer("pixel_mean", torch.randn(3).view(-1, 1, 1), False)
+        # self.register_buffer("pixel_std", torch.randn(3).view(-1, 1, 1), False)
+        # self.register_buffer("adsaf", torch.randn(3).view(-1, 1, 1), False)
+        # self.register_buffer("yurfdgdf", torch.randn(3).view(-1, 1, 1), False)
+
         # Backbone
         self.backbone = ResNet52BackBone()
 
         # Semantic segmentation decoder
         self.semantic_decoder = DecoderModel(
-            name="Semantics_head",
+            name="semantic_decoder",
         )
 
         # Instance segmentation decoders
         self.instance_decoder = DecoderModel(
-            name="instance_head",
+            name="instance_decoder",
         )
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:

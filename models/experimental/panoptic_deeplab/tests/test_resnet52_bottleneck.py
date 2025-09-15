@@ -57,7 +57,7 @@ class BottleneckTestInfra:
         torch_model = Bottleneck(
             inplanes=inplanes, planes=planes, stride=stride, dilation=dilation, downsample=downsample_conv
         )
-        torch_model = load_torch_model_state(torch_model, name)
+        torch_model = load_torch_model_state(torch_model, f"backbone.{name}")
 
         input_shape = (batch_size * self.num_devices, inplanes, height, width)
 

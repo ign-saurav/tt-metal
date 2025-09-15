@@ -12,6 +12,7 @@ from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import Torc
 from models.experimental.panoptic_deeplab.tt.panoptic_deeplab import TTPanopticDeepLab
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from ttnn.model_preprocessing import infer_ttnn_module_args, preprocess_model_parameters
+from models.experimental.panoptic_deeplab.common import load_torch_model_state
 
 
 class PanopticDeepLabTestInfra:
@@ -42,11 +43,12 @@ class PanopticDeepLabTestInfra:
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
 
         # Initialize torch model
-        torch_model = TorchPanopticDeepLab().eval()
+        torch_model = TorchPanopticDeepLab()
+        torch_model = load_torch_model_state(torch_model, "panoptic_deeplab")
 
         # Create input tensor
         input_shape = (batch_size * self.num_devices, in_channels, height, width)
-        self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float32)
+        self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float)
 
         # Preprocess model parameters
         parameters = preprocess_model_parameters(
@@ -144,8 +146,6 @@ class PanopticDeepLabTestInfra:
         self.torch_output_tensor, self.torch_output_tensor_2, self.torch_output_tensor_3 = torch_model(
             self.torch_input_tensor
         )
-        torch_model.to(torch.bfloat16)
-        self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
 
         # Convert input to TTNN format (NHWC)
         logger.info("Converting input to TTNN format...")

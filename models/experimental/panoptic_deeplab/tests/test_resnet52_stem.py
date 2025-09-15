@@ -35,7 +35,7 @@ class Resnet52StemTestInfra:
             out_channels=planes,
             stride=stride,
         )
-        torch_model = load_torch_model_state(torch_model, name)
+        torch_model = load_torch_model_state(torch_model, f"backbone.{name}")
 
         input_shape = (batch_size * self.num_devices, inplanes, height, width)
 

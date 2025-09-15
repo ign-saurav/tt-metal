@@ -14,9 +14,8 @@ from models.experimental.panoptic_deeplab.tt.res_block import (
     res_layer_optimisations,
 )
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
-from models.experimental.panoptic_deeplab.reference.res_block import (
-    ResModel,
-)
+from models.experimental.panoptic_deeplab.reference.res_block import ResModel
+from models.experimental.panoptic_deeplab.common import load_torch_model_state
 
 
 class ResTestInfra:
@@ -58,15 +57,16 @@ class ResTestInfra:
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
 
         self.torch_input_tensor = torch.randn(
-            (self.batch_size, self.upsample_channels, self.height, self.width), dtype=torch.float32
+            (self.batch_size, self.upsample_channels, self.height, self.width), dtype=torch.float
         )
 
         self.torch_res_input_tensor = torch.randn(
-            (self.batch_size, self.in_channels, self.height_res, self.width_res), dtype=torch.float32
+            (self.batch_size, self.in_channels, self.height_res, self.width_res), dtype=torch.float
         )
 
         # torch model
-        torch_model = ResModel(self.in_channels, self.intermediate_channels, self.out_channels).eval()
+        torch_model = ResModel(self.in_channels, self.intermediate_channels, self.out_channels)
+        torch_model = load_torch_model_state(torch_model, name)
 
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
@@ -81,9 +81,6 @@ class ResTestInfra:
         )
 
         # Generate input tensors for different model blocks
-        torch_model.to(torch.bfloat16)
-        self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
-        self.torch_res_input_tensor = self.torch_res_input_tensor.to(torch.bfloat16)
         self.torch_output_tensor = torch_model(self.torch_input_tensor, self.torch_res_input_tensor)
 
         # Convert torch tensors to TTNN host tensors (NHWC, bfloat8_b)
@@ -127,18 +124,26 @@ class ResTestInfra:
         return self.output_tensor
 
     def validate(self, output_tensor=None, output_tensor1=None):
-        """Validate outputs"""
-        output_tensor = self.output_tensor if output_tensor is None else output_tensor
-        output_tensor = ttnn.to_torch(output_tensor, device=self.device, mesh_composer=self.output_mesh_composer)
-        expected_shape = self.torch_output_tensor.shape
-        output_tensor = torch.reshape(
-            output_tensor, (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1])
+        tt_output_tensor = self.output_tensor if output_tensor is None else output_tensor
+        tt_output_tensor_torch = ttnn.to_torch(
+            tt_output_tensor, device=self.device, mesh_composer=self.output_mesh_composer
         )
-        output_tensor = torch.permute(output_tensor, (0, 3, 1, 2))
-        batch_size = self.batch_size
 
-        valid_pcc = 0.97
-        self.pcc_passed, self.pcc_message = check_with_pcc(self.torch_output_tensor, output_tensor, pcc=valid_pcc)
+        # Deallocate output tesnors
+        ttnn.deallocate(tt_output_tensor)
+
+        expected_shape = self.torch_output_tensor.shape
+        tt_output_tensor_torch = torch.reshape(
+            tt_output_tensor_torch, (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1])
+        )
+        tt_output_tensor_torch = torch.permute(tt_output_tensor_torch, (0, 3, 1, 2))
+
+        batch_size = tt_output_tensor_torch.shape[0]
+
+        valid_pcc = 0.99
+        self.pcc_passed, self.pcc_message = check_with_pcc(
+            self.torch_output_tensor, tt_output_tensor_torch, pcc=valid_pcc
+        )
 
         assert self.pcc_passed, logger.error(f"PCC check failed: {self.pcc_message}")
         logger.info(
@@ -159,10 +164,10 @@ model_config = {
 @pytest.mark.parametrize(
     "batch_size, in_channels, upsample_channels, intermediate_channels, out_channels, height_res, width_res, height, width, name",
     [
-        (1, 512, 256, 320, 256, 64, 128, 32, 64, "semantics_res3"),  # semantics res3 block
-        (1, 256, 256, 288, 256, 128, 256, 64, 128, "semantics_res2"),  # semantics res2 block
-        (1, 512, 256, 320, 128, 64, 128, 32, 64, "instance_res3"),  # instance res3 block
-        (1, 256, 128, 160, 128, 128, 256, 64, 128, "instance_res2"),  # instance res2 block
+        (1, 512, 256, 320, 256, 64, 128, 32, 64, "semantic_decoder.res3"),  # semantics res3 block
+        (1, 256, 256, 288, 256, 128, 256, 64, 128, "semantic_decoder.res2"),  # semantics res2 block
+        (1, 512, 256, 320, 128, 64, 128, 32, 64, "instance_decoder.res3"),  # instance res3 block
+        (1, 256, 128, 160, 128, 128, 256, 64, 128, "instance_decoder.res2"),  # instance res2 block
     ],
 )
 def test_res(

@@ -28,16 +28,16 @@ class TTPanopticDeepLab:
         self.semantic_decoder = TTDecoder(
             parameters.semantic_decoder,
             model_config,
-            layer_optimisations=decoder_layer_optimisations["semantics_head"],
-            name="semantics_head",
+            layer_optimisations=decoder_layer_optimisations["semantic_decoder"],
+            name="semantic_decoder",
         )
 
         # Initialize instance segmentation decoder
         self.instance_decoder = TTDecoder(
             parameters.instance_decoder,
             model_config,
-            layer_optimisations=decoder_layer_optimisations["instance_head"],
-            name="instance_head",
+            layer_optimisations=decoder_layer_optimisations["instance_decoder"],
+            name="instance_decoder",
         )
 
     def __call__(

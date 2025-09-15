@@ -29,7 +29,7 @@ head_layer_optimisations = {
         },
         shape=(0, 0, 0, 0),
     ),
-    "semantic_head": HeadOptimizer(
+    "semantic_decoder.head_1": HeadOptimizer(
         conv1={
             "act_block_h": 256,
             "deallocate_activation": True,
@@ -55,7 +55,7 @@ head_layer_optimisations = {
         },
         shape=(1, 128, 256, 256),
     ),
-    "instance_offset_head": HeadOptimizer(
+    "instance_decoder.head_1": HeadOptimizer(
         conv1={
             "act_block_h": 128,
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
@@ -78,7 +78,7 @@ head_layer_optimisations = {
         },
         shape=(1, 128, 256, 128),
     ),
-    "instance_center_head": HeadOptimizer(
+    "instance_decoder.head_2": HeadOptimizer(
         conv1={
             "act_block_h": 128,
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,

@@ -22,20 +22,24 @@ class HeadModel(torch.nn.Module):
 
         if out_channels == 1:  # instance center head
             self.conv1 = nn.Sequential(
-                nn.Conv2d(in_channels, in_channels, 3, 1, 1, 1), nn.BatchNorm2d(in_channels), nn.ReLU()
+                nn.Conv2d(in_channels, in_channels, 3, 1, 1, 1, bias=False), nn.BatchNorm2d(in_channels), nn.ReLU()
             )
 
             self.conv2 = nn.Sequential(
-                nn.Conv2d(in_channels, intermediate_channels, 3, 1, 1, 1),
+                nn.Conv2d(in_channels, intermediate_channels, 3, 1, 1, 1, bias=False),
                 nn.BatchNorm2d(intermediate_channels),
                 nn.ReLU(),
             )
         else:  # instance offset head and semantics head
             self.conv1 = nn.Sequential(
-                nn.Conv2d(in_channels, in_channels, 5, 1, 2, 1, in_channels), nn.BatchNorm2d(in_channels), nn.ReLU()
+                nn.Conv2d(in_channels, in_channels, 5, 1, 2, 1, in_channels, bias=False),
+                nn.BatchNorm2d(in_channels),
+                nn.ReLU(),
             )
             self.conv2 = nn.Sequential(
-                nn.Conv2d(in_channels, intermediate_channels, 1, 1), nn.BatchNorm2d(intermediate_channels), nn.ReLU()
+                nn.Conv2d(in_channels, intermediate_channels, 1, 1, bias=False),
+                nn.BatchNorm2d(intermediate_channels),
+                nn.ReLU(),
             )
         self.conv3 = nn.Sequential(nn.Conv2d(intermediate_channels, out_channels, 1, 1))
 
