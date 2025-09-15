@@ -3,8 +3,15 @@
 
 import torch
 import torch.nn.functional as F
-from typing import Tuple, Optional
+from typing import Tuple, Optional, Any
 from collections import Counter
+import ttnn
+from typing import Dict
+import numpy as np
+import cv2
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 class PostProcessing:
@@ -167,3 +174,256 @@ class PostProcessing:
             panoptic_pred[b] = panoptic_img
 
         return panoptic_pred
+
+    def postprocess_outputs(
+        self,
+        torch_outputs: torch.Tensor,
+        torch_outputs_2: torch.Tensor,
+        torch_outputs_3: torch.Tensor,
+        ttnn_outputs: ttnn.Tensor,
+        ttnn_outputs_2: ttnn.Tensor,
+        ttnn_outputs_3: ttnn.Tensor,
+        original_size: Tuple[int, int],
+        ttnn_device: ttnn.Device,
+        output_mesh_composer: Optional[Any],
+    ) -> Dict[str, Dict]:
+        """Postprocess outputs from both pipelines"""
+        results = {"torch": {}, "ttnn": {}}
+
+        # Process PyTorch outputs
+        if torch_outputs is not None and torch_outputs_2 is not None and torch_outputs_3 is not None:
+            logger.info("Processing PyTorch outputs...")
+            try:
+                semantic_logits = torch_outputs
+                offset_map = torch_outputs_2
+                center_heatmap = torch_outputs_3
+
+                # semantic_logits
+                if semantic_logits is not None and isinstance(semantic_logits, torch.Tensor):
+                    np_array = semantic_logits.squeeze(0).cpu().numpy()
+                    semantic_pred = np.argmax(np_array, axis=0)
+                    results["torch"]["semantic_pred"] = cv2.resize(
+                        semantic_pred.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
+                    )
+                    logger.debug(f"PyTorch semantic_pred shape: {results['torch']['semantic_pred'].shape}")
+
+                # center_heatmap
+                if center_heatmap is not None and isinstance(center_heatmap, torch.Tensor):
+                    np_array = center_heatmap.squeeze(0).cpu().numpy()
+                    if len(np_array.shape) == 3 and np_array.shape[0] == 1:
+                        center_data = np_array[0]  # Remove channel dim
+                    elif len(np_array.shape) == 2:
+                        center_data = np_array
+                    else:
+                        center_data = np_array  # Use as is
+
+                    results["torch"]["center_heatmap"] = cv2.resize(
+                        center_data, original_size, interpolation=cv2.INTER_LINEAR
+                    )
+                    logger.debug(f"PyTorch center_heatmap shape: {results['torch']['center_heatmap'].shape}")
+
+                # offset_map
+                if offset_map is not None and isinstance(offset_map, torch.Tensor):
+                    np_array = offset_map.squeeze(0).cpu().numpy()
+                    if len(np_array.shape) == 3 and np_array.shape[0] == 2:
+                        results["torch"]["offset_map"] = np.stack(
+                            [
+                                cv2.resize(np_array[0], original_size, interpolation=cv2.INTER_LINEAR),
+                                cv2.resize(np_array[1], original_size, interpolation=cv2.INTER_LINEAR),
+                            ]
+                        )
+                    else:
+                        logger.warning(f"Unexpected offset_map shape: {np_array.shape}")
+                # panoptic_pred
+                # For PyTorch outputs:
+                panoptic_pred = self.panoptic_fusion(
+                    semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map
+                )
+                if panoptic_pred is not None and isinstance(panoptic_pred, torch.Tensor):
+                    np_array = panoptic_pred.squeeze(0).cpu().numpy()
+                    results["torch"]["panoptic_pred"] = cv2.resize(
+                        np_array.astype(np.int32), original_size, interpolation=cv2.INTER_NEAREST
+                    )
+                    logger.debug(f"PyTorch panoptic_pred shape: {results['torch']['panoptic_pred'].shape}")
+
+            except Exception as e:
+                logger.error(f"Error processing PyTorch outputs: {e}")
+
+        # Process TTNN outputs
+        if ttnn_outputs is not None and ttnn_outputs_2 is not None and ttnn_outputs_3 is not None:
+            logger.info("Processing TTNN outputs...")
+            try:
+                # Convert TTNN to torch tensor
+                torch_tensor = ttnn.to_torch(ttnn_outputs, device=ttnn_device, mesh_composer=output_mesh_composer)
+                torch_tensor_2 = ttnn.to_torch(ttnn_outputs_2, device=ttnn_device, mesh_composer=output_mesh_composer)
+                torch_tensor_3 = ttnn.to_torch(ttnn_outputs_3, device=ttnn_device, mesh_composer=output_mesh_composer)
+
+                # Debug: Log raw TTNN output stats
+                logger.debug(
+                    f"TTNN raw output 1 (semantic): shape={torch_tensor.shape}, "
+                    f"min={torch_tensor.min():.4f}, max={torch_tensor.max():.4f}, "
+                    f"mean={torch_tensor.mean():.4f}"
+                )
+                logger.debug(
+                    f"TTNN raw output 2 (offset): shape={torch_tensor_2.shape}, "
+                    f"min={torch_tensor_2.min():.4f}, max={torch_tensor_2.max():.4f}, "
+                    f"mean={torch_tensor_2.mean():.4f}"
+                )
+                logger.debug(
+                    f"TTNN raw output 3 (center): shape={torch_tensor_3.shape}, "
+                    f"min={torch_tensor_3.min():.4f}, max={torch_tensor_3.max():.4f}, "
+                    f"mean={torch_tensor_3.mean():.4f}"
+                )
+
+                # Reshape to proper format
+                reshaped_tensor = self._reshape_ttnn_output(torch_tensor, "semantic_logits")
+                reshaped_tensor_2 = self._reshape_ttnn_output(torch_tensor_2, "offset_map")
+                reshaped_tensor_3 = self._reshape_ttnn_output(torch_tensor_3, "center_heatmap")
+
+                # Process semantic segmentation
+                np_array = reshaped_tensor.squeeze(0).cpu().float().numpy()
+                semantic_pred = np.argmax(np_array, axis=0)
+                results["ttnn"]["semantic_pred"] = cv2.resize(
+                    semantic_pred.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
+                )
+                logger.debug(f"TTNN semantic_pred shape: {results['ttnn']['semantic_pred'].shape}")
+
+                # Process center heatmap - FIXED: This was in elif block before
+                np_array_3 = reshaped_tensor_3.squeeze(0).cpu().float().numpy()
+
+                # Debug center heatmap values
+                logger.debug(
+                    f"TTNN center heatmap stats: shape={np_array_3.shape}, "
+                    f"min={np_array_3.min():.4f}, max={np_array_3.max():.4f}, "
+                    f"mean={np_array_3.mean():.4f}, std={np_array_3.std():.4f}"
+                )
+
+                if len(np_array_3.shape) == 3 and np_array_3.shape[0] == 1:
+                    center_data = np_array_3[0]  # Remove channel dim
+                elif len(np_array_3.shape) == 2:
+                    center_data = np_array_3
+                else:
+                    center_data = np_array_3
+                    logger.warning(f"Unexpected center heatmap shape: {np_array_3.shape}, using as is")
+
+                # Check if center data has very small values and scale if needed
+                if center_data.max() < 0.01:
+                    logger.warning(f"Center heatmap has very small values (max={center_data.max():.6f}), scaling up")
+                    center_data = center_data * 100  # Scale up for visualization
+
+                results["ttnn"]["center_heatmap"] = cv2.resize(
+                    center_data, original_size, interpolation=cv2.INTER_LINEAR
+                )
+                logger.debug(f"TTNN center_heatmap shape: {results['ttnn']['center_heatmap'].shape}")
+
+                # Process offset map - FIXED: This was in elif block before
+                np_array_2 = reshaped_tensor_2.squeeze(0).cpu().float().numpy()
+                if len(np_array_2.shape) == 3 and np_array_2.shape[0] == 2:
+                    results["ttnn"]["offset_map"] = np.stack(
+                        [
+                            cv2.resize(np_array_2[0], original_size, interpolation=cv2.INTER_LINEAR),
+                            cv2.resize(np_array_2[1], original_size, interpolation=cv2.INTER_LINEAR),
+                        ]
+                    )
+                    logger.debug(f"TTNN offset_map shape: {results['ttnn']['offset_map'].shape}")
+                else:
+                    logger.warning(f"Unexpected TTNN offset_map shape: {np_array_2.shape}")
+
+                semantic_logits = reshaped_tensor
+                center_heatmap = reshaped_tensor_3
+                offset_map = reshaped_tensor_2
+
+                panoptic_pred_ttnn = self.panoptic_fusion(
+                    semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map
+                )
+                panoptic_pred = ttnn.from_torch(panoptic_pred_ttnn, dtype=ttnn.int32)
+
+                if panoptic_pred is not None and isinstance(panoptic_pred, ttnn.Tensor):
+                    # Convert TTNN tensor to numpy properly
+                    torch_tensor = ttnn.to_torch(panoptic_pred, device=ttnn_device, mesh_composer=output_mesh_composer)
+                    np_array = torch_tensor.squeeze().cpu().numpy()
+
+                    # Debug information
+                    logger.debug(f"Panoptic array shape: {np_array.shape}")
+                    logger.debug(f"Original size for resize: {original_size}")
+
+                    # Validate original_size before resize
+                    if not original_size or len(original_size) != 2 or original_size[0] <= 0 or original_size[1] <= 0:
+                        logger.error(f"Invalid original_size: {original_size}")
+                        original_size = (1024, 512)
+                        logger.warning(f"Using fallback size: {original_size}")
+
+                    # Ensure valid array dimensions
+                    if np_array.size > 0 and len(np_array.shape) >= 2:
+                        if len(np_array.shape) > 2:
+                            np_array = np_array.squeeze()
+
+                        results["ttnn"]["panoptic_pred"] = cv2.resize(
+                            np_array.astype(np.int32), original_size, interpolation=cv2.INTER_NEAREST
+                        )
+                        logger.debug(f"TTNN panoptic_pred shape: {results['ttnn']['panoptic_pred'].shape}")
+                    else:
+                        logger.error("Invalid array for resize - skipping panoptic processing")
+
+            except Exception as e:
+                logger.error(f"Error processing TTNN output: {e}")
+                import traceback
+
+                traceback.print_exc()
+
+        return results
+
+    def _reshape_ttnn_output(self, tensor: torch.Tensor, key: str) -> torch.Tensor:
+        """Reshape TTNN output tensor to proper format - IMPROVED VERSION"""
+
+        logger.debug(f"Reshaping TTNN output for {key}: input shape = {tensor.shape}")
+
+        if len(tensor.shape) == 4:  # BHWC format from TTNN
+            B, H, W, C = tensor.shape
+
+            if key == "semantic_logits":
+                # Should have num_classes channels
+                expected_c = 19
+                if C == expected_c:
+                    result = tensor.permute(0, 3, 1, 2)  # BHWC -> BCHW
+                else:
+                    # Try to reshape if flattened
+                    total_elements = B * H * W * C
+                    expected_h = 512 // 4  # Typical output stride
+                    expected_w = 1024 // 4
+                    if total_elements == B * expected_h * expected_w * expected_c:
+                        tensor = tensor.reshape(B, expected_h, expected_w, expected_c)
+                        result = tensor.permute(0, 3, 1, 2)
+                    else:
+                        logger.warning(f"Unexpected semantic_logits shape: {tensor.shape}")
+                        result = tensor
+
+            elif key == "center_heatmap":
+                # Should have 1 channel
+                if C == 1:
+                    result = tensor.permute(0, 3, 1, 2)  # BHWC -> BCHW
+                else:
+                    # Take first channel or reshape
+                    if C > 1:
+                        tensor = tensor[:, :, :, :1]  # Take first channel
+                    result = tensor.permute(0, 3, 1, 2)
+
+            elif key == "offset_map":
+                # Should have 2 channels (x, y offsets)
+                if C == 2:
+                    result = tensor.permute(0, 3, 1, 2)  # BHWC -> BCHW
+                else:
+                    logger.warning(f"Unexpected offset_map channels: {C}, expected 2")
+                    result = tensor
+            else:
+                result = tensor
+
+        elif len(tensor.shape) == 3:  # BHW format
+            result = tensor
+
+        else:
+            logger.warning(f"Unexpected tensor shape for {key}: {tensor.shape}")
+            result = tensor
+
+        logger.debug(f"Reshaped TTNN output for {key}: output shape = {result.shape}")
+        return result

@@ -8,6 +8,11 @@ from loguru import logger
 import pickle
 import numpy as np
 import os
+from PIL import Image
+from typing import Tuple
+import torchvision.transforms as transforms
+from typing import Optional, Any
+import ttnn
 from models.experimental.panoptic_deeplab.reference.resnet52_backbone import ResNet52BackBone as TorchBackbone
 from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
 from torchvision.models.resnet import Bottleneck
@@ -190,12 +195,12 @@ def load_torch_model_state(torch_model: torch.nn.Module = None, layer_name: str 
         model_path = model_location_generator("vision-models/panoptic_deeplab", model_subdir="", download_if_ci_v2=True)
     if model_path == "models":
         if not os.path.exists(
-            "models/experimental/panoptic_deeplab/reference/Panoptic_Deeplab_R52.pkl"
+            "models/experimental/panoptic_deeplab/resources/Panoptic_Deeplab_R52.pkl"
         ):  # check if Panoptic_Deeplab_R52.pkl is available
             os.system(
-                "models/experimental/panoptic_deeplab/reference/panoptic_deeplab_weights_download.sh"
+                "models/experimental/panoptic_deeplab/resources/panoptic_deeplab_weights_download.sh"
             )  # execute the panoptic_deeplab_weights_download.sh file
-        weights_path = "models/experimental/panoptic_deeplab/reference/Panoptic_Deeplab_R52.pkl"
+        weights_path = "models/experimental/panoptic_deeplab/resources/Panoptic_Deeplab_R52.pkl"
     else:
         weights_path = os.path.join(model_path, "Panoptic_Deeplab_R52.pkl")
 
@@ -339,3 +344,65 @@ def parameter_conv_args(torch_model: torch.nn.Module = None, parameters: dict = 
     else:
         raise NotImplementedError("Unknown torch model. Parameter conv args not implemented")
     return parameters
+
+
+def preprocess_image(
+    image_path: str, input_width: int, input_height: int, ttnn_device: ttnn.Device, inputs_mesh_mapper: Optional[Any]
+) -> Tuple[torch.Tensor, ttnn.Tensor, np.ndarray, Tuple[int, int]]:
+    """Preprocess image for both PyTorch and TTNN"""
+    # Load image
+    image = Image.open(image_path).convert("RGB")
+    original_size = image.size  # (width, height)
+    original_array = np.array(image)
+    preprocess = transforms.Compose(
+        [transforms.ToTensor(), transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]
+    )
+
+    # Resize to model input size
+    target_size = (input_width, input_height)  # PIL expects (width, height)
+    image_resized = image.resize(target_size)
+
+    # PyTorch preprocessing
+    torch_tensor = preprocess(image_resized).unsqueeze(0)  # Add batch dimension
+    torch_tensor = torch_tensor.to(torch.float)
+
+    # TTNN preprocessing
+    ttnn_tensor = None
+    ttnn_tensor = ttnn.from_torch(
+        torch_tensor.permute(0, 2, 3, 1),  # BCHW -> BHWC
+        dtype=ttnn.bfloat16,
+        device=ttnn_device,
+        mesh_mapper=inputs_mesh_mapper,
+    )
+
+    if ttnn_tensor is not None:
+        ttnn_as_torch = ttnn.to_torch(ttnn_tensor)
+
+    return torch_tensor, ttnn_tensor, original_array, original_size
+
+
+def save_preprocessed_inputs(torch_input: torch.Tensor, save_dir: str, filename: str):
+    """Save preprocessed inputs for testing purposes"""
+
+    # Create directory for test inputs
+    test_inputs_dir = os.path.join(save_dir, "test_inputs")
+    os.makedirs(test_inputs_dir, exist_ok=True)
+
+    # Save torch input tensor
+    torch_input_path = os.path.join(test_inputs_dir, f"{filename}_torch_input.pt")
+    torch.save(
+        {
+            "tensor": torch_input,
+            "shape": torch_input.shape,
+            "dtype": torch_input.dtype,
+            "mean": torch_input.mean().item(),
+            "std": torch_input.std().item(),
+            "min": torch_input.min().item(),
+            "max": torch_input.max().item(),
+        },
+        torch_input_path,
+    )
+
+    logger.info(f"Saved preprocessed torch input to: {torch_input_path}")
+
+    return torch_input_path

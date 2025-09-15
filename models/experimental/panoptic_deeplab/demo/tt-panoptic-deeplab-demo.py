@@ -6,16 +6,14 @@ import os
 import argparse
 import time
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict
 import numpy as np
 from PIL import Image
-import cv2
 import matplotlib.pyplot as plt
 from loguru import logger
 import json
 from dataclasses import asdict
 import torch
-import torchvision.transforms as transforms
 import ttnn
 from models.experimental.panoptic_deeplab.tt.panoptic_deeplab import TTPanopticDeepLab
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
@@ -23,7 +21,7 @@ from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import Torc
 from post_processing import PostProcessing
 from models.experimental.panoptic_deeplab.common import load_torch_model_state
 from models.experimental.panoptic_deeplab.demo.config import DemoConfig
-from models.experimental.panoptic_deeplab.common import parameter_conv_args
+from models.experimental.panoptic_deeplab.common import parameter_conv_args, preprocess_image, save_preprocessed_inputs
 
 
 class Demo:
@@ -34,15 +32,6 @@ class Demo:
         self.torch_model = None
         self.ttnn_model = None
         self.ttnn_device = None
-
-        self.preprocess = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(mean=config.mean, std=config.std)
-                if config.normalize_enabled
-                else transforms.Lambda(lambda x: x),
-            ]
-        )
 
         # Color palette for visualization
         self.colors = self.config._get_cityscapes_colors()
@@ -115,97 +104,6 @@ class Demo:
             self.weights_mesh_mapper = None
             self.output_mesh_composer = None
 
-    def save_preprocessed_inputs(self, torch_input: torch.Tensor, save_dir: str, filename: str):
-        """Save preprocessed inputs for testing purposes"""
-
-        # Create directory for test inputs
-        test_inputs_dir = os.path.join(save_dir, "test_inputs")
-        os.makedirs(test_inputs_dir, exist_ok=True)
-
-        # Save torch input tensor
-        torch_input_path = os.path.join(test_inputs_dir, f"{filename}_torch_input.pt")
-        torch.save(
-            {
-                "tensor": torch_input,
-                "shape": torch_input.shape,
-                "dtype": torch_input.dtype,
-                "mean": torch_input.mean().item(),
-                "std": torch_input.std().item(),
-                "min": torch_input.min().item(),
-                "max": torch_input.max().item(),
-            },
-            torch_input_path,
-        )
-
-        logger.info(f"Saved preprocessed torch input to: {torch_input_path}")
-
-        # Also save as numpy for compatibility
-        numpy_input_path = os.path.join(test_inputs_dir, f"{filename}_input.npy")
-        np.save(numpy_input_path, torch_input.cpu().numpy())
-
-        # Save metadata about the preprocessing
-        metadata = {
-            "original_image_path": self.current_image_path if hasattr(self, "current_image_path") else "unknown",
-            "input_shape": list(torch_input.shape),
-            "preprocessing": {
-                "normalized": self.config.normalize_enabled,
-                "mean": self.config.mean,
-                "std": self.config.std,
-            },
-            "input_size": {
-                "height": self.config.input_height,
-                "width": self.config.input_width,
-            },
-            "stats": {
-                "mean": torch_input.mean().item(),
-                "std": torch_input.std().item(),
-                "min": torch_input.min().item(),
-                "max": torch_input.max().item(),
-            },
-        }
-
-        metadata_path = os.path.join(test_inputs_dir, f"{filename}_metadata.json")
-        with open(metadata_path, "w") as f:
-            json.dump(metadata, f, indent=2)
-
-        return torch_input_path, numpy_input_path, metadata_path
-
-    def preprocess_image(self, image_path: str) -> Tuple[torch.Tensor, ttnn.Tensor, np.ndarray, Tuple[int, int]]:
-        """Preprocess image for both PyTorch and TTNN"""
-        # Load image
-        image = Image.open(image_path).convert("RGB")
-        original_size = image.size  # (width, height)
-        original_array = np.array(image)
-
-        # Resize to model input size
-        target_size = (self.config.input_width, self.config.input_height)  # PIL expects (width, height)
-        image_resized = image.resize(target_size)
-
-        # PyTorch preprocessing
-        torch_tensor = self.preprocess(image_resized).unsqueeze(0)  # Add batch dimension
-        torch_tensor = torch_tensor.to(torch.float)
-
-        # TTNN preprocessing
-        ttnn_tensor = None
-        ttnn_tensor = ttnn.from_torch(
-            torch_tensor.permute(0, 2, 3, 1),  # BCHW -> BHWC
-            dtype=ttnn.bfloat16,
-            device=self.ttnn_device,
-            mesh_mapper=self.inputs_mesh_mapper,
-        )
-
-        print(f"PyTorch input stats: mean={torch_tensor.mean():.4f}, std={torch_tensor.std():.4f}")
-        print(f"PyTorch input shape: {torch_tensor.shape}")
-        print(f"PyTorch input range: [{torch_tensor.min():.4f}, {torch_tensor.max():.4f}]")
-
-        if ttnn_tensor is not None:
-            ttnn_as_torch = ttnn.to_torch(ttnn_tensor)
-            print(f"TTNN input stats: mean={ttnn_as_torch.mean():.4f}, std={ttnn_as_torch.std():.4f}")
-            print(f"TTNN input shape: {ttnn_as_torch.shape}")
-            print(f"TTNN input range: [{ttnn_as_torch.min():.4f}, {ttnn_as_torch.max():.4f}]")
-
-        return torch_tensor, ttnn_tensor, original_array, original_size
-
     def run_torch_inference(self, input_tensor: torch.Tensor) -> Dict[str, torch.Tensor]:
         """Run PyTorch inference"""
         logger.info("Running PyTorch inference...")
@@ -230,272 +128,6 @@ class Demo:
         logger.info(f"TTNN inference completed in {inference_time:.4f}s")
 
         return ttnn_outputs, ttnn_outputs_2, ttnn_outputs_3
-
-    #     return results
-    def postprocess_outputs(
-        self,
-        torch_outputs: torch.Tensor,
-        torch_outputs_2: torch.Tensor,
-        torch_outputs_3: torch.Tensor,
-        ttnn_outputs: ttnn.Tensor,
-        ttnn_outputs_2: ttnn.Tensor,
-        ttnn_outputs_3: ttnn.Tensor,
-        original_size: Tuple[int, int],
-    ) -> Dict[str, Dict]:
-        """Postprocess outputs from both pipelines"""
-        results = {"torch": {}, "ttnn": {}}
-
-        # Process PyTorch outputs
-        if torch_outputs is not None and torch_outputs_2 is not None and torch_outputs_3 is not None:
-            logger.info("Processing PyTorch outputs...")
-            try:
-                semantic_logits = torch_outputs
-                offset_map = torch_outputs_2
-                center_heatmap = torch_outputs_3
-
-                # semantic_logits
-                if semantic_logits is not None and isinstance(semantic_logits, torch.Tensor):
-                    np_array = semantic_logits.squeeze(0).cpu().numpy()
-                    semantic_pred = np.argmax(np_array, axis=0)
-                    results["torch"]["semantic_pred"] = cv2.resize(
-                        semantic_pred.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
-                    )
-                    logger.debug(f"PyTorch semantic_pred shape: {results['torch']['semantic_pred'].shape}")
-
-                # center_heatmap
-                if center_heatmap is not None and isinstance(center_heatmap, torch.Tensor):
-                    np_array = center_heatmap.squeeze(0).cpu().numpy()
-                    if len(np_array.shape) == 3 and np_array.shape[0] == 1:
-                        center_data = np_array[0]  # Remove channel dim
-                    elif len(np_array.shape) == 2:
-                        center_data = np_array
-                    else:
-                        center_data = np_array  # Use as is
-
-                    results["torch"]["center_heatmap"] = cv2.resize(
-                        center_data, original_size, interpolation=cv2.INTER_LINEAR
-                    )
-                    logger.debug(f"PyTorch center_heatmap shape: {results['torch']['center_heatmap'].shape}")
-
-                # offset_map
-                if offset_map is not None and isinstance(offset_map, torch.Tensor):
-                    np_array = offset_map.squeeze(0).cpu().numpy()
-                    if len(np_array.shape) == 3 and np_array.shape[0] == 2:
-                        results["torch"]["offset_map"] = np.stack(
-                            [
-                                cv2.resize(np_array[0], original_size, interpolation=cv2.INTER_LINEAR),
-                                cv2.resize(np_array[1], original_size, interpolation=cv2.INTER_LINEAR),
-                            ]
-                        )
-                    else:
-                        logger.warning(f"Unexpected offset_map shape: {np_array.shape}")
-                # panoptic_pred
-                # For PyTorch outputs:
-                panoptic_pred = PostProcessing(
-                    thing_classes=self.config.thing_classes,
-                    stuff_classes=self.config.stuff_classes,
-                    stuff_area_threshold=self.config.stuff_area_threshold,
-                    label_divisor=256,
-                ).panoptic_fusion(semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map)
-                if panoptic_pred is not None and isinstance(panoptic_pred, torch.Tensor):
-                    np_array = panoptic_pred.squeeze(0).cpu().numpy()
-                    results["torch"]["panoptic_pred"] = cv2.resize(
-                        np_array.astype(np.int32), original_size, interpolation=cv2.INTER_NEAREST
-                    )
-                    logger.debug(f"PyTorch panoptic_pred shape: {results['torch']['panoptic_pred'].shape}")
-
-            except Exception as e:
-                logger.error(f"Error processing PyTorch outputs: {e}")
-
-        # Process TTNN outputs
-        if ttnn_outputs is not None and ttnn_outputs_2 is not None and ttnn_outputs_3 is not None:
-            logger.info("Processing TTNN outputs...")
-            try:
-                # Convert TTNN to torch tensor
-                torch_tensor = ttnn.to_torch(
-                    ttnn_outputs, device=self.ttnn_device, mesh_composer=self.output_mesh_composer
-                )
-                torch_tensor_2 = ttnn.to_torch(
-                    ttnn_outputs_2, device=self.ttnn_device, mesh_composer=self.output_mesh_composer
-                )
-                torch_tensor_3 = ttnn.to_torch(
-                    ttnn_outputs_3, device=self.ttnn_device, mesh_composer=self.output_mesh_composer
-                )
-
-                # Debug: Log raw TTNN output stats
-                logger.debug(
-                    f"TTNN raw output 1 (semantic): shape={torch_tensor.shape}, "
-                    f"min={torch_tensor.min():.4f}, max={torch_tensor.max():.4f}, "
-                    f"mean={torch_tensor.mean():.4f}"
-                )
-                logger.debug(
-                    f"TTNN raw output 2 (offset): shape={torch_tensor_2.shape}, "
-                    f"min={torch_tensor_2.min():.4f}, max={torch_tensor_2.max():.4f}, "
-                    f"mean={torch_tensor_2.mean():.4f}"
-                )
-                logger.debug(
-                    f"TTNN raw output 3 (center): shape={torch_tensor_3.shape}, "
-                    f"min={torch_tensor_3.min():.4f}, max={torch_tensor_3.max():.4f}, "
-                    f"mean={torch_tensor_3.mean():.4f}"
-                )
-
-                # Reshape to proper format
-                reshaped_tensor = self._reshape_ttnn_output(torch_tensor, "semantic_logits")
-                reshaped_tensor_2 = self._reshape_ttnn_output(torch_tensor_2, "offset_map")
-                reshaped_tensor_3 = self._reshape_ttnn_output(torch_tensor_3, "center_heatmap")
-
-                # Process semantic segmentation
-                np_array = reshaped_tensor.squeeze(0).cpu().float().numpy()
-                semantic_pred = np.argmax(np_array, axis=0)
-                results["ttnn"]["semantic_pred"] = cv2.resize(
-                    semantic_pred.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
-                )
-                logger.debug(f"TTNN semantic_pred shape: {results['ttnn']['semantic_pred'].shape}")
-
-                # Process center heatmap - FIXED: This was in elif block before
-                np_array_3 = reshaped_tensor_3.squeeze(0).cpu().float().numpy()
-
-                # Debug center heatmap values
-                logger.debug(
-                    f"TTNN center heatmap stats: shape={np_array_3.shape}, "
-                    f"min={np_array_3.min():.4f}, max={np_array_3.max():.4f}, "
-                    f"mean={np_array_3.mean():.4f}, std={np_array_3.std():.4f}"
-                )
-
-                if len(np_array_3.shape) == 3 and np_array_3.shape[0] == 1:
-                    center_data = np_array_3[0]  # Remove channel dim
-                elif len(np_array_3.shape) == 2:
-                    center_data = np_array_3
-                else:
-                    center_data = np_array_3
-                    logger.warning(f"Unexpected center heatmap shape: {np_array_3.shape}, using as is")
-
-                # Check if center data has very small values and scale if needed
-                if center_data.max() < 0.01:
-                    logger.warning(f"Center heatmap has very small values (max={center_data.max():.6f}), scaling up")
-                    center_data = center_data * 100  # Scale up for visualization
-
-                results["ttnn"]["center_heatmap"] = cv2.resize(
-                    center_data, original_size, interpolation=cv2.INTER_LINEAR
-                )
-                logger.debug(f"TTNN center_heatmap shape: {results['ttnn']['center_heatmap'].shape}")
-
-                # Process offset map - FIXED: This was in elif block before
-                np_array_2 = reshaped_tensor_2.squeeze(0).cpu().float().numpy()
-                if len(np_array_2.shape) == 3 and np_array_2.shape[0] == 2:
-                    results["ttnn"]["offset_map"] = np.stack(
-                        [
-                            cv2.resize(np_array_2[0], original_size, interpolation=cv2.INTER_LINEAR),
-                            cv2.resize(np_array_2[1], original_size, interpolation=cv2.INTER_LINEAR),
-                        ]
-                    )
-                    logger.debug(f"TTNN offset_map shape: {results['ttnn']['offset_map'].shape}")
-                else:
-                    logger.warning(f"Unexpected TTNN offset_map shape: {np_array_2.shape}")
-
-                semantic_logits = reshaped_tensor
-                center_heatmap = reshaped_tensor_3
-                offset_map = reshaped_tensor_2
-
-                panoptic_pred_ttnn = PostProcessing(
-                    thing_classes=self.config.thing_classes,
-                    stuff_classes=self.config.stuff_classes,
-                    stuff_area_threshold=self.config.stuff_area_threshold,
-                    label_divisor=256,
-                ).panoptic_fusion(semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map)
-                panoptic_pred = ttnn.from_torch(panoptic_pred_ttnn, dtype=ttnn.int32)
-
-                if panoptic_pred is not None and isinstance(panoptic_pred, ttnn.Tensor):
-                    # Convert TTNN tensor to numpy properly
-                    torch_tensor = ttnn.to_torch(
-                        panoptic_pred, device=self.ttnn_device, mesh_composer=self.output_mesh_composer
-                    )
-                    np_array = torch_tensor.squeeze().cpu().numpy()
-
-                    # Debug information
-                    logger.debug(f"Panoptic array shape: {np_array.shape}")
-                    logger.debug(f"Original size for resize: {original_size}")
-
-                    # Validate original_size before resize
-                    if not original_size or len(original_size) != 2 or original_size[0] <= 0 or original_size[1] <= 0:
-                        logger.error(f"Invalid original_size: {original_size}")
-                        original_size = (self.config.input_width, self.config.input_height)
-                        logger.warning(f"Using fallback size: {original_size}")
-
-                    # Ensure valid array dimensions
-                    if np_array.size > 0 and len(np_array.shape) >= 2:
-                        if len(np_array.shape) > 2:
-                            np_array = np_array.squeeze()
-
-                        results["ttnn"]["panoptic_pred"] = cv2.resize(
-                            np_array.astype(np.int32), original_size, interpolation=cv2.INTER_NEAREST
-                        )
-                        logger.debug(f"TTNN panoptic_pred shape: {results['ttnn']['panoptic_pred'].shape}")
-                    else:
-                        logger.error("Invalid array for resize - skipping panoptic processing")
-
-            except Exception as e:
-                logger.error(f"Error processing TTNN output: {e}")
-                import traceback
-
-                traceback.print_exc()
-
-        return results
-
-    def _reshape_ttnn_output(self, tensor: torch.Tensor, key: str) -> torch.Tensor:
-        """Reshape TTNN output tensor to proper format - IMPROVED VERSION"""
-
-        logger.debug(f"Reshaping TTNN output for {key}: input shape = {tensor.shape}")
-
-        if len(tensor.shape) == 4:  # BHWC format from TTNN
-            B, H, W, C = tensor.shape
-
-            if key == "semantic_logits":
-                # Should have num_classes channels
-                expected_c = self.config.num_classes
-                if C == expected_c:
-                    result = tensor.permute(0, 3, 1, 2)  # BHWC -> BCHW
-                else:
-                    # Try to reshape if flattened
-                    total_elements = B * H * W * C
-                    expected_h = self.config.input_height // 4  # Typical output stride
-                    expected_w = self.config.input_width // 4
-                    if total_elements == B * expected_h * expected_w * expected_c:
-                        tensor = tensor.reshape(B, expected_h, expected_w, expected_c)
-                        result = tensor.permute(0, 3, 1, 2)
-                    else:
-                        logger.warning(f"Unexpected semantic_logits shape: {tensor.shape}")
-                        result = tensor
-
-            elif key == "center_heatmap":
-                # Should have 1 channel
-                if C == 1:
-                    result = tensor.permute(0, 3, 1, 2)  # BHWC -> BCHW
-                else:
-                    # Take first channel or reshape
-                    if C > 1:
-                        tensor = tensor[:, :, :, :1]  # Take first channel
-                    result = tensor.permute(0, 3, 1, 2)
-
-            elif key == "offset_map":
-                # Should have 2 channels (x, y offsets)
-                if C == 2:
-                    result = tensor.permute(0, 3, 1, 2)  # BHWC -> BCHW
-                else:
-                    logger.warning(f"Unexpected offset_map channels: {C}, expected 2")
-                    result = tensor
-            else:
-                result = tensor
-
-        elif len(tensor.shape) == 3:  # BHW format
-            result = tensor
-
-        else:
-            logger.warning(f"Unexpected tensor shape for {key}: {tensor.shape}")
-            result = tensor
-
-        logger.debug(f"Reshaped TTNN output for {key}: output shape = {result.shape}")
-        return result
 
     def compare_outputs(self, results: Dict[str, Dict]) -> Dict[str, float]:
         """Compare PyTorch and TTNN outputs"""
@@ -726,12 +358,12 @@ class Demo:
         self.initialize_ttnn_model()
 
         # Preprocess image
-        torch_input, ttnn_input, original_image, original_size = self.preprocess_image(image_path)
+        torch_input, ttnn_input, original_image, original_size = preprocess_image(
+            image_path, self.config.input_width, self.config.input_height, self.ttnn_device, self.inputs_mesh_mapper
+        )
 
         base_name = Path(image_path).stem
-        torch_input_path, numpy_input_path, metadata_path = self.save_preprocessed_inputs(
-            torch_input, output_dir, base_name
-        )
+        torch_input_path = save_preprocessed_inputs(torch_input, output_dir, base_name)
         logger.info(f"Preprocessed inputs saved for testing: {torch_input_path}")
 
         # Run inference
@@ -739,8 +371,16 @@ class Demo:
         ttnn_outputs, ttnn_outputs_2, ttnn_outputs_3 = self.run_ttnn_inference(ttnn_input)
 
         # Postprocess results
-        results = self.postprocess_outputs(
-            torch_outputs, torch_outputs_2, torch_outputs_3, ttnn_outputs, ttnn_outputs_2, ttnn_outputs_3, original_size
+        results = PostProcessing().postprocess_outputs(
+            torch_outputs,
+            torch_outputs_2,
+            torch_outputs_3,
+            ttnn_outputs,
+            ttnn_outputs_2,
+            ttnn_outputs_3,
+            original_size,
+            self.ttnn_device,
+            self.output_mesh_composer,
         )
         # Compare outputs if both pipelines ran
         self.compare_outputs(results)

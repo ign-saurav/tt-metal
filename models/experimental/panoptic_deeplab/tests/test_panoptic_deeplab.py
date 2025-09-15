@@ -9,12 +9,17 @@ from ttnn.model_preprocessing import preprocess_model_parameters
 from tests.ttnn.utils_for_testing import check_with_pcc
 import os
 import numpy as np
+from pathlib import Path
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
 from models.experimental.panoptic_deeplab.tt.panoptic_deeplab import TTPanopticDeepLab
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from ttnn.model_preprocessing import preprocess_model_parameters
-from models.experimental.panoptic_deeplab.common import load_torch_model_state
-from models.experimental.panoptic_deeplab.common import parameter_conv_args
+from models.experimental.panoptic_deeplab.common import (
+    load_torch_model_state,
+    parameter_conv_args,
+    preprocess_image,
+    save_preprocessed_inputs,
+)
 
 
 class PanopticDeepLabTestInfra:
@@ -26,7 +31,6 @@ class PanopticDeepLabTestInfra:
         height,
         width,
         model_config,
-        real_input_path=None,
     ):
         super().__init__()
         if not hasattr(self, "_model_initialized"):
@@ -44,15 +48,26 @@ class PanopticDeepLabTestInfra:
         self.height = height
         self.width = width
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
-        self.real_input_path = real_input_path
+        self.real_input_path = (
+            "/home/ubuntu/ign-tt-sm/tt-metal/models/experimental/panoptic_deeplab/resources/input.png"
+        )
+
         # Initialize torch model
         torch_model = TorchPanopticDeepLab()
         torch_model = load_torch_model_state(torch_model, "panoptic_deeplab")
 
         # Create input tensor
         if self.real_input_path and os.path.exists(self.real_input_path):
+            self.torch_input_tensor, self.ttnn_input_tensor, self.original_image, self.original_size = preprocess_image(
+                self.real_input_path, self.width, self.height, self.device, self.inputs_mesh_mapper
+            )
+            base_name = Path(self.real_input_path).stem
+            torch_input_path = save_preprocessed_inputs(
+                self.torch_input_tensor, "models/experimental/panoptic_deeplab/resources/test_inputs", base_name
+            )
+            logger.info(f"Preprocessed inputs saved for testing: {torch_input_path}")
             logger.info(f"Loading real input from: {self.real_input_path}")
-            self.torch_input_tensor = self.load_real_input(self.real_input_path)
+            self.torch_input_tensor = self.load_real_input(torch_input_path)
 
             # Verify shape matches expected dimensions
             expected_shape = (batch_size * self.num_devices, in_channels, height, width)
@@ -220,16 +235,9 @@ model_config = {
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
 @pytest.mark.parametrize(
-    "batch_size, in_channels, height, width, real_input_path",
+    "batch_size, in_channels, height, width",
     [
-        # (1, 3, 512, 1024),
-        (
-            1,
-            3,
-            512,
-            1024,
-            "/home/ubuntu/ign-tt-sm/tt-metal/models/experimental/panoptic_deeplab/result/fullnet/test_inputs/frankfurt_000000_005543_leftImg8bit_torch_input.pt",
-        ),
+        (1, 3, 512, 1024),
     ],
 )
 def test_panoptic_deeplab(
@@ -238,7 +246,6 @@ def test_panoptic_deeplab(
     in_channels,
     height,
     width,
-    real_input_path,
 ):
     PanopticDeepLabTestInfra(
         device,
@@ -247,5 +254,4 @@ def test_panoptic_deeplab(
         height,
         width,
         model_config,
-        real_input_path,
     )
