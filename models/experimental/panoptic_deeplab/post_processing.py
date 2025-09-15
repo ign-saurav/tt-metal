@@ -179,125 +179,129 @@ from typing import List, Tuple
 
 #     return panoptic, center
 ##########################################
-def panoptic_fusion(
-    self, semantic_logits: torch.Tensor, center_heatmap: torch.Tensor, offset_map: torch.Tensor
-) -> torch.Tensor:
-    """
-    Fuse semantic and instance predictions to generate panoptic segmentation.
+class PostProcessing:
+    def __init__(self, center_threshold=0.1, nms_kernel=7, top_k_instance=200, thing_classes=None):
+        self.center_threshold = center_threshold
+        self.nms_kernel = nms_kernel
+        self.top_k_instance = top_k_instance
+        self.thing_classes = thing_classes
 
-    Args:
-        semantic_logits: [B, num_classes, H, W]
-        center_heatmap: [B, 1, H, W]
-        offset_map: [B, 2, H, W]
+    def panoptic_fusion(
+        self, semantic_logits: torch.Tensor, center_heatmap: torch.Tensor, offset_map: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Fuse semantic and instance predictions to generate panoptic segmentation.
 
-    Returns:
-        panoptic_pred: [B, H, W] with instance IDs and semantic labels
-    """
-    batch_size, _, height, width = semantic_logits.shape
-    device = semantic_logits.device
+        Args:
+            semantic_logits: [B, num_classes, H, W]
+            center_heatmap: [B, 1, H, W]
+            offset_map: [B, 2, H, W]
 
-    # Get semantic predictions
-    semantic_pred = torch.argmax(semantic_logits, dim=1)  # [B, H, W]
+        Returns:
+            panoptic_pred: [B, H, W] with instance IDs and semantic labels
+        """
+        batch_size, _, height, width = semantic_logits.shape
+        device = semantic_logits.device
 
-    panoptic_pred = torch.zeros_like(semantic_pred)
+        # Get semantic predictions
+        semantic_pred = torch.argmax(semantic_logits, dim=1)  # [B, H, W]
 
-    for b in range(batch_size):
-        # Process each image in the batch
-        sem_pred = semantic_pred[b]  # [H, W]
-        center_heat = center_heatmap[b, 0]  # [H, W]
-        offset = offset_map[b]  # [2, H, W]
+        panoptic_pred = torch.zeros_like(semantic_pred)
 
-        # Find instance centers
-        centers = self.find_instance_centers(center_heat)
+        for b in range(batch_size):
+            # Process each image in the batch
+            sem_pred = semantic_pred[b]  # [H, W]
+            center_heat = center_heatmap[b, 0]  # [H, W]
+            offset = offset_map[b]  # [2, H, W]
 
-        # Generate instance masks
-        instance_masks = self.generate_instance_masks(centers, offset, height, width)
+            # Find instance centers
+            centers = self.find_instance_centers(center_heat)
 
-        # Fuse semantic and instance predictions
-        panoptic_img = self.fuse_semantic_instance(sem_pred, instance_masks, centers)
+            # Generate instance masks
+            instance_masks = self.generate_instance_masks(centers, offset, height, width)
 
-        panoptic_pred[b] = panoptic_img
+            # Fuse semantic and instance predictions
+            panoptic_img = self.fuse_semantic_instance(sem_pred, instance_masks, centers)
 
-    return panoptic_pred
+            panoptic_pred[b] = panoptic_img
 
+        return panoptic_pred
 
-def find_instance_centers(self, center_heatmap: torch.Tensor) -> List[Tuple[int, int]]:
-    """Find instance centers from center heatmap using NMS."""
-    # Apply threshold
-    center_mask = center_heatmap > self.center_threshold
+    def find_instance_centers(self, center_heatmap: torch.Tensor) -> List[Tuple[int, int]]:
+        """Find instance centers from center heatmap using NMS."""
+        # Apply threshold
+        center_mask = center_heatmap > self.center_threshold
 
-    # Apply NMS
-    nms_heatmap = F.max_pool2d(
-        center_heatmap.unsqueeze(0).unsqueeze(0),
-        kernel_size=self.nms_kernel,
-        stride=1,
-        padding=self.nms_kernel // 2,
-    ).squeeze()
+        # Apply NMS
+        nms_heatmap = F.max_pool2d(
+            center_heatmap.unsqueeze(0).unsqueeze(0),
+            kernel_size=self.nms_kernel,
+            stride=1,
+            padding=(self.nms_kernel - 1) // 2,
+        ).squeeze()
 
-    # Find local maxima
-    center_mask = center_mask & (center_heatmap == nms_heatmap)
+        # Find local maxima
+        center_mask = center_mask & (center_heatmap == nms_heatmap)
 
-    # Get top-k centers
-    center_coords = torch.nonzero(center_mask, as_tuple=False)
-    center_scores = center_heatmap[center_mask]
+        # Get top-k centers
+        center_coords = torch.nonzero(center_mask, as_tuple=False)
+        center_scores = center_heatmap[center_mask]
 
-    if len(center_coords) > self.top_k_instance:
-        top_k_indices = torch.topk(center_scores, self.top_k_instance)[1]
-        center_coords = center_coords[top_k_indices]
+        if len(center_coords) > self.top_k_instance:
+            top_k_indices = torch.topk(center_scores, self.top_k_instance)[1]
+            center_coords = center_coords[top_k_indices]
 
-    return [(coord[0].item(), coord[1].item()) for coord in center_coords]
+        return [(coord[0].item(), coord[1].item()) for coord in center_coords]
 
+    def generate_instance_masks(
+        self, centers: List[Tuple[int, int]], offset_map: torch.Tensor, height: int, width: int
+    ) -> List[torch.Tensor]:
+        """Generate instance masks from centers and offset map."""
+        device = offset_map.device
 
-def generate_instance_masks(
-    self, centers: List[Tuple[int, int]], offset_map: torch.Tensor, height: int, width: int
-) -> List[torch.Tensor]:
-    """Generate instance masks from centers and offset map."""
-    device = offset_map.device
+        # Create coordinate grids
+        y_coords, x_coords = torch.meshgrid(
+            torch.arange(height, device=device), torch.arange(width, device=device), indexing="ij"
+        )
 
-    # Create coordinate grids
-    y_coords, x_coords = torch.meshgrid(
-        torch.arange(height, device=device), torch.arange(width, device=device), indexing="ij"
-    )
+        instance_masks = []
 
-    instance_masks = []
+        for center_y, center_x in centers:
+            # Calculate shifted coordinates using offset map
+            shifted_y = y_coords + offset_map[0]  # [H, W]
+            shifted_x = x_coords + offset_map[1]  # [H, W]
 
-    for center_y, center_x in centers:
-        # Calculate shifted coordinates using offset map
-        shifted_y = y_coords + offset_map[0]  # [H, W]
-        shifted_x = x_coords + offset_map[1]  # [H, W]
+            # Calculate distance to center
+            dist_y = shifted_y - center_y
+            dist_x = shifted_x - center_x
+            distance = torch.sqrt(dist_y**2 + dist_x**2)
 
-        # Calculate distance to center
-        dist_y = shifted_y - center_y
-        dist_x = shifted_x - center_x
-        distance = torch.sqrt(dist_y**2 + dist_x**2)
+            # Create instance mask (pixels that point to this center)
+            mask = distance < 1.0  # Threshold for belonging to instance
+            instance_masks.append(mask)
 
-        # Create instance mask (pixels that point to this center)
-        mask = distance < 1.0  # Threshold for belonging to instance
-        instance_masks.append(mask)
+        return instance_masks
 
-    return instance_masks
+    def fuse_semantic_instance(
+        self, semantic_pred: torch.Tensor, instance_masks: List[torch.Tensor], centers: List[Tuple[int, int]]
+    ) -> torch.Tensor:
+        """Fuse semantic and instance predictions."""
+        height, width = semantic_pred.shape
+        panoptic_pred = semantic_pred.clone()
 
+        instance_id = 1000  # Start instance IDs from 1000
 
-def fuse_semantic_instance(
-    self, semantic_pred: torch.Tensor, instance_masks: List[torch.Tensor], centers: List[Tuple[int, int]]
-) -> torch.Tensor:
-    """Fuse semantic and instance predictions."""
-    height, width = semantic_pred.shape
-    panoptic_pred = semantic_pred.clone()
+        for mask, (center_y, center_x) in zip(instance_masks, centers):
+            if mask.sum() < 32:  # Skip very small instances
+                continue
 
-    instance_id = 1000  # Start instance IDs from 1000
+            # Get semantic class at center
+            center_class = semantic_pred[center_y, center_x].item()
 
-    for mask, (center_y, center_x) in zip(instance_masks, centers):
-        if mask.sum() < 32:  # Skip very small instances
-            continue
+            # Only process thing classes for instances
+            if center_class in self.thing_classes:
+                # Assign instance ID to mask region
+                panoptic_pred[mask] = instance_id
+                instance_id += 1
 
-        # Get semantic class at center
-        center_class = semantic_pred[center_y, center_x].item()
-
-        # Only process thing classes for instances
-        if center_class in self.thing_classes:
-            # Assign instance ID to mask region
-            panoptic_pred[mask] = instance_id
-            instance_id += 1
-
-    return panoptic_pred
+        return panoptic_pred

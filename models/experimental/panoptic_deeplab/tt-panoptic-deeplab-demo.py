@@ -22,7 +22,7 @@ import ttnn
 from models.experimental.panoptic_deeplab.tt.panoptic_deeplab import TTPanopticDeepLab
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
-from post_processing import panoptic_fusion
+from post_processing import PostProcessing
 
 
 def map_single_key(checkpoint_key):
@@ -655,29 +655,6 @@ class DualPipelineDemo:
 
                 # Print sample weight values for a few loaded checkpoint keys and their mapped model keys
                 logger.info("Sample loaded weights (checkpoint key -> model key):")
-                # for i, (checkpoint_key, model_key) in enumerate(key_mapping.items()):
-                #     if i >= 3:
-                #         break
-                #     checkpoint_key = "backbone.res4.5.conv3.weight"
-                #     model_key = "backbone.layer3.5.conv3.weight"
-                #     ckpt_val = state_dict[checkpoint_key]
-                #     model_val = self.torch_model.state_dict()[model_key]
-                #     logger.info(f"  {checkpoint_key} -> {model_key}")
-                #     logger.info(
-                #         f"    checkpoint value (mean/std): {ckpt_val.float().mean():f} / {ckpt_val.float().std():f}"
-                #     )
-                #     logger.info(
-                #         f"    model value (mean/std):      {model_val.float().mean():f} / {model_val.float().std():f}"
-                #     )
-                # conv_layer = self.torch_model.backbone.layer3[5].conv3
-                # bn_layer = self.torch_model.backbone.layer3[5].bn3
-
-                # # print(f"Conv weight: {conv_layer.weight[:5]}")
-                # # print(f"Conv bias: {conv_layer.bias[:5]}")
-                # print(f"BN running_mean: {bn_layer.running_mean[:5]}")  # First 5 values
-                # print(f"BN running_var: {bn_layer.running_var[:5]}")
-                # print(f"BN weight (gamma): {bn_layer.weight[:5]}")
-                # print(f"BN bias (beta): {bn_layer.bias[:5]}")
 
                 # Verify sample parameters were updated
                 sample_params = list(self.torch_model.parameters())[:3]
@@ -692,24 +669,6 @@ class DualPipelineDemo:
 
         else:
             logger.warning("No weights provided - using random initialization")
-
-        # if self.torch_model is not None:
-        #     # Get original conv weight (before BN folding)
-        #     original_conv = self.torch_model.backbone.layer3[5].conv3
-        #     original_bn = self.torch_model.backbone.layer3[5].bn3
-
-        #     print("\nOriginal Conv3 weight (before BN folding):")
-        #     print(f"  Mean: {original_conv.weight.mean():.4f}")
-        #     print(f"  Std: {original_conv.weight.std():.4f}")
-
-        # Manually fold BN to see the effect
-        # from ttnn.model_preprocessing import fold_batch_norm2d_into_conv2d
-
-        # folded_weight, folded_bias = fold_batch_norm2d_into_conv2d(original_conv, original_bn)
-
-        # print("\nFolded Conv3 weight (after BN folding):")
-        # print(f"  Mean: {folded_weight.mean():.4f}")
-        # print(f"  Std: {folded_weight.std():.4f}")
 
         logger.info("PyTorch model initialization completed")
         logger.info("PyTorch model initialized")
@@ -833,29 +792,6 @@ class DualPipelineDemo:
 
                     # Print sample weight values for a few loaded checkpoint keys and their mapped model keys
                     logger.info("Sample loaded weights (checkpoint key -> model key):")
-                    # for i, (checkpoint_key, model_key) in enumerate(key_mapping.items()):
-                    #     if i >= 3:
-                    #         break
-                    #     checkpoint_key = "backbone.res4.5.conv3.weight"
-                    #     model_key = "backbone.layer3.5.conv3.weight"
-                    #     ckpt_val = state_dict[checkpoint_key]
-                    #     model_val = self.torch_model.state_dict()[model_key]
-                    #     logger.info(f"  {checkpoint_key} -> {model_key}")
-                    #     logger.info(
-                    #         f"    checkpoint value (mean/std): {ckpt_val.float().mean():f} / {ckpt_val.float().std():f}"
-                    #     )
-                    #     logger.info(
-                    #         f"    model value (mean/std):      {model_val.float().mean():f} / {model_val.float().std():f}"
-                    #     )
-                    # conv_layer = self.torch_model.backbone.layer3[5].conv3
-                    # bn_layer = self.torch_model.backbone.layer3[5].bn3
-
-                    # # print(f"Conv weight: {conv_layer.weight[:5]}")
-                    # # print(f"Conv bias: {conv_layer.bias[:5]}")
-                    # print(f"BN running_mean: {bn_layer.running_mean[:5]}")  # First 5 values
-                    # print(f"BN running_var: {bn_layer.running_var[:5]}")
-                    # print(f"BN weight (gamma): {bn_layer.weight[:5]}")
-                    # print(f"BN bias (beta): {bn_layer.bias[:5]}")
 
                     # Verify sample parameters were updated
                     sample_params = list(self.torch_model.parameters())[:3]
@@ -965,26 +901,6 @@ class DualPipelineDemo:
                 parameters.instance_decoder.head_1.conv_args = head_args_1
             if hasattr(parameters.instance_decoder, "head_2"):
                 parameters.instance_decoder.head_2.conv_args = head_args_2
-        ########################
-        # print("parameters::::", parameters)
-        # logger.info("Moving parameters to TTNN device...")
-        # parameters.to(self.ttnn_device)
-
-        # if hasattr(parameters, "backbone"):
-        #     if hasattr(parameters.backbone, "layer3"):
-        #         # if hasattr(parameters.backbone.layer3, '5'):
-        #         # if hasattr(parameters.backbone.layer3.5, 'conv3'):
-        #         # aspp = parameters.instance_head
-        #         # if hasattr(aspp, 'ASPP_0_Conv'):
-        #         weight = parameters.backbone.layer3[5].conv3.weight
-        #         # weight = parameters.instance_head.ASPP_0_Conv["weight"]
-        #         weight_torch = ttnn.to_torch(weight)
-        #         print(f"backbone layer3.5.conv3 weight stats:")
-        #         print(f"  Shape: {weight_torch.shape}")
-        #         print(f"  Min: {weight_torch.min().item():.4f}")
-        #         print(f"  Max: {weight_torch.max().item():.4f}")
-        #         print(f"  Mean: {weight_torch.mean().item():.4f}")
-        #         print(f"  Std: {weight_torch.std().item():.4f}")
 
         torch_conv = reference_model.backbone.layer3[5].conv3
         torch_bn = reference_model.backbone.layer3[5].bn3
@@ -999,12 +915,6 @@ class DualPipelineDemo:
         print(f"Folded PyTorch: mean={folded_weight.mean():.4f}, std={folded_weight.std():.4f}")
         print(f"TTNN processed: mean={ttnn_weight.mean():.4f}, std={ttnn_weight.std():.4f}")
 
-        # Model configuration for TTNN
-        # model_config = {
-        #     "MATH_FIDELITY": getattr(ttnn.MathFidelity, self.config.math_fidelity),
-        #     "WEIGHTS_DTYPE": getattr(ttnn, self.config.weights_dtype),
-        #     "ACTIVATIONS_DTYPE": getattr(ttnn, self.config.activations_dtype),
-        # }
         model_config = {
             "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
             "WEIGHTS_DTYPE": ttnn.bfloat8_b,
@@ -1212,7 +1122,9 @@ class DualPipelineDemo:
                     else:
                         logger.warning(f"Unexpected offset_map shape: {np_array.shape}")
                 # panoptic_pred
-                panoptic_pred = panoptic_fusion(semantic_logits, center_heatmap, offset_map)
+                panoptic_pred = PostProcessing().panoptic_fusion(
+                    semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map
+                )
                 if panoptic_pred is not None and isinstance(panoptic_pred, torch.Tensor):
                     np_array = panoptic_pred.squeeze(0).cpu().numpy()
                     results["torch"]["panoptic_pred"] = cv2.resize(
@@ -1310,20 +1222,55 @@ class DualPipelineDemo:
                     logger.warning(f"Unexpected TTNN offset_map shape: {np_array_2.shape}")
 
                 # panoptic_pred_ttnn
-                semantic_logits = ttnn.to_torch(semantic_logits)
-                center_heatmap = ttnn.to_torch(center_heatmap)
-                offset_map = ttnn.to_torch(offset_map)
+                # semantic_logits = ttnn.to_torch(semantic_logits) if hasattr(ttnn, "to_torch") else semantic_logits
+                # center_heatmap = ttnn.to_torch(center_heatmap) if hasattr(ttnn, "to_torch") else center_heatmap
+                # offset_map = ttnn.to_torch(offset_map) if hasattr(ttnn, "to_torch") else offset_map
 
-                panoptic_pred_ttnn = panoptic_fusion(semantic_logits, center_heatmap, offset_map)
-                panoptic_pred = ttnn.from_torch(panoptic_pred, dtype=ttnn.int32)
+                semantic_logits = reshaped_tensor
+                center_heatmap = reshaped_tensor_3
+                offset_map = reshaped_tensor_2
+
+                panoptic_pred_ttnn = PostProcessing().panoptic_fusion(
+                    semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map
+                )
+                panoptic_pred = ttnn.from_torch(panoptic_pred_ttnn, dtype=ttnn.int32)
 
                 if panoptic_pred is not None and isinstance(panoptic_pred, ttnn.Tensor):
-                    if len(np_array.shape) > 2:
-                        np_array = np_array.squeeze()  # Remove single dimensions
-                    results["ttnn"]["panoptic_pred"] = cv2.resize(
-                        np_array.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
+                    # Convert TTNN tensor to numpy properly
+                    torch_tensor = ttnn.to_torch(
+                        panoptic_pred, device=self.ttnn_device, mesh_composer=self.output_mesh_composer
                     )
-                    logger.debug(f"TTNN panoptic_pred shape: {results['ttnn']['panoptic_pred'].shape}")
+                    np_array = torch_tensor.squeeze().cpu().numpy()
+
+                    # Debug information
+                    logger.debug(f"Panoptic array shape: {np_array.shape}")
+                    logger.debug(f"Original size for resize: {original_size}")
+
+                    # Validate original_size before resize
+                    if not original_size or len(original_size) != 2 or original_size[0] <= 0 or original_size[1] <= 0:
+                        logger.error(f"Invalid original_size: {original_size}")
+                        original_size = (self.config.input_width, self.config.input_height)
+                        logger.warning(f"Using fallback size: {original_size}")
+
+                    # Ensure valid array dimensions
+                    if np_array.size > 0 and len(np_array.shape) >= 2:
+                        if len(np_array.shape) > 2:
+                            np_array = np_array.squeeze()
+
+                        results["ttnn"]["panoptic_pred"] = cv2.resize(
+                            np_array.astype(np.int32), original_size, interpolation=cv2.INTER_NEAREST
+                        )
+                        logger.debug(f"TTNN panoptic_pred shape: {results['ttnn']['panoptic_pred'].shape}")
+                    else:
+                        logger.error("Invalid array for resize - skipping panoptic processing")
+
+                # if panoptic_pred is not None and isinstance(panoptic_pred, ttnn.Tensor):
+                #     if len(np_array.shape) > 2:
+                #         np_array = np_array.squeeze()  # Remove single dimensions
+                #     results["ttnn"]["panoptic_pred"] = cv2.resize(
+                #         np_array.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
+                #     )
+                #     logger.debug(f"TTNN panoptic_pred shape: {results['ttnn']['panoptic_pred'].shape}")
 
             except Exception as e:
                 logger.error(f"Error processing TTNN output: {e}")

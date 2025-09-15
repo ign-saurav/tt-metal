@@ -797,6 +797,7 @@ model_config = {
             1024,
             "/home/ubuntu/ign-tt-sm/tt-metal/models/experimental/panoptic_deeplab/model_final_23d03a.pkl",
             "/home/ubuntu/ign-tt-sm/tt-metal/models/experimental/panoptic_deeplab/result/fullnet/test_inputs/frankfurt_000000_005543_leftImg8bit_torch_input.pt",
+            # "/home/ubuntu/ign-tt-sm/tt-metal/models/experimental/panoptic_deeplab/result/fullnet6/test_inputs/munster_000091_000019_leftImg8bit_torch_input.pt",
         ),
     ],
 )
