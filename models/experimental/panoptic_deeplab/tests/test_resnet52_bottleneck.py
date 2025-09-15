@@ -10,7 +10,7 @@ import ttnn
 
 from tests.ttnn.utils_for_testing import check_with_pcc
 from torchvision.models.resnet import Bottleneck
-from models.experimental.panoptic_deeplab.tt.bottleneck import TTBottleneck, bottleneck_layer_optimisations
+from models.experimental.panoptic_deeplab.tt.bottleneck import TTBottleneck, get_bottleneck_optimisation
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from models.experimental.panoptic_deeplab.common import load_torch_model_state
 
@@ -32,7 +32,7 @@ class BottleneckTestInfra:
     ):
         super().__init__()
         if not hasattr(self, "_model_initialized"):
-            torch.manual_seed(42)  # Only seed once
+            torch.manual_seed(42)
             self._model_initialized = True
             torch.cuda.manual_seed_all(42)
             torch.backends.cudnn.deterministic = True
@@ -57,7 +57,7 @@ class BottleneckTestInfra:
         torch_model = Bottleneck(
             inplanes=inplanes, planes=planes, stride=stride, dilation=dilation, downsample=downsample_conv
         )
-        torch_model = load_torch_model_state(torch_model, f"backbone.{name}")
+        torch_model = load_torch_model_state(torch_model, name)
 
         input_shape = (batch_size * self.num_devices, inplanes, height, width)
 
@@ -85,15 +85,9 @@ class BottleneckTestInfra:
             model_config=model_config,
             dilation=dilation,
             name=name,
-            layer_optimisations=bottleneck_layer_optimisations[name[:6]],
+            layer_optimisations=get_bottleneck_optimisation(name),
         )
 
-        # First run configures convs JIT
-        self.input_tensor = ttnn.to_device(tt_host_tensor, device)
-        self.run()
-        self.validate()
-
-        # Optimized run
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
         self.run()
         self.validate()
@@ -141,7 +135,7 @@ class BottleneckTestInfra:
 
         assert self.pcc_passed, logger.error(f"PCC check failed: {self.pcc_message}")
         logger.info(
-            f"ResNet50 Bottleneck Block {self.name} - batch_size={batch_size}, act_dtype={model_config['ACTIVATIONS_DTYPE']}, weight_dtype={model_config['WEIGHTS_DTYPE']}, math_fidelity={model_config['MATH_FIDELITY']}, PCC={self.pcc_message}"
+            f"ResNet52 Bottleneck Block {self.name} - batch_size={batch_size}, act_dtype={model_config['ACTIVATIONS_DTYPE']}, weight_dtype={model_config['WEIGHTS_DTYPE']}, math_fidelity={model_config['MATH_FIDELITY']}, PCC={self.pcc_message}"
         )
 
         return self.pcc_passed, self.pcc_message
@@ -158,19 +152,19 @@ model_config = {
 @pytest.mark.parametrize(
     "batch_size, inplanes, planes, height, width, stride, dilation, downsample, name",
     (
-        # Layer 1
-        (1, 128, 64, 128, 256, 1, 1, True, "layer1.0"),
-        (1, 256, 64, 128, 256, 1, 1, False, "layer1.1"),
-        # Layer 2
-        (1, 256, 128, 128, 256, 2, 1, True, "layer2.0"),
-        (1, 512, 128, 64, 128, 1, 1, False, "layer2.1"),
-        # Layer 3
-        (1, 512, 256, 64, 128, 2, 1, True, "layer3.0"),
-        (1, 1024, 256, 32, 64, 1, 1, False, "layer3.1"),
-        # Layer 4
-        (1, 1024, 512, 32, 64, 1, 2, True, "layer4.0"),
-        (1, 2048, 512, 32, 64, 1, 4, False, "layer4.1"),
-        (1, 2048, 512, 32, 64, 1, 8, False, "layer4.2"),
+        # res 2
+        (1, 128, 64, 128, 256, 1, 1, True, "backbone.res2.0"),
+        (1, 256, 64, 128, 256, 1, 1, False, "backbone.res2.1"),
+        # res 2
+        (1, 256, 128, 128, 256, 2, 1, True, "backbone.res3.0"),
+        (1, 512, 128, 64, 128, 1, 1, False, "backbone.res3.1"),
+        # res 3
+        (1, 512, 256, 64, 128, 2, 1, True, "backbone.res4.0"),
+        (1, 1024, 256, 32, 64, 1, 1, False, "backbone.res4.1"),
+        # res 4
+        (1, 1024, 512, 32, 64, 1, 2, True, "backbone.res5.0"),
+        (1, 2048, 512, 32, 64, 1, 4, False, "backbone.res5.1"),
+        (1, 2048, 512, 32, 64, 1, 8, False, "backbone.res5.2"),
     ),
 )
 def test_bottleneck(device, batch_size, inplanes, planes, height, width, stride, dilation, downsample, name):

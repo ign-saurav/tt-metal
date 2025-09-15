@@ -3,65 +3,61 @@
 
 import ttnn
 from typing import List, Optional
-from models.experimental.panoptic_deeplab.tt.bottleneck import TTBottleneck, bottleneck_layer_optimisations
+from models.experimental.panoptic_deeplab.tt.bottleneck import TTBottleneck, get_bottleneck_optimisation
 from models.experimental.panoptic_deeplab.tt.stem import resnet52Stem, neck_optimisations
 
 
 class TTBackbone:
-    def __init__(self, parameters, model_config, reshard_block_inputs: bool = True, small_tensor: bool = False):
+    def __init__(self, parameters, model_config, name="backbone"):
         layers = [3, 4, 6, 3]
         self.inplanes = 128
-        self.reshard_block_inputs = reshard_block_inputs
         # stem
-        neck_layer_optimistaion = neck_optimisations["optimization_full_tensor"]
-        if small_tensor:
-            neck_layer_optimistaion = neck_optimisations["optimization_small_tensor"]
         self.stem = resnet52Stem(
             parameters.stem,
             stride=1,
             model_config=model_config,
-            layer_optimisations=neck_layer_optimistaion,
+            layer_optimisations=neck_optimisations,
         )
-        # Four bottleneck stages (layer1, layer2, layer3, layer4)
-        self.layer1 = self._make_layer(
-            name="layer1",
-            parameters=parameters.layer1,
+        # Four bottleneck stages (res2, res3, res4, res5)
+        self.res2 = self._make_layer(
+            name=f"{name}.res2",
+            parameters=parameters.res2,
             planes=64,
             blocks=layers[0],
             stride=1,
             dilate_config=None,
             model_config=model_config,
-            layer_optimisations=bottleneck_layer_optimisations["layer1"],
+            layer_optimisations=get_bottleneck_optimisation("res2"),
         )
-        self.layer2 = self._make_layer(
-            name="layer2",
-            parameters=parameters.layer2,
+        self.res3 = self._make_layer(
+            name=f"{name}.res3",
+            parameters=parameters.res3,
             planes=128,
             blocks=layers[1],
             stride=2,
             dilate_config=None,
             model_config=model_config,
-            layer_optimisations=bottleneck_layer_optimisations["layer2"],
+            layer_optimisations=get_bottleneck_optimisation("res3"),
         )
-        self.layer3 = self._make_layer(
-            name="layer3",
-            parameters=parameters.layer3,
+        self.res4 = self._make_layer(
+            name=f"{name}.res4",
+            parameters=parameters.res4,
             planes=256,
             blocks=layers[2],
             stride=2,
             dilate_config=None,
             model_config=model_config,
-            layer_optimisations=bottleneck_layer_optimisations["layer3"],
+            layer_optimisations=get_bottleneck_optimisation("res4"),
         )
-        self.layer4 = self._make_layer(
-            name="layer4",
-            parameters=parameters.layer4,
+        self.res5 = self._make_layer(
+            name=f"{name}.res5",
+            parameters=parameters.res5,
             planes=512,
             blocks=layers[3],
             stride=1,
             dilate_config=[2, 4, 8],
             model_config=model_config,
-            layer_optimisations=bottleneck_layer_optimisations["layer4"],
+            layer_optimisations=get_bottleneck_optimisation("res5"),
         )
 
     def _make_layer(
@@ -73,7 +69,7 @@ class TTBackbone:
         stride: int,
         dilate_config: Optional[List[int]] = None,
         model_config=None,
-        layer_optimisations=bottleneck_layer_optimisations["default"],
+        layer_optimisations=get_bottleneck_optimisation("default"),
     ) -> List[TTBottleneck]:
         if dilate_config is None:
             dilate_config = [1] * blocks
@@ -108,38 +104,22 @@ class TTBackbone:
         x = self.stem(x, device)
         shape = x.shape
 
-        for block in self.layer1:
-            # x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-            # x = ttnn.reallocate(x)
+        for block in self.res2:
             x, shape = block(x, device, shape)
-
         res_2 = x
         res_2 = ttnn.to_memory_config(res_2, ttnn.DRAM_MEMORY_CONFIG)
 
-        for block in self.layer2:
-            # if self.reshard_block_inputs:
-            #     x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-            # x = ttnn.reallocate(x)
+        for block in self.res3:
             x, shape = block(x, device, shape)
-
         res_3 = x
         res_3 = ttnn.to_memory_config(res_3, ttnn.DRAM_MEMORY_CONFIG)
 
-        for block in self.layer3:
-            # x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-            # x = ttnn.reallocate(x)
+        for block in self.res4:
             x, shape = block(x, device, shape)
 
-        # res_4 = x
-        # res_4 = ttnn.to_memory_config(res_4, ttnn.DRAM_MEMORY_CONFIG)
-
-        for block in self.layer4:
-            # x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-            # x = ttnn.reallocate(x)
+        for block in self.res5:
             x, shape = block(x, device, shape)
-
+        x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
         res_5 = x
-        res_5 = ttnn.to_memory_config(res_5, ttnn.DRAM_MEMORY_CONFIG)
-        res_5 = ttnn.reallocate(res_5)
-        ttnn.deallocate(x, force=True)
+
         return {"res_2": res_2, "res_3": res_3, "res_5": res_5}

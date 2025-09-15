@@ -34,7 +34,7 @@ bottleneck_layer_optimisations = {
             "reallocate_halo_output": True,
         },
     ),
-    "layer1": BottleneckOptimizer(
+    "res2": BottleneckOptimizer(
         conv1={
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "reshard_if_not_optimal": True,
@@ -64,7 +64,7 @@ bottleneck_layer_optimisations = {
             "enable_weights_double_buffer": True,
         },
     ),
-    "layer2": BottleneckOptimizer(
+    "res3": BottleneckOptimizer(
         conv1={
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "reshard_if_not_optimal": True,
@@ -94,7 +94,7 @@ bottleneck_layer_optimisations = {
             "enable_weights_double_buffer": True,
         },
     ),
-    "layer3": BottleneckOptimizer(
+    "res4": BottleneckOptimizer(
         conv1={
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "reshard_if_not_optimal": True,
@@ -123,7 +123,7 @@ bottleneck_layer_optimisations = {
             "enable_weights_double_buffer": True,
         },
     ),
-    "layer4": BottleneckOptimizer(
+    "res5": BottleneckOptimizer(
         conv1={
             "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
             "reshard_if_not_optimal": True,
@@ -154,6 +154,13 @@ bottleneck_layer_optimisations = {
 }
 
 
+def get_bottleneck_optimisation(layer_name):
+    for key in ["res2", "res3", "res4", "res5"]:
+        if key in layer_name:
+            return bottleneck_layer_optimisations[key]
+    return bottleneck_layer_optimisations["default"]
+
+
 class TTBottleneck:
     expansion: int = 4
 
@@ -164,7 +171,7 @@ class TTBottleneck:
         stride,
         model_config,
         dilation: int = 1,
-        name: Optional[str] = "",
+        name: Optional[str] = "bottleneck",
         layer_optimisations=bottleneck_layer_optimisations["default"],
     ) -> None:
         self.name = name

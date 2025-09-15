@@ -13,82 +13,42 @@ class NeckOptimizer:
     conv3: dict
 
 
-neck_optimisations = {
-    "optimization_full_tensor": NeckOptimizer(
-        conv1={
-            "act_block_h": 512,
-            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-            "reshard_if_not_optimal": True,
-            "enable_split_reader": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-            "slice_config": ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dSliceHeight, num_slices=4),
-            "dtype": ttnn.bfloat16,
-        },
-        conv2={
-            "act_block_h": 128,
-            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-            "reshard_if_not_optimal": True,
-            "enable_split_reader": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-            "slice_config": ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dSliceHeight, num_slices=4),
-            "dtype": ttnn.bfloat16,
-        },
-        conv3={
-            "act_block_h": 32,
-            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-            "reshard_if_not_optimal": True,
-            "enable_split_reader": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-            "slice_config": ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dSliceHeight, num_slices=4),
-            "dtype": ttnn.bfloat16,
-        },
-    ),
-    "optimization_small_tensor": NeckOptimizer(
-        conv1={
-            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-            "reshard_if_not_optimal": True,
-            "enable_split_reader": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-            "slice_config": ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dSliceHeight, num_slices=2),
-            "dtype": ttnn.bfloat16,
-        },
-        conv2={
-            "act_block_h": 512,
-            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-            "reshard_if_not_optimal": True,
-            "enable_split_reader": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-            "dtype": ttnn.bfloat16,
-        },
-        conv3={
-            "act_block_h": 128,
-            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            "memory_config": ttnn.DRAM_MEMORY_CONFIG,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-            "reshard_if_not_optimal": True,
-            "enable_split_reader": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-            "dtype": ttnn.bfloat16,
-        },
-    ),
-}
+neck_optimisations = NeckOptimizer(
+    conv1={
+        "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+        "deallocate_activation": True,
+        "reallocate_halo_output": True,
+        "reshard_if_not_optimal": True,
+        "enable_split_reader": True,
+        "enable_act_double_buffer": True,
+        "enable_weights_double_buffer": True,
+        "slice_config": ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dSliceHeight, num_slices=2),
+        "dtype": ttnn.bfloat16,
+    },
+    conv2={
+        "act_block_h": 512,
+        "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+        "deallocate_activation": True,
+        "reallocate_halo_output": True,
+        "reshard_if_not_optimal": True,
+        "enable_split_reader": True,
+        "enable_act_double_buffer": True,
+        "enable_weights_double_buffer": True,
+        "dtype": ttnn.bfloat16,
+    },
+    conv3={
+        "act_block_h": 128,
+        "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+        "memory_config": ttnn.DRAM_MEMORY_CONFIG,
+        "deallocate_activation": True,
+        "reallocate_halo_output": True,
+        "reshard_if_not_optimal": True,
+        "enable_split_reader": True,
+        "enable_act_double_buffer": True,
+        "enable_weights_double_buffer": True,
+        "dtype": ttnn.bfloat16,
+    },
+)
 
 
 class resnet52Stem:
@@ -97,7 +57,7 @@ class resnet52Stem:
         parameters,
         stride,
         model_config,
-        layer_optimisations=neck_optimisations["optimization_full_tensor"],
+        layer_optimisations=neck_optimisations,
     ) -> None:
         self.conv1 = TTConv2D(
             kernel_size=3,
