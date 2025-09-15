@@ -40,26 +40,6 @@ class TTWindowAttentionTR(LightweightModule):
             core_grid=ttnn.CoreGrid(y=8, x=8),
         )
         ttnn.deallocate(x)
-        tile_size = 32
-        # for 180 dim, 540 qkvshape[-1] :- head_size = 30, padded_head_size = 32
-        head_size = qkv.shape[-1] // (3 * self.num_heads)
-        padded_head_size = ((head_size + tile_size - 1) // tile_size) * tile_size
-        pad = padded_head_size != head_size
-        if pad:  # add padding
-            qkv_torch = ttnn.to_torch(qkv)
-            input_tensor_heads = torch.split(qkv_torch, head_size, dim=-1)
-            input_tensor_heads = [
-                torch.nn.functional.pad(head, (0, padded_head_size - head_size), "constant", 0)
-                for head in input_tensor_heads
-            ]
-            qkv = torch.cat(input_tensor_heads, dim=-1)
-            qkv = ttnn.from_torch(
-                qkv,
-                device=self.device,
-                dtype=ttnn.bfloat16,
-                memory_config=self.memory_config,
-                layout=ttnn.TILE_LAYOUT,
-            )
         (
             q,
             k,
@@ -69,32 +49,6 @@ class TTWindowAttentionTR(LightweightModule):
         )
 
         ttnn.deallocate(qkv)
-        if pad:  # remove padding
-            q = ttnn.to_torch(q)[..., :head_size]
-            k = ttnn.to_torch(k)[..., :head_size, :]
-            v = ttnn.to_torch(v)[..., :head_size]
-
-            q = ttnn.from_torch(
-                q,
-                device=self.device,
-                dtype=ttnn.bfloat16,
-                memory_config=self.memory_config,
-                layout=ttnn.TILE_LAYOUT,
-            )
-            k = ttnn.from_torch(
-                k,
-                device=self.device,
-                dtype=ttnn.bfloat16,
-                memory_config=self.memory_config,
-                layout=ttnn.TILE_LAYOUT,
-            )
-            v = ttnn.from_torch(
-                v,
-                device=self.device,
-                dtype=ttnn.bfloat16,
-                memory_config=self.memory_config,
-                layout=ttnn.TILE_LAYOUT,
-            )
 
         # Remove the first dimension
         q = ttnn.squeeze(q, 0)
@@ -140,35 +94,24 @@ class TTWindowAttentionTR(LightweightModule):
             core_grid=ttnn.CoreGrid(y=8, x=8),
         )  # [b_, num_heads, n, head_dim]
 
-        if pad:
-            x = ttnn.to_torch(x)
-            padded_head_size = 32
-            head_size = 30
+        output_tensor = ttnn.transformer.concatenate_heads(x)
 
-            x = torch.nn.functional.pad(x, (0, padded_head_size - head_size), "constant", 0)
-            input_tensor = ttnn.from_torch(
-                x,
-                device=self.device,
-                dtype=ttnn.bfloat16,
-                memory_config=self.memory_config,
-                layout=ttnn.TILE_LAYOUT,
-            )
-        output_tensor = ttnn.transformer.concatenate_heads(input_tensor)
-
-        if pad:
+        if self.proj_weight.shape[-1] != output_tensor.shape[-1]:
+            head_size = self.proj_weight.shape[-1] // self.num_heads
+            padded_head_size = output_tensor.shape[-1] // self.num_heads
             output_tensor = ttnn.to_torch(output_tensor)
 
             # Remove the padding
             output_tensor = torch.cat(
                 [chunk[..., :head_size] for chunk in torch.split(output_tensor, padded_head_size, dim=-1)], dim=-1
             )
-        x = ttnn.from_torch(
-            output_tensor,
-            device=self.device,
-            dtype=ttnn.bfloat16,
-            memory_config=self.memory_config,
-            layout=ttnn.TILE_LAYOUT,
-        )
+            x = ttnn.from_torch(
+                output_tensor,
+                device=self.device,
+                dtype=ttnn.bfloat16,
+                memory_config=self.memory_config,
+                layout=ttnn.TILE_LAYOUT,
+            )
 
         x = ttnn.linear(
             x,

@@ -12,15 +12,33 @@ from ttnn.model_preprocessing import preprocess_linear_bias, preprocess_linear_w
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
-def create_window_attention_preprocessor(device, window_size=None, rpi=None):
+def create_window_attention_preprocessor(device, window_size=None, rpi=None, num_heads=6, tile_size=32):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         params = {}
 
         # QKV linear layer
+        head_size = torch_model.qkv.weight.shape[0] // (3 * num_heads)
+        # nearest multiple of tile_size
+        padded_head_size = ((head_size + tile_size - 1) // tile_size) * tile_size
+        qkv_weight = torch_model.qkv.weight
+        qkv_bias = torch_model.qkv.bias
+
+        if padded_head_size != head_size:
+            # Weight: [3*num_heads*head_size, in_features]
+            qkv_weight = qkv_weight.view(3 * num_heads, head_size, -1)
+            qkv_weight = torch.nn.functional.pad(qkv_weight, (0, 0, 0, padded_head_size - head_size), "constant", 0)
+            qkv_weight = qkv_weight.reshape(3 * num_heads * padded_head_size, -1)
+
+            if qkv_bias is not None:
+                # Bias: [3*num_heads, head_size]
+                qkv_bias = qkv_bias.view(3 * num_heads, head_size)
+                qkv_bias = torch.nn.functional.pad(qkv_bias, (0, padded_head_size - head_size), "constant", 0)
+                qkv_bias = qkv_bias.reshape(3 * num_heads * padded_head_size)
+
         params["qkv"] = {
-            "weight": preprocess_linear_weight(torch_model.qkv.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT),
-            "bias": preprocess_linear_bias(torch_model.qkv.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
-            if torch_model.qkv.bias is not None
+            "weight": preprocess_linear_weight(qkv_weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT),
+            "bias": preprocess_linear_bias(qkv_bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+            if qkv_bias is not None
             else None,
         }
 
