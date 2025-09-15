@@ -1499,57 +1499,98 @@ class DualPipelineDemo:
         logger.info(f"Visualization saved to: {save_path}")
 
     def _add_instance_labels(self, image: np.ndarray, panoptic: np.ndarray) -> np.ndarray:
-        """Add instance labels to the image"""
+        """Add instance labels to the image with improved positioning and filtering"""
         import cv2
 
         labeled_image = image.copy()
         label_divisor = 1000
 
-        # Group by semantic class to avoid duplicate labels
-        labeled_classes = set()
+        # Track labeled positions to avoid overlap
+        labeled_positions = []
+
+        # Group by semantic class and sort by area (largest first)
         unique_ids = np.unique(panoptic)
+        id_areas = []
 
         for pan_id in unique_ids:
+            if pan_id > 0:
+                mask = panoptic == pan_id
+                area = np.sum(mask)
+                id_areas.append((pan_id, area))
+
+        # Sort by area (largest first) for better label placement
+        id_areas.sort(key=lambda x: x[1], reverse=True)
+
+        for pan_id, area in id_areas:
             semantic_class = pan_id // label_divisor
             instance_id = pan_id % label_divisor
 
-            if pan_id > 0 and semantic_class < len(self.config.class_names):
-                # Only label once per semantic class for cleaner view
-                class_key = semantic_class if instance_id == 0 else f"{semantic_class}_{instance_id}"
+            # Only label significant instances (improved threshold)
+            if area > 800 and semantic_class < len(self.config.class_names):  # Increased from 500
+                mask = (panoptic == pan_id).astype(np.uint8)
 
-                if semantic_class not in labeled_classes or instance_id > 0:
-                    mask = (panoptic == pan_id).astype(np.uint8)
-                    M = cv2.moments(mask)
-
-                    if M["m00"] > 500:  # Larger threshold for cleaner labels
+                # Find better centroid using contour
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if contours:
+                    # Use largest contour
+                    largest_contour = max(contours, key=cv2.contourArea)
+                    M = cv2.moments(largest_contour)
+                    if M["m00"] > 0:
                         cx = int(M["m10"] / M["m00"])
                         cy = int(M["m01"] / M["m00"])
 
-                        # Simple class name only
-                        label = self.config.class_names[semantic_class]
+                        # Check if position is too close to existing labels
+                        too_close = False
+                        for prev_x, prev_y in labeled_positions:
+                            if abs(cx - prev_x) < 60 and abs(cy - prev_y) < 30:
+                                too_close = True
+                                break
 
-                        # Add text with semi-transparent background
-                        font = cv2.FONT_HERSHEY_SIMPLEX
-                        font_scale = 0.5
-                        thickness = 2
-                        text_size = cv2.getTextSize(label, font, font_scale, thickness)[0]
+                        if not too_close:
+                            # Create label text
+                            if instance_id > 0:
+                                label = (
+                                    f"{self.config.class_names[semantic_class]}"  # Remove instance ID for cleaner look
+                                )
+                            else:
+                                label = self.config.class_names[semantic_class]
 
-                        # Semi-transparent white background
-                        overlay = labeled_image.copy()
-                        cv2.rectangle(
-                            overlay,
-                            (cx - 3, cy - text_size[1] - 3),
-                            (cx + text_size[0] + 3, cy + 3),
-                            (255, 255, 255),
-                            -1,
-                        )
-                        cv2.addWeighted(overlay, 0.7, labeled_image, 0.3, 0, labeled_image)
+                            # Improved text rendering
+                            font = cv2.FONT_HERSHEY_SIMPLEX
+                            font_scale = 0.6  # Slightly larger
+                            thickness = 2
+                            text_size = cv2.getTextSize(label, font, font_scale, thickness)[0]
 
-                        # Black text
-                        cv2.putText(labeled_image, label, (cx, cy), font, font_scale, (0, 0, 0), thickness)
+                            # Better background with rounded corners effect
+                            padding = 4
+                            bg_x1 = cx - text_size[0] // 2 - padding
+                            bg_y1 = cy - text_size[1] - padding
+                            bg_x2 = cx + text_size[0] // 2 + padding
+                            bg_y2 = cy + padding
 
-                        if instance_id == 0:
-                            labeled_classes.add(semantic_class)
+                            # Semi-transparent white background
+                            overlay = labeled_image.copy()
+                            cv2.rectangle(overlay, (bg_x1, bg_y1), (bg_x2, bg_y2), (255, 255, 255), -1)
+                            cv2.addWeighted(overlay, 0.8, labeled_image, 0.2, 0, labeled_image)
+
+                            # Add thin border
+                            cv2.rectangle(labeled_image, (bg_x1, bg_y1), (bg_x2, bg_y2), (200, 200, 200), 1)
+
+                            # Black text for better contrast
+                            text_x = cx - text_size[0] // 2
+                            text_y = cy
+                            cv2.putText(
+                                labeled_image,
+                                label,
+                                (text_x, text_y),
+                                font,
+                                font_scale,
+                                (0, 0, 0),
+                                thickness,
+                                cv2.LINE_AA,
+                            )
+
+                            labeled_positions.append((cx, cy))
 
         return labeled_image
 
@@ -1563,16 +1604,38 @@ class DualPipelineDemo:
         return colored
 
     def _colorize_panoptic(self, panoptic: np.ndarray) -> np.ndarray:
-        """Convert panoptic prediction to colored image with proper instance coloring"""
         colored = np.zeros((*panoptic.shape, 3), dtype=np.uint8)
         label_divisor = 1000
-
         unique_ids = np.unique(panoptic)
 
-        # Use more vibrant colors for instances
+        # Enhanced color generation
         instance_colors = {}
+        color_index = 0
+
+        # Define vibrant colors for instances
+        vibrant_colors = [
+            [255, 100, 100],  # Bright red
+            [100, 255, 100],  # Bright green
+            [100, 100, 255],  # Bright blue
+            [255, 255, 100],  # Bright yellow
+            [255, 100, 255],  # Bright magenta
+            [100, 255, 255],  # Bright cyan
+            [255, 150, 100],  # Orange
+            [150, 100, 255],  # Purple
+            [255, 100, 150],  # Pink
+            [100, 255, 150],  # Light green
+            [150, 255, 100],  # Lime
+            [100, 150, 255],  # Light blue
+            [255, 200, 100],  # Light orange
+            [200, 100, 255],  # Light purple
+            [100, 200, 255],  # Sky blue
+            [255, 100, 200],  # Hot pink
+        ]
 
         for pan_id in unique_ids:
+            if pan_id == 0:
+                continue
+
             mask = panoptic == pan_id
             semantic_class = pan_id // label_divisor
             instance_id = pan_id % label_divisor
@@ -1581,26 +1644,25 @@ class DualPipelineDemo:
                 base_color = self.colors[semantic_class]
 
                 if instance_id == 0:
-                    # Stuff classes - use original semantic color
+                    # Stuff classes - use original semantic color but brighten it
                     colored[mask] = base_color
-                else:
-                    # Thing instances - create distinct colors
-                    if pan_id not in instance_colors:
-                        # Generate distinct color for each instance
-                        np.random.seed(int(pan_id))
+                # else:
+                #     # Thing instances - use vibrant colors
+                #     if pan_id not in instance_colors:
+                #         if color_index < len(vibrant_colors):
+                #             instance_colors[pan_id] = vibrant_colors[color_index]
+                #         else:
+                #             # Fallback to generated colors with better distribution
+                #             np.random.seed(int(pan_id))
+                #             hue = (color_index * 47) % 360  # Better distribution
+                #             from colorsys import hsv_to_rgb
+                #             r, g, b = hsv_to_rgb(hue/360, 0.9, 0.95)  # High saturation and value
+                #             instance_colors[pan_id] = np.array([r*255, g*255, b*255], dtype=np.uint8)
+                #         color_index += 1
 
-                        # Use golden angle for hue distribution
-                        golden_angle = 137.5
-                        hue = ((instance_id - 1) * golden_angle) % 360
-
-                        # High saturation and value for vibrancy
-                        from colorsys import hsv_to_rgb
-
-                        r, g, b = hsv_to_rgb(hue / 360, 0.8, 0.9)
-                        instance_colors[pan_id] = np.array([r * 255, g * 255, b * 255], dtype=np.uint8)
-
-                    colored[mask] = instance_colors[pan_id]
+                #     colored[mask] = instance_colors[pan_id]
             else:
+                # Unknown class - gray
                 colored[mask] = [128, 128, 128]
 
         return colored

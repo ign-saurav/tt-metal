@@ -229,16 +229,18 @@ class PostProcessing:
         return panoptic_pred
 
     def find_instance_centers(self, center_heatmap: torch.Tensor) -> List[Tuple[int, int]]:
-        """Find instance centers from center heatmap using NMS with validation"""
+        """Find instance centers with improved filtering"""
+
         # Apply threshold
         center_mask = center_heatmap > self.center_threshold
 
-        # Apply NMS
+        # Apply NMS with larger kernel for better separation
+        nms_kernel = max(self.nms_kernel, 5)  # Ensure minimum separation
         nms_heatmap = F.max_pool2d(
             center_heatmap.unsqueeze(0).unsqueeze(0),
-            kernel_size=self.nms_kernel,
+            kernel_size=nms_kernel,
             stride=1,
-            padding=(self.nms_kernel - 1) // 2,
+            padding=(nms_kernel - 1) // 2,
         ).squeeze()
 
         # Find local maxima that are also above threshold
@@ -248,17 +250,47 @@ class PostProcessing:
         center_coords = torch.nonzero(center_mask, as_tuple=False)
         center_scores = center_heatmap[center_mask]
 
-        # Sort by score and take top-k
+        # Enhanced filtering: remove centers too close to image borders
         if len(center_coords) > 0:
-            sorted_indices = torch.argsort(center_scores, descending=True)
-            center_coords = center_coords[sorted_indices]
-            center_scores = center_scores[sorted_indices]
+            h, w = center_heatmap.shape
+            border_threshold = 5
 
-            # Keep only top-k
-            if len(center_coords) > self.top_k_instance:
-                center_coords = center_coords[: self.top_k_instance]
+            # Filter out border centers
+            valid_centers = []
+            valid_scores = []
 
-        return [(coord[0].item(), coord[1].item()) for coord in center_coords]
+            for i, coord in enumerate(center_coords):
+                y, x = coord[0].item(), coord[1].item()
+                if border_threshold < y < h - border_threshold and border_threshold < x < w - border_threshold:
+                    valid_centers.append((y, x))
+                    valid_scores.append(center_scores[i].item())
+
+            # Sort by score and take top-k
+            if valid_centers:
+                # Sort by score (descending)
+                sorted_pairs = sorted(zip(valid_centers, valid_scores), key=lambda x: x[1], reverse=True)
+
+                # Keep only top-k with minimum distance constraint
+                selected_centers = []
+                min_distance = 20  # Minimum distance between centers
+
+                for (y, x), score in sorted_pairs:
+                    if len(selected_centers) >= self.top_k_instance:
+                        break
+
+                    # Check distance to existing centers
+                    too_close = False
+                    for existing_y, existing_x in selected_centers:
+                        if ((y - existing_y) ** 2 + (x - existing_x) ** 2) ** 0.5 < min_distance:
+                            too_close = True
+                            break
+
+                    if not too_close:
+                        selected_centers.append((y, x))
+
+                return selected_centers
+
+        return []
 
     def generate_instance_masks(
         self, centers: List[Tuple[int, int]], offset_map: torch.Tensor, height: int, width: int
@@ -298,7 +330,7 @@ class PostProcessing:
     def fuse_semantic_instance(
         self, semantic_pred: torch.Tensor, instance_masks: List[torch.Tensor], centers: List[Tuple[int, int]]
     ) -> torch.Tensor:
-        """Fuse semantic and instance predictions with better accuracy"""
+        """Fuse semantic and instance predictions with better filtering"""
         height, width = semantic_pred.shape
         panoptic_pred = semantic_pred.clone()
 
@@ -319,7 +351,7 @@ class PostProcessing:
 
         # Process instance masks with better validation
         if len(instance_masks) > 0:
-            # Sort by mask size (larger first)
+            # Sort by mask size (larger first) for better assignment
             mask_sizes = [mask.sum().item() for mask in instance_masks]
             sorted_indices = sorted(range(len(mask_sizes)), key=lambda i: mask_sizes[i], reverse=True)
 
@@ -327,35 +359,37 @@ class PostProcessing:
                 mask = instance_masks[idx]
                 center_y, center_x = centers[idx]
 
-                # Skip very small instances
-                if mask.sum() < 50:  # Increased threshold
+                # Improved size filtering - scale with image size
+                min_instance_size = max(100, (height * width) // 10000)  # Adaptive threshold
+                if mask.sum() < min_instance_size:
                     continue
 
-                # Get semantic class at center AND verify majority class in mask
+                # Get semantic class at center
                 center_class = semantic_pred[center_y, center_x].item()
 
                 # Verify this is actually a thing class
                 if center_class not in self.thing_classes:
                     continue
 
-                # Double-check: get majority vote of semantic class within mask
+                # Improved validation: check class consistency in mask
                 mask_region = semantic_pred[mask]
                 if len(mask_region) > 0:
                     # Get most common class in the mask region
                     unique_classes, counts = torch.unique(mask_region, return_counts=True)
                     majority_class = unique_classes[torch.argmax(counts)].item()
 
-                    # Use majority class if it's a thing class and has significant presence
-                    if majority_class in self.thing_classes and (counts[torch.argmax(counts)] > mask.sum() * 0.3):
+                    # Use majority class if it's a thing class and dominant (>40%)
+                    dominant_ratio = counts[torch.argmax(counts)].float() / mask.sum()
+                    if majority_class in self.thing_classes and dominant_ratio > 0.4:
                         center_class = majority_class
+                    else:
+                        continue  # Skip inconsistent instances
 
-                # Only assign pixels that:
-                # 1. Match the semantic class
-                # 2. Haven't been assigned to another instance yet
-                # 3. Are within the instance mask
+                # Only assign pixels that match criteria
                 valid_mask = mask & (semantic_pred == center_class) & ~instance_assigned
 
-                if valid_mask.sum() > 30:  # Minimum pixels for valid instance
+                # Higher threshold for valid instances
+                if valid_mask.sum() > min_instance_size:
                     # Track instance count for this class
                     if center_class not in class_instance_count:
                         class_instance_count[center_class] = 0
@@ -369,7 +403,6 @@ class PostProcessing:
                     instance_assigned[valid_mask] = True
 
         # Handle any remaining thing class pixels that weren't assigned to instances
-        # These become "stuff-like" (class * label_divisor)
         for thing_class in self.thing_classes:
             unassigned_mask = (semantic_pred == thing_class) & ~instance_assigned
             if unassigned_mask.sum() > 0:
