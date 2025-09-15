@@ -13,7 +13,6 @@ from models.experimental.SSR.tests.tile_refinement.test_upsample import create_u
 from models.experimental.SSR.tests.tile_selection.test_tile_selection import create_tile_selection_preprocessor
 from models.experimental.SSR.tests.tile_refinement.test_tile_refinement import create_tile_refinement_preprocessor
 from models.experimental.SSR.tests.tile_refinement.test_HAB import create_relative_position_index
-from models.experimental.SSR.reference.SSR.model.net_blocks import window_reverse
 
 
 from ttnn.model_preprocessing import preprocess_model_parameters
@@ -164,16 +163,11 @@ def test_ssr_model(input_shape, num_cls, with_conv):
         tt_sr, tt_patch_fea3 = tt_model(tt_input)
 
         # Convert back to torch tensors
-        tt_torch_sr = tt2torch_tensor(tt_sr)
+        tt_sr = tt_sr.permute(0, 3, 1, 2)
         tt_torch_patch_fea3 = tt2torch_tensor(tt_patch_fea3)
-        tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
-
-        _, _, H, W = x.shape
-        tt_torch_sr = window_reverse(tt_torch_sr.permute(0, 2, 3, 1), window_size=H, H=H * 4, W=W * 4)
-        tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
 
         # Compare outputs
-        sr_pass, sr_pcc_message = check_with_pcc(ref_sr, tt_torch_sr, 0.95)
+        sr_pass, sr_pcc_message = check_with_pcc(ref_sr, tt_sr, 0.95)
         fea3_pass, fea3_pcc_message = check_with_pcc(ref_patch_fea3, tt_torch_patch_fea3, 0.95)
         logger.info(f"sr_pcc: {sr_pcc_message}")
         logger.info(f"fea3_pcc: {fea3_pcc_message}")

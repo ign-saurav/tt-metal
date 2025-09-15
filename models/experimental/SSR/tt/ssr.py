@@ -3,11 +3,12 @@
 
 import torch
 import ttnn
-import torch.nn.functional as F
 from models.common.lightweightmodule import LightweightModule
+from models.utility_functions import tt2torch_tensor
 from models.experimental.SSR.tt.tile_refinement.tile_refinement import TTTileRefinement
 from models.experimental.SSR.tt.tile_selection.tile_selection import TTTileSelection
 from models.experimental.SSR.tt.tile_refinement.upsample import TTUpsample
+from models.experimental.SSR.reference.SSR.model.net_blocks import window_reverse
 
 
 def window_partition_ttnn(x, window_size):
@@ -294,18 +295,35 @@ class TTSSR_wo_conv(LightweightModule):
                 posX, _ = self.sr_model(ttnn.permute(patch_input, (0, 3, 1, 2)))
                 sr_patches.append(posX)
             else:
-                # Move tensor to host and convert to torch
-                patch_host = ttnn.to_torch(patch_input)  # Shape: (1, H/4, W/4, C)
+                # Pad channels to be tile-aligned (minimum 32 for tile layout)
+                if patch_input.shape[-1] < 32:
+                    padding = ((0, 0), (0, 0), (0, 0), (0, 32 - patch_input.shape[-1]))
+                    patch_input = ttnn.pad(patch_input, padding, 0.0)
 
-                # Convert to NCHW format for PyTorch upsample
-                patch_nchw = patch_host.permute(0, 3, 1, 2)  # (1, H/4, W/4, C) -> (1, C, H/4, W/4)
+                patch_input = ttnn.to_layout(patch_input, ttnn.ROW_MAJOR_LAYOUT)
+                patch_input = ttnn.to_dtype(patch_input, ttnn.bfloat16)
+                patch_input = ttnn.to_memory_config(patch_input, ttnn.DRAM_MEMORY_CONFIG)
 
-                # Use PyTorch's upsample (bicubic like the reference)
-                negX_torch = F.upsample(patch_nchw, scale_factor=4, mode="bicubic")
+                compute_kernel_config = ttnn.WormholeComputeKernelConfig(
+                    math_fidelity=ttnn.MathFidelity.HiFi4,
+                    math_approx_mode=False,
+                    fp32_dest_acc_en=False,
+                )
 
-                # Convert back to NHWC and to TTNN tensor
-                negX_torch = negX_torch.permute(0, 2, 3, 1)  # Back to (1, H, W, C)
-                negX = ttnn.from_torch(negX_torch, device=self.device, dtype=ttnn.bfloat16)
+                # Use TTNN's bilinear upsample with DRAM output
+                negX = ttnn.upsample(
+                    patch_input,
+                    scale_factor=(4, 4),
+                    mode="bilinear",
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    compute_kernel_config=compute_kernel_config,
+                )
+
+                # Remove padding if added
+                if negX.shape[-1] > 3:
+                    negX = negX[..., :3]
+
+                # Ensure proper layout
                 if negX.layout == ttnn.ROW_MAJOR_LAYOUT:
                     negX = ttnn.to_layout(negX, ttnn.TILE_LAYOUT)
                 sr_patches.append(negX)
@@ -314,6 +332,7 @@ class TTSSR_wo_conv(LightweightModule):
 
         # Concatenate and reconstruct
         sr = ttnn.concat(sr_patches, dim=0)
+        torch_sr = tt2torch_tensor(sr)
+        torch_sr = torch_sr.permute(0, 3, 1, 2)
+        sr = window_reverse(torch_sr.permute(0, 2, 3, 1), window_size=H, H=H * 4, W=W * 4)
         return sr, patch_fea3
-        # sr = window_reverse_ttnn(sr, window_size=H, h=H * 4, w=W * 4)
-        # return sr, patch_fea3

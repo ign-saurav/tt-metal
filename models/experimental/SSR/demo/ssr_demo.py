@@ -14,7 +14,6 @@ from models.experimental.SSR.tt.ssr import TTSSR, TTSSR_wo_conv
 
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.utility_functions import (
-    tt2torch_tensor,
     comp_pcc,
 )
 
@@ -138,24 +137,21 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
 
         # Convert input to TTNN tensor
         logger.info("Converting input to TTNN tensor...")
-        tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT)
+        tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
 
         # Run TTNN model
         logger.info("Running TTNN model inference...")
         tt_sr, tt_patch_fea3 = tt_model(tt_input)
 
-        # Convert back to torch tensors
-        logger.info("Converting outputs back to torch tensors...")
-        tt_torch_sr = tt2torch_tensor(tt_sr)
-        tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
+        tt_sr = tt_sr.permute(0, 3, 1, 2)
 
         # Save TTNN output image
         ttnn_output_path = os.path.join(output_dir, "ttnn_output.png")
         logger.info("Saving TTNN super-resolved image...")
-        save_tensor_as_image(tt_torch_sr, ttnn_output_path)
+        save_tensor_as_image(tt_sr, ttnn_output_path)
 
         # Compare outputs (optional - for validation)
-        sr_pass, sr_pcc_message = comp_pcc(ref_sr, tt_torch_sr, 0.95)
+        sr_pass, sr_pcc_message = comp_pcc(ref_sr, tt_sr, 0.95)
         logger.info(f"SR Output PCC: {sr_pcc_message}")
 
         if sr_pass:
@@ -166,7 +162,7 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
         logger.info(f"Reference output saved to: {ref_output_path}")
         logger.info(f"TTNN output saved to: {ttnn_output_path}")
 
-        return tt_torch_sr, ref_sr
+        return tt_sr, ref_sr
 
     finally:
         ttnn.close_device(device)
