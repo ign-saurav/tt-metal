@@ -23,24 +23,24 @@ decoder_layer_optimisations = {
         head_layer_optimisations=head_layer_optimisations["default"],
         shape=(0, 0, 0, 0),
     ),
-    "semantics_head": DecoderOptimizer(
+    "semantic_decoder": DecoderOptimizer(
         res_layer_optimisations={
-            "res3": res_layer_optimisations["semantics_res3"],
-            "res2": res_layer_optimisations["semantics_res2"],
+            "res3": res_layer_optimisations["semantic_decoder.res3"],
+            "res2": res_layer_optimisations["semantic_decoder.res2"],
         },
         head_layer_optimisations={
-            "head_1": head_layer_optimisations["semantic_head"],
+            "head_1": head_layer_optimisations["semantic_decoder.head_1"],
         },
         shape=(1, 128, 256, 256),
     ),
-    "instance_head": DecoderOptimizer(
+    "instance_decoder": DecoderOptimizer(
         res_layer_optimisations={
-            "res3": res_layer_optimisations["instance_res3"],
-            "res2": res_layer_optimisations["instance_res2"],
+            "res3": res_layer_optimisations["instance_decoder.res3"],
+            "res2": res_layer_optimisations["instance_decoder.res2"],
         },
         head_layer_optimisations={
-            "head_1": head_layer_optimisations["instance_offset_head"],
-            "head_2": head_layer_optimisations["instance_center_head"],
+            "head_1": head_layer_optimisations["instance_decoder.head_1"],
+            "head_2": head_layer_optimisations["instance_decoder.head_2"],
         },
         shape=(1, 128, 256, 128),
     ),
@@ -49,7 +49,11 @@ decoder_layer_optimisations = {
 
 class TTDecoder:
     def __init__(
-        self, parameters, model_config, layer_optimisations=decoder_layer_optimisations["default"], name="default"
+        self,
+        parameters,
+        model_config,
+        layer_optimisations=decoder_layer_optimisations["default"],
+        name="semantic_decoder",
     ) -> None:
         super().__init__()
         self.shape = layer_optimisations.shape
@@ -77,7 +81,7 @@ class TTDecoder:
                 model_config,
                 layer_optimisations=layer_optimisations.head_layer_optimisations["head_2"],
             )
-        if self.name == "semantics_head":
+        if self.name == "semantic_decoder":
             self.res3_upsample_channels = 256
             self.res2_upsample_channels = 256
         else:
@@ -89,11 +93,11 @@ class TTDecoder:
         out = self.res3(out, res3, self.res3_upsample_channels, device)
         out = self.res2(out, res2, self.res2_upsample_channels, device)
 
-        if self.name == "instance_head":
+        if self.name == "instance_decoder":
             activation_copy = ttnn.clone(out)
         out = self.head(out, device)
 
-        if self.name == "instance_head":
+        if self.name == "instance_decoder":
             out_ = self.head_2(activation_copy, device)
         else:
             out_ = None

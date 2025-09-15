@@ -11,6 +11,11 @@ import os
 from models.experimental.panoptic_deeplab.reference.resnet52_backbone import ResNet52BackBone as TorchBackbone
 from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
 from torchvision.models.resnet import Bottleneck
+from models.experimental.panoptic_deeplab.reference.aspp import ASPPModel
+from models.experimental.panoptic_deeplab.reference.decoder import DecoderModel
+from models.experimental.panoptic_deeplab.reference.res_block import ResModel
+from models.experimental.panoptic_deeplab.reference.head import HeadModel
+from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
 
 
 def map_single_key(checkpoint_key):
@@ -259,17 +264,18 @@ def map_single_key(checkpoint_key):
     return key
 
 
-def load_partial_state(torch_model: torch.nn.Module, state_dict, layer_prefix: str = ""):
+def load_partial_state(torch_model: torch.nn.Module, state_dict, layer_name: str = ""):
     partial_state_dict = {}
+    layer_prefix = layer_name + "."
     for k, v in state_dict.items():
         if k.startswith(layer_prefix):
             partial_state_dict[k[len(layer_prefix) :]] = v
     torch_model.load_state_dict(partial_state_dict, strict=True)
     logger.info(f"Successfully loaded all mapped weights with strict=True")
-    return torch_model.eval()
+    return torch_model
 
 
-def load_torch_model_state(model: torch.nn.Module = None, layer_name: str = "", model_location_generator=None):
+def load_torch_model_state(torch_model: torch.nn.Module = None, layer_name: str = "", model_location_generator=None):
     if model_location_generator == None or "TT_GH_CI_INFRA" not in os.environ:
         model_path = "models"
     else:
@@ -312,16 +318,24 @@ def load_torch_model_state(model: torch.nn.Module = None, layer_name: str = "", 
     for checkpoint_key, model_key in key_mapping.items():
         mapped_state_dict[model_key] = state_dict[checkpoint_key]
 
-    if model is None:
-        return mapped_state_dict
-    elif isinstance(model, TorchBackbone):
-        layer_prefix = "backbone."
-        return load_partial_state(model, mapped_state_dict, layer_prefix)
-    elif isinstance(model, DeepLabStem):
-        layer_prefix = "backbone.stem."
-        return load_partial_state(model, mapped_state_dict, layer_prefix)
-    elif isinstance(model, Bottleneck):
-        layer_prefix = "backbone." + layer_name + "."
-        return load_partial_state(model, mapped_state_dict, layer_prefix)
+    if isinstance(
+        torch_model,
+        (
+            DeepLabStem,
+            Bottleneck,
+            TorchBackbone,
+            ASPPModel,
+            ResModel,
+            HeadModel,
+            DecoderModel,
+        ),
+    ):
+        torch_model = load_partial_state(torch_model, mapped_state_dict, layer_name)
+    elif isinstance(torch_model, TorchPanopticDeepLab):
+        del mapped_state_dict["pixel_mean"]
+        del mapped_state_dict["pixel_std"]
+        torch_model.load_state_dict(mapped_state_dict, strict=True)
     else:
         raise NotImplementedError("Unknown torch model. Weight loading not implemented")
+
+    return torch_model.eval()

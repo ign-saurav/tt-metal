@@ -9,10 +9,9 @@ from ttnn.model_preprocessing import preprocess_model_parameters
 
 from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
-from models.experimental.panoptic_deeplab.reference.aspp import (
-    ASPPModel,
-)
+from models.experimental.panoptic_deeplab.reference.aspp import ASPPModel
 from models.experimental.panoptic_deeplab.tt.aspp import TTASPP
+from models.experimental.panoptic_deeplab.common import load_torch_model_state
 
 
 class AsppTestInfra:
@@ -24,6 +23,7 @@ class AsppTestInfra:
         height,
         width,
         model_config,
+        name,
     ):
         super().__init__()
         if not hasattr(self, "_model_initialized"):
@@ -37,19 +37,20 @@ class AsppTestInfra:
         self.num_devices = device.get_num_devices()
         self.batch_size = batch_size
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
+        self.name = name
 
         # torch model
-        torch_model = ASPPModel().eval()
-        self.torch_input_tensor = torch.randn((batch_size, input_channels, height, width), dtype=torch.float16)
+        torch_model = ASPPModel()
+        torch_model = load_torch_model_state(torch_model, name)
+
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
             custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
             device=None,
         )
-        torch_model.to(torch.bfloat16)
-        self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
 
         # golden
+        self.torch_input_tensor = torch.randn((batch_size, input_channels, height, width), dtype=torch.float)
         self.torch_output_tensor = torch_model(self.torch_input_tensor)
 
         # ttnn
@@ -67,7 +68,6 @@ class AsppTestInfra:
         # run and validate
         self.run()
         self.validate()
-        ttnn.deallocate(self.output_tensor)
 
     def get_mesh_mappers(self, device):
         if device.get_num_devices() != 1:
@@ -85,23 +85,30 @@ class AsppTestInfra:
         return self.output_tensor
 
     def validate(self, output_tensor=None):
-        """Validate outputs"""
-
-        output_tensor = self.output_tensor if output_tensor is None else output_tensor
-        output_tensor = ttnn.to_torch(output_tensor, device=self.device, mesh_composer=self.output_mesh_composer)
-        expected_shape = self.torch_output_tensor.shape
-        output_tensor = torch.reshape(
-            output_tensor, (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1])
+        tt_output_tensor = self.output_tensor if output_tensor is None else output_tensor
+        tt_output_tensor_torch = ttnn.to_torch(
+            tt_output_tensor, device=self.device, mesh_composer=self.output_mesh_composer
         )
-        output_tensor = torch.permute(output_tensor, (0, 3, 1, 2))
-        batch_size = self.batch_size
 
-        valid_pcc = 0.97
-        self.pcc_passed, self.pcc_message = check_with_pcc(self.torch_output_tensor, output_tensor, pcc=valid_pcc)
+        # Deallocate output tesnors
+        ttnn.deallocate(tt_output_tensor)
+
+        expected_shape = self.torch_output_tensor.shape
+        tt_output_tensor_torch = torch.reshape(
+            tt_output_tensor_torch, (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1])
+        )
+        tt_output_tensor_torch = torch.permute(tt_output_tensor_torch, (0, 3, 1, 2))
+
+        batch_size = tt_output_tensor_torch.shape[0]
+
+        valid_pcc = 0.99
+        self.pcc_passed, self.pcc_message = check_with_pcc(
+            self.torch_output_tensor, tt_output_tensor_torch, pcc=valid_pcc
+        )
 
         assert self.pcc_passed, logger.error(f"PCC check failed: {self.pcc_message}")
         logger.info(
-            f"Modular Panoptic DeepLab ASPP - batch_size={batch_size}, act_dtype={model_config['ACTIVATIONS_DTYPE']}, weight_dtype={model_config['WEIGHTS_DTYPE']}, math_fidelity={model_config['MATH_FIDELITY']}, PCC={self.pcc_message}"
+            f"Modular Panoptic DeepLab ASPP layer:{self.name} - batch_size={batch_size}, act_dtype={model_config['ACTIVATIONS_DTYPE']}, weight_dtype={model_config['WEIGHTS_DTYPE']}, math_fidelity={model_config['MATH_FIDELITY']}, PCC={self.pcc_message}"
         )
 
         return self.pcc_passed, self.pcc_message
@@ -121,7 +128,8 @@ model_config = {
         (1, 2048, 32, 64),
     ],
 )
-def test_aspp(device, batch_size, input_channels, height, width):
+@pytest.mark.parametrize("name", ["semantic_decoder.aspp", "instance_decoder.aspp"])
+def test_aspp(device, batch_size, input_channels, height, width, name):
     AsppTestInfra(
         device,
         batch_size,
@@ -129,4 +137,5 @@ def test_aspp(device, batch_size, input_channels, height, width):
         height,
         width,
         model_config,
+        name,
     )

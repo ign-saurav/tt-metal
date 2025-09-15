@@ -13,9 +13,8 @@ from models.experimental.panoptic_deeplab.tt.decoder import (
     decoder_layer_optimisations,
 )
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
-from models.experimental.panoptic_deeplab.reference.decoder import (
-    DecoderModel,
-)
+from models.experimental.panoptic_deeplab.reference.decoder import DecoderModel
+from models.experimental.panoptic_deeplab.common import load_torch_model_state
 
 
 class DecoderTestInfra:
@@ -56,20 +55,19 @@ class DecoderTestInfra:
 
         # Create input tensors
         self.torch_input_tensor = torch.randn(
-            (self.batch_size, self.in_channels, self.height, self.width), dtype=torch.float32
+            (self.batch_size, self.in_channels, self.height, self.width), dtype=torch.float
         )
 
         # Create res3 and res2 feature maps with appropriate dimensions
-        self.torch_res3_tensor = torch.randn(
-            (self.batch_size, 512, self.height * 2, self.width * 2), dtype=torch.float32
-        )
+        self.torch_res3_tensor = torch.randn((self.batch_size, 512, self.height * 2, self.width * 2), dtype=torch.float)
 
         self.torch_res2_tensor = torch.randn(
-            (self.batch_size, upsample_channels, self.height * 4, self.width * 4), dtype=torch.float32
+            (self.batch_size, upsample_channels, self.height * 4, self.width * 4), dtype=torch.float
         )
 
         # torch model
-        torch_model = DecoderModel(self.name).eval()
+        torch_model = DecoderModel(self.name)
+        torch_model = load_torch_model_state(torch_model, name)
 
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
@@ -77,7 +75,6 @@ class DecoderTestInfra:
             device=None,
         )
 
-        parameters.conv_args = {}
         # For ASPP
         aspp_args = infer_ttnn_module_args(
             model=torch_model.aspp, run_model=lambda model: model(self.torch_input_tensor), device=None
@@ -115,12 +112,6 @@ class DecoderTestInfra:
             )
             if hasattr(parameters, "head_2"):
                 parameters.head_2.conv_args = head_2_args
-
-        # Convert to bfloat16
-        torch_model.to(torch.bfloat16)
-        self.torch_input_tensor = self.torch_input_tensor.to(torch.bfloat16)
-        self.torch_res3_tensor = self.torch_res3_tensor.to(torch.bfloat16)
-        self.torch_res2_tensor = self.torch_res2_tensor.to(torch.bfloat16)
 
         # Get torch output with all three inputs
         self.torch_output_tensor, self.torch_output_tensor_2 = torch_model(
@@ -189,7 +180,7 @@ class DecoderTestInfra:
 
         batch_size = output_tensor.shape[0]
 
-        valid_pcc = 0.97
+        valid_pcc = 0.99
         self.pcc_passed, self.pcc_message = check_with_pcc(self.torch_output_tensor, output_tensor, pcc=valid_pcc)
         assert self.pcc_passed, logger.error(f"PCC check failed: {self.pcc_message}")
         logger.info(
@@ -207,7 +198,7 @@ class DecoderTestInfra:
 
             batch_size = output_tensor.shape[0]
 
-            valid_pcc = 0.96
+            valid_pcc = 0.99
             self.pcc_passed, self.pcc_message = check_with_pcc(self.torch_output_tensor_2, output_tensor, pcc=valid_pcc)
             assert self.pcc_passed, logger.error(f"PCC check failed: {self.pcc_message}")
             logger.info(
@@ -228,8 +219,8 @@ model_config = {
 @pytest.mark.parametrize(
     "batch_size, in_channels, res3_intermediate_channels, res2_intermediate_channels, out_channels, upsample_channels, height, width, name",
     [
-        (1, 2048, 320, 288, (19,), 256, 32, 64, "semantics_head"),  # semantic head
-        (1, 2048, 320, 160, (2, 1), 256, 32, 64, "instance_head"),  # instance offset head
+        (1, 2048, 320, 288, (19,), 256, 32, 64, "semantic_decoder"),  # semantic head
+        (1, 2048, 320, 160, (2, 1), 256, 32, 64, "instance_decoder"),  # instance offset head
     ],
 )
 def test_decoder(

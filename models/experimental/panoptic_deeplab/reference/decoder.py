@@ -22,7 +22,7 @@ class DecoderModel(torch.nn.Module):
         super().__init__()
         self.name = name
         self.aspp = ASPPModel()
-        if name == "semantics_head":
+        if name == "semantic_decoder":
             self.res3 = ResModel(512, 320, 256)
             self.res2 = ResModel(256, 288, 256)
             self.head_1 = HeadModel(256, 256, 19)
@@ -48,7 +48,7 @@ class DecoderModel(torch.nn.Module):
         out_ = self.res2(out, res2)
         out = self.head_1(out_)
 
-        if self.name == "instance_head":
+        if self.name == "instance_decoder":
             out_2 = self.head_2(out_)
         else:
             out_2 = None
