@@ -6,12 +6,15 @@ from models.common.lightweightmodule import LightweightModule
 
 
 class TTMlp(LightweightModule):
-    def __init__(self, device, in_features, hidden_features=None, out_features=None, parameters=None):
+    def __init__(
+        self, device, in_features, hidden_features=None, out_features=None, parameters=None, dtype=ttnn.bfloat16
+    ):
         self.device = device
 
         self.in_features = in_features
         self.hidden_features = hidden_features
         self.out_features = out_features
+        self.dtype = dtype
 
         # Initialize weights and biases based on available inputs
         # Use preprocessed parameters
@@ -30,6 +33,7 @@ class TTMlp(LightweightModule):
             memory_config=ttnn.L1_MEMORY_CONFIG,
             core_grid=ttnn.CoreGrid(y=8, x=8),
             activation="gelu",
+            dtype=self.dtype,
         )
 
         x = ttnn.linear(
@@ -38,6 +42,7 @@ class TTMlp(LightweightModule):
             bias=self.fc2_bias,
             memory_config=ttnn.L1_MEMORY_CONFIG,
             core_grid=ttnn.CoreGrid(y=8, x=8),
+            dtype=self.dtype,
         )
 
         return x

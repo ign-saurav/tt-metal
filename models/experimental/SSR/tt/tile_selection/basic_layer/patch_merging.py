@@ -14,12 +14,14 @@ class TTPatchMerging(LightweightModule):
         input_resolution,
         dim,
         memory_config=None,
+        dtype=ttnn.bfloat8_b,
     ):
         super().__init__()
         self.device = device
         self.memory_config = memory_config or ttnn.DRAM_MEMORY_CONFIG
         self.input_resolution = input_resolution
         self.dim = dim
+        self.dtype = dtype
 
         # Extract weights from preprocessed parameters
         self.reduction_weight = parameters["reduction"]["weight"]
@@ -62,7 +64,7 @@ class TTPatchMerging(LightweightModule):
             "input_height": H,
             "input_width": W,
             "conv_config": None,
-            "dtype": ttnn.bfloat16,
+            "dtype": self.dtype,
             "memory_config": ttnn.DRAM_MEMORY_CONFIG,
         }
 
