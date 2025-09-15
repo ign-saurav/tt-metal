@@ -293,13 +293,12 @@ class DemoConfig:
     normalize_enabled: bool = True
     mean: List[float] = None
     std: List[float] = None
-    show_instance_labels: bool = True
 
     # Inference configuration
     center_threshold: float = 0.1
     nms_kernel: int = 7
     top_k_instances: int = 200
-    stuff_area_threshold: int = 2048
+    stuff_area_threshold: int = 4096
 
     # Device configuration
     device_id: int = 0
@@ -1123,8 +1122,12 @@ class DualPipelineDemo:
                     else:
                         logger.warning(f"Unexpected offset_map shape: {np_array.shape}")
                 # panoptic_pred
+                # For PyTorch outputs:
                 panoptic_pred = PostProcessing(
-                    thing_classes=self.config.thing_classes, stuff_classes=self.config.stuff_classes
+                    thing_classes=self.config.thing_classes,
+                    stuff_classes=self.config.stuff_classes,
+                    stuff_area_threshold=self.config.stuff_area_threshold,
+                    label_divisor=256,  # Standard panoptic format
                 ).panoptic_fusion(semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map)
                 if panoptic_pred is not None and isinstance(panoptic_pred, torch.Tensor):
                     np_array = panoptic_pred.squeeze(0).cpu().numpy()
@@ -1231,9 +1234,12 @@ class DualPipelineDemo:
                 center_heatmap = reshaped_tensor_3
                 offset_map = reshaped_tensor_2
 
-                panoptic_pred_ttnn = PostProcessing().panoptic_fusion(
-                    semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map
-                )
+                panoptic_pred_ttnn = PostProcessing(
+                    thing_classes=self.config.thing_classes,
+                    stuff_classes=self.config.stuff_classes,
+                    stuff_area_threshold=self.config.stuff_area_threshold,
+                    label_divisor=256,
+                ).panoptic_fusion(semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map)
                 panoptic_pred = ttnn.from_torch(panoptic_pred_ttnn, dtype=ttnn.int32)
 
                 if panoptic_pred is not None and isinstance(panoptic_pred, ttnn.Tensor):
@@ -1467,132 +1473,25 @@ class DualPipelineDemo:
             # Both panoptic side by side
             for i, pipeline in enumerate(pipelines):
                 ax_pan = fig.add_subplot(gs[3, i * 2 : (i * 2) + 2])
-                if pipeline in results and "panoptic_pred" in results[pipeline]:
-                    panoptic_colored = self._colorize_panoptic(results[pipeline]["panoptic_pred"])
-                    if self.config.show_instance_labels:
-                        panoptic_with_labels = self._add_instance_labels(
-                            panoptic_colored, results[pipeline]["panoptic_pred"]
-                        )
-                        ax_pan.imshow(panoptic_with_labels)
-                    else:
-                        ax_pan.imshow(panoptic_colored)
-                    ax_pan.set_title(f"{pipeline.upper()} Panoptic Segmentation", fontsize=12, fontweight="bold")
-                ax_pan.axis("off")
+                # Column 3: Panoptic segmentation
+                if "panoptic_pred" in pipeline_results:
+                    panoptic_colored = self._colorize_panoptic(pipeline_results["panoptic_pred"])
+                    ax_pan.imshow(panoptic_colored)
+                    ax_pan.set_title(f"{pipeline.upper()} Panoptic", fontsize=10)
+                    ax_pan.axis("off")
         else:
             # Single panoptic centered
             pipeline = pipelines[0]
             ax_pan = fig.add_subplot(gs[2, :])
             if "panoptic_pred" in results[pipeline]:
                 panoptic_colored = self._colorize_panoptic(results[pipeline]["panoptic_pred"])
-                if self.config.show_instance_labels:
-                    panoptic_with_labels = self._add_instance_labels(
-                        panoptic_colored, results[pipeline]["panoptic_pred"]
-                    )
-                    ax_pan.imshow(panoptic_with_labels)
-                else:
-                    ax_pan.imshow(panoptic_colored)
+                ax_pan.imshow(panoptic_colored)
                 ax_pan.set_title(f"{pipeline.upper()} Panoptic Segmentation", fontsize=12, fontweight="bold")
             ax_pan.axis("off")
 
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close()
         logger.info(f"Visualization saved to: {save_path}")
-
-    def _add_instance_labels(self, image: np.ndarray, panoptic: np.ndarray) -> np.ndarray:
-        """Add instance labels to the image with improved positioning and filtering"""
-        import cv2
-
-        labeled_image = image.copy()
-        label_divisor = 1000
-
-        # Track labeled positions to avoid overlap
-        labeled_positions = []
-
-        # Group by semantic class and sort by area (largest first)
-        unique_ids = np.unique(panoptic)
-        id_areas = []
-
-        for pan_id in unique_ids:
-            if pan_id > 0:
-                mask = panoptic == pan_id
-                area = np.sum(mask)
-                id_areas.append((pan_id, area))
-
-        # Sort by area (largest first) for better label placement
-        id_areas.sort(key=lambda x: x[1], reverse=True)
-
-        for pan_id, area in id_areas:
-            semantic_class = pan_id // label_divisor
-            instance_id = pan_id % label_divisor
-
-            # Only label significant instances (improved threshold)
-            if area > 800 and semantic_class < len(self.config.class_names):  # Increased from 500
-                mask = (panoptic == pan_id).astype(np.uint8)
-
-                # Find better centroid using contour
-                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                if contours:
-                    # Use largest contour
-                    largest_contour = max(contours, key=cv2.contourArea)
-                    M = cv2.moments(largest_contour)
-                    if M["m00"] > 0:
-                        cx = int(M["m10"] / M["m00"])
-                        cy = int(M["m01"] / M["m00"])
-
-                        # Check if position is too close to existing labels
-                        too_close = False
-                        for prev_x, prev_y in labeled_positions:
-                            if abs(cx - prev_x) < 60 and abs(cy - prev_y) < 30:
-                                too_close = True
-                                break
-
-                        if not too_close:
-                            # Create label text
-                            if instance_id > 0:
-                                label = (
-                                    f"{self.config.class_names[semantic_class]}"  # Remove instance ID for cleaner look
-                                )
-                            else:
-                                label = self.config.class_names[semantic_class]
-
-                            # Improved text rendering
-                            font = cv2.FONT_HERSHEY_SIMPLEX
-                            font_scale = 0.6  # Slightly larger
-                            thickness = 2
-                            text_size = cv2.getTextSize(label, font, font_scale, thickness)[0]
-
-                            # Better background with rounded corners effect
-                            padding = 4
-                            bg_x1 = cx - text_size[0] // 2 - padding
-                            bg_y1 = cy - text_size[1] - padding
-                            bg_x2 = cx + text_size[0] // 2 + padding
-                            bg_y2 = cy + padding
-
-                            # Semi-transparent white background
-                            overlay = labeled_image.copy()
-                            cv2.rectangle(overlay, (bg_x1, bg_y1), (bg_x2, bg_y2), (255, 255, 255), -1)
-                            cv2.addWeighted(overlay, 0.8, labeled_image, 0.2, 0, labeled_image)
-
-                            # Add thin border
-                            cv2.rectangle(labeled_image, (bg_x1, bg_y1), (bg_x2, bg_y2), (200, 200, 200), 1)
-
-                            # Black text for better contrast
-                            text_x = cx - text_size[0] // 2
-                            text_y = cy
-                            cv2.putText(
-                                labeled_image,
-                                label,
-                                (text_x, text_y),
-                                font,
-                                font_scale,
-                                (0, 0, 0),
-                                thickness,
-                                cv2.LINE_AA,
-                            )
-
-                            labeled_positions.append((cx, cy))
-
-        return labeled_image
 
     def _colorize_segmentation(self, segmentation: np.ndarray) -> np.ndarray:
         """Convert segmentation map to colored image"""
@@ -1604,65 +1503,32 @@ class DualPipelineDemo:
         return colored
 
     def _colorize_panoptic(self, panoptic: np.ndarray) -> np.ndarray:
+        """Convert panoptic prediction to colored image"""
         colored = np.zeros((*panoptic.shape, 3), dtype=np.uint8)
-        label_divisor = 1000
+        label_divisor = 256
+
         unique_ids = np.unique(panoptic)
 
-        # Enhanced color generation
-        instance_colors = {}
-        color_index = 0
-
-        # Define vibrant colors for instances
-        vibrant_colors = [
-            [255, 100, 100],  # Bright red
-            [100, 255, 100],  # Bright green
-            [100, 100, 255],  # Bright blue
-            [255, 255, 100],  # Bright yellow
-            [255, 100, 255],  # Bright magenta
-            [100, 255, 255],  # Bright cyan
-            [255, 150, 100],  # Orange
-            [150, 100, 255],  # Purple
-            [255, 100, 150],  # Pink
-            [100, 255, 150],  # Light green
-            [150, 255, 100],  # Lime
-            [100, 150, 255],  # Light blue
-            [255, 200, 100],  # Light orange
-            [200, 100, 255],  # Light purple
-            [100, 200, 255],  # Sky blue
-            [255, 100, 200],  # Hot pink
-        ]
-
         for pan_id in unique_ids:
-            if pan_id == 0:
-                continue
-
+            # Don't skip 0 - it's a valid panoptic ID for road
             mask = panoptic == pan_id
             semantic_class = pan_id // label_divisor
             instance_id = pan_id % label_divisor
 
             if semantic_class < len(self.colors):
-                base_color = self.colors[semantic_class]
-
                 if instance_id == 0:
-                    # Stuff classes - use original semantic color but brighten it
-                    colored[mask] = base_color
-                # else:
-                #     # Thing instances - use vibrant colors
-                #     if pan_id not in instance_colors:
-                #         if color_index < len(vibrant_colors):
-                #             instance_colors[pan_id] = vibrant_colors[color_index]
-                #         else:
-                #             # Fallback to generated colors with better distribution
-                #             np.random.seed(int(pan_id))
-                #             hue = (color_index * 47) % 360  # Better distribution
-                #             from colorsys import hsv_to_rgb
-                #             r, g, b = hsv_to_rgb(hue/360, 0.9, 0.95)  # High saturation and value
-                #             instance_colors[pan_id] = np.array([r*255, g*255, b*255], dtype=np.uint8)
-                #         color_index += 1
-
-                #     colored[mask] = instance_colors[pan_id]
+                    # Stuff class - use base color
+                    colored[mask] = self.colors[semantic_class]
+                else:
+                    # Thing instance - create variation
+                    np.random.seed(int(pan_id))
+                    base_color = self.colors[semantic_class].astype(float)
+                    # Create variation for different instances
+                    variation = np.random.randint(-40, 40, 3)
+                    instance_color = np.clip(base_color + variation, 0, 255)
+                    colored[mask] = instance_color.astype(np.uint8)
             else:
-                # Unknown class - gray
+                # Unknown class
                 colored[mask] = [128, 128, 128]
 
         return colored
