@@ -180,11 +180,12 @@ from typing import List, Tuple
 #     return panoptic, center
 ##########################################
 class PostProcessing:
-    def __init__(self, center_threshold=0.1, nms_kernel=7, top_k_instance=200, thing_classes=None):
+    def __init__(self, center_threshold=0.1, nms_kernel=7, top_k_instance=200, thing_classes=None, stuff_classes=None):
         self.center_threshold = center_threshold
         self.nms_kernel = nms_kernel
         self.top_k_instance = top_k_instance
-        self.thing_classes = thing_classes
+        self.thing_classes = thing_classes if thing_classes else [11, 12, 13, 14, 15, 16, 17, 18]
+        self.stuff_classes = stuff_classes if stuff_classes else [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
 
     def panoptic_fusion(
         self, semantic_logits: torch.Tensor, center_heatmap: torch.Tensor, offset_map: torch.Tensor
@@ -228,7 +229,7 @@ class PostProcessing:
         return panoptic_pred
 
     def find_instance_centers(self, center_heatmap: torch.Tensor) -> List[Tuple[int, int]]:
-        """Find instance centers from center heatmap using NMS."""
+        """Find instance centers from center heatmap using NMS with validation"""
         # Apply threshold
         center_mask = center_heatmap > self.center_threshold
 
@@ -240,44 +241,56 @@ class PostProcessing:
             padding=(self.nms_kernel - 1) // 2,
         ).squeeze()
 
-        # Find local maxima
-        center_mask = center_mask & (center_heatmap == nms_heatmap)
+        # Find local maxima that are also above threshold
+        center_mask = center_mask & (center_heatmap == nms_heatmap) & (nms_heatmap > self.center_threshold)
 
-        # Get top-k centers
+        # Get center coordinates and scores
         center_coords = torch.nonzero(center_mask, as_tuple=False)
         center_scores = center_heatmap[center_mask]
 
-        if len(center_coords) > self.top_k_instance:
-            top_k_indices = torch.topk(center_scores, self.top_k_instance)[1]
-            center_coords = center_coords[top_k_indices]
+        # Sort by score and take top-k
+        if len(center_coords) > 0:
+            sorted_indices = torch.argsort(center_scores, descending=True)
+            center_coords = center_coords[sorted_indices]
+            center_scores = center_scores[sorted_indices]
+
+            # Keep only top-k
+            if len(center_coords) > self.top_k_instance:
+                center_coords = center_coords[: self.top_k_instance]
 
         return [(coord[0].item(), coord[1].item()) for coord in center_coords]
 
     def generate_instance_masks(
         self, centers: List[Tuple[int, int]], offset_map: torch.Tensor, height: int, width: int
     ) -> List[torch.Tensor]:
-        """Generate instance masks from centers and offset map."""
+        """Generate instance masks from centers and offset map with better precision"""
         device = offset_map.device
 
         # Create coordinate grids
         y_coords, x_coords = torch.meshgrid(
-            torch.arange(height, device=device), torch.arange(width, device=device), indexing="ij"
+            torch.arange(height, device=device, dtype=torch.float32),
+            torch.arange(width, device=device, dtype=torch.float32),
+            indexing="ij",
         )
 
         instance_masks = []
 
         for center_y, center_x in centers:
-            # Calculate shifted coordinates using offset map
-            shifted_y = y_coords + offset_map[0]  # [H, W]
-            shifted_x = x_coords + offset_map[1]  # [H, W]
+            # Calculate where each pixel points to using offset map
+            predicted_center_y = y_coords + offset_map[0]
+            predicted_center_x = x_coords + offset_map[1]
 
-            # Calculate distance to center
-            dist_y = shifted_y - center_y
-            dist_x = shifted_x - center_x
+            # Distance to this specific center
+            dist_y = predicted_center_y - float(center_y)
+            dist_x = predicted_center_x - float(center_x)
             distance = torch.sqrt(dist_y**2 + dist_x**2)
 
-            # Create instance mask (pixels that point to this center)
-            mask = distance < 1.0  # Threshold for belonging to instance
+            # Adaptive threshold based on image size
+            threshold = min(3.0, max(1.5, (height + width) / 500))
+
+            # Create mask for pixels pointing to this center
+            mask = distance < threshold
+
             instance_masks.append(mask)
 
         return instance_masks
@@ -285,23 +298,81 @@ class PostProcessing:
     def fuse_semantic_instance(
         self, semantic_pred: torch.Tensor, instance_masks: List[torch.Tensor], centers: List[Tuple[int, int]]
     ) -> torch.Tensor:
-        """Fuse semantic and instance predictions."""
+        """Fuse semantic and instance predictions with better accuracy"""
         height, width = semantic_pred.shape
         panoptic_pred = semantic_pred.clone()
 
-        instance_id = 1000  # Start instance IDs from 1000
+        # Label divisor to separate semantic classes from instance IDs
+        label_divisor = 1000
 
-        for mask, (center_y, center_x) in zip(instance_masks, centers):
-            if mask.sum() < 32:  # Skip very small instances
-                continue
+        # First, handle all stuff classes (non-instance classes)
+        for stuff_class in self.stuff_classes:
+            stuff_mask = semantic_pred == stuff_class
+            if stuff_mask.sum() > 0:
+                panoptic_pred[stuff_mask] = stuff_class * label_divisor
 
-            # Get semantic class at center
-            center_class = semantic_pred[center_y, center_x].item()
+        # Track which pixels have been assigned to instances
+        instance_assigned = torch.zeros_like(semantic_pred, dtype=torch.bool)
 
-            # Only process thing classes for instances
-            if center_class in self.thing_classes:
-                # Assign instance ID to mask region
-                panoptic_pred[mask] = instance_id
-                instance_id += 1
+        # Track instance count per class
+        class_instance_count = {}
+
+        # Process instance masks with better validation
+        if len(instance_masks) > 0:
+            # Sort by mask size (larger first)
+            mask_sizes = [mask.sum().item() for mask in instance_masks]
+            sorted_indices = sorted(range(len(mask_sizes)), key=lambda i: mask_sizes[i], reverse=True)
+
+            for idx in sorted_indices:
+                mask = instance_masks[idx]
+                center_y, center_x = centers[idx]
+
+                # Skip very small instances
+                if mask.sum() < 50:  # Increased threshold
+                    continue
+
+                # Get semantic class at center AND verify majority class in mask
+                center_class = semantic_pred[center_y, center_x].item()
+
+                # Verify this is actually a thing class
+                if center_class not in self.thing_classes:
+                    continue
+
+                # Double-check: get majority vote of semantic class within mask
+                mask_region = semantic_pred[mask]
+                if len(mask_region) > 0:
+                    # Get most common class in the mask region
+                    unique_classes, counts = torch.unique(mask_region, return_counts=True)
+                    majority_class = unique_classes[torch.argmax(counts)].item()
+
+                    # Use majority class if it's a thing class and has significant presence
+                    if majority_class in self.thing_classes and (counts[torch.argmax(counts)] > mask.sum() * 0.3):
+                        center_class = majority_class
+
+                # Only assign pixels that:
+                # 1. Match the semantic class
+                # 2. Haven't been assigned to another instance yet
+                # 3. Are within the instance mask
+                valid_mask = mask & (semantic_pred == center_class) & ~instance_assigned
+
+                if valid_mask.sum() > 30:  # Minimum pixels for valid instance
+                    # Track instance count for this class
+                    if center_class not in class_instance_count:
+                        class_instance_count[center_class] = 0
+                    class_instance_count[center_class] += 1
+
+                    # Create unique panoptic ID
+                    panoptic_id = center_class * label_divisor + class_instance_count[center_class]
+
+                    # Assign instance ID
+                    panoptic_pred[valid_mask] = panoptic_id
+                    instance_assigned[valid_mask] = True
+
+        # Handle any remaining thing class pixels that weren't assigned to instances
+        # These become "stuff-like" (class * label_divisor)
+        for thing_class in self.thing_classes:
+            unassigned_mask = (semantic_pred == thing_class) & ~instance_assigned
+            if unassigned_mask.sum() > 0:
+                panoptic_pred[unassigned_mask] = thing_class * label_divisor
 
         return panoptic_pred

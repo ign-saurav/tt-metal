@@ -293,6 +293,7 @@ class DemoConfig:
     normalize_enabled: bool = True
     mean: List[float] = None
     std: List[float] = None
+    show_instance_labels: bool = True
 
     # Inference configuration
     center_threshold: float = 0.1
@@ -1122,13 +1123,13 @@ class DualPipelineDemo:
                     else:
                         logger.warning(f"Unexpected offset_map shape: {np_array.shape}")
                 # panoptic_pred
-                panoptic_pred = PostProcessing().panoptic_fusion(
-                    semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map
-                )
+                panoptic_pred = PostProcessing(
+                    thing_classes=self.config.thing_classes, stuff_classes=self.config.stuff_classes
+                ).panoptic_fusion(semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map)
                 if panoptic_pred is not None and isinstance(panoptic_pred, torch.Tensor):
                     np_array = panoptic_pred.squeeze(0).cpu().numpy()
                     results["torch"]["panoptic_pred"] = cv2.resize(
-                        np_array.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
+                        np_array.astype(np.int32), original_size, interpolation=cv2.INTER_NEAREST
                     )
                     logger.debug(f"PyTorch panoptic_pred shape: {results['torch']['panoptic_pred'].shape}")
 
@@ -1383,180 +1384,174 @@ class DualPipelineDemo:
 
     #     logger.info(f"Visualization saved to: {save_path}")
     def visualize_results(self, original_image: np.ndarray, results: Dict, save_path: str):
-        """Create comprehensive visualization comparing both pipelines - MODIFIED for single offset"""
+        """Create comprehensive visualization with panoptic in separate row"""
         from mpl_toolkits.axes_grid1 import make_axes_locatable
 
         logger.info("Creating visualization...")
-        # Determine subplot layout based on available results
         has_torch = "torch" in results and results["torch"]
         has_ttnn = "ttnn" in results and results["ttnn"]
 
         if has_torch and has_ttnn:
-            # 3 rows, 3 columns layout for dual pipeline with single offset visualization
-            fig, axes = plt.subplots(3, 4, figsize=(15, 15))
+            # 4 rows for dual pipeline: original, torch outputs, ttnn outputs, panoptic comparison
+            fig = plt.figure(figsize=(16, 20))
+            gs = fig.add_gridspec(4, 4, height_ratios=[0.8, 1, 1, 1], hspace=0.3, wspace=0.2)
             pipelines = ["torch", "ttnn"]
-        elif has_torch or has_ttnn:
-            # 2 rows, 3 columns for single pipeline
-            fig, axes = plt.subplots(2, 4, figsize=(15, 10))
-            pipelines = ["torch"] if has_torch else ["ttnn"]
         else:
-            logger.warning("No results to visualize")
-            return
+            fig = plt.figure(figsize=(16, 12))
+            gs = fig.add_gridspec(3, 4, height_ratios=[0.8, 1, 1], hspace=0.3, wspace=0.2)
+            pipelines = ["torch"] if has_torch else ["ttnn"]
 
-        # Ensure axes is 2D array for consistent indexing
-        if axes.ndim == 1:
-            axes = axes.reshape(1, -1)
+        # Row 0: Original image (centered)
+        ax_orig = fig.add_subplot(gs[0, 1:3])
+        ax_orig.imshow(original_image)
+        ax_orig.set_title("Original Image", fontsize=14, fontweight="bold")
+        ax_orig.axis("off")
 
-        # Original image (top-center)
-        axes[0, 1].imshow(original_image)
-        axes[0, 1].set_title("Original Image", fontsize=12, fontweight="bold")
-        axes[0, 1].axis("off")
+        # Hide unused cells in first row
+        for i in [0, 3]:
+            ax = fig.add_subplot(gs[0, i])
+            ax.axis("off")
 
-        # Hide unused top row cells
-        axes[0, 0].axis("off")
-        axes[0, 2].axis("off")
-
-        # For each pipeline, fill the visualization
+        # Rows 1-2: Pipeline outputs (semantic, centers, offset)
         for i, pipeline in enumerate(pipelines):
             if pipeline not in results:
                 continue
             pipeline_results = results[pipeline]
+            row = i + 1
 
-            if len(pipelines) == 2:
-                # Dual pipeline layout
-                row_base = i + 1  # torch=1, ttnn=2
+            # Semantic segmentation
+            ax_sem = fig.add_subplot(gs[row, 0])
+            if "semantic_pred" in pipeline_results:
+                semantic_colored = self._colorize_segmentation(pipeline_results["semantic_pred"])
+                ax_sem.imshow(semantic_colored)
+                ax_sem.set_title(f"{pipeline.upper()} Semantic", fontsize=11)
+            ax_sem.axis("off")
 
-                # Column 0: Semantic segmentation
-                if "semantic_pred" in pipeline_results:
-                    semantic_colored = self._colorize_segmentation(pipeline_results["semantic_pred"])
-                    axes[row_base, 0].imshow(semantic_colored)
-                    axes[row_base, 0].set_title(f"{pipeline.upper()} Semantic", fontsize=10)
-                    axes[row_base, 0].axis("off")
+            # Centers
+            ax_center = fig.add_subplot(gs[row, 1])
+            if "center_heatmap" in pipeline_results:
+                center_data = pipeline_results["center_heatmap"]
+                if center_data.max() > center_data.min():
+                    center_normalized = (center_data - center_data.min()) / (center_data.max() - center_data.min())
                 else:
-                    axes[row_base, 0].axis("off")
+                    center_normalized = center_data
+                ax_center.imshow(original_image, alpha=0.5)
+                ax_center.imshow(center_normalized, cmap="hot", alpha=0.5, vmin=0, vmax=1)
+                ax_center.set_title(f"{pipeline.upper()} Centers", fontsize=11)
+            ax_center.axis("off")
 
-                # Column 1: Instance centers
-                if "center_heatmap" in pipeline_results:
-                    center_data = pipeline_results["center_heatmap"]
-
-                    # Normalize for better visualization
-                    if center_data.max() > center_data.min():
-                        center_normalized = (center_data - center_data.min()) / (center_data.max() - center_data.min())
-                    else:
-                        center_normalized = center_data
-
-                    axes[row_base, 1].imshow(original_image, alpha=0.6)
-                    im = axes[row_base, 1].imshow(center_normalized, cmap="hot", alpha=0.4, vmin=0, vmax=1)
-                    axes[row_base, 1].set_title(f"{pipeline.upper()} Centers", fontsize=10)
-                    axes[row_base, 1].axis("off")
+            # Offset
+            ax_offset = fig.add_subplot(gs[row, 2])
+            if "offset_map" in pipeline_results:
+                offset_data = pipeline_results["offset_map"]
+                if len(offset_data.shape) == 3 and offset_data.shape[0] == 2:
+                    offset_magnitude = np.sqrt(offset_data[0] ** 2 + offset_data[1] ** 2)
                 else:
-                    axes[row_base, 1].axis("off")
+                    offset_magnitude = offset_data
+                vmax = offset_magnitude.max() if offset_magnitude.max() > 0 else 1
+                im = ax_offset.imshow(offset_magnitude, cmap="viridis", vmin=0, vmax=vmax)
+                ax_offset.set_title(f"{pipeline.upper()} Offset", fontsize=11)
 
-                # Column 2: Combined Offset magnitude visualization
-                if "offset_map" in pipeline_results:
-                    offset_data = pipeline_results["offset_map"]
+                # Add small colorbar
+                divider = make_axes_locatable(ax_offset)
+                cax = divider.append_axes("right", size="5%", pad=0.05)
+                plt.colorbar(im, cax=cax)
+            ax_offset.axis("off")
 
-                    # Handle different offset map shapes
-                    if len(offset_data.shape) == 3 and offset_data.shape[0] == 2:
-                        # Shape is (2, H, W) - correct format
-                        offset_x = offset_data[0]
-                        offset_y = offset_data[1]
-                    elif len(offset_data.shape) == 3 and offset_data.shape[2] == 2:
-                        # Shape is (H, W, 2) - transpose needed
-                        offset_x = offset_data[:, :, 0]
-                        offset_y = offset_data[:, :, 1]
+            # Hide the 4th column in these rows
+            ax_empty = fig.add_subplot(gs[row, 3])
+            ax_empty.axis("off")
+
+        # Row 3 (or 2 for single pipeline): Panoptic comparison
+        if has_torch and has_ttnn:
+            # Both panoptic side by side
+            for i, pipeline in enumerate(pipelines):
+                ax_pan = fig.add_subplot(gs[3, i * 2 : (i * 2) + 2])
+                if pipeline in results and "panoptic_pred" in results[pipeline]:
+                    panoptic_colored = self._colorize_panoptic(results[pipeline]["panoptic_pred"])
+                    if self.config.show_instance_labels:
+                        panoptic_with_labels = self._add_instance_labels(
+                            panoptic_colored, results[pipeline]["panoptic_pred"]
+                        )
+                        ax_pan.imshow(panoptic_with_labels)
                     else:
-                        logger.warning(f"Unexpected offset_map shape: {offset_data.shape}")
-                        axes[row_base, 2].axis("off")
-                        continue
-
-                    # Calculate combined offset magnitude
-                    offset_magnitude = np.sqrt(offset_x**2 + offset_y**2)
-
-                    # Visualize combined offset magnitude
-                    vmax = offset_magnitude.max() if offset_magnitude.max() > 0 else 1
-                    axes[row_base, 2].imshow(offset_magnitude, cmap="viridis", vmin=0, vmax=vmax)
-                    axes[row_base, 2].set_title(f"{pipeline.upper()} Offset", fontsize=10)
-                    axes[row_base, 2].axis("off")
-
-                    # Add colorbar for offset magnitude
-                    divider = make_axes_locatable(axes[row_base, 2])
-                    cax = divider.append_axes("right", size="5%", pad=0.05)
-                    plt.colorbar(axes[row_base, 2].get_images()[0], cax=cax)
+                        ax_pan.imshow(panoptic_colored)
+                    ax_pan.set_title(f"{pipeline.upper()} Panoptic Segmentation", fontsize=12, fontweight="bold")
+                ax_pan.axis("off")
+        else:
+            # Single panoptic centered
+            pipeline = pipelines[0]
+            ax_pan = fig.add_subplot(gs[2, :])
+            if "panoptic_pred" in results[pipeline]:
+                panoptic_colored = self._colorize_panoptic(results[pipeline]["panoptic_pred"])
+                if self.config.show_instance_labels:
+                    panoptic_with_labels = self._add_instance_labels(
+                        panoptic_colored, results[pipeline]["panoptic_pred"]
+                    )
+                    ax_pan.imshow(panoptic_with_labels)
                 else:
-                    axes[row_base, 2].axis("off")
+                    ax_pan.imshow(panoptic_colored)
+                ax_pan.set_title(f"{pipeline.upper()} Panoptic Segmentation", fontsize=12, fontweight="bold")
+            ax_pan.axis("off")
 
-                # Column 3: Panoptic segmentation
-                if "panoptic_pred" in pipeline_results:
-                    panoptic_colored = self._colorize_panoptic(pipeline_results["panoptic_pred"])
-                    axes[row_base, 3].imshow(panoptic_colored)
-                    axes[row_base, 3].set_title(f"{pipeline.upper()} Panoptic", fontsize=10)
-                    axes[row_base, 3].axis("off")
-            else:
-                # Single pipeline layout
-                pipeline_results = results[pipeline]
-
-                # Row 1, Column 0: Semantic segmentation
-                if "semantic_pred" in pipeline_results:
-                    semantic_colored = self._colorize_segmentation(pipeline_results["semantic_pred"])
-                    axes[1, 0].imshow(semantic_colored)
-                    axes[1, 0].set_title(f"{pipeline.upper()} Semantic", fontsize=12)
-                    axes[1, 0].axis("off")
-
-                # Row 1, Column 1: Instance centers
-                if "center_heatmap" in pipeline_results:
-                    center_data = pipeline_results["center_heatmap"]
-
-                    # Normalize for better visualization
-                    if center_data.max() > center_data.min():
-                        center_normalized = (center_data - center_data.min()) / (center_data.max() - center_data.min())
-                    else:
-                        center_normalized = center_data
-
-                    axes[1, 1].imshow(original_image, alpha=0.6)
-                    axes[1, 1].imshow(center_normalized, cmap="hot", alpha=0.4, vmin=0, vmax=1)
-                    axes[1, 1].set_title(f"{pipeline.upper()} Centers", fontsize=12)
-                    axes[1, 1].axis("off")
-
-                # Row 1, Column 2: Combined Offset magnitude
-                if "offset_map" in pipeline_results:
-                    offset_data = pipeline_results["offset_map"]
-
-                    if len(offset_data.shape) == 3 and offset_data.shape[0] == 2:
-                        offset_x = offset_data[0]
-                        offset_y = offset_data[1]
-                    elif len(offset_data.shape) == 3 and offset_data.shape[2] == 2:
-                        offset_x = offset_data[:, :, 0]
-                        offset_y = offset_data[:, :, 1]
-                    else:
-                        logger.warning(f"Unexpected offset_map shape: {offset_data.shape}")
-                        axes[1, 2].axis("off")
-                        continue
-
-                    # Calculate combined offset magnitude
-                    offset_magnitude = np.sqrt(offset_x**2 + offset_y**2)
-
-                    # Visualize combined offset magnitude
-                    vmax = offset_magnitude.max() if offset_magnitude.max() > 0 else 1
-                    axes[1, 2].imshow(offset_magnitude, cmap="viridis", vmin=0, vmax=vmax)
-                    axes[1, 2].set_title(f"{pipeline.upper()} Offset", fontsize=12)
-                    axes[1, 2].axis("off")
-
-                    # Add colorbar for offset magnitude
-                    divider = make_axes_locatable(axes[1, 2])
-                    cax = divider.append_axes("right", size="5%", pad=0.05)
-                    plt.colorbar(axes[1, 2].get_images()[0], cax=cax)
-
-        # Hide any remaining unused subplots
-        for i in range(axes.shape[0]):
-            for j in range(axes.shape[1]):
-                if len(axes[i, j].get_images()) == 0:
-                    axes[i, j].axis("off")
-
-        plt.tight_layout()
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close()
         logger.info(f"Visualization saved to: {save_path}")
+
+    def _add_instance_labels(self, image: np.ndarray, panoptic: np.ndarray) -> np.ndarray:
+        """Add instance labels to the image"""
+        import cv2
+
+        labeled_image = image.copy()
+        label_divisor = 1000
+
+        # Group by semantic class to avoid duplicate labels
+        labeled_classes = set()
+        unique_ids = np.unique(panoptic)
+
+        for pan_id in unique_ids:
+            semantic_class = pan_id // label_divisor
+            instance_id = pan_id % label_divisor
+
+            if pan_id > 0 and semantic_class < len(self.config.class_names):
+                # Only label once per semantic class for cleaner view
+                class_key = semantic_class if instance_id == 0 else f"{semantic_class}_{instance_id}"
+
+                if semantic_class not in labeled_classes or instance_id > 0:
+                    mask = (panoptic == pan_id).astype(np.uint8)
+                    M = cv2.moments(mask)
+
+                    if M["m00"] > 500:  # Larger threshold for cleaner labels
+                        cx = int(M["m10"] / M["m00"])
+                        cy = int(M["m01"] / M["m00"])
+
+                        # Simple class name only
+                        label = self.config.class_names[semantic_class]
+
+                        # Add text with semi-transparent background
+                        font = cv2.FONT_HERSHEY_SIMPLEX
+                        font_scale = 0.5
+                        thickness = 2
+                        text_size = cv2.getTextSize(label, font, font_scale, thickness)[0]
+
+                        # Semi-transparent white background
+                        overlay = labeled_image.copy()
+                        cv2.rectangle(
+                            overlay,
+                            (cx - 3, cy - text_size[1] - 3),
+                            (cx + text_size[0] + 3, cy + 3),
+                            (255, 255, 255),
+                            -1,
+                        )
+                        cv2.addWeighted(overlay, 0.7, labeled_image, 0.3, 0, labeled_image)
+
+                        # Black text
+                        cv2.putText(labeled_image, label, (cx, cy), font, font_scale, (0, 0, 0), thickness)
+
+                        if instance_id == 0:
+                            labeled_classes.add(semantic_class)
+
+        return labeled_image
 
     def _colorize_segmentation(self, segmentation: np.ndarray) -> np.ndarray:
         """Convert segmentation map to colored image"""
@@ -1568,24 +1563,45 @@ class DualPipelineDemo:
         return colored
 
     def _colorize_panoptic(self, panoptic: np.ndarray) -> np.ndarray:
-        """Convert panoptic prediction to colored image"""
+        """Convert panoptic prediction to colored image with proper instance coloring"""
         colored = np.zeros((*panoptic.shape, 3), dtype=np.uint8)
+        label_divisor = 1000
 
-        # Color stuff classes
-        for stuff_class in self.config.stuff_classes:
-            mask = panoptic == stuff_class
-            if stuff_class < len(self.colors):
-                colored[mask] = self.colors[stuff_class]
+        unique_ids = np.unique(panoptic)
 
-        # Color thing instances with unique colors
-        instance_ids = np.unique(panoptic)
-        for instance_id in instance_ids:
-            if instance_id >= 1000:  # Instance IDs start from 1000
-                mask = panoptic == instance_id
-                # Generate unique color for instance
-                np.random.seed(instance_id)
-                instance_color = np.random.randint(0, 255, 3)
-                colored[mask] = instance_color
+        # Use more vibrant colors for instances
+        instance_colors = {}
+
+        for pan_id in unique_ids:
+            mask = panoptic == pan_id
+            semantic_class = pan_id // label_divisor
+            instance_id = pan_id % label_divisor
+
+            if semantic_class < len(self.colors):
+                base_color = self.colors[semantic_class]
+
+                if instance_id == 0:
+                    # Stuff classes - use original semantic color
+                    colored[mask] = base_color
+                else:
+                    # Thing instances - create distinct colors
+                    if pan_id not in instance_colors:
+                        # Generate distinct color for each instance
+                        np.random.seed(int(pan_id))
+
+                        # Use golden angle for hue distribution
+                        golden_angle = 137.5
+                        hue = ((instance_id - 1) * golden_angle) % 360
+
+                        # High saturation and value for vibrancy
+                        from colorsys import hsv_to_rgb
+
+                        r, g, b = hsv_to_rgb(hue / 360, 0.8, 0.9)
+                        instance_colors[pan_id] = np.array([r * 255, g * 255, b * 255], dtype=np.uint8)
+
+                    colored[mask] = instance_colors[pan_id]
+            else:
+                colored[mask] = [128, 128, 128]
 
         return colored
 
