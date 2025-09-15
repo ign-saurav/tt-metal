@@ -22,6 +22,7 @@ import ttnn
 from models.experimental.panoptic_deeplab.tt.panoptic_deeplab import TTPanopticDeepLab
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
+from post_processing import panoptic_fusion
 
 
 def map_single_key(checkpoint_key):
@@ -1152,150 +1153,6 @@ class DualPipelineDemo:
 
         return ttnn_outputs, ttnn_outputs_2, ttnn_outputs_3
 
-    # def postprocess_outputs(
-    #     self, torch_outputs: torch.Tensor, torch_outputs_2: torch.Tensor, torch_outputs_3: torch.Tensor, ttnn_outputs: ttnn.Tensor, ttnn_outputs_2: ttnn.Tensor, ttnn_outputs_3: ttnn.Tensor, original_size: Tuple[int, int]
-    # ) -> Dict[str, Dict]:
-    #     """Postprocess outputs from both pipelines - IMPROVED VERSION"""
-    #     results = {"torch": {}, "ttnn": {}}
-
-    #     # Process PyTorch outputs
-    #     # if torch_outputs:
-    #     logger.info("Processing PyTorch outputs...")
-
-    #     # Assume torch_outputs is a tuple/list of tensors in order:
-    #     # (semantic_logits, center_heatmap, offset_map)
-    #     # Optionally, panoptic_pred as a 4th output if available
-
-    #     if torch_outputs and torch_outputs_2 and torch_outputs_3:
-    #         try:
-    #             # Unpack outputs
-    #             # if isinstance(torch_outputs, (tuple, list)):
-    #             # num_outputs = len(torch_outputs)
-    #             semantic_logits = torch_outputs
-    #             offset_map = torch_outputs_2
-    #             center_heatmap = torch_outputs_3
-
-    #             # semantic_logits
-    #             if semantic_logits is not None and isinstance(semantic_logits, torch.Tensor):
-    #                 np_array = semantic_logits.squeeze(0).cpu().numpy()
-    #                 semantic_pred = np.argmax(np_array, axis=0)
-    #                 results["torch"]["semantic_pred"] = cv2.resize(
-    #                     semantic_pred.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
-    #                 )
-    #                 logger.debug(f"PyTorch semantic_pred shape: {results['torch']['semantic_pred'].shape}")
-
-    #             # center_heatmap
-    #             if center_heatmap is not None and isinstance(center_heatmap, torch.Tensor):
-    #                 np_array = center_heatmap.squeeze(0).cpu().numpy()
-    #                 if len(np_array.shape) == 3 and np_array.shape[0] == 1:
-    #                     center_data = np_array[0]  # Remove channel dim
-    #                 elif len(np_array.shape) == 2:
-    #                     center_data = np_array
-    #                 else:
-    #                     center_data = np_array  # Use as is
-
-    #                 results["torch"]["center_heatmap"] = cv2.resize(
-    #                     center_data, original_size, interpolation=cv2.INTER_LINEAR
-    #                 )
-    #                 logger.debug(f"PyTorch center_heatmap shape: {results['torch']['center_heatmap'].shape}")
-
-    #             # offset_map
-    #             if offset_map is not None and isinstance(offset_map, torch.Tensor):
-    #                 np_array = offset_map.squeeze(0).cpu().numpy()
-    #                 if len(np_array.shape) == 3 and np_array.shape[0] == 2:
-    #                     results["torch"]["offset_map"] = np.stack(
-    #                         [
-    #                             cv2.resize(np_array[0], original_size, interpolation=cv2.INTER_LINEAR),
-    #                             cv2.resize(np_array[1], original_size, interpolation=cv2.INTER_LINEAR),
-    #                         ]
-    #                     )
-    #                 else:
-    #                     logger.warning(f"Unexpected offset_map shape: {np_array.shape}")
-
-    #             # # panoptic_pred (optional)
-    #             # if panoptic_pred is not None and isinstance(panoptic_pred, torch.Tensor):
-    #             #     np_array = panoptic_pred
-    #             #     if len(np_array.shape) == 3:
-    #             #         np_array = np_array.squeeze()  # Remove single dimensions
-    #             #     np_array = np_array.cpu().numpy()
-    #             #     results["torch"]["panoptic_pred"] = cv2.resize(
-    #             #         np_array.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
-    #             #     )
-    #             #     logger.debug(f"PyTorch panoptic_pred shape: {results['torch']['panoptic_pred'].shape}")
-
-    #         except Exception as e:
-    #             logger.error(f"Error processing PyTorch outputs: {e}")
-
-    #         # Process TTNN outputs
-    #     if ttnn_outputs and ttnn_outputs_2 and ttnn_outputs_3:
-    #         logger.info("Processing TTNN outputs...")
-    #             # for key, tensor in ttnn_outputs.items():
-    #             #     if hasattr(tensor, "shape"):
-    #         try:
-    #             # Convert TTNN to torch tensor
-    #             torch_tensor = ttnn.to_torch(
-    #                 ttnn_outputs, device=self.ttnn_device, mesh_composer=self.output_mesh_composer
-    #             )
-    #             torch_tensor_2 = ttnn.to_torch(
-    #                 ttnn_outputs_2, device=self.ttnn_device, mesh_composer=self.output_mesh_composer
-    #             )
-    #             torch_tensor_3 = ttnn.to_torch(
-    #                 ttnn_outputs_3, device=self.ttnn_device, mesh_composer=self.output_mesh_composer
-    #             )
-
-    #             # Reshape to proper format
-    #             reshaped_tensor = self._reshape_ttnn_output(torch_tensor, "semantic_logits")
-    #             reshaped_tensor_3 = self._reshape_ttnn_output(torch_tensor_3, "center_heatmap")
-    #             reshaped_tensor_2 = self._reshape_ttnn_output(torch_tensor_2, "offset_map")
-    #             np_array = reshaped_tensor.squeeze(0).cpu().float().numpy()
-    #             np_array_2 = reshaped_tensor_2.squeeze(0).cpu().float().numpy()
-    #             np_array_3 = reshaped_tensor_3.squeeze(0).cpu().float().numpy()
-
-    #             # semantic_logits
-    #             if torch_tensor is not None and isinstance(torch_tensor, torch.Tensor):
-    #                 semantic_pred = np.argmax(np_array, axis=0)
-    #                 results["ttnn"]["semantic_pred"] = cv2.resize(
-    #                     semantic_pred.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
-    #                 )
-    #                 logger.debug(f"TTNN semantic_pred shape: {results['ttnn']['semantic_pred'].shape}")
-
-    #             # center_heatmap
-    #             if torch_tensor_3 is not None and isinstance(torch_tensor_3, torch.Tensor):
-    #                 if len(np_array_3.shape) == 3 and np_array_3.shape[0] == 1:
-    #                     center_data = np_array_3[0]  # Remove channel dim
-    #                 elif len(np_array_3.shape) == 2:
-    #                     center_data = np_array_3
-    #                 else:
-    #                     center_data = np_array_3
-
-    #                 results["ttnn"]["center_heatmap"] = cv2.resize(
-    #                     center_data, original_size, interpolation=cv2.INTER_LINEAR
-    #                 )
-    #                 logger.debug(f"TTNN center_heatmap shape: {results['ttnn']['center_heatmap'].shape}")
-
-    #             # offset_map
-    #             if torch_tensor_2 is not None and isinstance(torch_tensor_2, torch.Tensor):
-    #                 if len(np_array_2.shape) == 3 and np_array_2.shape[0] == 2:
-    #                     results["ttnn"]["offset_map"] = np.stack(
-    #                         [
-    #                             cv2.resize(np_array_2[0], original_size, interpolation=cv2.INTER_LINEAR),
-    #                             cv2.resize(np_array_2[1], original_size, interpolation=cv2.INTER_LINEAR),
-    #                         ]
-    #                     )
-    #                 else:
-    #                     logger.warning(f"Unexpected TTNN offset_map shape: {np_array_2.shape}")
-
-    #             # elif "panoptic_pred_ttnn" or "panoptic_pred":
-    #             #     if len(np_array.shape) > 2:
-    #             #         np_array = np_array.squeeze()  # Remove single dimensions
-    #             #     results["ttnn"]["panoptic_pred"] = cv2.resize(
-    #             #         np_array.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
-    #             #     )
-    #             #     logger.debug(f"TTNN panoptic_pred shape: {results['ttnn']['panoptic_pred'].shape}")
-
-    #         except Exception as e:
-    #             logger.error(f"Error processing TTNN output : {e}")
-
     #     return results
     def postprocess_outputs(
         self,
@@ -1307,7 +1164,7 @@ class DualPipelineDemo:
         ttnn_outputs_3: ttnn.Tensor,
         original_size: Tuple[int, int],
     ) -> Dict[str, Dict]:
-        """Postprocess outputs from both pipelines - FIXED VERSION"""
+        """Postprocess outputs from both pipelines"""
         results = {"torch": {}, "ttnn": {}}
 
         # Process PyTorch outputs
@@ -1354,6 +1211,14 @@ class DualPipelineDemo:
                         )
                     else:
                         logger.warning(f"Unexpected offset_map shape: {np_array.shape}")
+                # panoptic_pred
+                panoptic_pred = panoptic_fusion(semantic_logits, center_heatmap, offset_map)
+                if panoptic_pred is not None and isinstance(panoptic_pred, torch.Tensor):
+                    np_array = panoptic_pred.squeeze(0).cpu().numpy()
+                    results["torch"]["panoptic_pred"] = cv2.resize(
+                        np_array.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
+                    )
+                    logger.debug(f"PyTorch panoptic_pred shape: {results['torch']['panoptic_pred'].shape}")
 
             except Exception as e:
                 logger.error(f"Error processing PyTorch outputs: {e}")
@@ -1444,6 +1309,22 @@ class DualPipelineDemo:
                 else:
                     logger.warning(f"Unexpected TTNN offset_map shape: {np_array_2.shape}")
 
+                # panoptic_pred_ttnn
+                semantic_logits = ttnn.to_torch(semantic_logits)
+                center_heatmap = ttnn.to_torch(center_heatmap)
+                offset_map = ttnn.to_torch(offset_map)
+
+                panoptic_pred_ttnn = panoptic_fusion(semantic_logits, center_heatmap, offset_map)
+                panoptic_pred = ttnn.from_torch(panoptic_pred, dtype=ttnn.int32)
+
+                if panoptic_pred is not None and isinstance(panoptic_pred, ttnn.Tensor):
+                    if len(np_array.shape) > 2:
+                        np_array = np_array.squeeze()  # Remove single dimensions
+                    results["ttnn"]["panoptic_pred"] = cv2.resize(
+                        np_array.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
+                    )
+                    logger.debug(f"TTNN panoptic_pred shape: {results['ttnn']['panoptic_pred'].shape}")
+
             except Exception as e:
                 logger.error(f"Error processing TTNN output: {e}")
                 import traceback
@@ -1494,14 +1375,6 @@ class DualPipelineDemo:
                 else:
                     logger.warning(f"Unexpected offset_map channels: {C}, expected 2")
                     result = tensor
-
-            # elif key == "panoptic_pred_ttnn" or key == "panoptic_pred":
-            #     # Single channel prediction map
-            #     if C == 1:
-            #         result = tensor.permute(0, 3, 1, 2).squeeze(1)  # BHWC -> BHW
-            #     else:
-            #         # Take first channel
-            #         result = tensor[:, :, :, 0]  # BHW
             else:
                 result = tensor
 
@@ -1561,165 +1434,6 @@ class DualPipelineDemo:
                 logger.debug(f"  PyTorch stats: mean={torch_flat.mean():.4f}, std={torch_flat.std():.4f}")
                 logger.debug(f"  TTNN stats: mean={ttnn_flat.mean():.4f}, std={ttnn_flat.std():.4f}")
 
-                # # Calculate PCC
-                # if len(torch_flat) == len(ttnn_flat) and len(torch_flat) > 1:
-                #     # Remove any NaN or inf values
-                #     valid_mask = np.isfinite(torch_flat) & np.isfinite(ttnn_flat)
-                #     if valid_mask.sum() > 1:
-                #         torch_clean = torch_flat[valid_mask]
-                #         ttnn_clean = ttnn_flat[valid_mask]
-
-                #         correlation_matrix = np.corrcoef(torch_clean, ttnn_clean)
-                #         pcc = correlation_matrix[0, 1] if not np.isnan(correlation_matrix[0, 1]) else 0.0
-                #         pcc_scores[key] = pcc
-
-                #         status = "PASS" if pcc >= self.config.pcc_threshold else "FAIL"
-                #         logger.info(f"  {key}: PCC = {pcc:.4f} ({status})")
-                #     else:
-                #         logger.warning(f"  {key}: No valid values for comparison")
-                # else:
-                #     logger.warning(f"  {key}: Cannot compare - length mismatch or insufficient data")
-
-        # return pcc_scores
-
-    # def visualize_results(self, original_image: np.ndarray, results: Dict, save_path: str):
-    #     """Create comprehensive visualization comparing both pipelines"""
-    #     logger.info("Creating visualization...")
-
-    #     # Determine subplot layout based on available results
-    #     has_torch = "torch" in results and results["torch"]
-    #     has_ttnn = "ttnn" in results and results["ttnn"]
-
-    #     if has_torch and has_ttnn:
-    #         # 3 rows, 3 columns layout for dual pipeline
-    #         fig, axes = plt.subplots(3, 3, figsize=(18, 15))
-    #         pipelines = ["torch", "ttnn"]
-    #     elif has_torch or has_ttnn:
-    #         # 2 rows, 3 columns for single pipeline
-    #         fig, axes = plt.subplots(2, 3, figsize=(15, 10))
-    #         pipelines = ["torch"] if has_torch else ["ttnn"]
-    #     else:
-    #         logger.warning("No results to visualize")
-    #         return
-
-    #     # Ensure axes is 2D array for consistent indexing
-    #     if axes.ndim == 1:
-    #         axes = axes.reshape(1, -1)
-    #     # Original image (top-middle)
-    #     axes[0, 1].imshow(original_image)
-    #     axes[0, 1].set_title("Original Image", fontsize=12)
-    #     axes[0, 1].axis("off")
-    #     axes[0, 0].axis("off")  # Top-left empty
-    #     axes[0, 2].axis("off")  # Top-right empty
-    #     # axes[1, 2].axis("off")  # Top-right empty
-    #     # axes[2, 2].axis("off")  # Top-right empty
-
-    #     # For each pipeline, fill the visualization
-    #     for i, pipeline in enumerate(pipelines):
-    #         if pipeline not in results:
-    #             continue
-
-    #         pipeline_results = results[pipeline]
-
-    #         if len(pipelines) == 2:
-    #             # Dual pipeline layout
-    #             row_base = i + 1  # torch=1, ttnn=2
-
-    #             # Semantic segmentation
-    #             if "semantic_pred" in pipeline_results:
-    #                 semantic_colored = self._colorize_segmentation(pipeline_results["semantic_pred"])
-    #                 axes[row_base, 0].imshow(semantic_colored)
-    #                 axes[row_base, 0].set_title(f"{pipeline.upper()} Semantic", fontsize=10)
-    #                 axes[row_base, 0].axis("off")
-
-    #             # Instance centers
-    #             if "center_heatmap" in pipeline_results:
-    #                 axes[row_base, 1].imshow(pipeline_results["center_heatmap"], cmap="hot", alpha=0.7)
-    #                 axes[row_base, 1].imshow(original_image, alpha=0.3)
-    #                 axes[row_base, 1].set_title(f"{pipeline.upper()} Centers", fontsize=10)
-    #                 axes[row_base, 1].axis("off")
-    #             # if "offset_map" in pipeline_results:
-    #             #     offset_data = pipeline_results["offset_map"]
-
-    #             #     # Handle different offset map shapes
-    #             #     if len(offset_data.shape) == 3 and offset_data.shape[0] == 2:
-    #             #         # Shape is (2, H, W) - correct format
-    #             #         offset_x = offset_data[0]
-    #             #         offset_y = offset_data[1]
-    #             #     elif len(offset_data.shape) == 3 and offset_data.shape[2] == 2:
-    #             #         # Shape is (H, W, 2) - transpose needed
-    #             #         offset_x = offset_data[:, :, 0]
-    #             #         offset_y = offset_data[:, :, 1]
-    #             #     else:
-    #             #         logger.warning(f"Unexpected offset_map shape: {offset_data.shape}")
-    #             #         axes[row_base, 2].axis("off")
-    #             #         axes[row_base, 3].axis("off")
-    #             #         continue
-    #             # # Instance centers
-    #             # if "offset_map" in pipeline_results:
-    #             #     axes[row_base, 1].imshow(pipeline_results["offset_map"], cmap="hot", alpha=0.7)
-    #             #     axes[row_base, 1].imshow(original_image, alpha=0.3)
-    #             #     axes[row_base, 1].set_title(f"{pipeline.upper()} Offset", fontsize=10)
-    #             #     axes[row_base, 1].axis("off")
-
-    #             # # Panoptic segmentation
-    #             # if "panoptic_pred" in pipeline_results:
-    #             #     panoptic_colored = self._colorize_panoptic(pipeline_results["panoptic_pred"])
-    #             #     axes[row_base, 2].imshow(panoptic_colored)
-    #             #     axes[row_base, 2].set_title(f"{pipeline.upper()} Panoptic", fontsize=10)
-    #             #     axes[row_base, 2].axis("off")
-
-    #         else:
-    #             # Single pipeline layout
-    #             pipeline_results = results[pipeline]
-
-    #             # Semantic segmentation (top-middle)
-    #             if "semantic_pred" in pipeline_results:
-    #                 semantic_colored = self._colorize_segmentation(pipeline_results["semantic_pred"])
-    #                 axes[1, 0].imshow(semantic_colored)
-    #                 axes[1, 0].set_title(f"{pipeline.upper()} Semantic", fontsize=12)
-    #                 axes[1, 0].axis("off")
-
-    #             # Instance centers (top-right)
-    #             if "center_heatmap" in pipeline_results:
-    #                 axes[1, 1].imshow(pipeline_results["center_heatmap"], cmap="hot", alpha=0.7)
-    #                 axes[1, 1].imshow(original_image, alpha=0.3)
-    #                 axes[1, 1].set_title(f"{pipeline.upper()} Centers", fontsize=12)
-    #                 axes[1, 1].axis("off")
-
-    #             if "offset_map" in pipeline_results:
-    #                 axes[1, 1].imshow(pipeline_results["offset_map"], cmap="hot", alpha=0.7)
-    #                 axes[1, 1].imshow(original_image, alpha=0.3)
-    #                 axes[1, 1].set_title(f"{pipeline.upper()} Offset", fontsize=12)
-    #                 axes[1, 1].axis("off")
-
-    #             # # Panoptic segmentation (bottom-left)
-    #             # if "panoptic_pred" in pipeline_results:
-    #             #     panoptic_colored = self._colorize_panoptic(pipeline_results["panoptic_pred"])
-    #             #     axes[1, 2].imshow(panoptic_colored)
-    #             #     axes[1, 2].set_title(f"{pipeline.upper()} Panoptic", fontsize=12)
-    #             #     axes[1, 2].axis("off")
-
-    #             # # Overlay panoptic on original (bottom-middle)
-    #             # if "panoptic_pred" in pipeline_results:
-    #             #     axes[1, 1].imshow(original_image)
-    #             #     axes[1, 1].imshow(panoptic_colored, alpha=0.6)
-    #             #     axes[1, 1].set_title("Panoptic Overlay", fontsize=12)
-    #             #     axes[1, 1].axis("off")
-
-    #             # Hide unused subplot (bottom-right)
-    #             # axes[1, 2].axis("off")
-
-    #     # Hide any remaining unused subplots
-    #     for i in range(axes.shape[0]):
-    #         for j in range(axes.shape[1]):
-    #             if not axes[i, j].get_images() and not axes[i, j].get_children():
-    #                 axes[i, j].axis("off")
-
-    #     plt.tight_layout()
-    #     plt.savefig(save_path, dpi=150, bbox_inches="tight")
-    #     plt.close()
-
     #     logger.info(f"Visualization saved to: {save_path}")
     def visualize_results(self, original_image: np.ndarray, results: Dict, save_path: str):
         """Create comprehensive visualization comparing both pipelines - MODIFIED for single offset"""
@@ -1732,11 +1446,11 @@ class DualPipelineDemo:
 
         if has_torch and has_ttnn:
             # 3 rows, 3 columns layout for dual pipeline with single offset visualization
-            fig, axes = plt.subplots(3, 3, figsize=(15, 15))
+            fig, axes = plt.subplots(3, 4, figsize=(15, 15))
             pipelines = ["torch", "ttnn"]
         elif has_torch or has_ttnn:
             # 2 rows, 3 columns for single pipeline
-            fig, axes = plt.subplots(2, 3, figsize=(15, 10))
+            fig, axes = plt.subplots(2, 4, figsize=(15, 10))
             pipelines = ["torch"] if has_torch else ["ttnn"]
         else:
             logger.warning("No results to visualize")
@@ -1824,6 +1538,13 @@ class DualPipelineDemo:
                     plt.colorbar(axes[row_base, 2].get_images()[0], cax=cax)
                 else:
                     axes[row_base, 2].axis("off")
+
+                # Column 3: Panoptic segmentation
+                if "panoptic_pred" in pipeline_results:
+                    panoptic_colored = self._colorize_panoptic(pipeline_results["panoptic_pred"])
+                    axes[row_base, 3].imshow(panoptic_colored)
+                    axes[row_base, 3].set_title(f"{pipeline.upper()} Panoptic", fontsize=10)
+                    axes[row_base, 3].axis("off")
             else:
                 # Single pipeline layout
                 pipeline_results = results[pipeline]
