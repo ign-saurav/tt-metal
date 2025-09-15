@@ -4,11 +4,9 @@
 import torch
 import ttnn
 from models.common.lightweightmodule import LightweightModule
-from models.utility_functions import tt2torch_tensor
 from models.experimental.SSR.tt.tile_refinement.tile_refinement import TTTileRefinement
 from models.experimental.SSR.tt.tile_selection.tile_selection import TTTileSelection
 from models.experimental.SSR.tt.tile_refinement.upsample import TTUpsample
-from models.experimental.SSR.reference.SSR.model.net_blocks import window_reverse
 
 
 def window_partition_ttnn(x, window_size):
@@ -332,7 +330,6 @@ class TTSSR_wo_conv(LightweightModule):
 
         # Concatenate and reconstruct
         sr = ttnn.concat(sr_patches, dim=0)
-        torch_sr = tt2torch_tensor(sr)
-        torch_sr = torch_sr.permute(0, 3, 1, 2)
-        sr = window_reverse(torch_sr.permute(0, 2, 3, 1), window_size=H, H=H * 4, W=W * 4)
         return sr, patch_fea3
+        # sr = window_reverse_ttnn(sr, window_size=H, h=H * 4, w=W * 4)
+        # return sr, patch_fea3
