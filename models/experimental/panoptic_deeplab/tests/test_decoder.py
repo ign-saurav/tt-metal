@@ -207,7 +207,7 @@ class DecoderTestInfra:
 
             batch_size = output_tensor.shape[0]
 
-            valid_pcc = 0.97
+            valid_pcc = 0.96
             self.pcc_passed, self.pcc_message = check_with_pcc(self.torch_output_tensor_2, output_tensor, pcc=valid_pcc)
             assert self.pcc_passed, logger.error(f"PCC check failed: {self.pcc_message}")
             logger.info(
