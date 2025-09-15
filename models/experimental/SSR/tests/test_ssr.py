@@ -165,6 +165,11 @@ def test_ssr_model(input_shape, num_cls, with_conv):
         tt_torch_sr = tt2torch_tensor(tt_sr)
         tt_torch_patch_fea3 = tt2torch_tensor(tt_patch_fea3)
         tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
+        from models.experimental.SSR.reference.SSR.model.net_blocks import window_reverse
+
+        B, C, H, W = x.shape
+        tt_torch_sr = window_reverse(tt_torch_sr.permute(0, 2, 3, 1), window_size=H, H=H * 4, W=W * 4)
+        tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
 
         # Compare outputs
         sr_pass, sr_pcc_message = check_with_pcc(ref_sr, tt_torch_sr, 0.95)
