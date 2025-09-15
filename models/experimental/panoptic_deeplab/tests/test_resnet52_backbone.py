@@ -26,7 +26,7 @@ class BackboneTestInfra:
     ):
         super().__init__()
         if not hasattr(self, "_model_initialized"):
-            torch.manual_seed(42)  # Only seed once
+            torch.manual_seed(42)
             self._model_initialized = True
             torch.cuda.manual_seed_all(42)
             torch.backends.cudnn.deterministic = True
@@ -63,15 +63,8 @@ class BackboneTestInfra:
         self.ttnn_model = TTBackbone(
             parameters=parameters,
             model_config=model_config,
-            small_tensor=width < 2048,
         )
 
-        # First run configures convs JIT
-        self.input_tensor = ttnn.to_device(tt_host_tensor, device)
-        self.run()
-        self.validate()
-
-        # Optimized run
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
         self.run()
         self.validate()
@@ -99,8 +92,7 @@ class BackboneTestInfra:
         valid_pcc = {
             "res_2": 0.99,
             "res_3": 0.99,
-            "res_4": 0.99,
-            "res_5": 0.98,
+            "res_5": 0.99,
         }
         self.pcc_passed_all = []
         self.pcc_message_all = []

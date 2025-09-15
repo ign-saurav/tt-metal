@@ -36,10 +36,10 @@ class ResNet52BackBone(nn.Module):
         self.groups = groups
         self.base_width = width_per_group
         self.stem = DeepLabStem(in_channels=3, out_channels=self.inplanes, stride=1)
-        self.layer1 = self._make_layer(block, 64, layers[0], stride=1, dialate_config=dialate_layer_config[0])
-        self.layer2 = self._make_layer(block, 128, layers[1], stride=2, dialate_config=dialate_layer_config[1])
-        self.layer3 = self._make_layer(block, 256, layers[2], stride=2, dialate_config=dialate_layer_config[2])
-        self.layer4 = self._make_layer(block, 512, layers[3], stride=1, dialate_config=[2, 4, 8])
+        self.res2 = self._make_layer(block, 64, layers[0], stride=1, dialate_config=dialate_layer_config[0])
+        self.res3 = self._make_layer(block, 128, layers[1], stride=2, dialate_config=dialate_layer_config[1])
+        self.res4 = self._make_layer(block, 256, layers[2], stride=2, dialate_config=dialate_layer_config[2])
+        self.res5 = self._make_layer(block, 512, layers[3], stride=1, dialate_config=[2, 4, 8])
 
     def _make_layer(
         self,
@@ -83,10 +83,10 @@ class ResNet52BackBone(nn.Module):
     def forward(self, x: Tensor) -> Tensor:
         x = self.stem(x)
 
-        res_2 = self.layer1(x)
-        res_3 = self.layer2(res_2)
-        res_4 = self.layer3(res_3)
-        res_5 = self.layer4(res_4)
+        res_2 = self.res2(x)
+        res_3 = self.res3(res_2)
+        res_4 = self.res4(res_3)
+        res_5 = self.res5(res_4)
         out = {"res_2": res_2, "res_3": res_3, "res_5": res_5}
 
         return out

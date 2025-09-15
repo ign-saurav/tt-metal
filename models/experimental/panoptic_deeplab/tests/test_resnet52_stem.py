@@ -17,7 +17,7 @@ class Resnet52StemTestInfra:
     def __init__(self, device, batch_size, inplanes, planes, height, width, stride, model_config, name):
         super().__init__()
         if not hasattr(self, "_model_initialized"):
-            torch.manual_seed(42)  # Only seed once
+            torch.manual_seed(42)
             self._model_initialized = True
             torch.cuda.manual_seed_all(42)
             torch.backends.cudnn.deterministic = True
@@ -35,7 +35,7 @@ class Resnet52StemTestInfra:
             out_channels=planes,
             stride=stride,
         )
-        torch_model = load_torch_model_state(torch_model, f"backbone.{name}")
+        torch_model = load_torch_model_state(torch_model, name)
 
         input_shape = (batch_size * self.num_devices, inplanes, height, width)
 
@@ -56,23 +56,13 @@ class Resnet52StemTestInfra:
             mesh_mapper=self.inputs_mesh_mapper,
         )
 
-        layer_optimisations = neck_optimisations["optimization_full_tensor"]
-        if input_shape[-1] == 1024:
-            layer_optimisations = neck_optimisations["optimization_small_tensor"]
-
         self.ttnn_model = resnet52Stem(
             parameters=parameters,
             stride=stride,
             model_config=model_config,
-            layer_optimisations=layer_optimisations,
+            layer_optimisations=neck_optimisations,
         )
 
-        # First run configures convs JIT
-        self.input_tensor = ttnn.to_device(tt_host_tensor, device)
-        self.run()
-        self.validate()
-
-        # Optimized run
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
         self.run()
         self.validate()
@@ -135,7 +125,7 @@ model_config = {
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
 @pytest.mark.parametrize(
     "batch_size, inplanes, planes, height, width, stride, name",
-    ((1, 3, 128, 512, 1024, 1, "stem"),),
+    ((1, 3, 128, 512, 1024, 1, "backbone.stem"),),
 )
 def test_stem(
     device,
