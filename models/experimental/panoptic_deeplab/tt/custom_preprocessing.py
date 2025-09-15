@@ -9,15 +9,6 @@ import ttnn
 from models.utility_functions import pad_and_fold_conv_filters_for_unity_stride
 from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
 
-from models.experimental.panoptic_deeplab.reference.head import (
-    HeadModel,
-)
-from models.experimental.panoptic_deeplab.reference.res_block import (
-    ResModel,
-)
-from models.experimental.panoptic_deeplab.reference.aspp import (
-    ASPPModel,
-)
 from models.experimental.panoptic_deeplab.reference.decoder import (
     DecoderModel,
 )
@@ -83,102 +74,6 @@ def custom_preprocessor(
         parameters["conv2"]["bias"] = ttnn.from_torch(torch.reshape(conv2_bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
         parameters["conv3"]["bias"] = ttnn.from_torch(torch.reshape(conv3_bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
 
-    elif isinstance(model, HeadModel):
-        for name, module in model.named_children():
-            if hasattr(module, "__getitem__"):
-                if len(module) > 1 and hasattr(module[0], "weight") and hasattr(module[1], "weight"):
-                    # Assume Conv + BN, fold BN into Conv
-                    weight, bias = fold_batch_norm2d_into_conv2d(module[0], module[1])
-                elif hasattr(module[0], "weight"):
-                    # Just a Conv, no BN
-                    weight = module[0].weight.clone().detach().contiguous()
-                    bias = (
-                        module[0].bias.clone().detach().contiguous()
-                        if module[0].bias is not None
-                        else torch.zeros(module[0].out_channels)
-                    )
-                else:
-                    continue
-            elif hasattr(module, "weight"):
-                # Single Conv2d
-                weight = module.weight.clone().detach().contiguous()
-                bias = (
-                    module.bias.clone().detach().contiguous()
-                    if module.bias is not None
-                    else torch.zeros(module.out_channels)
-                )
-            else:
-                continue
-
-            parameters[name] = {}
-            parameters[name]["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
-            parameters[name]["bias"] = ttnn.from_torch(torch.reshape(bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
-
-    elif isinstance(model, ASPPModel):
-        for name, module in model.named_children():
-            # For each submodule (e.g., ASPP_0_Conv, ASPP_1_Depthwise, etc.)
-            if hasattr(module, "__getitem__"):
-                # If it's a Sequential or similar
-                if len(module) > 1 and hasattr(module[0], "weight") and hasattr(module[1], "weight"):
-                    # Assume Conv + BN, fold BN into Conv
-                    weight, bias = fold_batch_norm2d_into_conv2d(module[0], module[1])
-                elif hasattr(module[0], "weight"):
-                    # Just a Conv, no BN
-                    weight = module[0].weight.clone().detach().contiguous()
-                    bias = (
-                        module[0].bias.clone().detach().contiguous()
-                        if module[0].bias is not None
-                        else torch.zeros(module[0].out_channels)
-                    )
-                else:
-                    continue
-            elif hasattr(module, "weight"):
-                # Single Conv2d
-                weight = module.weight.clone().detach().contiguous()
-                bias = (
-                    module.bias.clone().detach().contiguous()
-                    if module.bias is not None
-                    else torch.zeros(module.out_channels)
-                )
-            else:
-                continue
-
-            parameters[name] = {}
-            parameters[name]["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
-            parameters[name]["bias"] = ttnn.from_torch(torch.reshape(bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
-
-    elif isinstance(model, ResModel):
-        for name, module in model.named_children():
-            if hasattr(module, "__getitem__"):
-                # If it's a Sequential or similar
-                if len(module) > 1 and hasattr(module[0], "weight") and hasattr(module[1], "weight"):
-                    # Assume Conv + BN, fold BN into Conv
-                    weight, bias = fold_batch_norm2d_into_conv2d(module[0], module[1])
-                elif hasattr(module[0], "weight"):
-                    # Just a Conv, no BN
-                    weight = module[0].weight.clone().detach().contiguous()
-                    bias = (
-                        module[0].bias.clone().detach().contiguous()
-                        if module[0].bias is not None
-                        else torch.zeros(module[0].out_channels)
-                    )
-                else:
-                    continue
-            elif hasattr(module, "weight"):
-                # Single Conv2d
-                weight = module.weight.clone().detach().contiguous()
-                bias = (
-                    module.bias.clone().detach().contiguous()
-                    if module.bias is not None
-                    else torch.zeros(module.out_channels)
-                )
-            else:
-                continue
-
-            parameters[name] = {}
-            parameters[name]["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
-            parameters[name]["bias"] = ttnn.from_torch(torch.reshape(bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
-
     elif isinstance(model, DecoderModel):
         parameters = {}
         # Let the sub-modules handle their own preprocessing
@@ -190,6 +85,37 @@ def custom_preprocessor(
                 convert_to_ttnn=convert_to_ttnn,
                 ttnn_module_args=ttnn_module_args,
             )
+
+    else:
+        for name, module in model.named_children():
+            if hasattr(module, "__getitem__"):
+                if len(module) > 1 and hasattr(module[0], "weight") and hasattr(module[1], "weight"):
+                    # Assume Conv + BN, fold BN into Conv
+                    weight, bias = fold_batch_norm2d_into_conv2d(module[0], module[1])
+                elif hasattr(module[0], "weight"):
+                    # Just a Conv, no BN
+                    weight = module[0].weight.clone().detach().contiguous()
+                    bias = (
+                        module[0].bias.clone().detach().contiguous()
+                        if module[0].bias is not None
+                        else torch.zeros(module[0].out_channels)
+                    )
+                else:
+                    continue
+            elif hasattr(module, "weight"):
+                # Single Conv2d
+                weight = module.weight.clone().detach().contiguous()
+                bias = (
+                    module.bias.clone().detach().contiguous()
+                    if module.bias is not None
+                    else torch.zeros(module.out_channels)
+                )
+            else:
+                continue
+
+            parameters[name] = {}
+            parameters[name]["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
+            parameters[name]["bias"] = ttnn.from_torch(torch.reshape(bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
 
     return parameters
 
