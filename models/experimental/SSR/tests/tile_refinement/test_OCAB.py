@@ -14,7 +14,7 @@ from models.experimental.SSR.reference.SSR.model.tile_refinement import OCAB
 from models.experimental.SSR.tt.tile_refinement import TTOCAB
 
 
-def create_ocab_preprocessor(device):
+def create_ocab_preprocessor(device, tile_size=32):
     """Create custom preprocessor for OCAB parameters"""
 
     def custom_preprocessor(model, name):
@@ -22,13 +22,13 @@ def create_ocab_preprocessor(device):
         if isinstance(model, OCAB):
             # Layer norm parameters
             dim = model.norm1.weight.size(0)
-            padded_dim = ((dim + 31) // 32) * 32  # Round up to nearest multiple of 32 = 192
+            padded_dim = ((dim + tile_size - 1) // tile_size) * tile_size
 
             norm1_weight_padded = torch.nn.functional.pad(model.norm1.weight, (0, padded_dim - dim))
             norm1_bias_padded = torch.nn.functional.pad(model.norm1.bias, (0, padded_dim - dim))
 
-            norm1_weight = norm1_weight_padded.view(1, 1, padded_dim // 32, 32)
-            norm1_bias = norm1_bias_padded.view(1, 1, padded_dim // 32, 32)
+            norm1_weight = norm1_weight_padded.view(1, 1, padded_dim // tile_size, tile_size)
+            norm1_bias = norm1_bias_padded.view(1, 1, padded_dim // tile_size, tile_size)
 
             parameters["norm1"] = {
                 "weight": ttnn.from_torch(
@@ -37,12 +37,40 @@ def create_ocab_preprocessor(device):
                 "bias": ttnn.from_torch(norm1_bias, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=device),
             }
 
-            # QKV linear layer
-            qkv_weight = model.qkv.weight.T  # Transpose for linear operation
+            # QKV linear layer with padded heads
+            qkv_weight = model.qkv.weight.T  # [embed_dim, 3*embed_dim]
+            num_heads = model.num_heads
+            head_size = qkv_weight.shape[1] // (3 * num_heads)
+            padded_head_size = ((head_size + tile_size - 1) // tile_size) * tile_size
+
+            if padded_head_size != head_size:
+                # Pad each head separately
+                qkv_chunks = torch.split(qkv_weight, head_size, dim=1)
+                qkv_weight_padded = torch.cat(
+                    [torch.nn.functional.pad(chunk, (0, padded_head_size - head_size)) for chunk in qkv_chunks], dim=1
+                )
+
+                if model.qkv.bias is not None:
+                    qkv_bias_chunks = torch.split(model.qkv.bias, head_size, dim=0)
+                    qkv_bias_padded = torch.cat(
+                        [
+                            torch.nn.functional.pad(chunk, (0, padded_head_size - head_size))
+                            for chunk in qkv_bias_chunks
+                        ],
+                        dim=0,
+                    )
+                else:
+                    qkv_bias_padded = None
+            else:
+                qkv_weight_padded = qkv_weight
+                qkv_bias_padded = model.qkv.bias
+
             parameters["qkv"] = {
-                "weight": ttnn.from_torch(qkv_weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device),
-                "bias": ttnn.from_torch(model.qkv.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
-                if model.qkv.bias is not None
+                "weight": ttnn.from_torch(
+                    qkv_weight_padded, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
+                ),
+                "bias": ttnn.from_torch(qkv_bias_padded, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+                if qkv_bias_padded is not None
                 else None,
             }
 
@@ -62,8 +90,8 @@ def create_ocab_preprocessor(device):
             norm2_weight_padded = torch.nn.functional.pad(model.norm2.weight, (0, padded_dim - dim))
             norm2_bias_padded = torch.nn.functional.pad(model.norm2.bias, (0, padded_dim - dim))
 
-            norm2_weight = norm2_weight_padded.view(1, 1, padded_dim // 32, 32)
-            norm2_bias = norm2_bias_padded.view(1, 1, padded_dim // 32, 32)
+            norm2_weight = norm2_weight_padded.view(1, 1, padded_dim // tile_size, tile_size)
+            norm2_bias = norm2_bias_padded.view(1, 1, padded_dim // tile_size, tile_size)
 
             parameters["norm2"] = {
                 "weight": ttnn.from_torch(

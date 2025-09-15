@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-import torch
 from models.common.lightweightmodule import LightweightModule
 
 
@@ -53,32 +52,6 @@ class TTOCAB(LightweightModule):
         self.mlp_fc2_weight = parameters["mlp"]["fc2"]["weight"]
         self.mlp_fc2_bias = parameters["mlp"]["fc2"]["bias"]
 
-    def ttnn_rearrange_host(self, tensor, pattern_from, pattern_to, **kwargs):
-        """Host-side implementation of rearrange using TTNN operations"""
-        # Convert to torch for complex rearrangement, then back to TTNN
-        torch_tensor = ttnn.to_torch(tensor)
-
-        if pattern_from == "b (nc ch owh oww) nw" and pattern_to == "nc (b nw) (owh oww) ch":
-            b, combined_dim, nw = torch_tensor.shape
-            nc, ch, owh, oww = kwargs["nc"], kwargs["ch"], kwargs["owh"], kwargs["oww"]
-
-            # Reshape to separate combined dimension
-            reshaped = torch_tensor.reshape(b, nc, ch, owh, oww, nw)
-            # Permute to desired order: nc, b, nw, ch, owh, oww
-            permuted = reshaped.permute(1, 0, 5, 2, 3, 4)
-            # Final reshape
-            final = permuted.reshape(nc, b * nw, owh * oww, ch)
-
-            return ttnn.from_torch(
-                final,
-                dtype=tensor.dtype,
-                layout=ttnn.ROW_MAJOR_LAYOUT,
-                device=self.device,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            )
-
-        return tensor
-
     def forward(self, x, x_size, rpi):
         h, w = x_size
         b, _, c = x.shape
@@ -96,26 +69,6 @@ class TTOCAB(LightweightModule):
             dtype=ttnn.bfloat8_b,
             core_grid=ttnn.CoreGrid(y=8, x=8),
         )
-        tile_size = 32
-        # for 180 dim, 540 qkvshape[-1] :- head_size = 30, padded_head_size = 32
-        head_size = qkv.shape[-1] // (3 * self.num_heads)
-        padded_head_size = ((head_size + tile_size - 1) // tile_size) * tile_size
-        pad = padded_head_size != head_size
-        if pad:
-            qkv_torch = ttnn.to_torch(qkv)
-            input_tensor_heads = torch.split(qkv_torch, head_size, dim=-1)
-            input_tensor_heads = [
-                torch.nn.functional.pad(head, (0, padded_head_size - head_size), "constant", 0)
-                for head in input_tensor_heads
-            ]
-            qkv = torch.cat(input_tensor_heads, dim=-1)
-            qkv = ttnn.from_torch(
-                qkv,
-                device=self.device,
-                dtype=ttnn.bfloat16,
-                memory_config=ttnn.L1_MEMORY_CONFIG,
-                layout=ttnn.TILE_LAYOUT,
-            )
         # Use transformer function for QKV splitting
         query, key, value = ttnn.transformer.split_query_key_value_and_split_heads(
             qkv, memory_config=ttnn.DRAM_MEMORY_CONFIG, num_heads=self.num_heads, transpose_key=False
@@ -159,16 +112,16 @@ class TTOCAB(LightweightModule):
         )
         ttnn.deallocate(attention_output)
 
-        if pad:
+        if context_layer.shape[-1] != self.dim:
             # remove padding
             context_layer = ttnn.to_torch(context_layer)[..., : self.dim]  # slice to 180 and remove padding
-        context_layer = ttnn.from_torch(
-            context_layer,
-            device=self.device,
-            dtype=ttnn.bfloat16,
-            memory_config=ttnn.L1_MEMORY_CONFIG,
-            layout=ttnn.TILE_LAYOUT,
-        )
+            context_layer = ttnn.from_torch(
+                context_layer,
+                device=self.device,
+                dtype=ttnn.bfloat16,
+                memory_config=ttnn.L1_MEMORY_CONFIG,
+                layout=ttnn.TILE_LAYOUT,
+            )
         x = ttnn.reshape(context_layer, (b, h * w, self.dim), memory_config=ttnn.L1_MEMORY_CONFIG)
 
         # Output projection and residual
