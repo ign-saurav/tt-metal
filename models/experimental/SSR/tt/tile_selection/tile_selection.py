@@ -12,13 +12,14 @@ from ..common import TTMlp
 
 
 class TTTileSelection(LightweightModule):
-    def __init__(self, device, parameters, args, num_cls, memory_config=None):
+    def __init__(self, device, parameters, args, num_cls, memory_config=None, dtype=ttnn.bfloat16):
         super().__init__()
         self.device = device
         self.token_size = args.token_size
         self.num_layers = int(math.log2((args.imgsz // args.patchsz) // args.token_size))
         self.num_cls = num_cls
         self.memory_config = ttnn.DRAM_MEMORY_CONFIG
+        self.dtype = dtype
 
         # Initialize patch embedding using existing TTPatchEmbed
         self.patch_embed = TTPatchEmbed(
@@ -29,6 +30,7 @@ class TTTileSelection(LightweightModule):
             device=device,
             parameters=parameters["patch_embed"],
             memory_config=memory_config,
+            dtype=dtype,
         )
 
         # Initialize encoder layers using existing TTBasicLayer
@@ -47,6 +49,7 @@ class TTTileSelection(LightweightModule):
                 mlp_ratio=4.0,
                 downsample=True if i_layer < self.num_layers - 1 else False,
                 memory_config=memory_config,
+                dtype=dtype,
             )
             self.layers.append(layer)
 
@@ -69,6 +72,7 @@ class TTTileSelection(LightweightModule):
             hidden_features=final_dim,
             out_features=final_dim,
             parameters=parameters["fea_mlp3"],
+            dtype=dtype,
         )
 
         # Initialize mask token inference modules
@@ -91,6 +95,7 @@ class TTTileSelection(LightweightModule):
             hidden_features=96,
             out_features=96,
             parameters=parameters["mlp3"],
+            dtype=dtype,
         )
 
         # Linear classification layers

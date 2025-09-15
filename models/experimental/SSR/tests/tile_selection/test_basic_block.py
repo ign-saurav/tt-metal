@@ -18,7 +18,7 @@ from models.experimental.SSR.tests.tile_selection.test_patch_merging import crea
 from models.experimental.SSR.reference.SSR.model.net_blocks import PatchMerging, BasicLayer
 
 
-def create_basic_layer_preprocessor(device, dim):
+def create_basic_layer_preprocessor(device, dim, weight_dtype=ttnn.bfloat16):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         params = {"blocks": {}}
 
@@ -26,7 +26,7 @@ def create_basic_layer_preprocessor(device, dim):
         for i, block in enumerate(torch_model.blocks):
             params["blocks"][i] = preprocess_model_parameters(
                 initialize_model=lambda: block,
-                custom_preprocessor=create_swin_transformer_block_preprocessor(device),
+                custom_preprocessor=create_swin_transformer_block_preprocessor(device, weight_dtype),
                 device=device,
             )
 
@@ -34,7 +34,7 @@ def create_basic_layer_preprocessor(device, dim):
         if torch_model.downsample is not None:
             params["downsample"] = preprocess_model_parameters(
                 initialize_model=lambda: torch_model.downsample,
-                custom_preprocessor=create_patch_merging_preprocessor(device, dim),
+                custom_preprocessor=create_patch_merging_preprocessor(device, dim, weight_dtype=weight_dtype),
                 device=device,
             )
 
@@ -54,7 +54,11 @@ def create_basic_layer_preprocessor(device, dim):
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}])
-def test_basic_layer(device, batch_size, input_resolution, dim, depth, num_heads, window_size, has_downsample):
+@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
+@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
+def test_basic_layer(
+    device, batch_size, input_resolution, dim, depth, num_heads, window_size, has_downsample, input_dtype, weight_dtype
+):
     torch.manual_seed(0)
 
     H, W = input_resolution
@@ -81,7 +85,7 @@ def test_basic_layer(device, batch_size, input_resolution, dim, depth, num_heads
     # Create ttnn model
     params = preprocess_model_parameters(
         initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_basic_layer_preprocessor(device, dim),
+        custom_preprocessor=create_basic_layer_preprocessor(device, dim, weight_dtype),
         device=device,
     )
 
@@ -96,10 +100,11 @@ def test_basic_layer(device, batch_size, input_resolution, dim, depth, num_heads
         mlp_ratio=4.0,
         downsample=TTPatchMerging if has_downsample else None,
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        dtype=input_dtype,
     )
 
     # Convert input to ttnn
-    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype)
 
     # ttnn forward pass
     tt_output = tt_layer(tt_input)
@@ -107,7 +112,7 @@ def test_basic_layer(device, batch_size, input_resolution, dim, depth, num_heads
 
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.98)
-    logger.info(f"pcc: {pcc_message}")
+    logger.info(f"PCC: {pcc_message}")
 
     if does_pass:
         logger.info("BasicLayer Passed!")
