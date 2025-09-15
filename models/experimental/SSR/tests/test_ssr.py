@@ -21,7 +21,7 @@ from models.utility_functions import tt2torch_tensor
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
-def create_ssr_preprocessor(device, args, num_cls):
+def create_ssr_preprocessor(device, args, num_cls, weight_dtype=ttnn.bfloat16):
     """Custom preprocessor for SSR model"""
 
     def custom_preprocessor(torch_model, name, ttnn_module_args):
@@ -31,7 +31,7 @@ def create_ssr_preprocessor(device, args, num_cls):
             # Preprocess tile selection model
             select_params = preprocess_model_parameters(
                 initialize_model=lambda: torch_model.select_model,
-                custom_preprocessor=create_tile_selection_preprocessor(device),
+                custom_preprocessor=create_tile_selection_preprocessor(device, weight_dtype=weight_dtype),
                 device=device,
             )
             parameters["select_model"] = select_params
@@ -113,7 +113,9 @@ class MockArgs:
         ((1, 3, 256, 256), 1, False),
     ],
 )
-def test_ssr_model(input_shape, num_cls, with_conv):
+@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
+@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
+def test_ssr_model(input_shape, num_cls, with_conv, input_dtype, weight_dtype):
     """Test TTSSR model against PyTorch reference"""
     # Create input tensor
     x = torch.randn(input_shape)
@@ -139,7 +141,7 @@ def test_ssr_model(input_shape, num_cls, with_conv):
         # Preprocess model parameters
         parameters = preprocess_model_parameters(
             initialize_model=lambda: ref_model,
-            custom_preprocessor=create_ssr_preprocessor(device, args, num_cls),
+            custom_preprocessor=create_ssr_preprocessor(device, args, num_cls, weight_dtype),
             device=device,
         )
         # Create TTNN model
@@ -159,7 +161,7 @@ def test_ssr_model(input_shape, num_cls, with_conv):
             )
 
         # Convert input to TTNN tensor
-        tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
+        tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype)
 
         # Run TTNN model
         tt_sr, tt_patch_fea3 = tt_model(tt_input)

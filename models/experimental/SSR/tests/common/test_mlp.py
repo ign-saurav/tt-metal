@@ -18,7 +18,7 @@ from models.utility_functions import (
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
-def create_mlp_preprocessor(device):
+def create_mlp_preprocessor(device, weight_dtype=ttnn.bfloat16):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
         if hasattr(torch_model, "fc1") and hasattr(torch_model, "fc2"):  # MLP model
@@ -26,12 +26,12 @@ def create_mlp_preprocessor(device):
             parameters["fc2"] = {}
 
             # Preprocess fc1 layer parameters
-            parameters["fc1"]["weight"] = preprocess_linear_weight(torch_model.fc1.weight, dtype=ttnn.bfloat16)
-            parameters["fc1"]["bias"] = preprocess_linear_bias(torch_model.fc1.bias, dtype=ttnn.bfloat16)
+            parameters["fc1"]["weight"] = preprocess_linear_weight(torch_model.fc1.weight, dtype=weight_dtype)
+            parameters["fc1"]["bias"] = preprocess_linear_bias(torch_model.fc1.bias, dtype=weight_dtype)
 
             # Preprocess fc2 layer parameters
-            parameters["fc2"]["weight"] = preprocess_linear_weight(torch_model.fc2.weight, dtype=ttnn.bfloat16)
-            parameters["fc2"]["bias"] = preprocess_linear_bias(torch_model.fc2.bias, dtype=ttnn.bfloat16)
+            parameters["fc2"]["weight"] = preprocess_linear_weight(torch_model.fc2.weight, dtype=weight_dtype)
+            parameters["fc2"]["bias"] = preprocess_linear_bias(torch_model.fc2.bias, dtype=weight_dtype)
 
         return parameters
 
@@ -51,7 +51,9 @@ def create_mlp_preprocessor(device):
         (180, 360, None, (1, 4096, 180)),  # TR
     ),
 )
-def test_mlp(device, in_features, hidden_features, out_features, input_shape):
+@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
+@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
+def test_mlp(device, in_features, hidden_features, out_features, input_shape, input_dtype, weight_dtype):
     x = torch.randn(input_shape)
 
     ref_layer = Mlp(
@@ -63,7 +65,9 @@ def test_mlp(device, in_features, hidden_features, out_features, input_shape):
     ref_output = ref_layer(x)
 
     parameters = preprocess_model_parameters(
-        initialize_model=lambda: ref_layer, custom_preprocessor=create_mlp_preprocessor(device), device=device
+        initialize_model=lambda: ref_layer,
+        custom_preprocessor=create_mlp_preprocessor(device, weight_dtype),
+        device=device,
     )
 
     tt_layer = TTMlp(
@@ -72,15 +76,16 @@ def test_mlp(device, in_features, hidden_features, out_features, input_shape):
         hidden_features=hidden_features,
         out_features=out_features,
         parameters=parameters,
+        dtype=input_dtype,
     )
-    tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
+    tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype)
     tt_input = ttnn.to_memory_config(tt_input, memory_config=ttnn.L1_MEMORY_CONFIG)
     tt_output = tt_layer(tt_input)
     tt_torch_output = tt2torch_tensor(tt_output)
 
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
 
-    logger.info(f"pcc: {pcc_message}")
+    logger.info(f"PCC: {pcc_message}")
 
     if does_pass:
         logger.info("SSR MLP Passed!")
