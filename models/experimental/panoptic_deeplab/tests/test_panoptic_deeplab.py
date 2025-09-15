@@ -6,13 +6,20 @@ import torch
 from loguru import logger
 import ttnn
 from ttnn.model_preprocessing import preprocess_model_parameters
+import numpy as np
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
 from models.experimental.panoptic_deeplab.tt.panoptic_deeplab import TTPanopticDeepLab
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
+from pathlib import Path
+import os
 from ttnn.model_preprocessing import infer_ttnn_module_args, preprocess_model_parameters
-from models.experimental.panoptic_deeplab.common import load_torch_model_state
+from models.experimental.panoptic_deeplab.common import (
+    load_torch_model_state,
+    preprocess_image,
+    save_preprocessed_inputs,
+)
 
 
 class PanopticDeepLabTestInfra:
@@ -41,14 +48,37 @@ class PanopticDeepLabTestInfra:
         self.height = height
         self.width = width
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
+        self.real_input_path = (
+            "/home/ubuntu/ign-tt-sm/tt-metal/models/experimental/panoptic_deeplab/resources/input.png"
+        )
 
         # Initialize torch model
         torch_model = TorchPanopticDeepLab()
         torch_model = load_torch_model_state(torch_model, "panoptic_deeplab")
 
         # Create input tensor
-        input_shape = (batch_size * self.num_devices, in_channels, height, width)
-        self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float)
+        if self.real_input_path and os.path.exists(self.real_input_path):
+            self.torch_input_tensor, self.ttnn_input_tensor, self.original_image, self.original_size = preprocess_image(
+                self.real_input_path, self.width, self.height, self.device, self.inputs_mesh_mapper
+            )
+            base_name = Path(self.real_input_path).stem
+            torch_input_path = save_preprocessed_inputs(
+                self.torch_input_tensor, "models/experimental/panoptic_deeplab/resources/test_inputs", base_name
+            )
+            logger.info(f"Preprocessed inputs saved for testing: {torch_input_path}")
+            logger.info(f"Loading real input from: {self.real_input_path}")
+            self.torch_input_tensor = self.load_real_input(torch_input_path)
+
+            # Verify shape matches expected dimensions
+            expected_shape = (batch_size * self.num_devices, in_channels, height, width)
+            if self.torch_input_tensor.shape != expected_shape:
+                logger.warning(
+                    f"Input shape mismatch. Expected: {expected_shape}, Got: {self.torch_input_tensor.shape}"
+                )
+        else:
+            logger.info("Using random input tensor (no real input provided)")
+            input_shape = (batch_size * self.num_devices, in_channels, height, width)
+            self.torch_input_tensor = torch.rand(input_shape, dtype=torch.float32)
 
         # Preprocess model parameters
         parameters = preprocess_model_parameters(
@@ -88,6 +118,32 @@ class PanopticDeepLabTestInfra:
             self.input_tensor = ttnn.to_device(tt_host_tensor, device)
             self.run()
             self.validate()
+
+    def load_real_input(self, input_path: str) -> torch.Tensor:
+        """Load real input from saved file"""
+
+        if input_path.endswith(".pt"):
+            # Load PyTorch tensor
+            data = torch.load(input_path, map_location="cpu")
+            if isinstance(data, dict):
+                tensor = data["tensor"]
+                logger.info(f"Loaded input metadata: {data.keys()}")
+                if "stats" in data:
+                    logger.info(f"Original input stats: {data['stats']}")
+            else:
+                tensor = data
+        elif input_path.endswith(".npy"):
+            # Load numpy array
+            np_array = np.load(input_path)
+            tensor = torch.from_numpy(np_array)
+        else:
+            raise ValueError(f"Unsupported input file format: {input_path}")
+
+        # Ensure tensor is float32
+        if tensor.dtype != torch.float32:
+            tensor = tensor.to(torch.float32)
+
+        return tensor
 
     @classmethod
     def get_mesh_mappers(self, device):
