@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-from typing import Dict
 
 from models.experimental.panoptic_deeplab.tt.backbone import TTBackbone
 from models.experimental.panoptic_deeplab.tt.decoder import TTDecoder, decoder_layer_optimisations
@@ -42,9 +41,9 @@ class TTPanopticDeepLab:
 
     def __call__(
         self,
-        x: ttnn.Tensor,
+        x,
         device,
-    ) -> Dict[str, ttnn.Tensor]:
+    ):
         """
         Forward pass of TTNN Panoptic DeepLab.
 
