@@ -1,47 +1,75 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+from __future__ import annotations
+
 import pytest
 import torch
 from loguru import logger
-from ttnn.model_preprocessing import preprocess_model_parameters
-from ttnn.model_preprocessing import infer_ttnn_module_args, preprocess_model_parameters
+
 import ttnn
 from tests.ttnn.utils_for_testing import check_with_pcc
+from ttnn.model_preprocessing import (
+    preprocess_model_parameters,
+    infer_ttnn_module_args,
+)
+
 from models.experimental.panoptic_deeplab.tt.decoder import (
     TTDecoder,
     decoder_layer_optimisations,
 )
-from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
+from models.experimental.panoptic_deeplab.tt.custom_preprocessing import (
+    create_custom_mesh_preprocessor,
+)
 from models.experimental.panoptic_deeplab.reference.decoder import DecoderModel
 from models.experimental.panoptic_deeplab.common import load_torch_model_state
 
 
+# -------------------------
+# Deterministic seeding once
+# -------------------------
+class _SeedOnce:
+    _done = False
+
+    @classmethod
+    def ensure(cls) -> None:
+        if cls._done:
+            return
+        torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        cls._done = True
+
+
+# -------------------------
+# Test Infra
+# -------------------------
 class DecoderTestInfra:
+    """Builds torch + TTNN decoder graphs, runs forward, and validates PCC.
+
+    The flow mirrors the reference decoder with ASPP → res3 → res2 → heads.
+    """
+
     def __init__(
         self,
-        device,
-        batch_size,
-        model_config,
-        in_channels,
-        res3_intermediate_channels,
-        res2_intermediate_channels,
-        out_channels,
-        upsample_channels,
-        height,
-        width,
-        name,
-    ):
-        super().__init__()
-        if not hasattr(self, "_model_initialized"):
-            torch.manual_seed(42)
-            self._model_initialized = True
-            torch.cuda.manual_seed_all(42)
-            torch.backends.cudnn.deterministic = True
-        self.pcc_passed = False
-        self.pcc_message = "call validate()?"
+        device: ttnn.Device,
+        batch_size: int,
+        model_config: dict,
+        in_channels: int,
+        res3_intermediate_channels: int,
+        res2_intermediate_channels: int,
+        out_channels: tuple[int, ...] | tuple[int] | int,
+        upsample_channels: int,
+        height: int,
+        width: int,
+        name: str,
+    ) -> None:
+        _SeedOnce.ensure()
+
+        # --- Public-ish test fields ---
         self.device = device
-        self.num_devices = device.get_num_devices()
         self.batch_size = batch_size
         self.in_channels = in_channels
         self.res3_intermediate_channels = res3_intermediate_channels
@@ -51,102 +79,105 @@ class DecoderTestInfra:
         self.height = height
         self.width = width
         self.name = name
-        self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
+        self.model_config = model_config
 
-        # Create input tensors
-        self.torch_input_tensor = torch.randn(
-            (self.batch_size, self.in_channels, self.height, self.width), dtype=torch.float
-        )
+        # PCC state
+        self.pcc_passed: bool = False
+        self.pcc_message: str = "call validate()?"
 
-        # Create res3 and res2 feature maps with appropriate dimensions
-        self.torch_res3_tensor = torch.randn((self.batch_size, 512, self.height * 2, self.width * 2), dtype=torch.float)
+        # Mesh-mapping policy
+        (
+            self.inputs_mesh_mapper,
+            self.weights_mesh_mapper,
+            self.output_mesh_composer,
+        ) = self._select_mesh_mappers(device)
 
-        self.torch_res2_tensor = torch.randn(
-            (self.batch_size, upsample_channels, self.height * 4, self.width * 4), dtype=torch.float
-        )
+        # ------------------------
+        # Build reference (Torch)
+        # ------------------------
+        self.torch_input_tensor = torch.randn((batch_size, in_channels, height, width), dtype=torch.float)
+        self.torch_res3_tensor = torch.randn((batch_size, 512, height * 2, width * 2), dtype=torch.float)
+        self.torch_res2_tensor = torch.randn((batch_size, upsample_channels, height * 4, width * 4), dtype=torch.float)
 
-        # torch model
-        torch_model = DecoderModel(self.name)
+        torch_model = DecoderModel(name)
         torch_model = load_torch_model_state(torch_model, name)
 
+        # Preprocess weights w/ mesh-aware custom preprocessor
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
             custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
             device=None,
         )
 
-        # For ASPP
-        aspp_args = infer_ttnn_module_args(
-            model=torch_model.aspp, run_model=lambda model: model(self.torch_input_tensor), device=None
-        )
-        if hasattr(parameters, "aspp"):
-            parameters.aspp.conv_args = aspp_args
+        # Infer per-submodule conv args by briefly running torch subgraphs
+        # (only when the corresponding params exist)
+        self._maybe_infer_and_attach(torch_model.aspp, "aspp", parameters, run=lambda m: m(self.torch_input_tensor))
 
-        # For res3
-        res3_output = torch_model.aspp(self.torch_input_tensor)
-        res3_args = infer_ttnn_module_args(
-            model=torch_model.res3, run_model=lambda model: model(res3_output, self.torch_res3_tensor), device=None
+        res3_input = torch_model.aspp(self.torch_input_tensor)
+        self._maybe_infer_and_attach(
+            torch_model.res3,
+            "res3",
+            parameters,
+            run=lambda m: m(res3_input, self.torch_res3_tensor),
         )
-        if hasattr(parameters, "res3"):
-            parameters.res3.conv_args = res3_args
 
-        # For res2
-        res2_input = torch_model.res3(res3_output, self.torch_res3_tensor)
-        res2_args = infer_ttnn_module_args(
-            model=torch_model.res2, run_model=lambda model: model(res2_input, self.torch_res2_tensor), device=None
+        res2_input = torch_model.res3(res3_input, self.torch_res3_tensor)
+        self._maybe_infer_and_attach(
+            torch_model.res2,
+            "res2",
+            parameters,
+            run=lambda m: m(res2_input, self.torch_res2_tensor),
         )
-        if hasattr(parameters, "res2"):
-            parameters.res2.conv_args = res2_args
 
-        # For head
         head_input = torch_model.res2(res2_input, self.torch_res2_tensor)
-        head_1_args = infer_ttnn_module_args(
-            model=torch_model.head_1, run_model=lambda model: model(head_input), device=None
+        self._maybe_infer_and_attach(
+            torch_model.head_1,
+            "head_1",
+            parameters,
+            run=lambda m: m(head_input),
         )
-        if hasattr(parameters, "head_1"):
-            parameters.head_1.conv_args = head_1_args
 
         if "instance" in name:
-            head_2_args = infer_ttnn_module_args(
-                model=torch_model.head_2, run_model=lambda model: model(head_input), device=None
-            )
-            if hasattr(parameters, "head_2"):
-                parameters.head_2.conv_args = head_2_args
-
-        # Get torch output with all three inputs
-        self.torch_output_tensor, self.torch_output_tensor_2 = torch_model(
-            self.torch_input_tensor, self.torch_res3_tensor, self.torch_res2_tensor
-        )
-
-        # Convert torch tensors to TTNN host tensors
-        def to_ttnn_host(tensor):
-            return ttnn.from_torch(
-                tensor.permute(0, 2, 3, 1),
-                dtype=ttnn.bfloat8_b,
-                device=device,
-                mesh_mapper=self.inputs_mesh_mapper,
+            self._maybe_infer_and_attach(
+                torch_model.head_2,
+                "head_2",
+                parameters,
+                run=lambda m: m(head_input),
             )
 
-        tt_host_tensor = to_ttnn_host(self.torch_input_tensor)
-        tt_res3_tensor = to_ttnn_host(self.torch_res3_tensor)
-        tt_res2_tensor = to_ttnn_host(self.torch_res2_tensor)
+        # Golden outputs
+        (
+            self.torch_output_tensor,
+            self.torch_output_tensor_2,
+        ) = torch_model(self.torch_input_tensor, self.torch_res3_tensor, self.torch_res2_tensor)
 
-        # Move TTNN host tensors to device
-        self.input_tensor = ttnn.to_device(tt_host_tensor, device)
-        self.res3_tensor = ttnn.to_device(tt_res3_tensor, device)
-        self.res2_tensor = ttnn.to_device(tt_res2_tensor, device)
+        # ------------------------
+        # Build device (TTNN)
+        # ------------------------
+        tt_in = self._torch_to_ttnn_host(self.torch_input_tensor)
+        tt_res3 = self._torch_to_ttnn_host(self.torch_res3_tensor)
+        tt_res2 = self._torch_to_ttnn_host(self.torch_res2_tensor)
 
-        # ttnn model
-        logger.info("Initializing TTNN model...")
+        self.input_tensor = ttnn.to_device(tt_in, device)
+        self.res3_tensor = ttnn.to_device(tt_res3, device)
+        self.res2_tensor = ttnn.to_device(tt_res2, device)
+
+        logger.info("Initializing TTNN model…")
         self.ttnn_model = TTDecoder(
-            parameters, model_config, layer_optimisations=decoder_layer_optimisations[self.name], name=self.name
+            parameters,
+            model_config,
+            layer_optimisations=decoder_layer_optimisations[name],
+            name=name,
         )
 
-        # run and validate
+        # Eager run + validate (keeps test signature identical)
         self.run()
         self.validate()
 
-    def get_mesh_mappers(self, device):
+    # -------------------------
+    # Helpers
+    # -------------------------
+    def _select_mesh_mappers(self, device: ttnn.Device):
         if device.get_num_devices() != 1:
             inputs_mesh_mapper = ttnn.ShardTensorToMesh(device, dim=0)
             weights_mesh_mapper = None
@@ -157,7 +188,29 @@ class DecoderTestInfra:
             output_mesh_composer = None
         return inputs_mesh_mapper, weights_mesh_mapper, output_mesh_composer
 
-    # Compute golden output for the selected block using a helper function
+    def _torch_to_ttnn_host(self, tensor: torch.Tensor) -> ttnn.Tensor:
+        # NHWC + dtype conversion for TTNN host tensor
+        return ttnn.from_torch(
+            tensor.permute(0, 2, 3, 1),
+            dtype=ttnn.bfloat8_b,
+            device=self.device,
+            mesh_mapper=self.inputs_mesh_mapper,
+        )
+
+    def _ttnn_to_torch(self, tensor: ttnn.Tensor, expected: torch.Size) -> torch.Tensor:
+        # Compose, reshape to N H W C, then back to N C H W
+        x = ttnn.to_torch(tensor, device=self.device, mesh_composer=self.output_mesh_composer)
+        x = torch.reshape(x, (expected[0], expected[2], expected[3], expected[1]))
+        return torch.permute(x, (0, 3, 1, 2))
+
+    def _maybe_infer_and_attach(self, module, attr_name: str, parameters, run):
+        if hasattr(parameters, attr_name):
+            args = infer_ttnn_module_args(model=module, run_model=run, device=None)
+            getattr(parameters, attr_name).conv_args = args
+
+    # -------------------------
+    # Execution + Validation
+    # -------------------------
     def run(self):
         self.output_tensor, self.output_tensor_2 = self.ttnn_model(
             self.input_tensor,
@@ -166,48 +219,44 @@ class DecoderTestInfra:
             self.upsample_channels,
             self.device,
         )
-
         return self.output_tensor, self.output_tensor_2
 
-    def validate(self, output_tensor=None):
-        output_tensor = self.output_tensor if output_tensor is None else output_tensor
-        output_tensor = ttnn.to_torch(output_tensor, device=self.device, mesh_composer=self.output_mesh_composer)
-        expected_shape = self.torch_output_tensor.shape
-        output_tensor = torch.reshape(
-            output_tensor, (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1])
-        )
-        output_tensor = torch.permute(output_tensor, (0, 3, 1, 2))
-
-        batch_size = output_tensor.shape[0]
+    def validate(self, output_tensor: ttnn.Tensor | None = None):
+        # --- Head 1 ---
+        out = self.output_tensor if output_tensor is None else output_tensor
+        out_torch = self._ttnn_to_torch(out, expected=self.torch_output_tensor.shape)
 
         valid_pcc = 0.99
-        self.pcc_passed, self.pcc_message = check_with_pcc(self.torch_output_tensor, output_tensor, pcc=valid_pcc)
+        self.pcc_passed, self.pcc_message = check_with_pcc(self.torch_output_tensor, out_torch, pcc=valid_pcc)
         assert self.pcc_passed, logger.error(f"PCC check failed: {self.pcc_message}")
+
         logger.info(
-            f"{self.name},  batch_size={batch_size}, act_dtype={model_config['ACTIVATIONS_DTYPE']}, weight_dtype={model_config['WEIGHTS_DTYPE']}, math_fidelity={model_config['MATH_FIDELITY']}, PCC={self.pcc_message}"
+            f"{self.name}, batch_size={out_torch.shape[0]}, "
+            f"act_dtype={self.model_config['ACTIVATIONS_DTYPE']}, "
+            f"weight_dtype={self.model_config['WEIGHTS_DTYPE']}, "
+            f"math_fidelity={self.model_config['MATH_FIDELITY']}, PCC={self.pcc_message}"
         )
 
+        # --- Head 2 (instance head only) ---
         if "instance" in self.name:
-            output_tensor = self.output_tensor_2
-            output_tensor = ttnn.to_torch(output_tensor, device=self.device, mesh_composer=self.output_mesh_composer)
-            expected_shape = self.torch_output_tensor_2.shape
-            output_tensor = torch.reshape(
-                output_tensor, (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1])
-            )
-            output_tensor = torch.permute(output_tensor, (0, 3, 1, 2))
+            out2_torch = self._ttnn_to_torch(self.output_tensor_2, expected=self.torch_output_tensor_2.shape)
 
-            batch_size = output_tensor.shape[0]
-
-            valid_pcc = 0.99
-            self.pcc_passed, self.pcc_message = check_with_pcc(self.torch_output_tensor_2, output_tensor, pcc=valid_pcc)
+            self.pcc_passed, self.pcc_message = check_with_pcc(self.torch_output_tensor_2, out2_torch, pcc=valid_pcc)
             assert self.pcc_passed, logger.error(f"PCC check failed: {self.pcc_message}")
+
             logger.info(
-                f"{self.name},  batch_size={batch_size}, act_dtype={model_config['ACTIVATIONS_DTYPE']}, weight_dtype={model_config['WEIGHTS_DTYPE']}, math_fidelity={model_config['MATH_FIDELITY']}, PCC={self.pcc_message}"
+                f"{self.name}, batch_size={out2_torch.shape[0]}, "
+                f"act_dtype={self.model_config['ACTIVATIONS_DTYPE']}, "
+                f"weight_dtype={self.model_config['WEIGHTS_DTYPE']}, "
+                f"math_fidelity={self.model_config['MATH_FIDELITY']}, PCC={self.pcc_message}"
             )
 
         return self.pcc_passed, self.pcc_message
 
 
+# -------------------------
+# Test parameters & entry
+# -------------------------
 model_config = {
     "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
     "WEIGHTS_DTYPE": ttnn.bfloat8_b,
@@ -217,10 +266,13 @@ model_config = {
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
 @pytest.mark.parametrize(
-    "batch_size, in_channels, res3_intermediate_channels, res2_intermediate_channels, out_channels, upsample_channels, height, width, name",
+    "batch_size, in_channels, res3_intermediate_channels, res2_intermediate_channels, out_channels, "
+    "upsample_channels, height, width, name",
     [
-        (1, 2048, 320, 288, (19,), 256, 32, 64, "semantic_decoder"),  # semantic head
-        (1, 2048, 320, 160, (2, 1), 256, 32, 64, "instance_decoder"),  # instance offset head
+        # semantic head
+        (1, 2048, 320, 288, (19,), 256, 32, 64, "semantic_decoder"),
+        # instance offset head
+        (1, 2048, 320, 160, (2, 1), 256, 32, 64, "instance_decoder"),
     ],
 )
 def test_decoder(
@@ -236,15 +288,15 @@ def test_decoder(
     name,
 ):
     DecoderTestInfra(
-        device,
-        batch_size,
-        model_config,
-        in_channels,
-        res3_intermediate_channels,
-        res2_intermediate_channels,
-        out_channels,
-        upsample_channels,
-        height,
-        width,
-        name,
+        device=device,
+        batch_size=batch_size,
+        model_config=model_config,
+        in_channels=in_channels,
+        res3_intermediate_channels=res3_intermediate_channels,
+        res2_intermediate_channels=res2_intermediate_channels,
+        out_channels=out_channels,
+        upsample_channels=upsample_channels,
+        height=height,
+        width=width,
+        name=name,
     )
