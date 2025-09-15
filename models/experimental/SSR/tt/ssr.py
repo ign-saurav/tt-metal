@@ -315,5 +315,5 @@ class TTSSR_wo_conv(LightweightModule):
         # Concatenate and reconstruct
         sr = ttnn.concat(sr_patches, dim=0)
         return sr, patch_fea3
-        sr = window_reverse_ttnn(sr, window_size=H, h=H * 4, w=W * 4)
-        return sr, patch_fea3
+        # sr = window_reverse_ttnn(sr, window_size=H, h=H * 4, w=W * 4)
+        # return sr, patch_fea3
