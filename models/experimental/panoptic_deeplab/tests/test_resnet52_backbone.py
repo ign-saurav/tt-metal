@@ -14,58 +14,54 @@ from models.experimental.panoptic_deeplab.common import load_torch_model_state
 
 
 class BackboneTestInfra:
-    def __init__(
-        self,
-        device,
-        batch_size,
-        in_channels,
-        height,
-        width,
-        model_config,
-        name,
-    ):
+    def __init__(self, device, batch_size, in_channels, height, width, model_config, name):
         super().__init__()
         if not hasattr(self, "_model_initialized"):
-            torch.manual_seed(42)
+            torch.manual_seed(42)  # Only seed once
             self._model_initialized = True
             torch.cuda.manual_seed_all(42)
             torch.backends.cudnn.deterministic = True
+
         self.pcc_passed = False
         self.pcc_message = "call validate()?"
         self.device = device
         self.num_devices = device.get_num_devices()
-        self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
-        self.name = name
         self.batch_size = batch_size * self.num_devices
+        self.name = name
+        self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
 
-        # torch model
+        # Torch model + weights
         torch_model = TorchBackbone()
         torch_model = load_torch_model_state(torch_model, name)
 
-        input_shape = (self.batch_size, in_channels, height, width)
+        # Torch input + golden output
+        self.torch_input_tensor = torch.randn((self.batch_size, in_channels, height, width), dtype=torch.float)
+        self.torch_output = torch_model(self.torch_input_tensor)
 
+        # Preprocess parameters
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
             custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
             device=None,
         )
 
-        # golden
-        self.torch_input_tensor = torch.randn(input_shape, dtype=torch.float)
-        self.torch_output = torch_model(self.torch_input_tensor)
+        # Convert input to TTNN host tensor
+        def to_ttnn_host(tensor):
+            return ttnn.from_torch(
+                tensor.permute(0, 2, 3, 1),
+                dtype=ttnn.bfloat16,
+                mesh_mapper=self.inputs_mesh_mapper,
+            )
 
-        tt_host_tensor = ttnn.from_torch(
-            self.torch_input_tensor.permute(0, 2, 3, 1),
-            dtype=ttnn.bfloat16,
-            mesh_mapper=self.inputs_mesh_mapper,
-        )
+        tt_host_tensor = to_ttnn_host(self.torch_input_tensor)
 
-        self.ttnn_model = TTBackbone(
-            parameters=parameters,
-            model_config=model_config,
-        )
+        # TTNN model
+        self.ttnn_model = TTBackbone(parameters=parameters, model_config=model_config)
 
+        # Move input to device
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
+
+        # Run + validate
         self.run()
         self.validate()
 
@@ -81,19 +77,13 @@ class BackboneTestInfra:
         return inputs_mesh_mapper, weights_mesh_mapper, output_mesh_composer
 
     def run(self):
-        self.output_tensor = self.ttnn_model(
-            self.input_tensor,
-            self.device,
-        )
+        self.output_tensor = self.ttnn_model(self.input_tensor, self.device)
         return self.output_tensor
 
     def validate(self, output_tensor=None):
         tt_output = self.output_tensor if output_tensor is None else output_tensor
-        valid_pcc = {
-            "res_2": 0.99,
-            "res_3": 0.99,
-            "res_5": 0.99,
-        }
+
+        valid_pcc = {"res_2": 0.99, "res_3": 0.99, "res_5": 0.99}
         self.pcc_passed_all = []
         self.pcc_message_all = []
 
@@ -105,7 +95,7 @@ class BackboneTestInfra:
                 mesh_composer=self.output_mesh_composer,
             )
 
-            # Deallocate output tesnors
+            # Free device memory
             ttnn.deallocate(tt_output[key])
 
             expected_shape = self.torch_output[key].shape
@@ -120,7 +110,11 @@ class BackboneTestInfra:
 
         assert all(self.pcc_passed_all), logger.error(f"PCC check failed: {self.pcc_message_all}")
         logger.info(
-            f"ResNet52 Backbone batch_size={self.batch_size}, act_dtype={model_config['ACTIVATIONS_DTYPE']}, weight_dtype={model_config['WEIGHTS_DTYPE']}, math_fidelity={model_config['MATH_FIDELITY']}, PCC={self.pcc_message_all}"
+            f"ResNet52 Backbone - batch_size={self.batch_size}, "
+            f"act_dtype={model_config['ACTIVATIONS_DTYPE']}, "
+            f"weight_dtype={model_config['WEIGHTS_DTYPE']}, "
+            f"math_fidelity={model_config['MATH_FIDELITY']}, "
+            f"PCC={self.pcc_message_all}"
         )
 
         return self.pcc_passed_all, self.pcc_message_all
@@ -140,20 +134,5 @@ model_config = {
         (1, 3, 512, 1024, "backbone"),
     ],
 )
-def test_backbone(
-    device,
-    batch_size,
-    in_channels,
-    height,
-    width,
-    name,
-):
-    BackboneTestInfra(
-        device,
-        batch_size,
-        in_channels,
-        height,
-        width,
-        model_config,
-        name,
-    )
+def test_backbone(device, batch_size, in_channels, height, width, name):
+    BackboneTestInfra(device, batch_size, in_channels, height, width, model_config, name)
