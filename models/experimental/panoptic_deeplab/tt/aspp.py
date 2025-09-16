@@ -37,8 +37,8 @@ class TTASPP:
             act_block_h=64,
             shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
             reallocate_halo_output=True,
-            enable_act_double_buffer=False,
-            enable_weights_double_buffer=True,
+            enable_act_double_buffer=True,
+            enable_weights_double_buffer=False,
             reshard_if_not_optimal=True,
         )
 
@@ -103,7 +103,7 @@ class TTASPP:
             act_block_h=512,
             shard_layout=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
             reallocate_halo_output=True,
-            enable_act_double_buffer=False,
+            enable_act_double_buffer=True,
             enable_weights_double_buffer=True,
             reshard_if_not_optimal=True,
         )

@@ -36,7 +36,7 @@ head_layer_optimisations = {
             "reallocate_halo_output": True,
             "memory_config": ttnn.L1_MEMORY_CONFIG,
             "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "enable_act_double_buffer": False,
+            "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
             "reshard_if_not_optimal": True,
         },
@@ -60,7 +60,7 @@ head_layer_optimisations = {
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": False,
+            "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
         },
         conv2={
