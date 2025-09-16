@@ -45,7 +45,6 @@ bottleneck_layer_optimisations = {
             "deallocate_activation": True,
             "reallocate_halo_output": True,
             "reshard_if_not_optimal": True,
-            "enable_split_reader": True,
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
         },
@@ -59,7 +58,6 @@ bottleneck_layer_optimisations = {
             "deallocate_activation": True,
             "reallocate_halo_output": True,
             "reshard_if_not_optimal": True,
-            "enable_split_reader": True,
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
         },
@@ -75,7 +73,6 @@ bottleneck_layer_optimisations = {
             "deallocate_activation": True,
             "reallocate_halo_output": True,
             "reshard_if_not_optimal": True,
-            "enable_split_reader": True,
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
         },
@@ -89,7 +86,6 @@ bottleneck_layer_optimisations = {
             "deallocate_activation": True,
             "reallocate_halo_output": True,
             "reshard_if_not_optimal": True,
-            "enable_split_reader": True,
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
         },
@@ -104,7 +100,6 @@ bottleneck_layer_optimisations = {
             "deallocate_activation": True,
             "reallocate_halo_output": True,
             "reshard_if_not_optimal": True,
-            "enable_split_reader": True,
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
         },
@@ -118,7 +113,6 @@ bottleneck_layer_optimisations = {
             "deallocate_activation": True,
             "reallocate_halo_output": True,
             "reshard_if_not_optimal": True,
-            "enable_split_reader": True,
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
         },
@@ -135,7 +129,6 @@ bottleneck_layer_optimisations = {
             "deallocate_activation": True,
             "reshard_if_not_optimal": True,
             "reallocate_halo_output": True,
-            "enable_split_reader": True,
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
             "dtype": ttnn.bfloat16,
@@ -183,7 +176,7 @@ class TTBottleneck:
             dilation=1,
             parameters=parameters.conv1,
             kernel_fidelity=model_config,
-            activation="relu",
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
             **layer_optimisations.conv1,
         )
         self.conv2 = TTConv2D(
@@ -193,7 +186,7 @@ class TTBottleneck:
             dilation=dilation,
             parameters=parameters.conv2,
             kernel_fidelity=model_config,
-            activation="relu",
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
             **layer_optimisations.conv2,
         )
         self.conv3 = TTConv2D(
@@ -203,7 +196,7 @@ class TTBottleneck:
             dilation=1,
             parameters=parameters.conv3,
             kernel_fidelity=model_config,
-            activation="",
+            activation=None,
             **layer_optimisations.conv3,
         )
 
@@ -216,7 +209,7 @@ class TTBottleneck:
                 dilation=1,
                 parameters=parameters.downsample,
                 kernel_fidelity=model_config,
-                activation="",
+                activation=None,
                 **layer_optimisations.downsample,
             )
 

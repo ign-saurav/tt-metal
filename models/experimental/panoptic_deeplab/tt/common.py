@@ -25,7 +25,6 @@ class TTConv2D:
         groups=1,
         num_cores_nhw=None,
         is_reshape=False,
-        enable_split_reader=False,
         enable_act_double_buffer=False,
         enable_weights_double_buffer=False,
         fp32_dest_acc_en=False,
@@ -83,7 +82,6 @@ class TTConv2D:
         self.slice_config = slice_config
         self.num_cores_nhw = num_cores_nhw
         self.is_reshape = is_reshape
-        self.enable_split_reader = enable_split_reader
         self.enable_act_double_buffer = enable_act_double_buffer
         self.enable_weights_double_buffer = enable_weights_double_buffer
         if dtype is not None:
@@ -103,14 +101,13 @@ class TTConv2D:
         conv_config = ttnn.Conv2dConfig(
             weights_dtype=self.weights_dtype,
             activation=self.activation,
-            in_place=True,
-            shard_layout=self.shard_layout,
-            reshard_if_not_optimal=self.reshard_if_not_optimal,
-            enable_split_reader=self.enable_split_reader,
-            enable_act_double_buffer=self.enable_act_double_buffer,
-            enable_weights_double_buffer=self.enable_weights_double_buffer,
             deallocate_activation=self.deallocate_activation,
             reallocate_halo_output=self.reallocate_halo_output,
+            reshard_if_not_optimal=self.reshard_if_not_optimal,
+            shard_layout=self.shard_layout,
+            enable_act_double_buffer=self.enable_act_double_buffer,
+            enable_weights_double_buffer=self.enable_weights_double_buffer,
+            in_place=True,
         )
         compute_config = ttnn.init_device_compute_kernel_config(
             device.arch(),

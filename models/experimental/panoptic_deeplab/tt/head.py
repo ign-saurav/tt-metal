@@ -36,8 +36,7 @@ head_layer_optimisations = {
             "reallocate_halo_output": True,
             "memory_config": ttnn.L1_MEMORY_CONFIG,
             "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "enable_split_reader": True,
-            "enable_act_double_buffer": True,
+            "enable_act_double_buffer": False,
             "enable_weights_double_buffer": True,
             "reshard_if_not_optimal": True,
         },
@@ -49,9 +48,9 @@ head_layer_optimisations = {
         },
         conv3={
             "act_block_h": 32,
-            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "deallocate_activation": True,
             "reallocate_halo_output": True,
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
         },
         shape=(1, 128, 256, 256),
     ),
@@ -61,8 +60,7 @@ head_layer_optimisations = {
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_split_reader": True,
-            "enable_act_double_buffer": True,
+            "enable_act_double_buffer": False,
             "enable_weights_double_buffer": True,
         },
         conv2={
@@ -120,7 +118,7 @@ class TTHead:
             groups=parameters.conv_args["conv1"]["0"].groups,
             parameters=parameters.conv1,
             kernel_fidelity=model_config,
-            activation="relu",
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
             **layer_optimisations.conv1,
         )
         # conv2
@@ -131,7 +129,7 @@ class TTHead:
             groups=parameters.conv_args["conv2"]["0"].groups,
             parameters=parameters.conv2,
             kernel_fidelity=model_config,
-            activation="relu",
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
             **layer_optimisations.conv2,
         )
         # conv3

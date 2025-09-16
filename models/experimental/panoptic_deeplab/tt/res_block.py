@@ -42,8 +42,7 @@ res_layer_optimisations = {
             "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_split_reader": True,
-            "enable_act_double_buffer": True,
+            "enable_act_double_buffer": False,
             "enable_weights_double_buffer": True,
             "reshard_if_not_optimal": True,
         },
@@ -62,8 +61,7 @@ res_layer_optimisations = {
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_split_reader": True,
-            "enable_act_double_buffer": True,
+            "enable_act_double_buffer": False,
             "enable_weights_double_buffer": True,
         },
         conv2={
@@ -92,9 +90,8 @@ res_layer_optimisations = {
             "act_block_h": 512,
             "memory_config": ttnn.L1_MEMORY_CONFIG,
             "deallocate_activation": True,
-            "enable_split_reader": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
+            "enable_act_double_buffer": False,
             "enable_weights_double_buffer": True,
         },
         conv3={
@@ -119,8 +116,7 @@ res_layer_optimisations = {
             "memory_config": ttnn.L1_MEMORY_CONFIG,
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_split_reader": True,
-            "enable_act_double_buffer": True,
+            "enable_act_double_buffer": False,
             "enable_weights_double_buffer": True,
         },
         conv3={
@@ -160,7 +156,7 @@ class TTRes:
             groups=parameters.conv_args["conv1"]["0"].groups,
             parameters=parameters.conv1,
             kernel_fidelity=model_config,
-            activation="relu",
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
             **layer_optimisations.conv1,
         )
         # conv2
@@ -171,7 +167,7 @@ class TTRes:
             groups=parameters.conv_args["conv2"]["0"].groups,
             parameters=parameters.conv2,
             kernel_fidelity=model_config,
-            activation="relu",
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
             **layer_optimisations.conv2,
         )
         # conv3
@@ -182,7 +178,7 @@ class TTRes:
             groups=parameters.conv_args["conv3"]["0"].groups,
             parameters=parameters.conv3,
             kernel_fidelity=model_config,
-            activation="relu",
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
             **layer_optimisations.conv3,
         )
         self.shape = layer_optimisations.shape

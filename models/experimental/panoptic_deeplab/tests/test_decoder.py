@@ -230,11 +230,16 @@ class DecoderTestInfra:
         self.pcc_passed, self.pcc_message = check_with_pcc(self.torch_output_tensor, out_torch, pcc=valid_pcc)
         assert self.pcc_passed, logger.error(f"PCC check failed: {self.pcc_message}")
 
+        if "instance" in self.name:
+            head_name = "Instance Offset Head"
+        else:
+            head_name = "Semantic Head"
+
         logger.info(
-            f"{self.name}, batch_size={out_torch.shape[0]}, "
+            f"{head_name}, batch_size={out_torch.shape[0]}, "
             f"act_dtype={self.model_config['ACTIVATIONS_DTYPE']}, "
             f"weight_dtype={self.model_config['WEIGHTS_DTYPE']}, "
-            f"math_fidelity={self.model_config['MATH_FIDELITY']}, PCC={self.pcc_message}"
+            f"math_fidelity={self.model_config['MATH_FIDELITY']}, PCC={self.pcc_message}, Shape={self.output_tensor.shape}"
         )
 
         # --- Head 2 (instance head only) ---
@@ -245,10 +250,10 @@ class DecoderTestInfra:
             assert self.pcc_passed, logger.error(f"PCC check failed: {self.pcc_message}")
 
             logger.info(
-                f"{self.name}, batch_size={out2_torch.shape[0]}, "
+                f"Instance Center Head, batch_size={out2_torch.shape[0]}, "
                 f"act_dtype={self.model_config['ACTIVATIONS_DTYPE']}, "
                 f"weight_dtype={self.model_config['WEIGHTS_DTYPE']}, "
-                f"math_fidelity={self.model_config['MATH_FIDELITY']}, PCC={self.pcc_message}"
+                f"math_fidelity={self.model_config['MATH_FIDELITY']}, PCC={self.pcc_message}, Shape={self.output_tensor_2.shape}"
             )
 
         return self.pcc_passed, self.pcc_message
