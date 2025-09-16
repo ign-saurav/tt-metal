@@ -14,12 +14,13 @@ from models.experimental.panoptic_deeplab.tt.panoptic_deeplab import TTPanopticD
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from pathlib import Path
 import os
-from ttnn.model_preprocessing import infer_ttnn_module_args, preprocess_model_parameters
-from models.experimental.panoptic_deeplab.common import (
+from ttnn.model_preprocessing import preprocess_model_parameters
+from models.experimental.panoptic_deeplab.tt.common import (
     load_torch_model_state,
     preprocess_image,
     save_preprocessed_inputs,
 )
+from models.experimental.panoptic_deeplab.tt.common import _populate_all_decoders
 
 
 class PanopticDeepLabTestInfra:
@@ -86,7 +87,7 @@ class PanopticDeepLabTestInfra:
         )
 
         # Populate conv_args for decoders via one small warm-up pass
-        self._populate_all_decoders(torch_model, parameters)
+        _populate_all_decoders(torch_model, parameters)
 
         # Run torch model with bfloat16
         logger.info("Running PyTorch model...")
@@ -152,47 +153,6 @@ class PanopticDeepLabTestInfra:
                 ttnn.ConcatMeshToTensor(device, dim=0),  # outputs
             )
         return None, None, None
-
-    @staticmethod
-    def _infer_and_set(module, params_holder, attr_name, run_fn):
-        """Infer conv args for a TTNN module and set them if present in parameters."""
-        if hasattr(params_holder, attr_name):
-            args = infer_ttnn_module_args(model=module, run_model=run_fn, device=None)
-            getattr(params_holder, attr_name).conv_args = args
-
-    def _populate_decoder(self, torch_dec, params_dec):
-        """Warm up a single decoder (semantic or instance) to populate conv_args."""
-        if not (torch_dec and params_dec):
-            return
-
-        # Synthetic tensors that match typical Panoptic-DeepLab strides
-        input_tensor = torch.randn(1, 2048, 32, 64)
-        res3_tensor = torch.randn(1, 512, 64, 128)
-        res2_tensor = torch.randn(1, 256, 128, 256)
-
-        # ASPP
-        self._infer_and_set(torch_dec.aspp, params_dec, "aspp", lambda m: m(input_tensor))
-        aspp_out = torch_dec.aspp(input_tensor)
-
-        # res3
-        self._infer_and_set(torch_dec.res3, params_dec, "res3", lambda m: m(aspp_out, res3_tensor))
-        res3_out = torch_dec.res3(aspp_out, res3_tensor)
-
-        # res2
-        self._infer_and_set(torch_dec.res2, params_dec, "res2", lambda m: m(res3_out, res2_tensor))
-        res2_out = torch_dec.res2(res3_out, res2_tensor)
-
-        # heads (one or two, if present)
-        if hasattr(torch_dec, "head_1"):
-            self._infer_and_set(torch_dec.head_1, params_dec, "head_1", lambda m: m(res2_out))
-        if hasattr(torch_dec, "head_2"):
-            self._infer_and_set(torch_dec.head_2, params_dec, "head_2", lambda m: m(res2_out))
-
-    def _populate_all_decoders(self, torch_model, parameters):
-        if hasattr(parameters, "semantic_decoder"):
-            self._populate_decoder(torch_model.semantic_decoder, parameters.semantic_decoder)
-        if hasattr(parameters, "instance_decoder"):
-            self._populate_decoder(torch_model.instance_decoder, parameters.instance_decoder)
 
     @staticmethod
     def _tt_to_torch_nchw(tt_tensor, device, mesh_composer, expected_shape):

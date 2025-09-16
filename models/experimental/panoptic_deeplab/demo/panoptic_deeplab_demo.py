@@ -19,9 +19,13 @@ from models.experimental.panoptic_deeplab.tt.panoptic_deeplab import TTPanopticD
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
 from post_processing import PostProcessing
-from models.experimental.panoptic_deeplab.common import load_torch_model_state
+from models.experimental.panoptic_deeplab.tt.common import load_torch_model_state
 from models.experimental.panoptic_deeplab.demo.config import DemoConfig
-from models.experimental.panoptic_deeplab.common import parameter_conv_args, preprocess_image, save_preprocessed_inputs
+from models.experimental.panoptic_deeplab.tt.common import (
+    _populate_all_decoders,
+    preprocess_image,
+    save_preprocessed_inputs,
+)
 
 
 class Demo:
@@ -77,7 +81,7 @@ class Demo:
             custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
             device=None,
         )
-        parameters = parameter_conv_args(reference_model, parameters)
+        parameters = _populate_all_decoders(reference_model, parameters)
 
         model_config = {
             "MATH_FIDELITY": ttnn.MathFidelity.LoFi,

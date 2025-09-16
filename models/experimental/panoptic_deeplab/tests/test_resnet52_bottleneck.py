@@ -11,7 +11,7 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from torchvision.models.resnet import Bottleneck
 from models.experimental.panoptic_deeplab.tt.bottleneck import TTBottleneck, get_bottleneck_optimisation
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
-from models.experimental.panoptic_deeplab.common import load_torch_model_state
+from models.experimental.panoptic_deeplab.tt.common import load_torch_model_state
 
 
 class BottleneckTestInfra:
