@@ -13,7 +13,7 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.SSR.tt.tile_selection import TTPatchMerging
 
 
-def create_patch_merging_preprocessor(device, dim, weight_dtype=ttnn.bfloat16):
+def create_patch_merging_preprocessor(device, dim):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         params = {}
 
@@ -32,17 +32,17 @@ def create_patch_merging_preprocessor(device, dim, weight_dtype=ttnn.bfloat16):
 
         # Convert to TTNN tensors
         params["conv_kernels"] = {
-            "top_left": ttnn.from_torch(kernel_top_left, device=device, dtype=ttnn.bfloat16),
-            "bottom_left": ttnn.from_torch(kernel_bottom_left, device=device, dtype=ttnn.bfloat16),
-            "top_right": ttnn.from_torch(kernel_top_right, device=device, dtype=ttnn.bfloat16),
-            "bottom_right": ttnn.from_torch(kernel_bottom_right, device=device, dtype=ttnn.bfloat16),
+            "top_left": ttnn.from_torch(kernel_top_left, device=device),
+            "bottom_left": ttnn.from_torch(kernel_bottom_left, device=device),
+            "top_right": ttnn.from_torch(kernel_top_right, device=device),
+            "bottom_right": ttnn.from_torch(kernel_bottom_right, device=device),
         }
 
         # Linear reduction layer
         params["reduction"] = {
             "weight": ttnn.from_torch(
                 torch_model.reduction.weight.transpose(0, 1),  # Transpose for ttnn.linear
-                dtype=weight_dtype,
+                dtype=ttnn.bfloat16,
                 layout=ttnn.TILE_LAYOUT,
                 device=device,
             )
@@ -52,13 +52,13 @@ def create_patch_merging_preprocessor(device, dim, weight_dtype=ttnn.bfloat16):
         params["norm"] = {
             "weight": ttnn.from_torch(
                 torch_model.norm.weight,
-                dtype=weight_dtype,
+                dtype=ttnn.bfloat16,
                 layout=ttnn.TILE_LAYOUT,
                 device=device,
             ),
             "bias": ttnn.from_torch(
                 torch_model.norm.bias,
-                dtype=weight_dtype,
+                dtype=ttnn.bfloat16,
                 layout=ttnn.TILE_LAYOUT,
                 device=device,
             ),
@@ -80,9 +80,7 @@ def create_patch_merging_preprocessor(device, dim, weight_dtype=ttnn.bfloat16):
     ),
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}])
-@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
-@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
-def test_patch_merging(device, batch_size, input_resolution, dim, input_dtype, weight_dtype):
+def test_patch_merging(device, batch_size, input_resolution, dim):
     torch.manual_seed(0)
 
     H, W = input_resolution
@@ -100,7 +98,7 @@ def test_patch_merging(device, batch_size, input_resolution, dim, input_dtype, w
     # Create ttnn model
     params = preprocess_model_parameters(
         initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_patch_merging_preprocessor(device, dim, weight_dtype),
+        custom_preprocessor=create_patch_merging_preprocessor(device, dim),
         device=device,
     )
 
@@ -110,13 +108,10 @@ def test_patch_merging(device, batch_size, input_resolution, dim, input_dtype, w
         input_resolution=input_resolution,
         dim=dim,
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        dtype=input_dtype,
     )
 
     # Convert input to ttnn
-    tt_input = ttnn.from_torch(
-        input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype, memory_config=ttnn.L1_MEMORY_CONFIG
-    )
+    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
 
     # ttnn forward pass
     tt_output = tt_layer(tt_input)
@@ -124,7 +119,7 @@ def test_patch_merging(device, batch_size, input_resolution, dim, input_dtype, w
 
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
-    logger.info(f"PCC: {pcc_message}")
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("PatchMerging Passed!")

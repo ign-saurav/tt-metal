@@ -16,7 +16,7 @@ from models.utility_functions import tt2torch_tensor
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
-def create_swin_transformer_block_preprocessor(device, weight_dtype=ttnn.bfloat16):
+def create_swin_transformer_block_preprocessor(device):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
 
@@ -24,31 +24,31 @@ def create_swin_transformer_block_preprocessor(device, weight_dtype=ttnn.bfloat1
             # Preprocess attention parameters
             parameters["attn"] = preprocess_model_parameters(
                 initialize_model=lambda: torch_model.attn,
-                custom_preprocessor=create_window_attention_preprocessor(device, weight_dtype),
+                custom_preprocessor=create_window_attention_preprocessor(device),
                 device=device,
             )
 
             # Preprocess layer normalization parameters
             parameters["norm1"] = {}
             parameters["norm1"]["weight"] = ttnn.from_torch(
-                torch_model.norm1.weight, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT, device=device
+                torch_model.norm1.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
             )
             parameters["norm1"]["bias"] = ttnn.from_torch(
-                torch_model.norm1.bias, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT, device=device
+                torch_model.norm1.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
             )
 
             parameters["norm2"] = {}
             parameters["norm2"]["weight"] = ttnn.from_torch(
-                torch_model.norm2.weight, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT, device=device
+                torch_model.norm2.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
             )
             parameters["norm2"]["bias"] = ttnn.from_torch(
-                torch_model.norm2.bias, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT, device=device
+                torch_model.norm2.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
             )
 
             # Preprocess MLP parameters
             parameters["mlp"] = preprocess_model_parameters(
                 initialize_model=lambda: torch_model.mlp,
-                custom_preprocessor=create_mlp_preprocessor(device, weight_dtype),
+                custom_preprocessor=create_mlp_preprocessor(device),
                 device=device,
             )
         return parameters
@@ -72,11 +72,7 @@ def create_swin_transformer_block_preprocessor(device, weight_dtype=ttnn.bfloat1
     ),
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}])
-@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
-@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
-def test_swin_transformer_block(
-    device, batch_size, height, width, dim, num_heads, window_size, shift_size, mlp_ratio, input_dtype, weight_dtype
-):
+def test_swin_transformer_block(device, batch_size, height, width, dim, num_heads, window_size, shift_size, mlp_ratio):
     # Create input tensor
     input_shape = (batch_size, height * width, dim)
     x = torch.randn(input_shape)
@@ -102,7 +98,7 @@ def test_swin_transformer_block(
     # Preprocess model parameters
     parameters = preprocess_model_parameters(
         initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_swin_transformer_block_preprocessor(device, weight_dtype),
+        custom_preprocessor=create_swin_transformer_block_preprocessor(device),
         device=device,
     )
 
@@ -120,7 +116,7 @@ def test_swin_transformer_block(
     )
 
     # Convert input to TTNN tensor
-    tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype)
+    tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
     tt_input = ttnn.to_memory_config(tt_input, ttnn.L1_MEMORY_CONFIG)
 
     # Run forward pass
@@ -131,7 +127,7 @@ def test_swin_transformer_block(
 
     # Compare outputs
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.98)
-    logger.info(f"PCC: {pcc_message}")
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("SwinTransformerBlock Passed!")

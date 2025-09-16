@@ -13,7 +13,7 @@ from models.utility_functions import tt2torch_tensor
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
-def create_patch_embed_preprocessor(device, weight_dtype=ttnn.bfloat16):
+def create_patch_embed_preprocessor(device):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
         if isinstance(torch_model, PatchEmbed):
@@ -24,12 +24,12 @@ def create_patch_embed_preprocessor(device, weight_dtype=ttnn.bfloat16):
             parameters["proj"] = {}
             # Keep weights in 4D format
             parameters["proj"]["weight"] = ttnn.from_torch(
-                conv_weight, dtype=weight_dtype, layout=ttnn.ROW_MAJOR_LAYOUT
+                conv_weight, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
             )
             # Reshape bias to [1, 1, 1, out_channels] format expected by conv2d
             conv_bias_reshaped = conv_bias.reshape(1, 1, 1, -1)
             parameters["proj"]["bias"] = ttnn.from_torch(
-                conv_bias_reshaped, dtype=weight_dtype, layout=ttnn.ROW_MAJOR_LAYOUT
+                conv_bias_reshaped, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
             )
 
         return parameters
@@ -39,12 +39,12 @@ def create_patch_embed_preprocessor(device, weight_dtype=ttnn.bfloat16):
 
 @pytest.mark.parametrize("img_size, ch, patch_size, embed_dim, norm_layer", ((256, 3, 2, 96, None),))
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}])
-@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
-@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
-def test_patch_embed(device, img_size, ch, patch_size, embed_dim, norm_layer, input_dtype, weight_dtype):
+def test_patch_embed(device, img_size, ch, patch_size, embed_dim, norm_layer):
     input_shape = (3, ch, img_size, img_size)
 
     x = torch.randn(input_shape)
+
+    dtype = ttnn.bfloat8_b
 
     ref_layer = PatchEmbed(
         img_size=img_size,
@@ -58,7 +58,7 @@ def test_patch_embed(device, img_size, ch, patch_size, embed_dim, norm_layer, in
 
     parameters = preprocess_model_parameters(
         initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_patch_embed_preprocessor(device, weight_dtype),
+        custom_preprocessor=create_patch_embed_preprocessor(device),
         device=device,
     )
 
@@ -69,18 +69,18 @@ def test_patch_embed(device, img_size, ch, patch_size, embed_dim, norm_layer, in
         embed_dim=embed_dim,
         device=device,
         parameters=parameters,
-        dtype=input_dtype,
+        dtype=dtype,
     )
 
     # NCHW -> NHWC
     x = x.permute(0, 2, 3, 1)
 
-    tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype)
+    tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=dtype)
     tt_output = tt_layer(tt_input)
     tt_torch_output = tt2torch_tensor(tt_output)
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
 
-    logger.info(f"PCC: {pcc_message}")
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("PatchEmbed Passed!")

@@ -21,7 +21,6 @@ class TTBasicLayer(LightweightModule):
         mlp_ratio=4.0,
         downsample=None,
         memory_config=None,
-        dtype=ttnn.bfloat16,
     ):
         super().__init__()
         self.device = device
@@ -29,7 +28,6 @@ class TTBasicLayer(LightweightModule):
         self.dim = dim
         self.input_resolution = input_resolution
         self.depth = depth
-        self.dtype = dtype
 
         # Build transformer blocks
         self.blocks = []
@@ -58,7 +56,6 @@ class TTBasicLayer(LightweightModule):
                 input_resolution=input_resolution,
                 dim=dim,
                 memory_config=memory_config,
-                dtype=self.dtype,
             )
 
     def forward(self, input_tensor):

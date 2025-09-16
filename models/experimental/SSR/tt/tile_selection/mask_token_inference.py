@@ -9,23 +9,13 @@ from models.demos.deepseek_v3.utils.config_helpers import matmul_config
 
 class TTMaskTokenInference(LightweightModule):
     def __init__(
-        self,
-        device,
-        parameters,
-        dim,
-        num_heads=1,
-        qkv_bias=False,
-        qk_scale=None,
-        attn_drop=0.0,
-        proj_drop=0.0,
-        dtype=ttnn.bfloat16,
+        self, device, parameters, dim, num_heads=1, qkv_bias=False, qk_scale=None, attn_drop=0.0, proj_drop=0.0
     ):
         self.device = device
         self.dim = dim
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = qk_scale or (self.head_dim**-0.5)
-        self.dtype = dtype
 
         # Layer norm parameters
         self.norm_weight = parameters["norm"]["weight"]  # ttnn tensor for layer norm weight

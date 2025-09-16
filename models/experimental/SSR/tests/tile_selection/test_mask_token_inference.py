@@ -13,7 +13,7 @@ from models.utility_functions import tt2torch_tensor
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
-def create_mask_token_inference_preprocessor(device, weight_dtype=ttnn.bfloat16):
+def create_mask_token_inference_preprocessor(device):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
         if (
@@ -26,27 +26,27 @@ def create_mask_token_inference_preprocessor(device, weight_dtype=ttnn.bfloat16)
             # Layer norm parameters
             parameters["norm"] = {}
             parameters["norm"]["weight"] = ttnn.from_torch(
-                torch_model.norm.weight, dtype=weight_dtype, device=device, layout=ttnn.TILE_LAYOUT
+                torch_model.norm.weight, dtype=ttnn.bfloat16, device=device, layout=ttnn.TILE_LAYOUT
             )
             parameters["norm"]["bias"] = ttnn.from_torch(
-                torch_model.norm.bias, dtype=weight_dtype, device=device, layout=ttnn.TILE_LAYOUT
+                torch_model.norm.bias, dtype=ttnn.bfloat16, device=device, layout=ttnn.TILE_LAYOUT
             )
 
             # QKV linear layers
             parameters["proj"] = {}
 
-            parameters["proj"]["weight"] = preprocess_linear_weight(torch_model.proj.weight, dtype=weight_dtype)
+            parameters["proj"]["weight"] = preprocess_linear_weight(torch_model.proj.weight, dtype=ttnn.bfloat16)
 
             qkv_weight = torch.cat([torch_model.q.weight, torch_model.k.weight, torch_model.v.weight], dim=0)
 
             parameters["qkv"] = {}
-            parameters["qkv"]["weight"] = preprocess_linear_weight(qkv_weight, dtype=weight_dtype)
+            parameters["qkv"]["weight"] = preprocess_linear_weight(qkv_weight, dtype=ttnn.bfloat16)
 
             if torch_model.q.bias is not None:
                 qkv_bias = torch.cat([torch_model.q.bias, torch_model.k.bias, torch_model.v.bias], dim=0)
-                parameters["qkv"]["bias"] = preprocess_linear_bias(qkv_bias, dtype=weight_dtype)
+                parameters["qkv"]["bias"] = preprocess_linear_bias(qkv_bias, dtype=ttnn.bfloat16)
 
-            parameters["proj"]["bias"] = preprocess_linear_bias(torch_model.proj.bias, dtype=weight_dtype)
+            parameters["proj"]["bias"] = preprocess_linear_bias(torch_model.proj.bias, dtype=ttnn.bfloat16)
 
         return parameters
 
@@ -69,19 +69,19 @@ def test_mask_token_inference(device, input_shape, dim, num_heads, input_dtype, 
 
     parameters = preprocess_model_parameters(
         initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_mask_token_inference_preprocessor(device, weight_dtype),
+        custom_preprocessor=create_mask_token_inference_preprocessor(device),
         device=device,
     )
 
     tt_layer = TTMaskTokenInference(device=device, parameters=parameters, dim=dim, num_heads=num_heads)
 
-    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype)
+    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
     tt_output = tt_layer(tt_input)
     tt_torch_output = tt2torch_tensor(tt_output)
 
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
 
-    logger.info(f"PCC: {pcc_message}")
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("MaskTokenInference Passed!")

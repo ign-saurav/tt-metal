@@ -17,14 +17,14 @@ from models.utility_functions import tt2torch_tensor
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
-def create_window_attention_preprocessor(device, weight_dtype=ttnn.bfloat16):
+def create_window_attention_preprocessor(device):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
         if hasattr(torch_model, "qkv"):  # WindowAttention model
             parameters["qkv"] = {}
             parameters["proj"] = {}
-            parameters["qkv"]["weight"] = preprocess_linear_weight(torch_model.qkv.weight, dtype=weight_dtype)
-            parameters["qkv"]["bias"] = preprocess_linear_bias(torch_model.qkv.bias, dtype=weight_dtype)
+            parameters["qkv"]["weight"] = preprocess_linear_weight(torch_model.qkv.weight, dtype=ttnn.bfloat16)
+            parameters["qkv"]["bias"] = preprocess_linear_bias(torch_model.qkv.bias, dtype=ttnn.bfloat16)
 
             # Preprocess relative position bias
             relative_position_bias = torch_model.relative_position_bias_table[
@@ -36,11 +36,11 @@ def create_window_attention_preprocessor(device, weight_dtype=ttnn.bfloat16):
             )
             relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous().unsqueeze(0)
             parameters["relative_position_bias"] = ttnn.from_torch(
-                relative_position_bias, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT
+                relative_position_bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
             )
 
-            parameters["proj"]["weight"] = preprocess_linear_weight(torch_model.proj.weight, dtype=weight_dtype)
-            parameters["proj"]["bias"] = preprocess_linear_bias(torch_model.proj.bias, dtype=weight_dtype)
+            parameters["proj"]["weight"] = preprocess_linear_weight(torch_model.proj.weight, dtype=ttnn.bfloat16)
+            parameters["proj"]["bias"] = preprocess_linear_bias(torch_model.proj.bias, dtype=ttnn.bfloat16)
 
         return parameters
 
@@ -62,9 +62,7 @@ def create_window_attention_preprocessor(device, weight_dtype=ttnn.bfloat16):
         ((12, 49, 1536), (7, 7), 3, None),
     ),
 )
-@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
-@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
-def test_window_attn(device, input_shape, window_size, num_heads, input_resolution, input_dtype, weight_dtype):
+def test_window_attn(device, input_shape, window_size, num_heads, input_resolution):
     x = torch.randn(input_shape)
 
     qkv_bias = True
@@ -99,7 +97,7 @@ def test_window_attn(device, input_shape, window_size, num_heads, input_resoluti
 
     parameters = preprocess_model_parameters(
         initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_window_attention_preprocessor(device, weight_dtype),
+        custom_preprocessor=create_window_attention_preprocessor(device),
         device=device,
     )
     tt_layer = TTWindowAttention(
@@ -110,16 +108,16 @@ def test_window_attn(device, input_shape, window_size, num_heads, input_resoluti
         num_heads=num_heads,
         dtype=input_dtype,
     )
-    tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype)
+    tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
     tt_input = ttnn.to_memory_config(tt_input, ttnn.L1_MEMORY_CONFIG)
     tt_mask = None
     if mask is not None:
-        tt_mask = ttnn.from_torch(mask, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype)
+        tt_mask = ttnn.from_torch(mask, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
     tt_output = tt_layer(tt_input, tt_mask)
     tt_torch_output = tt2torch_tensor(tt_output)
 
     does_pass, pcc_message = check_with_pcc(ref_output, tt_torch_output, 0.99)
-    logger.info(f"PCC: {pcc_message}")
+    logger.info(f"pcc: {pcc_message}")
 
     if does_pass:
         logger.info("WindowAttn Passed!")

@@ -18,7 +18,7 @@ from models.utility_functions import tt2torch_tensor
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
-def create_tile_selection_preprocessor(device, dim=96, weight_dtype=ttnn.bfloat16):
+def create_tile_selection_preprocessor(device, dim=96):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
 
@@ -26,7 +26,7 @@ def create_tile_selection_preprocessor(device, dim=96, weight_dtype=ttnn.bfloat1
         if hasattr(torch_model, "mask_token"):
             parameters["mask_token"] = {}
             parameters["mask_token"]["weight"] = ttnn.from_torch(
-                torch_model.mask_token.weight, dtype=weight_dtype, device=device, layout=ttnn.TILE_LAYOUT
+                torch_model.mask_token.weight, dtype=ttnn.bfloat16, device=device, layout=ttnn.TILE_LAYOUT
             )
 
         # patch embedding parameters
@@ -44,7 +44,7 @@ def create_tile_selection_preprocessor(device, dim=96, weight_dtype=ttnn.bfloat1
                 layer_dim = int(dim * 2**i)
                 layer_params = preprocess_model_parameters(
                     initialize_model=lambda l=layer: l,
-                    custom_preprocessor=create_basic_layer_preprocessor(device, layer_dim, weight_dtype),
+                    custom_preprocessor=create_basic_layer_preprocessor(device, layer_dim),
                     device=device,
                 )
                 parameters[f"layers.{i}"] = layer_params
@@ -55,10 +55,10 @@ def create_tile_selection_preprocessor(device, dim=96, weight_dtype=ttnn.bfloat1
                 norm_layer = getattr(torch_model, norm_name)
                 parameters[norm_name] = {}
                 parameters[norm_name]["weight"] = ttnn.from_torch(
-                    norm_layer.weight, dtype=weight_dtype, device=device, layout=ttnn.TILE_LAYOUT
+                    norm_layer.weight, dtype=ttnn.bfloat16, device=device, layout=ttnn.TILE_LAYOUT
                 )
                 parameters[norm_name]["bias"] = ttnn.from_torch(
-                    norm_layer.bias, dtype=weight_dtype, device=device, layout=ttnn.TILE_LAYOUT
+                    norm_layer.bias, dtype=ttnn.bfloat16, device=device, layout=ttnn.TILE_LAYOUT
                 )
 
         # MLP parameters
@@ -67,7 +67,7 @@ def create_tile_selection_preprocessor(device, dim=96, weight_dtype=ttnn.bfloat1
                 mlp = getattr(torch_model, mlp_name)
                 mlp_params = preprocess_model_parameters(
                     initialize_model=lambda m=mlp: m,
-                    custom_preprocessor=create_mlp_preprocessor(device, weight_dtype),
+                    custom_preprocessor=create_mlp_preprocessor(device),
                     device=device,
                 )
                 parameters[mlp_name] = mlp_params
@@ -77,8 +77,8 @@ def create_tile_selection_preprocessor(device, dim=96, weight_dtype=ttnn.bfloat1
             if hasattr(torch_model, linear_name):
                 linear_layer = getattr(torch_model, linear_name)
                 parameters[linear_name] = {}
-                parameters[linear_name]["weight"] = preprocess_linear_weight(linear_layer.weight, dtype=weight_dtype)
-                parameters[linear_name]["bias"] = preprocess_linear_bias(linear_layer.bias, dtype=weight_dtype)
+                parameters[linear_name]["weight"] = preprocess_linear_weight(linear_layer.weight, dtype=ttnn.bfloat16)
+                parameters[linear_name]["bias"] = preprocess_linear_bias(linear_layer.bias, dtype=ttnn.bfloat16)
 
         # mask token inference modules parameters
         for mask_name in ["mask_pre1", "mask_pre2", "mask_pre3"]:
@@ -86,7 +86,7 @@ def create_tile_selection_preprocessor(device, dim=96, weight_dtype=ttnn.bfloat1
                 mask_module = getattr(torch_model, mask_name)
                 mask_params = preprocess_model_parameters(
                     initialize_model=lambda m=mask_module: m,
-                    custom_preprocessor=create_mask_token_inference_preprocessor(device, weight_dtype),
+                    custom_preprocessor=create_mask_token_inference_preprocessor(device),
                     device=device,
                 )
                 parameters[mask_name] = mask_params
@@ -103,9 +103,7 @@ def create_tile_selection_preprocessor(device, dim=96, weight_dtype=ttnn.bfloat1
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}])
-@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
-@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
-def test_tile_selection(device, image_size, patch_size, token_size, num_cls, input_dtype, weight_dtype):
+def test_tile_selection(device, image_size, patch_size, token_size, num_cls):
     """Test TileSelection module against PyTorch reference for correctness"""
 
     # Create mock args object
@@ -133,15 +131,15 @@ def test_tile_selection(device, image_size, patch_size, token_size, num_cls, inp
 
     parameters = preprocess_model_parameters(
         initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_tile_selection_preprocessor(device, dim, weight_dtype),
+        custom_preprocessor=create_tile_selection_preprocessor(device, dim),
         device=device,
     )
 
     # Create TTNN implementation
-    tt_layer = TTTileSelection(device=device, parameters=parameters, args=args, num_cls=num_cls, dtype=input_dtype)
+    tt_layer = TTTileSelection(device=device, parameters=parameters, args=args, num_cls=num_cls)
 
     # Convert input to TTNN
-    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype)
+    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
 
     # Run TTNN implementation
     tt_output = tt_layer(tt_input)
@@ -151,7 +149,7 @@ def test_tile_selection(device, image_size, patch_size, token_size, num_cls, inp
 
     # Compare outputs with appropriate PCC thresholds
     does_pass_3, pcc_message_3 = check_with_pcc(ref_output[0], tt_mask_3, 0.98)
-    logger.info(f"PCC: {pcc_message_3}")
+    logger.info(f"pcc: {pcc_message_3}")
 
     if does_pass_3:
         logger.info("TileSelection Passed!")
