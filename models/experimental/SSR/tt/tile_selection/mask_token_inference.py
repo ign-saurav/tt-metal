@@ -60,38 +60,26 @@ class TTMaskTokenInference(LightweightModule):
         ttnn.deallocate(x)
 
         # Query from feature tokens
-        F_s_prg_config = ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(
-            compute_with_storage_grid_size=(8, 8),
-            in0_block_w=4,
-            out_subblock_h=1,
-            out_subblock_w=4,
-            per_core_M=1,
-            per_core_N=36,
-            transpose_mcast=False,
-            fused_activation=None,
-            fuse_batch=False,
-        )
 
         F_s_qkv = ttnn.linear(
-            F_s, self.qkv_weight, bias=self.qkv_bias, memory_config=ttnn.L1_MEMORY_CONFIG, program_config=F_s_prg_config
+            F_s,
+            self.qkv_weight,
+            bias=self.qkv_bias,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            core_grid=ttnn.CoreGrid(x=8, y=8),
+            dtype=self.dtype,
         )
         ttnn.deallocate(F_s)
 
         # Key from classification token
         # For classification token (keys and values from T_s)
-        T_S_PRG_CONFIG = ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(
-            compute_with_storage_grid_size=(8, 8),
-            in0_block_w=4,
-            out_subblock_h=1,
-            out_subblock_w=4,
-            per_core_M=1,
-            per_core_N=36,
-            transpose_mcast=False,
-            fused_activation=None,
-            fuse_batch=False,
-        )
         T_s_qkv = ttnn.linear(
-            T_s, self.qkv_weight, bias=self.qkv_bias, memory_config=ttnn.L1_MEMORY_CONFIG, program_config=T_S_PRG_CONFIG
+            T_s,
+            self.qkv_weight,
+            bias=self.qkv_bias,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            core_grid=ttnn.CoreGrid(x=8, y=8),
+            dtype=self.dtype,
         )
         ttnn.deallocate(T_s)
 
@@ -117,18 +105,22 @@ class TTMaskTokenInference(LightweightModule):
 
         # Attention computation: q @ k.T
         prg_config = matmul_config(q_from_F_s.shape[-2], q_from_F_s.shape[-1], k_from_T_s.shape[-1], (8, 8))
-        attn = ttnn.matmul(q_from_F_s, k_from_T_s, memory_config=ttnn.L1_MEMORY_CONFIG, program_config=prg_config)
+        attn = ttnn.matmul(
+            q_from_F_s, k_from_T_s, memory_config=ttnn.L1_MEMORY_CONFIG, program_config=prg_config, dtype=self.dtype
+        )
         ttnn.deallocate(q_from_F_s)
         ttnn.deallocate(k_from_T_s)
 
         # Scale attention scores
-        attn = ttnn.multiply(attn, self.tt_scale, memory_config=ttnn.L1_MEMORY_CONFIG)
+        attn = ttnn.multiply(attn, self.tt_scale, memory_config=ttnn.L1_MEMORY_CONFIG, dtype=self.dtype)
 
         # Apply sigmoid instead of softmax
         attn = ttnn.sigmoid(attn, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         # Compute attention output
-        infer_fea = ttnn.matmul(attn, v_from_T_s, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        infer_fea = ttnn.matmul(
+            attn, v_from_T_s, memory_config=ttnn.DRAM_MEMORY_CONFIG, dtype=self.dtype, core_grid=ttnn.CoreGrid(x=8, y=8)
+        )
         ttnn.deallocate(attn)
         ttnn.deallocate(v_from_T_s)
         ttnn.reallocate(infer_fea)
@@ -138,12 +130,18 @@ class TTMaskTokenInference(LightweightModule):
         infer_fea = ttnn.reshape(infer_fea, (B, N - 1, C))
 
         # Output projection
-        infer_fea = ttnn.linear(infer_fea, self.proj_weight, bias=self.proj_bias, memory_config=ttnn.L1_MEMORY_CONFIG)
+        infer_fea = ttnn.linear(
+            infer_fea,
+            self.proj_weight,
+            bias=self.proj_bias,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            core_grid=ttnn.CoreGrid(x=8, y=8),
+        )
 
         # Apply projection dropout (if needed)
 
         # Residual connection with original feature tokens
         original_features = ttnn.slice(fea_skip, [0, 1, 0], [B, N, C])
-        infer_fea = ttnn.add(infer_fea, original_features, memory_config=ttnn.L1_MEMORY_CONFIG)
+        infer_fea = ttnn.add(infer_fea, original_features, memory_config=ttnn.L1_MEMORY_CONFIG, dtype=self.dtype)
 
         return infer_fea

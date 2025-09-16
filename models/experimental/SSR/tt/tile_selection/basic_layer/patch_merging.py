@@ -48,7 +48,7 @@ class TTPatchMerging(LightweightModule):
 
         # Reshape to spatial dimensions [B, H, W, C]
         input_tensor = ttnn.reshape(input_tensor, (B, H, W, C))
-        x = ttnn.to_layout(input_tensor, ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
+        x = ttnn.to_layout(input_tensor, ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG, dtype=self.dtype)
 
         # Common convolution parameters
         conv_params = {
@@ -102,7 +102,11 @@ class TTPatchMerging(LightweightModule):
             normalized.shape[-2], normalized.shape[-1], self.reduction_weight.shape[-2], (8, 8)
         )
         output = ttnn.linear(
-            normalized, self.reduction_weight, memory_config=ttnn.L1_MEMORY_CONFIG, program_config=output_matmul_config
+            normalized,
+            self.reduction_weight,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            program_config=output_matmul_config,
+            dtype=self.dtype,
         )
         ttnn.deallocate(normalized)
 
