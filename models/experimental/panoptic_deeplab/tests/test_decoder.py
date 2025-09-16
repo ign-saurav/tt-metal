@@ -22,7 +22,10 @@ from models.experimental.panoptic_deeplab.tt.custom_preprocessing import (
     create_custom_mesh_preprocessor,
 )
 from models.experimental.panoptic_deeplab.reference.decoder import DecoderModel
-from models.experimental.panoptic_deeplab.tt.common import load_torch_model_state
+from models.experimental.panoptic_deeplab.tt.common import (
+    _populate_decoder,
+    load_torch_model_state,
+)
 
 
 # -------------------------
@@ -68,7 +71,6 @@ class DecoderTestInfra:
     ) -> None:
         _SeedOnce.ensure()
 
-        # --- Public-ish test fields ---
         self.device = device
         self.batch_size = batch_size
         self.in_channels = in_channels
@@ -109,41 +111,8 @@ class DecoderTestInfra:
             device=None,
         )
 
-        # Infer per-submodule conv args by briefly running torch subgraphs
-        # (only when the corresponding params exist)
-        self._maybe_infer_and_attach(torch_model.aspp, "aspp", parameters, run=lambda m: m(self.torch_input_tensor))
-
-        res3_input = torch_model.aspp(self.torch_input_tensor)
-        self._maybe_infer_and_attach(
-            torch_model.res3,
-            "res3",
-            parameters,
-            run=lambda m: m(res3_input, self.torch_res3_tensor),
-        )
-
-        res2_input = torch_model.res3(res3_input, self.torch_res3_tensor)
-        self._maybe_infer_and_attach(
-            torch_model.res2,
-            "res2",
-            parameters,
-            run=lambda m: m(res2_input, self.torch_res2_tensor),
-        )
-
-        head_input = torch_model.res2(res2_input, self.torch_res2_tensor)
-        self._maybe_infer_and_attach(
-            torch_model.head_1,
-            "head_1",
-            parameters,
-            run=lambda m: m(head_input),
-        )
-
-        if "instance" in name:
-            self._maybe_infer_and_attach(
-                torch_model.head_2,
-                "head_2",
-                parameters,
-                run=lambda m: m(head_input),
-            )
+        # Populate conv_args
+        _populate_decoder(torch_model, parameters)
 
         # Golden outputs
         (
@@ -170,7 +139,6 @@ class DecoderTestInfra:
             name=name,
         )
 
-        # Eager run + validate (keeps test signature identical)
         self.run()
         self.validate()
 

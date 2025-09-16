@@ -19,8 +19,8 @@ from models.experimental.panoptic_deeplab.tt.common import (
     load_torch_model_state,
     preprocess_image,
     save_preprocessed_inputs,
+    _populate_all_decoders,
 )
-from models.experimental.panoptic_deeplab.tt.common import _populate_all_decoders
 
 
 class PanopticDeepLabTestInfra:

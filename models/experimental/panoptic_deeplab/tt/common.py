@@ -268,7 +268,7 @@ def _infer_and_set(module, params_holder, attr_name, run_fn):
         getattr(params_holder, attr_name).conv_args = args
 
 
-def _populate_decoder(torch_dec, params_dec):
+def _populate_decoder(torch_dec: torch.nn.Module = None, params_dec: dict = None):
     """Warm up a single decoder (semantic or instance) to populate conv_args."""
     if not (torch_dec and params_dec):
         return
