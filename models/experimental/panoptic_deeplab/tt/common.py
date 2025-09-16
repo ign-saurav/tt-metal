@@ -21,7 +21,7 @@ class TTConv2D:
         deallocate_activation=False,
         reallocate_halo_output=False,
         shard_layout=None,
-        activation="",
+        activation=None,
         groups=1,
         num_cores_nhw=None,
         is_reshape=False,
