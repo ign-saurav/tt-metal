@@ -67,10 +67,10 @@ class TTASPP:
             parameters=parameters.ASPP_2_Depthwise,
             kernel_fidelity=model_config,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            act_block_h=1024,
+            act_block_h=512,
             shard_layout=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
             reallocate_halo_output=False,
-            enable_act_double_buffer=False,
+            enable_act_double_buffer=True,
             enable_weights_double_buffer=True,
             reshard_if_not_optimal=True,
         )
