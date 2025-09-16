@@ -167,7 +167,7 @@ class Demo:
                         torch_flat = torch_output.flatten()
                         ttnn_flat = ttnn_output.flatten()
 
-                        # Truncate to same length if needed
+                        # Truncate to same length
                         min_len = min(len(torch_flat), len(ttnn_flat))
                         torch_flat = torch_flat[:min_len]
                         ttnn_flat = ttnn_flat[:min_len]
@@ -179,7 +179,7 @@ class Demo:
                 logger.debug(f"  PyTorch stats: mean={torch_flat.mean():.4f}, std={torch_flat.std():.4f}")
                 logger.debug(f"  TTNN stats: mean={ttnn_flat.mean():.4f}, std={ttnn_flat.std():.4f}")
 
-    #     logger.info(f"Visualization saved to: {save_path}")
+    # Visualize results
     def visualize_results(self, original_image: np.ndarray, results: Dict, save_path: str):
         """Create comprehensive visualization with panoptic in separate row"""
         from mpl_toolkits.axes_grid1 import make_axes_locatable
@@ -216,51 +216,52 @@ class Demo:
             pipeline_results = results[pipeline]
             row = i + 1
 
-            # Semantic segmentation
-            ax_sem = fig.add_subplot(gs[row, 0])
-            if "semantic_pred" in pipeline_results:
-                semantic_colored = self._colorize_segmentation(pipeline_results["semantic_pred"])
-                ax_sem.imshow(semantic_colored)
-                ax_sem.set_title(f"{pipeline.upper()} Semantic", fontsize=11)
-            ax_sem.axis("off")
+            if self.config.save_heads:
+                # Semantic segmentation
+                ax_sem = fig.add_subplot(gs[row, 0])
+                if "semantic_pred" in pipeline_results:
+                    semantic_colored = self._colorize_segmentation(pipeline_results["semantic_pred"])
+                    ax_sem.imshow(semantic_colored)
+                    ax_sem.set_title(f"{pipeline.upper()} Semantic", fontsize=11)
+                ax_sem.axis("off")
 
-            # Centers
-            ax_center = fig.add_subplot(gs[row, 1])
-            if "center_heatmap" in pipeline_results:
-                center_data = pipeline_results["center_heatmap"]
-                if center_data.max() > center_data.min():
-                    center_normalized = (center_data - center_data.min()) / (center_data.max() - center_data.min())
-                else:
-                    center_normalized = center_data
-                ax_center.imshow(original_image, alpha=0.5)
-                ax_center.imshow(center_normalized, cmap="hot", alpha=0.5, vmin=0, vmax=1)
-                ax_center.set_title(f"{pipeline.upper()} Centers", fontsize=11)
-            ax_center.axis("off")
+                # Centers
+                ax_center = fig.add_subplot(gs[row, 1])
+                if "center_heatmap" in pipeline_results:
+                    center_data = pipeline_results["center_heatmap"]
+                    if center_data.max() > center_data.min():
+                        center_normalized = (center_data - center_data.min()) / (center_data.max() - center_data.min())
+                    else:
+                        center_normalized = center_data
+                    ax_center.imshow(original_image, alpha=0.5)
+                    ax_center.imshow(center_normalized, cmap="hot", alpha=0.5, vmin=0, vmax=1)
+                    ax_center.set_title(f"{pipeline.upper()} Centers", fontsize=11)
+                ax_center.axis("off")
 
-            # Offset
-            ax_offset = fig.add_subplot(gs[row, 2])
-            if "offset_map" in pipeline_results:
-                offset_data = pipeline_results["offset_map"]
-                if len(offset_data.shape) == 3 and offset_data.shape[0] == 2:
-                    offset_magnitude = np.sqrt(offset_data[0] ** 2 + offset_data[1] ** 2)
-                else:
-                    offset_magnitude = offset_data
-                vmax = offset_magnitude.max() if offset_magnitude.max() > 0 else 1
-                im = ax_offset.imshow(offset_magnitude, cmap="viridis", vmin=0, vmax=vmax)
-                ax_offset.set_title(f"{pipeline.upper()} Offset", fontsize=11)
+                # Offset
+                ax_offset = fig.add_subplot(gs[row, 2])
+                if "offset_map" in pipeline_results:
+                    offset_data = pipeline_results["offset_map"]
+                    if len(offset_data.shape) == 3 and offset_data.shape[0] == 2:
+                        offset_magnitude = np.sqrt(offset_data[0] ** 2 + offset_data[1] ** 2)
+                    else:
+                        offset_magnitude = offset_data
+                    vmax = offset_magnitude.max() if offset_magnitude.max() > 0 else 1
+                    im = ax_offset.imshow(offset_magnitude, cmap="viridis", vmin=0, vmax=vmax)
+                    ax_offset.set_title(f"{pipeline.upper()} Offset", fontsize=11)
 
-                # Add small colorbar
-                divider = make_axes_locatable(ax_offset)
-                cax = divider.append_axes("right", size="5%", pad=0.05)
-                plt.colorbar(im, cax=cax)
-            ax_offset.axis("off")
+                    # Add small colorbar
+                    divider = make_axes_locatable(ax_offset)
+                    cax = divider.append_axes("right", size="5%", pad=0.05)
+                    plt.colorbar(im, cax=cax)
+                ax_offset.axis("off")
 
-            # Hide the 4th column in these rows
-            ax_empty = fig.add_subplot(gs[row, 3])
-            ax_empty.axis("off")
+                # Hide the 4th column in these rows
+                ax_empty = fig.add_subplot(gs[row, 3])
+                ax_empty.axis("off")
 
         # Row 3 (or 2 for single pipeline): Panoptic comparison
-        if has_torch and has_ttnn:
+        if self.config.save_panoptic and has_torch and has_ttnn:
             # Both panoptic side by side
             for i, pipeline in enumerate(pipelines):
                 ax_pan = fig.add_subplot(gs[3, i * 2 : (i * 2) + 2])
@@ -270,15 +271,6 @@ class Demo:
                     ax_pan.imshow(panoptic_colored)
                     ax_pan.set_title(f"{pipeline.upper()} Panoptic", fontsize=10)
                     ax_pan.axis("off")
-        else:
-            # Single panoptic centered
-            pipeline = pipelines[0]
-            ax_pan = fig.add_subplot(gs[2, :])
-            if "panoptic_pred" in results[pipeline]:
-                panoptic_colored = self._colorize_panoptic(results[pipeline]["panoptic_pred"])
-                ax_pan.imshow(panoptic_colored)
-                ax_pan.set_title(f"{pipeline.upper()} Panoptic Segmentation", fontsize=12, fontweight="bold")
-            ax_pan.axis("off")
 
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close()
@@ -296,31 +288,59 @@ class Demo:
     def _colorize_panoptic(self, panoptic: np.ndarray) -> np.ndarray:
         """Convert panoptic prediction to colored image"""
         colored = np.zeros((*panoptic.shape, 3), dtype=np.uint8)
-        label_divisor = 256
 
+        taken_colors = set()
+
+        def _get_instance_color(base_color, instance_id, max_dist=40):
+            """Generate distinct color for instance while staying close to base semantic color."""
+            # Use instance_id as seed
+            np.random.seed(int(instance_id))
+
+            # Try multiple times to get a unique color
+            for attempt in range(10):
+                if attempt == 0:
+                    # First try: use base color
+                    color = tuple(base_color)
+                else:
+                    # Generate variation
+                    variation = np.random.randint(-max_dist, max_dist + 1, size=3)
+                    new_color = np.clip(base_color.astype(float) + variation, 0, 255)
+                    color = tuple(new_color.astype(np.uint8))
+
+                if color not in taken_colors:
+                    taken_colors.add(color)
+                    return np.array(color, dtype=np.uint8)
+
+            # Fallback: use base color
+            return base_color
+
+        # Process each panoptic ID
         unique_ids = np.unique(panoptic)
 
         for pan_id in unique_ids:
-            # Don't skip 0 - it's a valid panoptic ID for road
             mask = panoptic == pan_id
-            semantic_class = pan_id // label_divisor
-            instance_id = pan_id % label_divisor
 
-            if semantic_class < len(self.colors):
+            # Calculate semantic class and instance ID
+            semantic_class = pan_id // self.config.label_divisor
+            instance_id = pan_id % self.config.label_divisor
+
+            if pan_id == 0:
+                # Road color
+                colored[mask] = self.colors[0]
+            elif semantic_class < len(self.colors):
+                # Get base semantic color
+                base_color = self.colors[semantic_class]
+
                 if instance_id == 0:
-                    # Stuff class - use base color
-                    colored[mask] = self.colors[semantic_class]
+                    # Stuff class
+                    colored[mask] = base_color
                 else:
-                    # Thing instance - create variation
-                    np.random.seed(int(pan_id))
-                    base_color = self.colors[semantic_class].astype(float)
-                    # Create variation for different instances
-                    variation = np.random.randint(-40, 40, 3)
-                    instance_color = np.clip(base_color + variation, 0, 255)
-                    colored[mask] = instance_color.astype(np.uint8)
+                    # Thing instance
+                    instance_color = _get_instance_color(base_color, pan_id)
+                    colored[mask] = instance_color
             else:
                 # Unknown class
-                colored[mask] = [128, 128, 128]
+                colored[mask] = np.array([128, 128, 128], dtype=np.uint8)
 
         return colored
 
@@ -328,23 +348,17 @@ class Demo:
         """Save all results to output directory"""
         os.makedirs(output_dir, exist_ok=True)
 
-        # Save original image
-        original_path = os.path.join(output_dir, f"{filename}_original.png")
-        Image.fromarray(original_image).save(original_path)
-
-        # Save results for each pipeline
         for pipeline, pipeline_results in results.items():
-            pipeline_dir = os.path.join(output_dir, pipeline)
-            os.makedirs(pipeline_dir, exist_ok=True)
             # Save panoptic segmentation
+            if self.config.compare_outputs:
+                pipeline_dir = os.path.join(output_dir, pipeline)
+                os.makedirs(pipeline_dir, exist_ok=True)
+            else:
+                pipeline_dir = "models/experimental/panoptic_deeplab/resources"
             if "panoptic_pred" in pipeline_results:
                 panoptic_colored = self._colorize_panoptic(pipeline_results["panoptic_pred"])
                 panoptic_path = os.path.join(pipeline_dir, f"{filename}_panoptic.png")
                 Image.fromarray(panoptic_colored).save(panoptic_path)
-
-                # Save raw panoptic prediction
-                raw_panoptic_path = os.path.join(pipeline_dir, f"{filename}_panoptic_raw.npy")
-                np.save(raw_panoptic_path, pipeline_results["panoptic_pred"])
 
         logger.info(f"Results saved to: {output_dir}")
 
@@ -386,21 +400,26 @@ class Demo:
             self.ttnn_device,
             self.output_mesh_composer,
         )
-        # Compare outputs if both pipelines ran
-        self.compare_outputs(results)
 
-        # Generate filename
-        base_name = Path(image_path).stem
+        # Compare outputs
+        if self.config.compare_outputs:
+            self.compare_outputs(results)
+        else:
+            logger.info("Skipping output comparison")
 
-        # Save individual results
-        self.save_results(results, original_image, output_dir, base_name)
+        # Save results
+        if self.config.save_results:
+            base_name = Path(image_path).stem
+            self.save_results(results, original_image, output_dir, base_name)
 
         # Create visualization
-        viz_path = os.path.join(output_dir, f"{base_name}_comparison.png")
-        self.visualize_results(original_image, results, viz_path)
+        if self.config.save_visualization:
+            viz_path = os.path.join(output_dir, f"{base_name}_comparison.png")
+            self.visualize_results(original_image, results, viz_path)
 
         # Save metadata and results summary
-        self._save_metadata(image_path, results, output_dir, base_name)
+        if self.config.save_comparison:
+            self._save_metadata(image_path, results, output_dir, base_name)
 
         logger.info(f"Demo completed! Results saved to: {output_dir}")
 
@@ -409,14 +428,12 @@ class Demo:
             ttnn.deallocate(ttnn_input)
 
     def _save_metadata(self, image_path: str, results: Dict, output_dir: str, filename: str):
-        # def _save_metadata(self, image_path: str, results: Dict, pcc_scores: Dict, output_dir: str, filename: str):
         """Save metadata and comparison results"""
         metadata = {
             "image_path": image_path,
             "config": asdict(self.config),
             "results": {
                 "pipelines_run": list(results.keys()),
-                # "pcc_scores": pcc_scores,
             },
             "output_files": {
                 "visualization": f"{filename}_comparison.png",

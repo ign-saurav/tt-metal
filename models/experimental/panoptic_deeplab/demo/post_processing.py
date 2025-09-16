@@ -1,10 +1,10 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
 import torch.nn.functional as F
 from typing import Tuple, Optional, Any
-from collections import Counter
 import ttnn
 from typing import Dict
 import numpy as np
@@ -57,6 +57,7 @@ class PostProcessing:
         # NMS via max pooling
         nms_padding = (nms_kernel - 1) // 2
         max_pooled = F.max_pool2d(center_heatmap, kernel_size=nms_kernel, stride=1, padding=nms_padding)
+        # Set non-maximal values
         center_heatmap[center_heatmap != max_pooled] = -1
 
         # Squeeze to 2D
@@ -64,19 +65,40 @@ class PostProcessing:
         if center_heatmap.dim() == 3:
             center_heatmap = center_heatmap[0]
 
-        # Find non-zero elements
+        # Find centers with positive values only
         if top_k is None:
-            return torch.nonzero(center_heatmap > 0)
+            return torch.nonzero(center_heatmap > 0, as_tuple=False)
         else:
-            flat = center_heatmap.flatten()
-            top_k_scores, _ = torch.topk(flat, min(top_k, flat.numel()))
-            return torch.nonzero(center_heatmap > top_k_scores[-1].clamp_(min=0))
+            # Get top-k based on actual scores
+            flat = center_heatmap[center_heatmap > 0]
+            if flat.numel() == 0:
+                return torch.empty((0, 2), dtype=torch.long, device=center_heatmap.device)
+
+            k = min(top_k, flat.numel())
+            if k == 0:
+                return torch.empty((0, 2), dtype=torch.long, device=center_heatmap.device)
+
+            top_k_scores, _ = torch.topk(flat, k)
+            threshold_score = top_k_scores[-1]
+            return torch.nonzero(center_heatmap >= threshold_score, as_tuple=False)
 
     def group_pixels(self, center_points: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
         """
         Assign each pixel to nearest center based on offset predictions.
         """
-        _, height, width = offsets.shape
+        # Handle different input shapes for offsets
+        if offsets.dim() == 4:
+            if offsets.size(0) != 1:
+                raise ValueError("Only supports inference for batch size = 1")
+            offsets = offsets.squeeze(0)
+
+        if offsets.dim() == 3:
+            channels, height, width = offsets.shape
+            if channels != 2:
+                raise ValueError(f"Expected 2 offset channels (x, y), got {channels}")
+        else:
+            raise ValueError(f"Unexpected offset tensor shape: {offsets.shape}")
+
         device = offsets.device
 
         # Generate coordinate map
@@ -89,14 +111,24 @@ class PostProcessing:
 
         # Add offsets to get predicted centers
         center_loc = coord + offsets
-        center_loc = center_loc.flatten(1).T.unsqueeze(0)  # [1, H*W, 2]
-        center_points = center_points.float().unsqueeze(1)  # [K, 1, 2]
+        center_loc = center_loc.flatten(1).T.unsqueeze(0)
+
+        # Handle center_points shape
+        if center_points.numel() == 0:
+            # No centers found, return zeros
+            return torch.zeros((1, height, width), dtype=torch.long, device=device)
+
+        if center_points.dim() == 1:
+            center_points = center_points.unsqueeze(0)
+
+        center_points = center_points.float().unsqueeze(1)
 
         # Compute distances
         distance = torch.norm(center_points - center_loc, dim=-1)
 
         # Find nearest center for each pixel
         instance_id = torch.argmin(distance, dim=0).reshape(1, height, width) + 1
+
         return instance_id
 
     def get_instance_segmentation(
@@ -105,43 +137,105 @@ class PostProcessing:
         """
         Generate instance segmentation from centers and offsets.
         """
+        # Ensure consistent dimensions
+        if sem_seg.dim() == 3 and sem_seg.size(0) == 1:
+            sem_seg = sem_seg.squeeze(0)  # [H, W]
+
+        if center_heatmap.dim() == 3 and center_heatmap.size(0) == 1:
+            center_heatmap = center_heatmap.squeeze(0)
+
+        if center_heatmap.dim() == 3 and center_heatmap.size(0) == 1:
+            center_heatmap = center_heatmap.squeeze(0)
+
+        # Add batch dimension back for find_instance_center
+        if center_heatmap.dim() == 2:
+            center_heatmap = center_heatmap.unsqueeze(0).unsqueeze(0)
+        elif center_heatmap.dim() == 3:
+            center_heatmap = center_heatmap.unsqueeze(0)
+
         center_points = self.find_instance_center(center_heatmap)
+
         if center_points.size(0) == 0:
-            return torch.zeros_like(sem_seg), center_points.unsqueeze(0)
+            height, width = sem_seg.shape[-2:]
+            return torch.zeros((1, height, width), dtype=torch.long, device=sem_seg.device), center_points.unsqueeze(0)
+
+        # Ensure offsets has the right shape for group_pixels
+        if offsets.dim() == 3 and offsets.size(0) == 1:
+            offsets = offsets.squeeze(0)
 
         ins_seg = self.group_pixels(center_points, offsets)
+
+        # Apply thing mask
+        if thing_seg.dim() == 3:
+            thing_seg = thing_seg.squeeze(0)
+
+        # Ensure thing_seg matches ins_seg dimensions
+        if ins_seg.dim() == 3:
+            thing_seg = thing_seg.unsqueeze(0)
+
         return thing_seg * ins_seg, center_points.unsqueeze(0)
 
     def merge_semantic_and_instance(
-        self, sem_seg: torch.Tensor, ins_seg: torch.Tensor, thing_seg: torch.Tensor, void_label: int = 0
+        self, sem_seg: torch.Tensor, ins_seg: torch.Tensor, thing_seg: torch.Tensor, void_label: int = -1
     ) -> torch.Tensor:
         """
         Merge semantic and instance predictions for panoptic output.
         """
-        pan_seg = torch.full_like(sem_seg, fill_value=void_label, dtype=torch.int32)
-        is_thing = (ins_seg > 0) & (thing_seg > 0)
+        # Initialize
+        pan_seg = torch.full_like(sem_seg, void_label, dtype=torch.int32)
 
-        class_id_tracker = Counter()
+        # Track instance IDs for each class
+        class_id_tracker = {}
 
-        # Process thing instances
+        # First, assign all stuff classes (including road)
+        for stuff_class in self.stuff_classes:
+            stuff_mask = sem_seg == stuff_class
+            if stuff_mask.sum() > 0:
+                pan_seg[stuff_mask] = stuff_class * self.label_divisor
+
+        # Process thing instances with majority voting
         for ins_id in torch.unique(ins_seg):
             if ins_id == 0:
                 continue
-            thing_mask = (ins_seg == ins_id) & is_thing
-            if thing_mask.sum() == 0:
+
+            # Get mask for this instance
+            ins_mask = ins_seg == ins_id
+
+            # Only consider pixels that are predicted as thing classes
+            thing_mask = torch.zeros_like(sem_seg, dtype=torch.bool)
+            for thing_class in self.thing_classes:
+                thing_mask |= sem_seg == thing_class
+
+            final_mask = ins_mask & thing_mask
+
+            if final_mask.sum() == 0:
                 continue
-            class_id = torch.mode(sem_seg[thing_mask].view(-1))[0].item()
+
+            semantic_votes = sem_seg[final_mask]
+            class_id = torch.mode(semantic_votes)[0].item()
+
+            # Ensure it's a valid thing class
             if class_id not in self.thing_classes:
                 continue
-            class_id_tracker[class_id] += 1
-            new_ins_id = class_id_tracker[class_id]
-            pan_seg[thing_mask] = class_id * self.label_divisor + new_ins_id
 
-        # Process stuff classes
+            # Track instance count for this class
+            if class_id not in class_id_tracker:
+                class_id_tracker[class_id] = 0
+            class_id_tracker[class_id] += 1
+
+            # Assign panoptic ID (overwrites stuff assignments where things are detected)
+            pan_seg[final_mask] = class_id * self.label_divisor + class_id_tracker[class_id]
+
+        # Apply area threshold for small stuff regions
         for stuff_class in self.stuff_classes:
-            stuff_mask = (sem_seg == stuff_class) & (ins_seg == 0)
-            if stuff_mask.sum().item() >= self.stuff_area_threshold:
-                pan_seg[stuff_mask] = stuff_class * self.label_divisor
+            if stuff_class == 0:
+                continue
+            stuff_mask = pan_seg == stuff_class * self.label_divisor
+            if stuff_mask.sum() > 0 and stuff_mask.sum() < self.stuff_area_threshold:
+                pan_seg[stuff_mask] = void_label
+
+        # Convert any remaining void pixels
+        pan_seg[pan_seg == void_label] = 0
 
         return pan_seg
 
@@ -149,28 +243,36 @@ class PostProcessing:
         self, semantic_logits: torch.Tensor, center_heatmap: torch.Tensor, offset_map: torch.Tensor
     ) -> torch.Tensor:
         """
-        Main panoptic segmentation fusion.
+        Main panoptic segmentation fusion with proper tensor handling.
         """
         batch_size = semantic_logits.shape[0]
-        semantic_pred = torch.argmax(semantic_logits, dim=1)  # [B, H, W]
+        semantic_pred = torch.argmax(semantic_logits, dim=1)
         panoptic_pred = torch.zeros_like(semantic_pred, dtype=torch.int32)
 
         for b in range(batch_size):
-            sem_seg = semantic_pred[b : b + 1]
-            center_heat = center_heatmap[b : b + 1]
+            sem_seg = semantic_pred[b]
+            center_heat = center_heatmap[b]
             offsets = offset_map[b]
 
-            # Create thing mask
+            # Create thing mask - keep semantic classes for thing regions
             thing_seg = torch.zeros_like(sem_seg)
             for thing_class in self.thing_classes:
                 thing_seg[sem_seg == thing_class] = 1
 
+            # Debug tensor shapes
+            logger.debug(f"sem_seg shape: {sem_seg.shape}")
+            logger.debug(f"center_heat shape: {center_heat.shape}")
+            logger.debug(f"offsets shape: {offsets.shape}")
+            logger.debug(f"thing_seg shape: {thing_seg.shape}")
+
             # Get instance segmentation
-            ins_seg, _ = self.get_instance_segmentation(sem_seg, center_heat, offsets, thing_seg)
+            ins_seg, _ = self.get_instance_segmentation(
+                sem_seg.unsqueeze(0), center_heat.unsqueeze(0), offsets.unsqueeze(0), thing_seg.unsqueeze(0)
+            )
+            ins_seg = ins_seg[0]
 
             # Merge to create panoptic
-            panoptic_img = self.merge_semantic_and_instance(sem_seg[0], ins_seg[0], thing_seg[0])
-
+            panoptic_img = self.merge_semantic_and_instance(sem_seg, ins_seg, thing_seg)
             panoptic_pred[b] = panoptic_img
 
         return panoptic_pred
@@ -235,7 +337,6 @@ class PostProcessing:
                     else:
                         logger.warning(f"Unexpected offset_map shape: {np_array.shape}")
                 # panoptic_pred
-                # For PyTorch outputs:
                 panoptic_pred = self.panoptic_fusion(
                     semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map
                 )
@@ -309,14 +410,14 @@ class PostProcessing:
                 # Check if center data has very small values and scale if needed
                 if center_data.max() < 0.01:
                     logger.warning(f"Center heatmap has very small values (max={center_data.max():.6f}), scaling up")
-                    center_data = center_data * 100  # Scale up for visualization
+                    center_data = center_data * 100
 
                 results["ttnn"]["center_heatmap"] = cv2.resize(
                     center_data, original_size, interpolation=cv2.INTER_LINEAR
                 )
                 logger.debug(f"TTNN center_heatmap shape: {results['ttnn']['center_heatmap'].shape}")
 
-                # Process offset map - FIXED: This was in elif block before
+                # Process offset map
                 np_array_2 = reshaped_tensor_2.squeeze(0).cpu().float().numpy()
                 if len(np_array_2.shape) == 3 and np_array_2.shape[0] == 2:
                     results["ttnn"]["offset_map"] = np.stack(
@@ -339,7 +440,7 @@ class PostProcessing:
                 panoptic_pred = ttnn.from_torch(panoptic_pred_ttnn, dtype=ttnn.int32)
 
                 if panoptic_pred is not None and isinstance(panoptic_pred, ttnn.Tensor):
-                    # Convert TTNN tensor to numpy properly
+                    # Convert TTNN tensor to numpy
                     torch_tensor = ttnn.to_torch(panoptic_pred, device=ttnn_device, mesh_composer=output_mesh_composer)
                     np_array = torch_tensor.squeeze().cpu().numpy()
 
@@ -374,11 +475,11 @@ class PostProcessing:
         return results
 
     def _reshape_ttnn_output(self, tensor: torch.Tensor, key: str) -> torch.Tensor:
-        """Reshape TTNN output tensor to proper format - IMPROVED VERSION"""
+        """Reshape TTNN output tensor to proper format"""
 
         logger.debug(f"Reshaping TTNN output for {key}: input shape = {tensor.shape}")
 
-        if len(tensor.shape) == 4:  # BHWC format from TTNN
+        if len(tensor.shape) == 4:
             B, H, W, C = tensor.shape
 
             if key == "semantic_logits":
@@ -389,7 +490,7 @@ class PostProcessing:
                 else:
                     # Try to reshape if flattened
                     total_elements = B * H * W * C
-                    expected_h = 512 // 4  # Typical output stride
+                    expected_h = 512 // 4
                     expected_w = 1024 // 4
                     if total_elements == B * expected_h * expected_w * expected_c:
                         tensor = tensor.reshape(B, expected_h, expected_w, expected_c)

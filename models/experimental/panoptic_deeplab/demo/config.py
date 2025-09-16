@@ -26,10 +26,11 @@ class DemoConfig:
     std: List[float] = None
 
     # Inference configuration
-    center_threshold: float = 0.1
+    center_threshold: float = 0.07
     nms_kernel: int = 7
-    top_k_instances: int = 200
-    stuff_area_threshold: int = 4096
+    top_k_instances: int = 300
+    stuff_area_threshold: int = 512
+    label_divisor: int = 256
 
     # Device configuration
     device_id: int = 0
@@ -38,15 +39,12 @@ class DemoConfig:
     activations_dtype: str = "bfloat8_b"
 
     # Output configuration
-    save_semantic: bool = True
-    save_instance: bool = True
+    save_results: bool = True
+    save_heads: bool = False
     save_panoptic: bool = True
-    save_visualization: bool = True
-    save_comparison: bool = True
-
-    # Pipeline configuration
-    compare_outputs: bool = True
-    pcc_threshold: float = 0.97
+    save_visualization: bool = False
+    save_comparison: bool = False
+    compare_outputs: bool = False
 
     # Dataset configuration (Cityscapes default)
     thing_classes: List[int] = None
