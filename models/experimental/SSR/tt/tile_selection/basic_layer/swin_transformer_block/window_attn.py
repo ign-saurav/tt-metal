@@ -13,7 +13,6 @@ class TTWindowAttention(nn.Module):
         dim,
         window_size,
         num_heads,
-        dtype=ttnn.bfloat16,
     ):
         super().__init__()
         self.parameters = parameters
@@ -23,7 +22,6 @@ class TTWindowAttention(nn.Module):
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
-        self.dtype = dtype
 
     def forward(self, input_tensor, mask=None):
         """
@@ -48,7 +46,6 @@ class TTWindowAttention(nn.Module):
             ),
             memory_config=ttnn.L1_MEMORY_CONFIG if B_ * N * C < 1_100_000 else ttnn.DRAM_MEMORY_CONFIG,
             core_grid=ttnn.CoreGrid(x=8, y=8),
-            dtype=self.dtype,
         )
         ttnn.deallocate(input_tensor)
 
@@ -73,7 +70,6 @@ class TTWindowAttention(nn.Module):
                 math_fidelity=ttnn.MathFidelity.LoFi,
             ),
             memory_config=ttnn.L1_MEMORY_CONFIG,
-            dtype=self.dtype,
         )
 
         # Clean up intermediate tensors
@@ -81,7 +77,7 @@ class TTWindowAttention(nn.Module):
         ttnn.deallocate(k)
 
         # Add relative position bias
-        attn = ttnn.add(attn, relative_position_bias, memory_config=ttnn.L1_MEMORY_CONFIG, dtype=self.dtype)
+        attn = ttnn.add(attn, relative_position_bias, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         # Apply mask if provided
         if mask is not None:
@@ -103,7 +99,6 @@ class TTWindowAttention(nn.Module):
                 math_fidelity=ttnn.MathFidelity.LoFi,
             ),
             memory_config=ttnn.L1_MEMORY_CONFIG,
-            dtype=self.dtype,
         )
 
         # Clean up attention and value tensors
@@ -125,7 +120,6 @@ class TTWindowAttention(nn.Module):
             ),
             memory_config=ttnn.L1_MEMORY_CONFIG,
             core_grid=ttnn.CoreGrid(x=8, y=8),
-            dtype=self.dtype,
         )
 
         return output_tensor

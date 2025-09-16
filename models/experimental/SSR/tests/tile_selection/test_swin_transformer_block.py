@@ -112,7 +112,6 @@ def test_swin_transformer_block(device, batch_size, height, width, dim, num_head
         window_size=window_size,
         shift_size=shift_size,
         mlp_ratio=mlp_ratio,
-        dtype=input_dtype,
     )
 
     # Convert input to TTNN tensor

@@ -43,7 +43,6 @@ class TTBasicLayer(LightweightModule):
                 window_size=window_size,
                 shift_size=shift_size,
                 mlp_ratio=mlp_ratio,
-                dtype=self.dtype,
             )
             self.blocks.append(block)
 

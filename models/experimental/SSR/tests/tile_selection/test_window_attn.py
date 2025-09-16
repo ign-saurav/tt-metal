@@ -106,7 +106,6 @@ def test_window_attn(device, input_shape, window_size, num_heads, input_resoluti
         dim=dim,
         window_size=window_size,
         num_heads=num_heads,
-        dtype=input_dtype,
     )
     tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
     tt_input = ttnn.to_memory_config(tt_input, ttnn.L1_MEMORY_CONFIG)

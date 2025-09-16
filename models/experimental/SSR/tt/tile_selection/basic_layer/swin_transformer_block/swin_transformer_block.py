@@ -20,7 +20,6 @@ class TTSwinTransformerBlock(LightweightModule):
         window_size=7,
         shift_size=0,
         mlp_ratio=4.0,
-        dtype=ttnn.bfloat16,
     ):
         super().__init__()
         self.parameters = parameters
@@ -32,7 +31,6 @@ class TTSwinTransformerBlock(LightweightModule):
         self.shift_size = shift_size
         self.mlp_ratio = mlp_ratio
         self.memory_config = ttnn.L1_MEMORY_CONFIG
-        self.dtype = dtype
 
         if min(self.input_resolution) <= self.window_size:
             self.shift_size = 0
@@ -46,7 +44,6 @@ class TTSwinTransformerBlock(LightweightModule):
             dim,
             window_size,
             num_heads,
-            dtype=self.dtype,
         )
 
         # Initialize MLP
@@ -57,7 +54,6 @@ class TTSwinTransformerBlock(LightweightModule):
             hidden_features=mlp_hidden_dim,
             out_features=dim,
             parameters=parameters["mlp"],
-            dtype=self.dtype,
         )
 
     def _compute_attention_mask(self):
@@ -160,7 +156,7 @@ class TTSwinTransformerBlock(LightweightModule):
         x = ttnn.layer_norm(input_tensor, weight=norm1_weight, bias=norm1_bias, memory_config=self.memory_config)
 
         # Reshape to spatial format
-        x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=self.memory_config, dtype=self.dtype)
+        x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=self.memory_config)
         x = ttnn.reshape(x, (B, H, W, C))
 
         # Cyclic shift
@@ -171,7 +167,7 @@ class TTSwinTransformerBlock(LightweightModule):
         # Partition windows
         x, pad_hw = self._window_partition_padding(x, self.window_size)
         x = ttnn.reshape(x, (-1, self.window_size * self.window_size, C), memory_config=self.memory_config)
-        x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT, memory_config=self.memory_config, dtype=self.dtype)
+        x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT, memory_config=self.memory_config)
 
         # Pre-compute attention mask if needed
         if self.shift_size > 0:
@@ -186,7 +182,7 @@ class TTSwinTransformerBlock(LightweightModule):
             ttnn.deallocate(self.attn_mask)
 
         # Merge windows
-        x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=self.memory_config, dtype=self.dtype)
+        x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=self.memory_config)
         x = ttnn.reshape(x, (-1, self.window_size, self.window_size, C), memory_config=self.memory_config)
         x = self._window_unpartition(x, self.window_size, pad_hw, (H, W))
 
@@ -196,10 +192,10 @@ class TTSwinTransformerBlock(LightweightModule):
 
         # Reshape back to sequence format
         x = ttnn.reshape(x, (B, H * W, C))
-        x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT, memory_config=self.memory_config, dtype=self.dtype)
+        x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT, memory_config=self.memory_config)
 
         # First residual connection (no drop_path implementation in TTNN)
-        x = ttnn.add(shortcut, x, memory_config=self.memory_config, dtype=self.dtype)
+        x = ttnn.add(shortcut, x, memory_config=self.memory_config)
 
         residual = ttnn.reallocate(x, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
@@ -212,6 +208,6 @@ class TTSwinTransformerBlock(LightweightModule):
         x = self.mlp(x)
 
         # Second residual connection
-        x = ttnn.add(residual, x, memory_config=self.memory_config, dtype=self.dtype)
+        x = ttnn.add(residual, x, memory_config=self.memory_config)
 
         return x
