@@ -58,7 +58,7 @@ def create_mask_token_inference_preprocessor(device, weight_dtype=ttnn.bfloat16)
     (((3, 17, 3072), 3072, 1),),
 )
 @pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
-@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
+@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
 def test_mask_token_inference(device, input_shape, dim, num_heads, input_dtype, weight_dtype):
     # Create test input [B, N, C]
     input_tensor = torch.randn(input_shape)
