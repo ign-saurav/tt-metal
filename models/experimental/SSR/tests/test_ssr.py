@@ -172,8 +172,10 @@ def test_ssr_model(input_shape, num_cls, with_conv, input_dtype, weight_dtype):
         tt_torch_patch_fea3 = tt2torch_tensor(tt_patch_fea3)
         tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
 
-        tt_torch_sr = window_reverse(tt_torch_sr.permute(0, 2, 3, 1), window_size=H, H=H * 4, W=W * 4)
-        tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
+        if not with_conv:
+            _, _, H, W = x.shape
+            tt_torch_sr = window_reverse(tt_torch_sr.permute(0, 2, 3, 1), window_size=H, H=H * 4, W=W * 4)
+            tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
 
         # Compare outputs
         sr_pass, sr_pcc_message = check_with_pcc(ref_sr, tt_torch_sr, 0.90)

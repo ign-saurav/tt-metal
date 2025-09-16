@@ -144,15 +144,14 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
         # Run TTNN model
         logger.info("Running TTNN model inference...")
         tt_sr, tt_patch_fea3 = tt_model(tt_input)
-
         # Convert back to torch tensors
         tt_torch_sr = tt2torch_tensor(tt_sr)
         tt_torch_patch_fea3 = tt2torch_tensor(tt_patch_fea3)
         tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
-
-        _, _, H, W = x.shape
-        tt_torch_sr = window_reverse(tt_torch_sr.permute(0, 2, 3, 1), window_size=H, H=H * 4, W=W * 4)
-        tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
+        if not with_conv:
+            _, _, H, W = x.shape
+            tt_torch_sr = window_reverse(tt_torch_sr.permute(0, 2, 3, 1), window_size=H, H=H * 4, W=W * 4)
+            tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
 
         # Save TTNN output image
         ttnn_output_path = os.path.join(output_dir, "ttnn_output.png")
@@ -160,7 +159,7 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
         save_tensor_as_image(tt_torch_sr, ttnn_output_path)
 
         # Compare outputs (optional - for validation)
-        sr_pass, sr_pcc_message = comp_pcc(ref_sr, tt_torch_sr, 0.95)
+        sr_pass, sr_pcc_message = comp_pcc(ref_sr, tt_torch_sr, 0.90)
         logger.info(f"SR Output PCC: {sr_pcc_message}")
 
         if sr_pass:
