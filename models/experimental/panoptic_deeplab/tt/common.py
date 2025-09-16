@@ -15,7 +15,6 @@ from loguru import logger
 import ttnn
 from models.experimental.panoptic_deeplab.reference.resnet52_backbone import ResNet52BackBone as TorchBackbone
 from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
-from torchvision.models.resnet import Bottleneck
 from models.experimental.panoptic_deeplab.reference.aspp import ASPPModel
 from models.experimental.panoptic_deeplab.reference.decoder import DecoderModel
 from models.experimental.panoptic_deeplab.reference.res_block import ResModel
@@ -23,11 +22,53 @@ from models.experimental.panoptic_deeplab.reference.head import HeadModel
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
 from tests.ttnn.ttnn_utility_fuction import get_shard_grid_from_num_cores
 from ttnn.model_preprocessing import infer_ttnn_module_args
+from models.experimental.panoptic_deeplab.reference.resnet52_bottleneck import Bottleneck
 
 
 # ---------------------------
 # Key mapping & model loading
 # ---------------------------
+
+key_mappings = {
+    # SEMANTIC HEAD MAPPINGS
+    "sem_seg_head.": "semantic_decoder.",
+    ".predictor.": ".head_1.conv3.",
+    ".head.pointwise.": ".head_1.conv2.",
+    ".head.depthwise.": ".head_1.conv1.",
+    # INSTANCE HEAD MAPPINGS
+    "ins_embed_head.": "instance_decoder.",
+    ".center_head.0.": ".head_2.conv1.",
+    ".center_head.1.": ".head_2.conv2.",
+    ".center_predictor.": ".head_2.conv3.",
+    ".offset_head.depthwise.": ".head_1.conv1.",
+    ".offset_head.pointwise.": ".head_1.conv2.",
+    ".offset_predictor.": ".head_1.conv3.",
+    # ASPP mappings (res5 -> aspp)
+    "decoder.res5.project_conv": "aspp",
+    ".aspp.convs.3.depthwise.": ".aspp.ASPP_3_Depthwise.",
+    ".aspp.convs.0.": ".aspp.ASPP_0_Conv.",
+    ".aspp.convs.1.depthwise.": ".aspp.ASPP_1_Depthwise.",
+    ".aspp.convs.1.pointwise.": ".aspp.ASPP_1_pointwise.",
+    ".aspp.convs.2.depthwise.": ".aspp.ASPP_2_Depthwise.",
+    ".aspp.convs.2.pointwise.": ".aspp.ASPP_2_pointwise.",
+    ".aspp.convs.3.pointwise.": ".aspp.ASPP_3_pointwise.",
+    ".aspp.convs.4.1.": ".aspp.ASPP_4_Conv_1.",
+    ".aspp.project.": ".aspp.ASPP_project.",
+    # Decoder res3 mappings
+    ".decoder.res3.project_conv.": ".res3.conv1.",
+    ".decoder.res3.fuse_conv.depthwise.": ".res3.conv2.",
+    ".decoder.res3.fuse_conv.pointwise.": ".res3.conv3.",
+    # Decoder res2 mappings
+    ".decoder.res2.project_conv.": ".res2.conv1.",
+    ".decoder.res2.fuse_conv.depthwise.": ".res2.conv2.",
+    ".decoder.res2.fuse_conv.pointwise.": ".res2.conv3.",
+}
+
+
+def map_single_key(checkpoint_key):
+    for key, value in key_mappings.items():
+        checkpoint_key = checkpoint_key.replace(key, value)
+    return checkpoint_key
 
 
 def map_single_key(checkpoint_key):
@@ -598,3 +639,38 @@ class TTUpsample:
             )
 
         return output_tensor
+
+
+# ---------------------------
+# Torch utility modules
+# ---------------------------
+
+class Conv2d(torch.nn.Conv2d):
+    """
+    A wrapper around :class:`torch.nn.Conv2d` to support empty inputs and more features.
+    """
+
+    def __init__(self, *args, **kwargs):
+        """
+        Extra keyword arguments supported in addition to those in `torch.nn.Conv2d`:
+
+        Args:
+            norm (nn.Module, optional): a normalization layer
+            activation (callable(Tensor) -> Tensor): a callable activation function
+
+        It assumes that norm layer is used before activation.
+        """
+        norm = kwargs.pop("norm", None)
+        activation = kwargs.pop("activation", None)
+        super().__init__(*args, **kwargs)
+
+        self.norm = norm
+        self.activation = activation
+
+    def forward(self, x):
+        x = torch.nn.functional.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
+        if self.norm is not None:
+            x = self.norm(x)
+        if self.activation is not None:
+            x = self.activation(x)
+        return x

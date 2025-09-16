@@ -4,6 +4,7 @@
 import torch.nn as nn
 import torch
 from torch import Tensor
+from models.experimental.panoptic_deeplab.tt.common import Conv2d
 
 
 class HeadModel(torch.nn.Module):
@@ -21,27 +22,41 @@ class HeadModel(torch.nn.Module):
         super().__init__()
 
         if out_channels == 1:  # instance center head
-            self.conv1 = nn.Sequential(
-                nn.Conv2d(in_channels, in_channels, 3, 1, 1, 1, bias=False), nn.BatchNorm2d(in_channels), nn.ReLU()
+            self.conv1 = Conv2d(
+                in_channels, in_channels, kernel_size=3, stride=1, padding=1, bias=False, norm=nn.BatchNorm2d(in_channels), activation=nn.ReLU()
             )
-
-            self.conv2 = nn.Sequential(
-                nn.Conv2d(in_channels, intermediate_channels, 3, 1, 1, 1, bias=False),
-                nn.BatchNorm2d(intermediate_channels),
-                nn.ReLU(),
+            self.conv2 = Conv2d(
+                in_channels,
+                intermediate_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                bias=False,
+                norm=nn.BatchNorm2d(intermediate_channels),
+                activation=nn.ReLU(),
             )
         else:  # instance offset head and semantics head
-            self.conv1 = nn.Sequential(
-                nn.Conv2d(in_channels, in_channels, 5, 1, 2, 1, in_channels, bias=False),
-                nn.BatchNorm2d(in_channels),
-                nn.ReLU(),
+            self.conv1 = Conv2d(
+                in_channels,
+                in_channels,
+                kernel_size=5,
+                stride=1,
+                padding=2,
+                groups=in_channels,
+                bias=False,
+                norm=nn.BatchNorm2d(in_channels),
+                activation=nn.ReLU(),
             )
-            self.conv2 = nn.Sequential(
-                nn.Conv2d(in_channels, intermediate_channels, 1, 1, bias=False),
-                nn.BatchNorm2d(intermediate_channels),
-                nn.ReLU(),
+            self.conv2 = Conv2d(
+                in_channels,
+                intermediate_channels,
+                kernel_size=1,
+                stride=1,
+                bias=False,
+                norm=nn.BatchNorm2d(intermediate_channels),
+                activation=nn.ReLU(),
             )
-        self.conv3 = nn.Sequential(nn.Conv2d(intermediate_channels, out_channels, 1, 1))
+        self.conv3 = Conv2d(intermediate_channels, out_channels, kernel_size=1, stride=1)
 
     def forward(self, x: Tensor) -> Tensor:
         """

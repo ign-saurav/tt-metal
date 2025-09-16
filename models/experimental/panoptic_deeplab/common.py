@@ -1,0 +1,296 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+
+# SPDX-License-Identifier: Apache-2.0
+
+import torch
+from loguru import logger
+
+import pickle
+import numpy as np
+import os
+from PIL import Image
+from typing import Tuple
+import torchvision.transforms as transforms
+from typing import Optional, Any
+import ttnn
+from models.experimental.panoptic_deeplab.reference.resnet52_backbone import ResNet52BackBone as TorchBackbone
+from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
+from models.experimental.panoptic_deeplab.reference.aspp import ASPPModel
+from models.experimental.panoptic_deeplab.reference.decoder import DecoderModel
+from models.experimental.panoptic_deeplab.reference.res_block import ResModel
+from models.experimental.panoptic_deeplab.reference.head import HeadModel
+from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
+from models.experimental.panoptic_deeplab.reference.resnet52_bottleneck import Bottleneck
+
+
+key_mappings = {
+    # SEMANTIC HEAD MAPPINGS
+    "sem_seg_head.": "semantic_decoder.",
+    ".predictor.": ".head_1.conv3.",
+    ".head.pointwise.": ".head_1.conv2.",
+    ".head.depthwise.": ".head_1.conv1.",
+    # INSTANCE HEAD MAPPINGS
+    "ins_embed_head.": "instance_decoder.",
+    ".center_head.0.": ".head_2.conv1.",
+    ".center_head.1.": ".head_2.conv2.",
+    ".center_predictor.": ".head_2.conv3.",
+    ".offset_head.depthwise.": ".head_1.conv1.",
+    ".offset_head.pointwise.": ".head_1.conv2.",
+    ".offset_predictor.": ".head_1.conv3.",
+    # ASPP mappings (res5 -> aspp)
+    "decoder.res5.project_conv": "aspp",
+    ".aspp.convs.3.depthwise.": ".aspp.ASPP_3_Depthwise.",
+    ".aspp.convs.0.": ".aspp.ASPP_0_Conv.",
+    ".aspp.convs.1.depthwise.": ".aspp.ASPP_1_Depthwise.",
+    ".aspp.convs.1.pointwise.": ".aspp.ASPP_1_pointwise.",
+    ".aspp.convs.2.depthwise.": ".aspp.ASPP_2_Depthwise.",
+    ".aspp.convs.2.pointwise.": ".aspp.ASPP_2_pointwise.",
+    ".aspp.convs.3.pointwise.": ".aspp.ASPP_3_pointwise.",
+    ".aspp.convs.4.1.": ".aspp.ASPP_4_Conv_1.",
+    ".aspp.project.": ".aspp.ASPP_project.",
+    # Decoder res3 mappings
+    ".decoder.res3.project_conv.": ".res3.conv1.",
+    ".decoder.res3.fuse_conv.depthwise.": ".res3.conv2.",
+    ".decoder.res3.fuse_conv.pointwise.": ".res3.conv3.",
+    # Decoder res2 mappings
+    ".decoder.res2.project_conv.": ".res2.conv1.",
+    ".decoder.res2.fuse_conv.depthwise.": ".res2.conv2.",
+    ".decoder.res2.fuse_conv.pointwise.": ".res2.conv3.",
+}
+
+
+def map_single_key(checkpoint_key):
+    for key, value in key_mappings.items():
+        checkpoint_key = checkpoint_key.replace(key, value)
+    return checkpoint_key
+
+
+def load_partial_state(torch_model: torch.nn.Module, state_dict, layer_name: str = ""):
+    partial_state_dict = {}
+    layer_prefix = layer_name + "."
+    for k, v in state_dict.items():
+        if k.startswith(layer_prefix):
+            partial_state_dict[k[len(layer_prefix) :]] = v
+    torch_model.load_state_dict(partial_state_dict, strict=True)
+    logger.info(f"Successfully loaded all mapped weights with strict=True")
+    return torch_model
+
+
+def load_torch_model_state(torch_model: torch.nn.Module = None, layer_name: str = "", model_location_generator=None):
+    if model_location_generator == None or "TT_GH_CI_INFRA" not in os.environ:
+        model_path = "models"
+    else:
+        model_path = model_location_generator("vision-models/panoptic_deeplab", model_subdir="", download_if_ci_v2=True)
+    if model_path == "models":
+        if not os.path.exists(
+            "models/experimental/panoptic_deeplab/resources/Panoptic_Deeplab_R52.pkl"
+        ):  # check if Panoptic_Deeplab_R52.pkl is available
+            os.system(
+                "models/experimental/panoptic_deeplab/resources/panoptic_deeplab_weights_download.sh"
+            )  # execute the panoptic_deeplab_weights_download.sh file
+        weights_path = "models/experimental/panoptic_deeplab/resources/Panoptic_Deeplab_R52.pkl"
+    else:
+        weights_path = os.path.join(model_path, "Panoptic_Deeplab_R52.pkl")
+
+    # Load checkpoint
+    with open(weights_path, "rb") as f:
+        checkpoint = pickle.load(f, encoding="latin1")
+    state_dict = checkpoint["model"]
+
+    converted_count = 0
+    for k, v in state_dict.items():
+        if isinstance(v, np.ndarray) or isinstance(v, np.array):
+            state_dict[k] = torch.from_numpy(v)
+            converted_count += 1
+
+    # Get keys
+    checkpoint_keys = set(state_dict.keys())
+
+    # Get key mappings
+    logger.info("Mapping keys...")
+    key_mapping = {}
+    for checkpoint_key in checkpoint_keys:  # pickle key
+        mapped_key = map_single_key(checkpoint_key)
+        key_mapping[checkpoint_key] = mapped_key
+
+    # Apply mappings
+    mapped_state_dict = {}
+    for checkpoint_key, model_key in key_mapping.items():
+        mapped_state_dict[model_key] = state_dict[checkpoint_key]
+    del mapped_state_dict["pixel_mean"]
+    del mapped_state_dict["pixel_std"]
+    logger.debug(f"Mapped {len(mapped_state_dict)} weights")
+
+    if isinstance(
+        torch_model,
+        (
+            DeepLabStem,
+            Bottleneck,
+            TorchBackbone,
+            ASPPModel,
+            ResModel,
+            HeadModel,
+            DecoderModel,
+        ),
+    ):
+        torch_model = load_partial_state(torch_model, mapped_state_dict, layer_name)
+    elif isinstance(torch_model, TorchPanopticDeepLab):
+        torch_model.load_state_dict(mapped_state_dict, strict=True)
+    else:
+        raise NotImplementedError("Unknown torch model. Weight loading not implemented")
+
+    return torch_model.eval()
+
+
+def parameter_conv_args(torch_model: torch.nn.Module = None, parameters: dict = None):
+    from ttnn.model_preprocessing import infer_ttnn_module_args
+
+    if isinstance(torch_model, TorchPanopticDeepLab):
+        parameters.conv_args = {}
+        sample_x = torch.randn(1, 2048, 32, 64)
+        sample_res3 = torch.randn(1, 512, 64, 128)
+        sample_res2 = torch.randn(1, 256, 128, 256)
+
+        # For semantic decoder
+        if hasattr(parameters, "semantic_decoder"):
+            # ASPP
+            aspp_args = infer_ttnn_module_args(
+                model=torch_model.semantic_decoder.aspp, run_model=lambda model: model(sample_x), device=None
+            )
+            if hasattr(parameters.semantic_decoder, "aspp"):
+                parameters.semantic_decoder.aspp.conv_args = aspp_args
+
+            # Res3
+            aspp_out = torch_model.semantic_decoder.aspp(sample_x)
+            res3_args = infer_ttnn_module_args(
+                model=torch_model.semantic_decoder.res3,
+                run_model=lambda model: model(aspp_out, sample_res3),
+                device=None,
+            )
+            if hasattr(parameters.semantic_decoder, "res3"):
+                parameters.semantic_decoder.res3.conv_args = res3_args
+
+            # Res2
+            res3_out = torch_model.semantic_decoder.res3(aspp_out, sample_res3)
+            res2_args = infer_ttnn_module_args(
+                model=torch_model.semantic_decoder.res2,
+                run_model=lambda model: model(res3_out, sample_res2),
+                device=None,
+            )
+            if hasattr(parameters.semantic_decoder, "res2"):
+                parameters.semantic_decoder.res2.conv_args = res2_args
+
+            # Head
+            res2_out = torch_model.semantic_decoder.res2(res3_out, sample_res2)
+            head_args = infer_ttnn_module_args(
+                model=torch_model.semantic_decoder.head_1, run_model=lambda model: model(res2_out), device=None
+            )
+            if hasattr(parameters.semantic_decoder, "head_1"):
+                parameters.semantic_decoder.head_1.conv_args = head_args
+
+        # For instance decoder
+        if hasattr(parameters, "instance_decoder"):
+            # ASPP
+            aspp_args = infer_ttnn_module_args(
+                model=torch_model.instance_decoder.aspp, run_model=lambda model: model(sample_x), device=None
+            )
+            if hasattr(parameters.instance_decoder, "aspp"):
+                parameters.instance_decoder.aspp.conv_args = aspp_args
+
+            # Res3
+            aspp_out = torch_model.instance_decoder.aspp(sample_x)
+            res3_args = infer_ttnn_module_args(
+                model=torch_model.instance_decoder.res3,
+                run_model=lambda model: model(aspp_out, sample_res3),
+                device=None,
+            )
+            if hasattr(parameters.instance_decoder, "res3"):
+                parameters.instance_decoder.res3.conv_args = res3_args
+
+            # Res2
+            res3_out = torch_model.instance_decoder.res3(aspp_out, sample_res3)
+            res2_args = infer_ttnn_module_args(
+                model=torch_model.instance_decoder.res2,
+                run_model=lambda model: model(res3_out, sample_res2),
+                device=None,
+            )
+            if hasattr(parameters.instance_decoder, "res2"):
+                parameters.instance_decoder.res2.conv_args = res2_args
+
+            # Head
+            res2_out = torch_model.instance_decoder.res2(res3_out, sample_res2)
+            head_args_1 = infer_ttnn_module_args(
+                model=torch_model.instance_decoder.head_1, run_model=lambda model: model(res2_out), device=None
+            )
+            head_args_2 = infer_ttnn_module_args(
+                model=torch_model.instance_decoder.head_2, run_model=lambda model: model(res2_out), device=None
+            )
+            if hasattr(parameters.instance_decoder, "head_1"):
+                parameters.instance_decoder.head_1.conv_args = head_args_1
+            if hasattr(parameters.instance_decoder, "head_2"):
+                parameters.instance_decoder.head_2.conv_args = head_args_2
+    else:
+        raise NotImplementedError("Unknown torch model. Parameter conv args not implemented")
+    return parameters
+
+
+def preprocess_image(
+    image_path: str, input_width: int, input_height: int, ttnn_device: ttnn.Device, inputs_mesh_mapper: Optional[Any]
+) -> Tuple[torch.Tensor, ttnn.Tensor, np.ndarray, Tuple[int, int]]:
+    """Preprocess image for both PyTorch and TTNN"""
+    # Load image
+    image = Image.open(image_path).convert("RGB")
+    original_size = image.size  # (width, height)
+    original_array = np.array(image)
+    preprocess = transforms.Compose(
+        [transforms.ToTensor(), transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])]
+    )
+
+    # Resize to model input size
+    target_size = (input_width, input_height)  # PIL expects (width, height)
+    image_resized = image.resize(target_size)
+
+    # PyTorch preprocessing
+    torch_tensor = preprocess(image_resized).unsqueeze(0)  # Add batch dimension
+    torch_tensor = torch_tensor.to(torch.float)
+
+    # TTNN preprocessing
+    ttnn_tensor = None
+    ttnn_tensor = ttnn.from_torch(
+        torch_tensor.permute(0, 2, 3, 1),  # BCHW -> BHWC
+        dtype=ttnn.bfloat16,
+        device=ttnn_device,
+        mesh_mapper=inputs_mesh_mapper,
+    )
+
+    if ttnn_tensor is not None:
+        ttnn_as_torch = ttnn.to_torch(ttnn_tensor)
+
+    return torch_tensor, ttnn_tensor, original_array, original_size
+
+
+def save_preprocessed_inputs(torch_input: torch.Tensor, save_dir: str, filename: str):
+    """Save preprocessed inputs for testing purposes"""
+
+    # Create directory for test inputs
+    test_inputs_dir = os.path.join(save_dir, "test_inputs")
+    os.makedirs(test_inputs_dir, exist_ok=True)
+
+    # Save torch input tensor
+    torch_input_path = os.path.join(test_inputs_dir, f"{filename}_torch_input.pt")
+    torch.save(
+        {
+            "tensor": torch_input,
+            "shape": torch_input.shape,
+            "dtype": torch_input.dtype,
+            "mean": torch_input.mean().item(),
+            "std": torch_input.std().item(),
+            "min": torch_input.min().item(),
+            "max": torch_input.max().item(),
+        },
+        torch_input_path,
+    )
+
+    logger.info(f"Saved preprocessed torch input to: {torch_input_path}")
+
+    return torch_input_path

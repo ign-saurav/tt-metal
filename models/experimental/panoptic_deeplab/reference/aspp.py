@@ -4,6 +4,7 @@
 import torch.nn as nn
 import torch
 from torch import Tensor
+from models.experimental.panoptic_deeplab.tt.common import Conv2d
 
 
 class ASPPModel(torch.nn.Module):
@@ -14,28 +15,26 @@ class ASPPModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.ASPP_0_Conv = nn.Sequential(nn.Conv2d(2048, 256, 1, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU())
-        self.ASPP_1_Depthwise = nn.Sequential(
-            nn.Conv2d(2048, 2048, 3, 1, 6, 6, 2048, bias=False), nn.BatchNorm2d(2048), nn.ReLU()
+        self.ASPP_0_Conv = Conv2d(2048, 256, 1, 1, bias=False, norm=nn.BatchNorm2d(256), activation=nn.ReLU())
+        self.ASPP_1_Depthwise = Conv2d(
+            2048, 2048, 3, 1, 6, 6, 2048, bias=False, norm=nn.BatchNorm2d(2048), activation=nn.ReLU()
         )
-        self.ASPP_1_pointwise = nn.Sequential(nn.Conv2d(2048, 256, 1, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU())
+        self.ASPP_1_pointwise = Conv2d(2048, 256, 1, 1, bias=False, norm=nn.BatchNorm2d(256), activation=nn.ReLU())
 
-        self.ASPP_2_Depthwise = nn.Sequential(
-            nn.Conv2d(2048, 2048, 3, 1, 12, 12, 2048, bias=False), nn.BatchNorm2d(2048), nn.ReLU()
+        self.ASPP_2_Depthwise = Conv2d(
+            2048, 2048, 3, 1, 12, 12, 2048, bias=False, norm=nn.BatchNorm2d(2048), activation=nn.ReLU()
         )
-        self.ASPP_2_pointwise = nn.Sequential(nn.Conv2d(2048, 256, 1, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU())
+        self.ASPP_2_pointwise = Conv2d(2048, 256, 1, 1, bias=False, norm=nn.BatchNorm2d(256), activation=nn.ReLU())
 
-        self.ASPP_3_Depthwise = nn.Sequential(
-            nn.Conv2d(2048, 2048, 3, 1, 18, 18, 2048, bias=False), nn.BatchNorm2d(2048), nn.ReLU()
+        self.ASPP_3_Depthwise = Conv2d(
+            2048, 2048, 3, 1, 18, 18, 2048, bias=False, norm=nn.BatchNorm2d(2048), activation=nn.ReLU()
         )
-        self.ASPP_3_pointwise = nn.Sequential(nn.Conv2d(2048, 256, 1, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU())
+        self.ASPP_3_pointwise = Conv2d(2048, 256, 1, 1, bias=False, norm=nn.BatchNorm2d(256), activation=nn.ReLU())
 
         self.ASPP_4_avg_pool = torch.nn.AvgPool2d((32, 64), stride=1, count_include_pad=True)
-        self.ASPP_4_Conv_1 = nn.Sequential(
-            nn.Conv2d(2048, 256, 1, 1),
-            nn.ReLU(),
-        )
-        self.ASPP_project = nn.Sequential(nn.Conv2d(1280, 256, 1, 1, bias=False), nn.BatchNorm2d(256), nn.ReLU())
+        self.ASPP_4_Conv_1 = Conv2d(2048, 256, 1, 1, activation=nn.ReLU())
+
+        self.ASPP_project = Conv2d(1280, 256, 1, 1, bias=False, norm=nn.BatchNorm2d(256), activation=nn.ReLU())
 
     def forward(self, x: Tensor) -> Tensor:
         """
