@@ -8,10 +8,11 @@ import ttnn
 from ttnn.model_preprocessing import preprocess_model_parameters
 
 from tests.ttnn.utils_for_testing import check_with_pcc
-from torchvision.models.resnet import Bottleneck
 from models.experimental.panoptic_deeplab.tt.bottleneck import TTBottleneck, get_bottleneck_optimisation
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from models.experimental.panoptic_deeplab.common import load_torch_model_state
+from models.experimental.panoptic_deeplab.reference.resnet52_bottleneck import Bottleneck
+from models.experimental.panoptic_deeplab.reference.aspp import Conv2d
 
 
 class BottleneckTestInfra:
@@ -36,9 +37,13 @@ class BottleneckTestInfra:
         # Optional downsample layer
         downsample_conv = None
         if downsample:
-            downsample_conv = torch.nn.Sequential(
-                torch.nn.Conv2d(inplanes, planes * Bottleneck.expansion, kernel_size=1, stride=stride, bias=False),
-                torch.nn.BatchNorm2d(planes * Bottleneck.expansion),
+            downsample_conv = Conv2d(
+                inplanes,
+                planes * Bottleneck.expansion,
+                kernel_size=1,
+                stride=stride,
+                bias=False,
+                norm=torch.nn.BatchNorm2d(planes * Bottleneck.expansion),
             )
 
         # Torch model

@@ -153,11 +153,11 @@ class TTRes:
 
         # conv1
         self.conv1 = TTConv2D(
-            kernel_size=parameters.conv_args["conv1"]["0"].kernel_size,
-            stride=parameters.conv_args["conv1"]["0"].stride,
-            padding=parameters.conv_args["conv1"]["0"].padding,
-            dilation=parameters.conv_args["conv1"]["0"].dilation,
-            groups=parameters.conv_args["conv1"]["0"].groups,
+            kernel_size=parameters.conv_args["conv1"].kernel_size,
+            stride=parameters.conv_args["conv1"].stride,
+            padding=parameters.conv_args["conv1"].padding,
+            dilation=parameters.conv_args["conv1"].dilation,
+            groups=parameters.conv_args["conv1"].groups,
             parameters=parameters.conv1,
             kernel_fidelity=model_config,
             activation="relu",
@@ -165,10 +165,10 @@ class TTRes:
         )
         # conv2
         self.conv2 = TTConv2D(
-            kernel_size=parameters.conv_args["conv2"]["0"].kernel_size,
-            stride=parameters.conv_args["conv2"]["0"].stride,
-            padding=parameters.conv_args["conv2"]["0"].padding,
-            groups=parameters.conv_args["conv2"]["0"].groups,
+            kernel_size=parameters.conv_args["conv2"].kernel_size,
+            stride=parameters.conv_args["conv2"].stride,
+            padding=parameters.conv_args["conv2"].padding,
+            groups=parameters.conv_args["conv2"].groups,
             parameters=parameters.conv2,
             kernel_fidelity=model_config,
             activation="relu",
@@ -176,10 +176,10 @@ class TTRes:
         )
         # conv3
         self.conv3 = TTConv2D(
-            kernel_size=parameters.conv_args["conv3"]["0"].kernel_size,
-            stride=parameters.conv_args["conv3"]["0"].stride,
-            padding=parameters.conv_args["conv3"]["0"].padding,
-            groups=parameters.conv_args["conv3"]["0"].groups,
+            kernel_size=parameters.conv_args["conv3"].kernel_size,
+            stride=parameters.conv_args["conv3"].stride,
+            padding=parameters.conv_args["conv3"].padding,
+            groups=parameters.conv_args["conv3"].groups,
             parameters=parameters.conv3,
             kernel_fidelity=model_config,
             activation="relu",

@@ -15,166 +15,54 @@ from typing import Optional, Any
 import ttnn
 from models.experimental.panoptic_deeplab.reference.resnet52_backbone import ResNet52BackBone as TorchBackbone
 from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
-from torchvision.models.resnet import Bottleneck
 from models.experimental.panoptic_deeplab.reference.aspp import ASPPModel
 from models.experimental.panoptic_deeplab.reference.decoder import DecoderModel
 from models.experimental.panoptic_deeplab.reference.res_block import ResModel
 from models.experimental.panoptic_deeplab.reference.head import HeadModel
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
+from models.experimental.panoptic_deeplab.reference.resnet52_bottleneck import Bottleneck
+
+
+key_mappings = {
+    # SEMANTIC HEAD MAPPINGS
+    "sem_seg_head.": "semantic_decoder.",
+    ".predictor.": ".head_1.conv3.",
+    ".head.pointwise.": ".head_1.conv2.",
+    ".head.depthwise.": ".head_1.conv1.",
+    # INSTANCE HEAD MAPPINGS
+    "ins_embed_head.": "instance_decoder.",
+    ".center_head.0.": ".head_2.conv1.",
+    ".center_head.1.": ".head_2.conv2.",
+    ".center_predictor.": ".head_2.conv3.",
+    ".offset_head.depthwise.": ".head_1.conv1.",
+    ".offset_head.pointwise.": ".head_1.conv2.",
+    ".offset_predictor.": ".head_1.conv3.",
+    # ASPP mappings (res5 -> aspp)
+    "decoder.res5.project_conv": "aspp",
+    ".aspp.convs.3.depthwise.": ".aspp.ASPP_3_Depthwise.",
+    ".aspp.convs.0.": ".aspp.ASPP_0_Conv.",
+    ".aspp.convs.1.depthwise.": ".aspp.ASPP_1_Depthwise.",
+    ".aspp.convs.1.pointwise.": ".aspp.ASPP_1_pointwise.",
+    ".aspp.convs.2.depthwise.": ".aspp.ASPP_2_Depthwise.",
+    ".aspp.convs.2.pointwise.": ".aspp.ASPP_2_pointwise.",
+    ".aspp.convs.3.pointwise.": ".aspp.ASPP_3_pointwise.",
+    ".aspp.convs.4.1.": ".aspp.ASPP_4_Conv_1.",
+    ".aspp.project.": ".aspp.ASPP_project.",
+    # Decoder res3 mappings
+    ".decoder.res3.project_conv.": ".res3.conv1.",
+    ".decoder.res3.fuse_conv.depthwise.": ".res3.conv2.",
+    ".decoder.res3.fuse_conv.pointwise.": ".res3.conv3.",
+    # Decoder res2 mappings
+    ".decoder.res2.project_conv.": ".res2.conv1.",
+    ".decoder.res2.fuse_conv.depthwise.": ".res2.conv2.",
+    ".decoder.res2.fuse_conv.pointwise.": ".res2.conv3.",
+}
 
 
 def map_single_key(checkpoint_key):
-    """
-    Map checkpoint keys to model keys.
-    """
-
-    if not checkpoint_key:
-        return ""
-
-    key = checkpoint_key
-
-    # BACKBONE MAPPINGS
-    if key.startswith("backbone."):
-        # Batch norm mapping: conv1/2/3.norm -> bn1/2/3
-        key = key.replace("conv1.norm", "bn1")
-        key = key.replace("conv2.norm", "bn2")
-        key = key.replace("conv3.norm", "bn3")
-
-        # Downsample mapping: shortcut -> downsample
-        key = key.replace(".shortcut.norm.", ".downsample.1.")
-        # Handle shortcut.weight
-        if ".shortcut." in key and ".shortcut.norm." not in checkpoint_key:
-            key = key.replace(".shortcut.", ".downsample.0.")
-
-    # SEMANTIC HEAD MAPPINGS
-    elif key.startswith("sem_seg_head."):
-        # Replace base prefix
-        key = key.replace("sem_seg_head.", "semantic_decoder.")
-
-        # Head mappings
-        if ".predictor." in key:
-            key = key.replace(".predictor.", ".head_1.conv3.0.")
-        elif ".head.pointwise." in key:
-            if ".head.pointwise.norm." in key:
-                key = key.replace(".head.pointwise.norm.", ".head_1.conv2.1.")
-            else:
-                key = key.replace(".head.pointwise.", ".head_1.conv2.0.")
-        elif ".head.depthwise." in key:
-            if ".head.depthwise.norm." in key:
-                key = key.replace(".head.depthwise.norm.", ".head_1.conv1.1.")
-            else:
-                key = key.replace(".head.depthwise.", ".head_1.conv1.0.")
-
-    # INSTANCE HEAD MAPPINGS
-    elif key.startswith("ins_embed_head."):
-        # Replace base prefix
-        key = key.replace("ins_embed_head.", "instance_decoder.")
-
-        # Center head mappings
-        if ".center_head.0.norm." in key:
-            key = key.replace(".center_head.0.norm.", ".head_2.conv1.1.")
-        elif ".center_head.0." in key:
-            key = key.replace(".center_head.0.", ".head_2.conv1.0.")
-        elif ".center_head.1.norm." in key:
-            key = key.replace(".center_head.1.norm.", ".head_2.conv2.1.")
-        elif ".center_head.1." in key:
-            key = key.replace(".center_head.1.", ".head_2.conv2.0.")
-        elif ".center_predictor." in key:
-            key = key.replace(".center_predictor.", ".head_2.conv3.0.")
-
-        # Offset head mappings
-        elif ".offset_head.depthwise.norm." in key:
-            key = key.replace(".offset_head.depthwise.norm.", ".head_1.conv1.1.")
-        elif ".offset_head.depthwise." in key:
-            key = key.replace(".offset_head.depthwise.", ".head_1.conv1.0.")
-        elif ".offset_head.pointwise.norm." in key:
-            key = key.replace(".offset_head.pointwise.norm.", ".head_1.conv2.1.")
-        elif ".offset_head.pointwise." in key:
-            key = key.replace(".offset_head.pointwise.", ".head_1.conv2.0.")
-        elif ".offset_predictor." in key:
-            key = key.replace(".offset_predictor.", ".head_1.conv3.0.")
-
-    # ASPP mappings (res5 -> aspp)
-    if ".decoder.res5.project_conv." in key:
-        # Special case for ASPP_3_Depthwise
-        if ".convs.3.depthwise.norm." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.3.depthwise.norm.", ".aspp.ASPP_3_Depthwise.1.")
-        elif ".convs.3.depthwise." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.3.depthwise.", ".aspp.ASPP_3_Depthwise.0.")
-
-        # ASPP_0_Conv
-        elif ".convs.0.norm." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.0.norm.", ".aspp.ASPP_0_Conv.1.")
-        elif ".convs.0." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.0.", ".aspp.ASPP_0_Conv.0.")
-
-        # ASPP_1 Depthwise and Pointwise
-        elif ".convs.1.depthwise.norm." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.1.depthwise.norm.", ".aspp.ASPP_1_Depthwise.1.")
-        elif ".convs.1.depthwise." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.1.depthwise.", ".aspp.ASPP_1_Depthwise.0.")
-        elif ".convs.1.pointwise.norm." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.1.pointwise.norm.", ".aspp.ASPP_1_pointwise.1.")
-        elif ".convs.1.pointwise." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.1.pointwise.", ".aspp.ASPP_1_pointwise.0.")
-
-        # ASPP_2 Depthwise and Pointwise
-        elif ".convs.2.depthwise.norm." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.2.depthwise.norm.", ".aspp.ASPP_2_Depthwise.1.")
-        elif ".convs.2.depthwise." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.2.depthwise.", ".aspp.ASPP_2_Depthwise.0.")
-        elif ".convs.2.pointwise.norm." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.2.pointwise.norm.", ".aspp.ASPP_2_pointwise.1.")
-        elif ".convs.2.pointwise." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.2.pointwise.", ".aspp.ASPP_2_pointwise.0.")
-
-        # ASPP_3 Pointwise
-        elif ".convs.3.pointwise.norm." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.3.pointwise.norm.", ".aspp.ASPP_3_pointwise.1.")
-        elif ".convs.3.pointwise." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.3.pointwise.", ".aspp.ASPP_3_pointwise.0.")
-
-        # ASPP_4_Conv
-        elif ".convs.4." in key:
-            key = key.replace(".decoder.res5.project_conv.convs.4.1.", ".aspp.ASPP_4_Conv_1.0.")
-
-        # ASPP project
-        elif ".project.norm." in key:
-            key = key.replace(".decoder.res5.project_conv.project.norm.", ".aspp.ASPP_project.1.")
-        elif ".project." in key:
-            key = key.replace(".decoder.res5.project_conv.project.", ".aspp.ASPP_project.0.")
-
-    # Decoder res3 mappings
-    elif ".decoder.res3." in key:
-        if ".project_conv.norm." in key:
-            key = key.replace(".decoder.res3.project_conv.norm.", ".res3.conv1.1.")
-        elif ".project_conv." in key:
-            key = key.replace(".decoder.res3.project_conv.", ".res3.conv1.0.")
-        elif ".fuse_conv.depthwise.norm." in key:
-            key = key.replace(".decoder.res3.fuse_conv.depthwise.norm.", ".res3.conv2.1.")
-        elif ".fuse_conv.depthwise." in key:
-            key = key.replace(".decoder.res3.fuse_conv.depthwise.", ".res3.conv2.0.")
-        elif ".fuse_conv.pointwise.norm." in key:
-            key = key.replace(".decoder.res3.fuse_conv.pointwise.norm.", ".res3.conv3.1.")
-        elif ".fuse_conv.pointwise." in key:
-            key = key.replace(".decoder.res3.fuse_conv.pointwise.", ".res3.conv3.0.")
-
-    # Decoder res2 mappings
-    elif ".decoder.res2." in key:
-        if ".project_conv.norm." in key:
-            key = key.replace(".decoder.res2.project_conv.norm.", ".res2.conv1.1.")
-        elif ".project_conv." in key:
-            key = key.replace(".decoder.res2.project_conv.", ".res2.conv1.0.")
-        elif ".fuse_conv.depthwise.norm." in key:
-            key = key.replace(".decoder.res2.fuse_conv.depthwise.norm.", ".res2.conv2.1.")
-        elif ".fuse_conv.depthwise." in key:
-            key = key.replace(".decoder.res2.fuse_conv.depthwise.", ".res2.conv2.0.")
-        elif ".fuse_conv.pointwise.norm." in key:
-            key = key.replace(".decoder.res2.fuse_conv.pointwise.norm.", ".res2.conv3.1.")
-        elif ".fuse_conv.pointwise." in key:
-            key = key.replace(".decoder.res2.fuse_conv.pointwise.", ".res2.conv3.0.")
-
-    return key
+    for key, value in key_mappings.items():
+        checkpoint_key = checkpoint_key.replace(key, value)
+    return checkpoint_key
 
 
 def load_partial_state(torch_model: torch.nn.Module, state_dict, layer_name: str = ""):

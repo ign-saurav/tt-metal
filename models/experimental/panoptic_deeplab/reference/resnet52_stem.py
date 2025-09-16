@@ -3,6 +3,7 @@
 
 from torch import nn
 from torch import Tensor
+from models.experimental.panoptic_deeplab.reference.aspp import Conv2d
 
 
 class CNNBlockBase(nn.Module):
@@ -72,45 +73,41 @@ class DeepLabStem(CNNBlockBase):
         """
         super().__init__(in_channels, out_channels, 1)
         self.in_channels = in_channels
-        self.conv1 = nn.Conv2d(
+        self.conv1 = Conv2d(
             in_channels,
             out_channels // 2,
             kernel_size=3,
             stride=2,
             padding=1,
             bias=False,
+            norm=nn.BatchNorm2d(out_channels // 2),
+            activation=nn.ReLU(inplace=True),
         )
-        self.bn1 = nn.BatchNorm2d(out_channels // 2)
-        self.conv2 = nn.Conv2d(
+        self.conv2 = Conv2d(
             out_channels // 2,
             out_channels // 2,
             kernel_size=3,
             stride=stride,
             padding=1,
             bias=False,
+            norm=nn.BatchNorm2d(out_channels // 2),
+            activation=nn.ReLU(inplace=True),
         )
-        self.bn2 = nn.BatchNorm2d(out_channels // 2)
-        self.conv3 = nn.Conv2d(
+        self.conv3 = Conv2d(
             out_channels // 2,
             out_channels,
             kernel_size=3,
             stride=stride,
             padding=1,
             bias=False,
+            norm=nn.BatchNorm2d(out_channels),
+            activation=nn.ReLU(inplace=True),
         )
-        self.bn3 = nn.BatchNorm2d(out_channels)
-        self.relu = nn.ReLU(inplace=True)
         self.maxpool = nn.MaxPool2d(kernel_size=3, stride=2, padding=1)
 
     def forward(self, x: Tensor) -> Tensor:
         x = self.conv1(x)
-        x = self.bn1(x)
-        x = self.relu(x)
         x = self.conv2(x)
-        x = self.bn2(x)
-        x = self.relu(x)
         x = self.conv3(x)
-        x = self.bn3(x)
-        x = self.relu(x)
         x = self.maxpool(x)
         return x

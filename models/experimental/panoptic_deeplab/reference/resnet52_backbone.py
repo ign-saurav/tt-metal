@@ -1,11 +1,12 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-from torchvision.models.resnet import Bottleneck
 import torch.nn as nn
 from typing import Callable, List, Optional
 from torch import Tensor
 from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
+from models.experimental.panoptic_deeplab.reference.aspp import Conv2d
+from models.experimental.panoptic_deeplab.reference.resnet52_bottleneck import Bottleneck
 
 
 class ResNet52BackBone(nn.Module):
@@ -54,9 +55,13 @@ class ResNet52BackBone(nn.Module):
             dialate_config = [1] * blocks
         downsample = None
         if stride != 1 or self.inplanes != planes * block.expansion:
-            downsample = nn.Sequential(
-                nn.Conv2d(self.inplanes, planes * block.expansion, kernel_size=1, stride=stride, bias=False),
-                norm_layer(planes * block.expansion),
+            downsample = Conv2d(
+                self.inplanes,
+                planes * block.expansion,
+                kernel_size=1,
+                stride=stride,
+                bias=False,
+                norm=norm_layer(planes * block.expansion),
             )
 
         layers = []

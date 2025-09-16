@@ -214,7 +214,7 @@ class TTBottleneck:
                 stride=stride,
                 padding=0,
                 dilation=1,
-                parameters=parameters.downsample,
+                parameters=parameters.shortcut,
                 kernel_fidelity=model_config,
                 activation="",
                 **layer_optimisations.downsample,
