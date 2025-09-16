@@ -8,11 +8,12 @@ import torch
 
 
 class TTUpsample(LightweightModule):
-    def __init__(self, scale, num_feat, device):
+    def __init__(self, scale, num_feat, device, dtype=ttnn.bfloat16):
         self.scale = scale
         self.num_feat = num_feat
         self.device = device
         self.memory_config = ttnn.DRAM_MEMORY_CONFIG
+        self.dtype = dtype
 
         # Pre-calculate operation parameters
         if (scale & (scale - 1)) == 0:  # scale = 2^n
@@ -34,7 +35,7 @@ class TTUpsample(LightweightModule):
         )
         # Initialize conv config with no activation and default output layout
         self.conv_config = ttnn.Conv2dConfig(
-            weights_dtype=ttnn.bfloat8_b,
+            weights_dtype=ttnn.bfloat16,
             activation="",
             output_layout=ttnn.TILE_LAYOUT,
             deallocate_activation=True,  # Free input memory after use
@@ -57,8 +58,8 @@ class TTUpsample(LightweightModule):
         ttnn_output = ttnn.from_torch(
             torch_output,
             device=self.device,
-            dtype=ttnn.bfloat16,
-            layout=ttnn.ROW_MAJOR_LAYOUT,
+            dtype=self.dtype,
+            layout=ttnn.TILE_LAYOUT,
             memory_config=self.memory_config,
         )
 
@@ -89,7 +90,7 @@ class TTUpsample(LightweightModule):
                 input_width=width,
                 conv_config=self.conv_config,
                 compute_config=self.compute_config,
-                dtype=ttnn.bfloat16,
+                dtype=self.dtype,
                 return_output_dim=False,
                 return_weights_and_bias=False,
                 slice_config=slice_config,

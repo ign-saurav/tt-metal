@@ -6,13 +6,14 @@ from models.common.lightweightmodule import LightweightModule
 
 
 class TTChannelAttention(LightweightModule):
-    def __init__(self, device, parameters, num_feat, squeeze_factor=16, memory_config=None):
+    def __init__(self, device, parameters, num_feat, squeeze_factor=16, memory_config=None, dtype=ttnn.bfloat16):
         super().__init__()
 
         self.device = device
         self.memory_config = ttnn.L1_MEMORY_CONFIG
         self.num_feat = num_feat
         self.squeeze_factor = squeeze_factor
+        self.dtype = dtype
 
         # Extract preprocessed parameters
         self.conv1_weight = parameters["conv1"]["weight"]
@@ -25,8 +26,8 @@ class TTChannelAttention(LightweightModule):
         original_shape = x.shape
 
         if x.memory_config().buffer_type != ttnn.BufferType.L1:
-            x = ttnn.to_memory_config(x, ttnn.L1_MEMORY_CONFIG)
-        x = ttnn.global_avg_pool2d(x, memory_config=self.memory_config)
+            x = ttnn.to_memory_config(x, ttnn.L1_MEMORY_CONFIG, dtype=self.dtype)
+        x = ttnn.global_avg_pool2d(x, memory_config=self.memory_config, dtype=self.dtype)
 
         if original_shape[-1] == 180:
             x = ttnn.slice(
@@ -42,6 +43,8 @@ class TTChannelAttention(LightweightModule):
             bias=self.conv1_bias,
             memory_config=self.memory_config,
             activation="relu",
+            dtype=self.dtype,
+            core_grid=ttnn.CoreGrid(y=8, x=8),
         )
 
         x = ttnn.linear(
@@ -49,6 +52,8 @@ class TTChannelAttention(LightweightModule):
             self.conv2_weight,
             bias=self.conv2_bias,
             memory_config=self.memory_config,
+            dtype=self.dtype,
+            core_grid=ttnn.CoreGrid(y=8, x=8),
         )
 
         # Sigmoid activation
@@ -59,6 +64,6 @@ class TTChannelAttention(LightweightModule):
         attention_weights = ttnn.repeat(attention_weights, [1, height, width, 1], memory_config=self.memory_config)
 
         # Element-wise multiplication with original input
-        output = ttnn.multiply(original_x, attention_weights, memory_config=self.memory_config)
+        output = ttnn.multiply(original_x, attention_weights, memory_config=self.memory_config, dtype=self.dtype)
 
         return output

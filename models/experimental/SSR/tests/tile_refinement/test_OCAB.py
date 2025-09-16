@@ -14,7 +14,7 @@ from models.experimental.SSR.reference.SSR.model.tile_refinement import OCAB
 from models.experimental.SSR.tt.tile_refinement import TTOCAB
 
 
-def create_ocab_preprocessor(device, tile_size=32):
+def create_ocab_preprocessor(device, tile_size=32, weight_dtype=ttnn.bfloat16, input_dtype=ttnn.bfloat16):
     """Create custom preprocessor for OCAB parameters"""
 
     def custom_preprocessor(model, name):
@@ -67,9 +67,9 @@ def create_ocab_preprocessor(device, tile_size=32):
 
             parameters["qkv"] = {
                 "weight": ttnn.from_torch(
-                    qkv_weight_padded, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
+                    qkv_weight_padded, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT, device=device
                 ),
-                "bias": ttnn.from_torch(qkv_bias_padded, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+                "bias": ttnn.from_torch(qkv_bias_padded, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT, device=device)
                 if qkv_bias_padded is not None
                 else None,
             }
@@ -82,8 +82,8 @@ def create_ocab_preprocessor(device, tile_size=32):
             # Output projection
             proj_weight = model.proj.weight.T
             parameters["proj"] = {
-                "weight": ttnn.from_torch(proj_weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device),
-                "bias": ttnn.from_torch(model.proj.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device),
+                "weight": ttnn.from_torch(proj_weight, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT, device=device),
+                "bias": ttnn.from_torch(model.proj.bias, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT, device=device),
             }
 
             # Layer norm 2
@@ -104,18 +104,18 @@ def create_ocab_preprocessor(device, tile_size=32):
             parameters["mlp"] = {
                 "fc1": {
                     "weight": ttnn.from_torch(
-                        model.mlp.fc1.weight.T, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
+                        model.mlp.fc1.weight.T, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT, device=device
                     ),
                     "bias": ttnn.from_torch(
-                        model.mlp.fc1.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
+                        model.mlp.fc1.bias, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT, device=device
                     ),
                 },
                 "fc2": {
                     "weight": ttnn.from_torch(
-                        model.mlp.fc2.weight.T, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
+                        model.mlp.fc2.weight.T, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT, device=device
                     ),
                     "bias": ttnn.from_torch(
-                        model.mlp.fc2.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
+                        model.mlp.fc2.bias, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT, device=device
                     ),
                 },
             }
@@ -129,7 +129,11 @@ def create_ocab_preprocessor(device, tile_size=32):
     ((180, (64, 64), 16, 0.5, 6, (1, 4096, 180)),),
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-def test_ocab(device, dim, input_resolution, window_size, overlap_ratio, num_heads, input_shape):
+@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
+@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
+def test_ocab(
+    device, dim, input_resolution, window_size, overlap_ratio, num_heads, input_shape, input_dtype, weight_dtype
+):
     x = torch.randn(input_shape)
 
     # Create reference OCAB layer
@@ -155,7 +159,9 @@ def test_ocab(device, dim, input_resolution, window_size, overlap_ratio, num_hea
     ttnn.synchronize_device(device)
 
     parameters = preprocess_model_parameters(
-        initialize_model=lambda: ref_layer, custom_preprocessor=create_ocab_preprocessor(device), device=device
+        initialize_model=lambda: ref_layer,
+        custom_preprocessor=create_ocab_preprocessor(device, weight_dtype=weight_dtype, input_dtype=input_dtype),
+        device=device,
     )
 
     tt_layer = TTOCAB(
@@ -166,6 +172,7 @@ def test_ocab(device, dim, input_resolution, window_size, overlap_ratio, num_hea
         overlap_ratio=overlap_ratio,
         num_heads=num_heads,
         parameters=parameters,
+        dtype=input_dtype,
     )
 
     tt_input = ttnn.from_torch(

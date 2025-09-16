@@ -62,6 +62,7 @@ class TTRHAG(LightweightModule):
         patch_size=4,
         resi_connection="1conv",
         memory_config=None,
+        dtype=ttnn.bfloat16,
     ):
         super().__init__()
 
@@ -70,6 +71,7 @@ class TTRHAG(LightweightModule):
         self.dim = dim
         self.input_resolution = input_resolution
         self.resi_connection = resi_connection
+        self.dtype = dtype
 
         # Initialize AttenBlocks (residual_group)
         self.residual_group = TTAttenBlocks(
@@ -92,6 +94,7 @@ class TTRHAG(LightweightModule):
             drop_path=drop_path,
             downsample=downsample,
             memory_config=memory_config,
+            dtype=dtype,
         )
 
         # Initialize convolutional layer for residual connection
@@ -187,7 +190,7 @@ class TTRHAG(LightweightModule):
                 input_width=width,
                 conv_config=self.conv_config,
                 compute_config=self.compute_config,
-                dtype=ttnn.bfloat16,
+                dtype=self.dtype,
                 return_output_dim=True,
             )
 
@@ -201,6 +204,6 @@ class TTRHAG(LightweightModule):
         x = ttnn.reshape(x, (x.shape[0], self.input_resolution[0] * self.input_resolution[1], self.dim))
 
         # Add residual connection
-        x = ttnn.add(x, shortcut)
+        x = ttnn.add(x, shortcut, dtype=self.dtype)
 
         return x

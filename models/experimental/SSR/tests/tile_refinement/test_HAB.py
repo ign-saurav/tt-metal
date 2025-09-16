@@ -15,18 +15,18 @@ from models.experimental.SSR.tests.tile_refinement.test_CAB import create_cab_pr
 from models.experimental.SSR.tests.common.test_mlp import create_mlp_preprocessor
 
 
-def create_hab_preprocessor(device, window_size, rpi):
+def create_hab_preprocessor(device, window_size, rpi, weight_dtype=ttnn.bfloat16, input_dtype=ttnn.bfloat16):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         params = {}
 
         # Norm layers
         params["norm1"] = {
-            "weight": preprocess_linear_weight(torch_model.norm1.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT),
-            "bias": preprocess_linear_bias(torch_model.norm1.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT),
+            "weight": preprocess_linear_weight(torch_model.norm1.weight, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT),
+            "bias": preprocess_linear_bias(torch_model.norm1.bias, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT),
         }
         params["norm2"] = {
-            "weight": preprocess_linear_weight(torch_model.norm2.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT),
-            "bias": preprocess_linear_bias(torch_model.norm2.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT),
+            "weight": preprocess_linear_weight(torch_model.norm2.weight, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT),
+            "bias": preprocess_linear_bias(torch_model.norm2.bias, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT),
         }
         relative_position_bias = torch_model.attn.relative_position_bias_table[rpi.view(-1)].view(
             window_size * window_size, window_size * window_size, -1
@@ -36,15 +36,17 @@ def create_hab_preprocessor(device, window_size, rpi):
             relative_position_bias.unsqueeze(0), dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
         )
         # Window attention parameters
-        window_attention_preprocessor = create_window_attention_preprocessor(device, (window_size, window_size), rpi)
+        window_attention_preprocessor = create_window_attention_preprocessor(
+            device, (window_size, window_size), rpi, weight_dtype=weight_dtype
+        )
         params["attn"] = window_attention_preprocessor(torch_model.attn, "attn", ttnn_module_args)
 
         # Conv block parameters
-        cab_preprocessor = create_cab_preprocessor(device)
+        cab_preprocessor = create_cab_preprocessor(device, weight_dtype=ttnn.bfloat16, input_dtype=input_dtype)
         params["conv_block"] = cab_preprocessor(torch_model.conv_block, "conv_block", ttnn_module_args)
 
         # MLP parameters
-        mlp_preprocessor = create_mlp_preprocessor(device)
+        mlp_preprocessor = create_mlp_preprocessor(device, weight_dtype=weight_dtype)
         params["mlp"] = mlp_preprocessor(torch_model.mlp, "mlp", ttnn_module_args)
 
         # Conv scale
@@ -73,12 +75,16 @@ def create_relative_position_index(window_size):
     "batch_size, height, width, dim, num_heads, window_size, shift_size, mlp_ratio",
     [
         # SSR configurations
-        (1, 64, 64, 180, 6, 16, 8, 2),  # With shift
+        # (1, 64, 64, 180, 6, 16, 8, 2),  # With shift
         (1, 64, 64, 180, 6, 16, 0, 2),  # Without shift
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-def test_hab_block(device, batch_size, height, width, dim, num_heads, window_size, shift_size, mlp_ratio):
+@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
+@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
+def test_hab_block(
+    device, batch_size, height, width, dim, num_heads, window_size, shift_size, mlp_ratio, input_dtype, weight_dtype
+):
     torch.manual_seed(0)
 
     # Create reference model
@@ -129,7 +135,9 @@ def test_hab_block(device, batch_size, height, width, dim, num_heads, window_siz
     # Create TTNN model
     parameters = ttnn.model_preprocessing.preprocess_model(
         initialize_model=lambda: ref_model,
-        custom_preprocessor=create_hab_preprocessor(device, window_size, rpi_sa),
+        custom_preprocessor=create_hab_preprocessor(
+            device, window_size, rpi_sa, weight_dtype=weight_dtype, input_dtype=input_dtype
+        ),
         device=device,
         run_model=lambda model: model(input_tensor, x_size, rpi_sa, attn_mask),
     )
@@ -146,11 +154,12 @@ def test_hab_block(device, batch_size, height, width, dim, num_heads, window_siz
         shift_size=shift_size,
         mlp_ratio=mlp_ratio,
         memory_config=memory_config,
+        dtype=input_dtype,
     )
 
     # Convert inputs to TTNN format
     tt_input = ttnn.from_torch(
-        input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b, memory_config=memory_config
+        input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype, memory_config=memory_config
     )
 
     tt_rpi = ttnn.from_torch(

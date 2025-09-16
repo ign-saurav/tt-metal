@@ -19,14 +19,16 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from ttnn.model_preprocessing import preprocess_model_parameters
 
 
-def create_rhag_preprocessor(device, depth, window_size, rpi_sa):
+def create_rhag_preprocessor(device, depth, window_size, rpi_sa, weight_dtype=ttnn.bfloat16, input_dtype=ttnn.bfloat16):
     """Preprocessor for RHAG that handles all sub-components by importing existing preprocessors"""
 
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         params = {}
 
         # Import and use AttenBlocks preprocessor
-        atten_blocks_preprocessor = create_atten_blocks_preprocessor(device, depth, window_size, rpi_sa)
+        atten_blocks_preprocessor = create_atten_blocks_preprocessor(
+            device, depth, window_size, rpi_sa, weight_dtype=weight_dtype, input_dtype=input_dtype
+        )
         params["residual_group"] = atten_blocks_preprocessor(
             torch_model.residual_group, "residual_group", ttnn_module_args
         )
@@ -52,7 +54,7 @@ def create_rhag_preprocessor(device, depth, window_size, rpi_sa):
                     has_bias=True,
                     groups=1,
                     device=device,
-                    input_dtype=ttnn.bfloat16,
+                    input_dtype=input_dtype,
                     conv_config=conv_config,
                 ),
                 "bias": ttnn.prepare_conv_bias(
@@ -70,7 +72,7 @@ def create_rhag_preprocessor(device, depth, window_size, rpi_sa):
                     dilation=(1, 1),
                     groups=1,
                     device=device,
-                    input_dtype=ttnn.bfloat16,
+                    input_dtype=input_dtype,
                     conv_config=conv_config,
                 ),
             }
@@ -95,8 +97,22 @@ def create_rhag_preprocessor(device, depth, window_size, rpi_sa):
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
+@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
+@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
 def test_rhag(
-    device, batch_size, height, width, dim, num_heads, window_size, depth, overlap_ratio, mlp_ratio, resi_connection
+    device,
+    batch_size,
+    height,
+    width,
+    dim,
+    num_heads,
+    window_size,
+    depth,
+    overlap_ratio,
+    mlp_ratio,
+    resi_connection,
+    input_dtype,
+    weight_dtype,
 ):
     torch.manual_seed(0)
 
@@ -151,7 +167,9 @@ def test_rhag(
     # parameters = preprocess_model_parameters(
     parameters = preprocess_model_parameters(
         initialize_model=lambda: ref_model,
-        custom_preprocessor=create_rhag_preprocessor(device, depth, window_size, rpi_sa),
+        custom_preprocessor=create_rhag_preprocessor(
+            device, depth, window_size, rpi_sa, weight_dtype=weight_dtype, input_dtype=input_dtype
+        ),
         device=device,
     )
 
@@ -172,10 +190,11 @@ def test_rhag(
         patch_size=4,
         resi_connection=resi_connection,
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        dtype=input_dtype,
     )
 
     # Convert inputs to TTNN format
-    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
+    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype)
 
     tt_rpi_sa = ttnn.from_torch(rpi_sa, device=device, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.uint32)
 

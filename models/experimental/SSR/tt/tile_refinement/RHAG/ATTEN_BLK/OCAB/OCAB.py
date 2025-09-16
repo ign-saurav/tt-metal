@@ -18,6 +18,7 @@ class TTOCAB(LightweightModule):
         qkv_bias=True,
         qk_scale=None,
         mlp_ratio=2,
+        dtype=ttnn.bfloat16,
     ):
         super().__init__()
 
@@ -27,6 +28,7 @@ class TTOCAB(LightweightModule):
         self.window_size = window_size
         self.num_heads = num_heads
         self.overlap_ratio = overlap_ratio
+        self.dtype = dtype
 
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim**-0.5
@@ -66,7 +68,7 @@ class TTOCAB(LightweightModule):
             self.qkv_weight,
             bias=self.qkv_bias,
             memory_config=ttnn.L1_MEMORY_CONFIG,
-            dtype=ttnn.bfloat8_b,
+            dtype=self.dtype,
             core_grid=ttnn.CoreGrid(y=8, x=8),
         )
         # Use transformer function for QKV splitting
@@ -118,7 +120,7 @@ class TTOCAB(LightweightModule):
             context_layer = ttnn.from_torch(
                 context_layer,
                 device=self.device,
-                dtype=ttnn.bfloat16,
+                dtype=self.dtype,
                 memory_config=ttnn.L1_MEMORY_CONFIG,
                 layout=ttnn.TILE_LAYOUT,
             )
@@ -131,8 +133,9 @@ class TTOCAB(LightweightModule):
             bias=self.proj_bias,
             memory_config=ttnn.L1_MEMORY_CONFIG,
             core_grid=ttnn.CoreGrid(y=8, x=8),
+            dtype=self.dtype,
         )
-        x = ttnn.add(x, shortcut)
+        x = ttnn.add(x, shortcut, dtype=self.dtype)
 
         x = ttnn.layer_norm(x, weight=self.norm2_weight, bias=self.norm2_bias, memory_config=ttnn.L1_MEMORY_CONFIG)
 
@@ -141,7 +144,7 @@ class TTOCAB(LightweightModule):
             self.mlp_fc1_weight,
             bias=self.mlp_fc1_bias,
             memory_config=ttnn.L1_MEMORY_CONFIG,
-            dtype=ttnn.bfloat8_b,
+            dtype=self.dtype,
             core_grid=ttnn.CoreGrid(y=8, x=8),
             activation="gelu",
         )
@@ -151,7 +154,8 @@ class TTOCAB(LightweightModule):
             bias=self.mlp_fc2_bias,
             memory_config=ttnn.L1_MEMORY_CONFIG,
             core_grid=ttnn.CoreGrid(y=8, x=8),
+            dtype=self.dtype,
         )
 
-        x = ttnn.add(x, mlp_out)
+        x = ttnn.add(x, mlp_out, dtype=self.dtype)
         return x

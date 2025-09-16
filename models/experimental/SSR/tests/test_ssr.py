@@ -158,6 +158,7 @@ def test_ssr_model(input_shape, num_cls, with_conv, input_dtype, weight_dtype):
                 parameters=parameters,
                 args=args,
                 num_cls=num_cls,
+                dtype=input_dtype,
             )
 
         # Convert input to TTNN tensor

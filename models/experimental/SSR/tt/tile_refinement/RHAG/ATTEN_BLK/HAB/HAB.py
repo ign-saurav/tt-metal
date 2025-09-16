@@ -21,6 +21,7 @@ class TTHAB(LightweightModule):
         shift_size=0,
         mlp_ratio=4.0,
         memory_config=None,
+        dtype=ttnn.bfloat16,
     ):
         super().__init__()
         self.device = device
@@ -31,6 +32,7 @@ class TTHAB(LightweightModule):
         self.window_size = window_size
         self.shift_size = shift_size
         self.mlp_ratio = mlp_ratio
+        self.dtype = dtype
 
         if min(self.input_resolution) <= self.window_size:
             self.shift_size = 0
@@ -51,10 +53,11 @@ class TTHAB(LightweightModule):
             window_size=(self.window_size, self.window_size),
             num_heads=num_heads,
             memory_config=memory_config,
+            dtype=dtype,
         )
 
         self.conv_block = TTCAB(
-            device=device, parameters=parameters["conv_block"], num_feat=dim, memory_config=memory_config
+            device=device, parameters=parameters["conv_block"], num_feat=dim, memory_config=memory_config, dtype=dtype
         )
 
         self.mlp = TTMlp(
@@ -62,13 +65,14 @@ class TTHAB(LightweightModule):
             in_features=dim,
             hidden_features=int(dim * mlp_ratio),
             parameters=parameters["mlp"],
+            dtype=dtype,
         )
 
     def forward(self, x, x_size, rpi_sa, attn_mask):
         h, w = x_size
         b, seq_len, c = x.shape
         if x.memory_config().buffer_type != ttnn.BufferType.L1:
-            x = ttnn.to_memory_config(x, ttnn.L1_MEMORY_CONFIG)
+            x = ttnn.to_memory_config(x, ttnn.L1_MEMORY_CONFIG, dtype=self.dtype)
         shortcut = x
 
         # Layer norm 1
@@ -80,7 +84,7 @@ class TTHAB(LightweightModule):
         # Convolutional branch
         conv_x = self.conv_block(x)
         conv_x = ttnn.reshape(conv_x, [b, h * w, c])
-        conv_x = ttnn.multiply(conv_x, self.conv_scale)
+        conv_x = ttnn.multiply(conv_x, self.conv_scale, dtype=self.dtype)
 
         # Attention branch - handle cyclic shifttt-metal
         if self.shift_size > 0:
@@ -93,7 +97,7 @@ class TTHAB(LightweightModule):
 
         # Window partition
         if shifted_x.memory_config().buffer_type != ttnn.BufferType.L1:
-            shifted_x = ttnn.to_memory_config(shifted_x, self.memory_config)
+            shifted_x = ttnn.to_memory_config(shifted_x, self.memory_config, dtype=self.dtype)
         x_windows = self._window_partition(shifted_x, self.window_size)
         x_windows = ttnn.reshape(x_windows, [-1, self.window_size * self.window_size, c])
 
@@ -111,12 +115,12 @@ class TTHAB(LightweightModule):
             attn_x = shifted_x
 
         if attn_x.memory_config().buffer_type != ttnn.BufferType.L1:
-            attn_x = ttnn.to_memory_config(attn_x, ttnn.L1_MEMORY_CONFIG)
+            attn_x = ttnn.to_memory_config(attn_x, ttnn.L1_MEMORY_CONFIG, dtype=self.dtype)
         attn_x = ttnn.reshape(attn_x, [b, h * w, c])
 
         # First residual connection
-        x = ttnn.add(shortcut, attn_x)
-        x = ttnn.add(x, conv_x)
+        x = ttnn.add(shortcut, attn_x, dtype=self.dtype)
+        x = ttnn.add(x, conv_x, dtype=self.dtype)
 
         # MLP branch
         x_norm = ttnn.layer_norm(x, weight=self.norm2_weight, bias=self.norm2_bias)

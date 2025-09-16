@@ -17,7 +17,7 @@ from models.experimental.SSR.tests.tile_refinement.test_OCAB import create_ocab_
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
-def create_atten_blocks_preprocessor(device, depth, window_size, rpi_sa):
+def create_atten_blocks_preprocessor(device, depth, window_size, rpi_sa, weight_dtype, input_dtype):
     """Preprocessor for AttenBlocks that handles multiple HAB blocks and one OCAB block"""
 
     def custom_preprocessor(torch_model, name, ttnn_module_args):
@@ -25,12 +25,12 @@ def create_atten_blocks_preprocessor(device, depth, window_size, rpi_sa):
 
         # Preprocess parameters for each HAB block
         params["blocks"] = {}
-        hab_preprocessor = create_hab_preprocessor(device, window_size, rpi_sa)
+        hab_preprocessor = create_hab_preprocessor(device, window_size, rpi_sa, weight_dtype, input_dtype)
         for i in range(depth):
             params["blocks"][i] = hab_preprocessor(torch_model.blocks[i], f"blocks_{i}", ttnn_module_args)
 
         # Preprocess parameters for OCAB
-        ocab_preprocessor = create_ocab_preprocessor(device)
+        ocab_preprocessor = create_ocab_preprocessor(device, weight_dtype=weight_dtype, input_dtype=input_dtype)
         params["overlap_attn"] = ocab_preprocessor(torch_model.overlap_attn, "overlap_attn")
 
         return params
@@ -45,7 +45,22 @@ def create_atten_blocks_preprocessor(device, depth, window_size, rpi_sa):
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-def test_atten_blocks(device, batch_size, height, width, dim, num_heads, window_size, depth, overlap_ratio, mlp_ratio):
+@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
+@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
+def test_atten_blocks(
+    device,
+    batch_size,
+    height,
+    width,
+    dim,
+    num_heads,
+    window_size,
+    depth,
+    overlap_ratio,
+    mlp_ratio,
+    input_dtype,
+    weight_dtype,
+):
     torch.manual_seed(0)
 
     # Create reference model
@@ -95,7 +110,9 @@ def test_atten_blocks(device, batch_size, height, width, dim, num_heads, window_
     # Create TTNN model
     parameters = ttnn.model_preprocessing.preprocess_model(
         initialize_model=lambda: ref_model,
-        custom_preprocessor=create_atten_blocks_preprocessor(device, depth, window_size, rpi_sa),
+        custom_preprocessor=create_atten_blocks_preprocessor(
+            device, depth, window_size, rpi_sa, weight_dtype=weight_dtype, input_dtype=input_dtype
+        ),
         device=device,
         run_model=lambda model: model(input_tensor, x_size, params),
     )
@@ -114,10 +131,11 @@ def test_atten_blocks(device, batch_size, height, width, dim, num_heads, window_
         overlap_ratio=overlap_ratio,
         mlp_ratio=mlp_ratio,
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        dtype=input_dtype,
     )
 
     # Convert inputs to TTNN format
-    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
+    tt_input = ttnn.from_torch(input_tensor, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype)
 
     tt_rpi_sa = ttnn.from_torch(rpi_sa, device=device, layout=ttnn.ROW_MAJOR_LAYOUT, dtype=ttnn.uint32)
 

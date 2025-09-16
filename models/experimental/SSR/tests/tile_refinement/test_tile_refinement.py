@@ -20,7 +20,9 @@ from models.utility_functions import tt2torch_tensor
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
-def create_tile_refinement_preprocessor(device, forward_params, window_size, rpi_sa):
+def create_tile_refinement_preprocessor(
+    device, forward_params, window_size, rpi_sa, weight_dtype=ttnn.bfloat16, input_dtype=ttnn.bfloat16
+):
     """Custom preprocessor for TileRefinement model"""
 
     def custom_preprocessor(torch_model, name, ttnn_module_args):
@@ -81,7 +83,7 @@ def create_tile_refinement_preprocessor(device, forward_params, window_size, rpi
             if hasattr(torch_model, "patch_embed"):
                 patch_embed_params = preprocess_model_parameters(
                     initialize_model=lambda: torch_model.patch_embed,
-                    custom_preprocessor=create_patch_embed_preprocessor_conv(device),
+                    custom_preprocessor=create_patch_embed_preprocessor_conv(device, weight_dtype=weight_dtype),
                     device=device,
                 )
                 parameters["patch_embed"] = patch_embed_params
@@ -99,7 +101,12 @@ def create_tile_refinement_preprocessor(device, forward_params, window_size, rpi
                     rhag_params = preprocess_model_parameters(
                         initialize_model=lambda: torch_model.layers[i],
                         custom_preprocessor=create_rhag_preprocessor(
-                            device, depth=6, window_size=window_size, rpi_sa=rpi_sa
+                            device,
+                            depth=6,
+                            window_size=window_size,
+                            rpi_sa=rpi_sa,
+                            weight_dtype=weight_dtype,
+                            input_dtype=input_dtype,
                         ),
                         device=device,
                     )
@@ -117,8 +124,21 @@ def create_tile_refinement_preprocessor(device, forward_params, window_size, rpi
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
+@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
+@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
 def test_tile_refinement(
-    device, img_size, patch_size, embed_dim, depths, num_heads, window_size, mlp_ratio, upscale, input_shape
+    device,
+    img_size,
+    patch_size,
+    embed_dim,
+    depths,
+    num_heads,
+    window_size,
+    mlp_ratio,
+    upscale,
+    input_shape,
+    input_dtype,
+    weight_dtype,
 ):
     """Test TTTileRefinement model against PyTorch reference"""
 
@@ -177,7 +197,9 @@ def test_tile_refinement(
         # Preprocess model parameters
         parameters = preprocess_model_parameters(
             initialize_model=lambda: ref_model,
-            custom_preprocessor=create_tile_refinement_preprocessor(device, tt_params, window_size, rpi_sa),
+            custom_preprocessor=create_tile_refinement_preprocessor(
+                device, tt_params, window_size, rpi_sa, weight_dtype=weight_dtype, input_dtype=input_dtype
+            ),
             device=device,
         )
 
@@ -208,10 +230,11 @@ def test_tile_refinement(
             img_range=1.0,
             upsampler="pixelshuffle",
             resi_connection="1conv",
+            dtype=input_dtype,
         )
 
         # Convert input to TTNN tensor
-        tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
+        tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype)
 
         # Run TTNN model
         tt_output, tt_features = tt_model(tt_input)

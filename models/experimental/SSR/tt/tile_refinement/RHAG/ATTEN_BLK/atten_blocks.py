@@ -29,6 +29,7 @@ class TTAttenBlocks(LightweightModule):
         drop_path=0.0,
         downsample=None,
         memory_config=None,
+        dtype=ttnn.bfloat16,
     ):
         super().__init__()
         self.device = device
@@ -36,6 +37,7 @@ class TTAttenBlocks(LightweightModule):
         self.dim = dim
         self.input_resolution = input_resolution
         self.depth = depth
+        self.dtype = dtype
 
         # Build HAB blocks
         self.blocks = []
@@ -59,6 +61,7 @@ class TTAttenBlocks(LightweightModule):
                 shift_size=shift_size,
                 mlp_ratio=mlp_ratio,
                 memory_config=memory_config,
+                dtype=dtype,
             )
             self.blocks.append(hab_block)
 
@@ -74,6 +77,7 @@ class TTAttenBlocks(LightweightModule):
             qkv_bias=qkv_bias,
             qk_scale=qk_scale,
             mlp_ratio=mlp_ratio,
+            dtype=dtype,
         )
 
         self.downsample = None

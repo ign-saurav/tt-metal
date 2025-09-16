@@ -45,7 +45,8 @@ def create_upsample_preprocessor(device):
     [(4, 64, 1, 256)],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-def test_upsample(device, scale, num_feat, batch_size, input_size):
+@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
+def test_upsample(device, scale, num_feat, batch_size, input_size, input_dtype):
     """Test Upsample block against PyTorch reference"""
     torch.manual_seed(0)
     if batch_size == 8:
@@ -69,7 +70,7 @@ def test_upsample(device, scale, num_feat, batch_size, input_size):
 
     # Convert input to TTNN format (NHWC)
     ttnn_input = torch.permute(torch_input, (0, 2, 3, 1))
-    ttnn_input = ttnn.from_torch(ttnn_input, dtype=ttnn.bfloat8_b, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_input = ttnn.from_torch(ttnn_input, dtype=input_dtype, layout=ttnn.TILE_LAYOUT, device=device)
 
     # Create TTNN model and run inference
     ttnn_model = TTUpsample(scale, num_feat, device)

@@ -20,7 +20,8 @@ from models.experimental.SSR.tt.tile_refinement import TTPatchUnEmbed
         (1, 64, 2, 3, 180),  # HAT blk test
     ],
 )
-def test_tt_patch_unembed(device, batch_size, img_size, patch_size, in_chans, embed_dim):
+@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
+def test_tt_patch_unembed(device, batch_size, img_size, patch_size, in_chans, embed_dim, input_dtype):
     """Test TTPatchUnEmbed against PyTorch reference implementation"""
     torch.manual_seed(0)
 
@@ -44,7 +45,7 @@ def test_tt_patch_unembed(device, batch_size, img_size, patch_size, in_chans, em
 
     # Convert input to TTNN format
     ttnn_input = ttnn.from_torch(
-        torch_input, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.L1_MEMORY_CONFIG
+        torch_input, dtype=input_dtype, layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.L1_MEMORY_CONFIG
     )
 
     # Run TTNN model

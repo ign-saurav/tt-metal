@@ -41,6 +41,7 @@ class TTHAT(LightweightModule):
         memory_config=None,
         h=64,
         w=64,
+        dtype=ttnn.bfloat16,
         **kwargs,
     ):
         super().__init__()
@@ -60,6 +61,7 @@ class TTHAT(LightweightModule):
         self.w = w
         self.ape = ape
         self.layers = []
+        self.dtype = dtype
         num_feat = 64
 
         self.patch_embed = TTPatchEmbed(
@@ -91,6 +93,7 @@ class TTHAT(LightweightModule):
                 patch_size=4,
                 resi_connection=resi_connection,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                dtype=dtype,
             )
             self.layers.append(layer)
 
@@ -98,14 +101,14 @@ class TTHAT(LightweightModule):
             mesh_device=device, img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim
         )
 
-        self.upsample = TTUpsample(upscale, num_feat, device)
+        self.upsample = TTUpsample(upscale, num_feat, device, dtype=dtype)
 
         # Mean normalization values
         if in_chans == 3:
             rgb_mean = torch.tensor([0.4488, 0.4371, 0.4040]).view(1, 3, 1, 1)
-            self.mean = ttnn.from_torch(rgb_mean, dtype=ttnn.bfloat16, device=device)
+            self.mean = ttnn.from_torch(rgb_mean, dtype=dtype, device=device)
         else:
-            self.mean = ttnn.zeros((1, 1, 1, 1), dtype=ttnn.bfloat16, device=device)
+            self.mean = ttnn.zeros((1, 1, 1, 1), dtype=dtype, device=device)
 
     def calculate_mask(self, x_size):
         """Calculate attention mask for SW-MSA with proper padding"""
@@ -151,11 +154,12 @@ class TTHAT(LightweightModule):
 
         # Add absolute position embedding if enabled
         if self.ape and hasattr(self.parameters, "absolute_pos_embed"):
-            x = ttnn.add(x, self.parameters.absolute_pos_embed, memory_config=self.memory_config)
+            x = ttnn.add(x, self.parameters.absolute_pos_embed, memory_config=self.memory_config, dtype=self.dtype)
         # Apply transformer layers
         x = ttnn.reshape(x, [x.shape[0], x.shape[1] * x.shape[2], x.shape[3]])
         for i in range(self.num_layers):
             x = self.layers[i](x, x_size, self.parameters["forward_params"])
+            ttnn.ReadDeviceProfiler(self.device)
 
         # Layer normalization
         x = ttnn.layer_norm(
@@ -255,8 +259,8 @@ class TTTileRefinement(TTHAT):
         # Normalize input
         batch_size = x.shape[0]
         self.mean = ttnn.to_layout(self.mean, ttnn.TILE_LAYOUT)
-        x = ttnn.subtract(x, self.mean, memory_config=self.memory_config)
-        x = ttnn.multiply(x, self.img_range, memory_config=self.memory_config)
+        x = ttnn.subtract(x, self.mean, memory_config=self.memory_config, dtype=self.dtype)
+        x = ttnn.multiply(x, self.img_range, memory_config=self.memory_config, dtype=self.dtype)
 
         if self.upsampler == "pixelshuffle":
             # Shallow feature extraction
@@ -336,7 +340,7 @@ class TTTileRefinement(TTHAT):
             )
             x_after_body = ttnn.reshape(x_after_body, [batch_size, 64, 64, 180])
             x = ttnn.permute(x, (0, 2, 3, 1))
-            x = ttnn.add(x, x_after_body, memory_config=self.memory_config)
+            x = ttnn.add(x, x_after_body, memory_config=self.memory_config, dtype=self.dtype)
 
             # Pre-upsample convolution
             x = ttnn.conv2d(
@@ -389,9 +393,9 @@ class TTTileRefinement(TTHAT):
 
             x = ttnn.reshape(x, [batch_size, 256, 256, 3])
         # Denormalize output
-        x = ttnn.divide(x, self.img_range, memory_config=self.memory_config)
+        x = ttnn.divide(x, self.img_range, memory_config=self.memory_config, dtype=self.dtype)
         self.mean = ttnn.permute(self.mean, (0, 2, 3, 1))
-        x = ttnn.add(x, self.mean, memory_config=self.memory_config)
+        x = ttnn.add(x, self.mean, memory_config=self.memory_config, dtype=self.dtype)
         self.mean = ttnn.permute(self.mean, (0, 3, 1, 2))
 
         return x, fea

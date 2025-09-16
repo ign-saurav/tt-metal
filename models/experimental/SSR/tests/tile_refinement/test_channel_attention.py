@@ -13,7 +13,7 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.SSR.reference.SSR.model.tile_refinement import ChannelAttention
 
 
-def create_channel_attention_preprocessor(device):
+def create_channel_attention_preprocessor(device, weight_dtype=ttnn.bfloat16, input_dtype=ttnn.bfloat16):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         params = {}
 
@@ -22,12 +22,12 @@ def create_channel_attention_preprocessor(device):
         conv1 = layers[1]  # First Conv2d layer
         conv2 = layers[3]  # Second Conv2d layer
 
-        conv_config = ttnn.Conv2dConfig(weights_dtype=ttnn.bfloat16)
+        conv_config = ttnn.Conv2dConfig(weights_dtype=weight_dtype)
 
         # Preprocess first convolution
         params["conv1"] = {
             "weight": ttnn.prepare_conv_weights(
-                weight_tensor=ttnn.from_torch(conv1.weight, dtype=ttnn.bfloat16),
+                weight_tensor=ttnn.from_torch(conv1.weight, dtype=weight_dtype),
                 input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 input_layout=ttnn.TILE_LAYOUT,
                 weights_format="OIHW",
@@ -43,12 +43,12 @@ def create_channel_attention_preprocessor(device):
                 has_bias=True,
                 groups=1,
                 device=device,
-                input_dtype=ttnn.bfloat16,
+                input_dtype=input_dtype,
                 conv_config=conv_config,
             ),
             "bias": ttnn.prepare_conv_bias(
                 bias_tensor=ttnn.from_torch(
-                    conv1.bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16  # Reshape to 4D: [1, 1, 1, out_channels]
+                    conv1.bias.reshape(1, 1, 1, -1), dtype=weight_dtype  # Reshape to 4D: [1, 1, 1, out_channels]
                 ),
                 input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 input_layout=ttnn.TILE_LAYOUT,
@@ -63,7 +63,7 @@ def create_channel_attention_preprocessor(device):
                 dilation=(1, 1),
                 groups=1,
                 device=device,
-                input_dtype=ttnn.bfloat16,
+                input_dtype=input_dtype,
                 conv_config=conv_config,
             ),
         }
@@ -71,7 +71,7 @@ def create_channel_attention_preprocessor(device):
         # Preprocess second convolution
         params["conv2"] = {
             "weight": ttnn.prepare_conv_weights(
-                weight_tensor=ttnn.from_torch(conv2.weight, dtype=ttnn.bfloat16),
+                weight_tensor=ttnn.from_torch(conv2.weight, dtype=weight_dtype),
                 input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 input_layout=ttnn.TILE_LAYOUT,
                 weights_format="OIHW",
@@ -87,12 +87,12 @@ def create_channel_attention_preprocessor(device):
                 has_bias=True,
                 groups=1,
                 device=device,
-                input_dtype=ttnn.bfloat16,
+                input_dtype=input_dtype,
                 conv_config=conv_config,
             ),
             "bias": ttnn.prepare_conv_bias(
                 bias_tensor=ttnn.from_torch(
-                    conv2.bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16  # Reshape to 4D: [1, 1, 1, out_channels]
+                    conv2.bias.reshape(1, 1, 1, -1), dtype=weight_dtype  # Reshape to 4D: [1, 1, 1, out_channels]
                 ),
                 input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 input_layout=ttnn.TILE_LAYOUT,
@@ -107,7 +107,7 @@ def create_channel_attention_preprocessor(device):
                 dilation=(1, 1),
                 groups=1,
                 device=device,
-                input_dtype=ttnn.bfloat16,
+                input_dtype=input_dtype,
                 conv_config=conv_config,
             ),
         }
@@ -124,7 +124,9 @@ def create_channel_attention_preprocessor(device):
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-def test_channel_attention(device, batch_size, num_feat, height, width, squeeze_factor):
+@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
+@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
+def test_channel_attention(device, batch_size, num_feat, height, width, squeeze_factor, input_dtype, weight_dtype):
     torch.manual_seed(0)
 
     # Create reference model
@@ -141,7 +143,7 @@ def test_channel_attention(device, batch_size, num_feat, height, width, squeeze_
     # Create TTNN model
     parameters = preprocess_model_parameters(
         initialize_model=lambda: ref_model,
-        custom_preprocessor=create_channel_attention_preprocessor(device),
+        custom_preprocessor=create_channel_attention_preprocessor(device, weight_dtype, input_dtype),
         device=device,
     )
 
@@ -152,6 +154,7 @@ def test_channel_attention(device, batch_size, num_feat, height, width, squeeze_
         num_feat=num_feat,
         squeeze_factor=squeeze_factor,
         memory_config=memory_config,
+        dtype=input_dtype,
     )
 
     # Convert input to TTNN format (NHWC)
@@ -159,7 +162,7 @@ def test_channel_attention(device, batch_size, num_feat, height, width, squeeze_
         input_tensor.permute(0, 2, 3, 1),
         device=device,
         layout=ttnn.TILE_LAYOUT,
-        dtype=ttnn.bfloat8_b,
+        dtype=input_dtype,
         memory_config=memory_config,
     )
 

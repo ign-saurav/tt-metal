@@ -7,7 +7,9 @@ from .channel_attention import TTChannelAttention
 
 
 class TTCAB(LightweightModule):
-    def __init__(self, device, parameters, num_feat, compress_ratio=3, squeeze_factor=30, memory_config=None):
+    def __init__(
+        self, device, parameters, num_feat, compress_ratio=3, squeeze_factor=30, memory_config=None, dtype=ttnn.bfloat16
+    ):
         super().__init__()
 
         self.device = device
@@ -15,6 +17,7 @@ class TTCAB(LightweightModule):
         self.num_feat = num_feat
         self.compress_ratio = compress_ratio
         self.squeeze_factor = squeeze_factor
+        self.dtype = dtype
 
         # Extract preprocessed parameters for convolutions
         self.conv1_weight = parameters["conv1"]["weight"]
@@ -29,6 +32,7 @@ class TTCAB(LightweightModule):
             num_feat=num_feat,
             squeeze_factor=squeeze_factor,
             memory_config=memory_config,
+            dtype=dtype,
         )
 
     def forward(self, x):
@@ -63,6 +67,7 @@ class TTCAB(LightweightModule):
                 fp32_dest_acc_en=False,
                 packer_l1_acc=False,
             ),
+            dtype=self.dtype,
         )
 
         # Reshape from flattened conv output back to spatial format
@@ -96,6 +101,7 @@ class TTCAB(LightweightModule):
                 packer_l1_acc=False,
             ),
             conv_config=conv_config,
+            dtype=self.dtype,
         )
 
         # Reshape from flattened conv output back to spatial format

@@ -29,7 +29,7 @@ def create_patch_embed_preprocessor_simple(device):
     return custom_preprocessor
 
 
-def create_patch_embed_preprocessor_conv(device):
+def create_patch_embed_preprocessor_conv(device, weight_dtype=ttnn.bfloat16):
     """Preprocessor for PatchEmbed with convolution projection"""
 
     def custom_preprocessor(torch_model, name, ttnn_module_args):
@@ -81,8 +81,8 @@ def create_patch_embed_preprocessor_conv(device):
 
         if hasattr(torch_model, "norm") and torch_model.norm is not None:
             params["norm"] = {
-                "weight": ttnn.from_torch(torch_model.norm.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT),
-                "bias": ttnn.from_torch(torch_model.norm.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT),
+                "weight": ttnn.from_torch(torch_model.norm.weight, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT),
+                "bias": ttnn.from_torch(torch_model.norm.bias, dtype=weight_dtype, layout=ttnn.TILE_LAYOUT),
             }
 
         return params

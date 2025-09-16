@@ -235,11 +235,12 @@ class TTSSR(LightweightModule):
 
 
 class TTSSR_wo_conv(LightweightModule):
-    def __init__(self, device, parameters, args, num_cls, memory_config=None):
+    def __init__(self, device, parameters, args, num_cls, memory_config=None, dtype=ttnn.bfloat16):
         super().__init__()
         self.device = device
         self.parameters = parameters
         self.memory_config = ttnn.DRAM_MEMORY_CONFIG
+        self.dtype = dtype
 
         # Only need select_model and sr_model - no conv layers
         self.select_model = TTTileSelection(
@@ -248,6 +249,7 @@ class TTSSR_wo_conv(LightweightModule):
             args=args,
             num_cls=num_cls,
             memory_config=self.memory_config,
+            dtype=dtype,
         )
 
         self.sr_model = TTTileRefinement(
@@ -263,6 +265,7 @@ class TTSSR_wo_conv(LightweightModule):
             mlp_ratio=2,
             upsampler="pixelshuffle",
             memory_config=self.memory_config,
+            dtype=dtype,
         )
 
     def forward(self, x):
@@ -306,7 +309,7 @@ class TTSSR_wo_conv(LightweightModule):
                 negX_torch = negX_torch.permute(0, 2, 3, 1)  # Back to (1, H, W, C)
                 negX = ttnn.from_torch(negX_torch, device=self.device, dtype=ttnn.bfloat16)
                 if negX.layout == ttnn.ROW_MAJOR_LAYOUT:
-                    negX = ttnn.to_layout(negX, ttnn.TILE_LAYOUT)
+                    negX = ttnn.to_layout(negX, ttnn.TILE_LAYOUT, dtype=self.dtype)
                 sr_patches.append(negX)
 
         ttnn.deallocate(patch_x)

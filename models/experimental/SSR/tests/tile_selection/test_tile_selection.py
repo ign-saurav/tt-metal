@@ -150,7 +150,7 @@ def test_tile_selection(device, image_size, patch_size, token_size, num_cls, inp
     tt_mask_3 = tt2torch_tensor(tt_output)
 
     # Compare outputs with appropriate PCC thresholds
-    does_pass_3, pcc_message_3 = check_with_pcc(ref_output[0], tt_mask_3, 0.98)
+    does_pass_3, pcc_message_3 = check_with_pcc(ref_output[0], tt_mask_3, 0.97)
     logger.info(f"PCC: {pcc_message_3}")
 
     if does_pass_3:

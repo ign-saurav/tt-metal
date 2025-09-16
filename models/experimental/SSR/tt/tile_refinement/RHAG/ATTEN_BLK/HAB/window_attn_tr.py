@@ -7,7 +7,7 @@ from models.common.lightweightmodule import LightweightModule
 
 
 class TTWindowAttentionTR(LightweightModule):
-    def __init__(self, device, parameters, dim, window_size, num_heads, memory_config=None):
+    def __init__(self, device, parameters, dim, window_size, num_heads, memory_config=None, dtype=ttnn.bfloat16):
         super().__init__()
         self.device = device
         self.memory_config = memory_config or ttnn.L1_MEMORY_CONFIG
@@ -15,6 +15,7 @@ class TTWindowAttentionTR(LightweightModule):
         self.window_size = window_size
         self.num_heads = num_heads
         self.head_dim = dim // num_heads
+        self.dtype = dtype
 
         # Extract preprocessed parameters
         self.qkv_weight = parameters["qkv"]["weight"]
@@ -36,7 +37,7 @@ class TTWindowAttentionTR(LightweightModule):
             self.qkv_weight,
             bias=self.qkv_bias,
             memory_config=self.memory_config,
-            dtype=ttnn.bfloat16,
+            dtype=self.dtype,
             core_grid=ttnn.CoreGrid(y=8, x=8),
         )
         ttnn.deallocate(x)
@@ -56,7 +57,7 @@ class TTWindowAttentionTR(LightweightModule):
         v = ttnn.squeeze(v, 0)
 
         # Scale Q
-        q = ttnn.multiply(q, self.scale, memory_config=ttnn.L1_MEMORY_CONFIG)
+        q = ttnn.multiply(q, self.scale, memory_config=ttnn.L1_MEMORY_CONFIG, dtype=self.dtype)
 
         attn = ttnn.matmul(
             q,
@@ -66,18 +67,19 @@ class TTWindowAttentionTR(LightweightModule):
             ),
             memory_config=self.memory_config,
             core_grid=ttnn.CoreGrid(y=8, x=8),
+            dtype=self.dtype,
         )
         ttnn.deallocate(q)
         ttnn.deallocate(k)
 
-        attn = ttnn.add(attn, self.relative_position_bias, memory_config=self.memory_config)
+        attn = ttnn.add(attn, self.relative_position_bias, memory_config=self.memory_config, dtype=self.dtype)
 
         # Apply mask if provided
         if mask is not None:
             nw = mask.shape[0]
             attn = ttnn.reshape(attn, [b_ // nw, nw, self.num_heads, n, n])
             mask_expanded = ttnn.unsqueeze(ttnn.unsqueeze(mask, 1), 0)
-            attn = ttnn.add(attn, mask_expanded)
+            attn = ttnn.add(attn, mask_expanded, dtype=self.dtype)
             attn = ttnn.reshape(attn, [-1, self.num_heads, n, n])
 
         # Softmax
@@ -92,6 +94,7 @@ class TTWindowAttentionTR(LightweightModule):
             ),
             memory_config=ttnn.L1_MEMORY_CONFIG,
             core_grid=ttnn.CoreGrid(y=8, x=8),
+            dtype=self.dtype,
         )  # [b_, num_heads, n, head_dim]
 
         output_tensor = ttnn.transformer.concatenate_heads(x)
@@ -108,7 +111,7 @@ class TTWindowAttentionTR(LightweightModule):
             x = ttnn.from_torch(
                 output_tensor,
                 device=self.device,
-                dtype=ttnn.bfloat16,
+                dtype=self.dtype,
                 memory_config=self.memory_config,
                 layout=ttnn.TILE_LAYOUT,
             )
@@ -119,5 +122,7 @@ class TTWindowAttentionTR(LightweightModule):
             bias=self.proj_bias,
             memory_config=self.memory_config,
             core_grid=ttnn.CoreGrid(y=8, x=8),
+            dtype=self.dtype,
         )
+
         return x
