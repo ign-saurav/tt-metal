@@ -37,7 +37,7 @@ res_layer_optimisations = {
             "deallocate_activation": True,
         },
         conv2={
-            "act_block_h": 512,
+            "act_block_h": 256,
             "memory_config": ttnn.L1_MEMORY_CONFIG,
             "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
             "deallocate_activation": True,
@@ -87,7 +87,7 @@ res_layer_optimisations = {
             "reallocate_halo_output": True,
         },
         conv2={
-            "act_block_h": 512,
+            "act_block_h": 256,
             "memory_config": ttnn.L1_MEMORY_CONFIG,
             "deallocate_activation": True,
             "reallocate_halo_output": True,
