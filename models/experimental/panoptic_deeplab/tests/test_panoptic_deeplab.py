@@ -48,9 +48,7 @@ class PanopticDeepLabTestInfra:
         self.height = height
         self.width = width
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
-        self.real_input_path = (
-            "/home/ubuntu/ign-tt-sm/tt-metal/models/experimental/panoptic_deeplab/resources/input.png"
-        )
+        self.real_input_path = "./models/experimental/panoptic_deeplab/resources/input.png"
 
         # Initialize torch model
         torch_model = TorchPanopticDeepLab()
