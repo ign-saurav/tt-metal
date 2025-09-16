@@ -117,6 +117,7 @@ def test_ssr_model(input_shape, num_cls, with_conv):
     """Test TTSSR model against PyTorch reference"""
     # Create input tensor
     x = torch.randn(input_shape)
+    _, _, H, W = x.shape
 
     # Create mock args
     args = MockArgs()
@@ -168,7 +169,6 @@ def test_ssr_model(input_shape, num_cls, with_conv):
         tt_torch_patch_fea3 = tt2torch_tensor(tt_patch_fea3)
         tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
 
-        _, _, H, W = x.shape
         tt_torch_sr = window_reverse(tt_torch_sr.permute(0, 2, 3, 1), window_size=H, H=H * 4, W=W * 4)
         tt_torch_sr = tt_torch_sr.permute(0, 3, 1, 2)
 

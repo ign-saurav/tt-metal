@@ -12,11 +12,12 @@ from ttnn.model_preprocessing import preprocess_linear_bias, preprocess_linear_w
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
-def create_window_attention_preprocessor(device, window_size=None, rpi=None, num_heads=6, tile_size=32):
+def create_window_attention_preprocessor(device, window_size=None, rpi=None, tile_size=32):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         params = {}
 
         # QKV linear layer
+        num_heads = torch_model.num_heads
         head_size = torch_model.qkv.weight.shape[0] // (3 * num_heads)
         # nearest multiple of tile_size
         padded_head_size = ((head_size + tile_size - 1) // tile_size) * tile_size

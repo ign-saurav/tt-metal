@@ -113,7 +113,7 @@ class SSR_wo_conv(nn.Module):
             else:
                 negX = self.upsample(patch_x[i].unsqueeze(0))
                 sr = torch.cat([sr, negX], dim=0)
-        # return sr, patch_fea3, patch_fea2, patch_fea1
+
         sr = window_reverse(sr.permute(0, 2, 3, 1), window_size=H, H=H * 4, W=W * 4)
 
         return sr.permute(0, 3, 1, 2), patch_fea3, patch_fea2, patch_fea1
