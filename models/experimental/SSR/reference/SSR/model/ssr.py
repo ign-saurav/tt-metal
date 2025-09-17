@@ -15,7 +15,7 @@ class SSR(nn.Module):
     feed pos tiles to TR Module, neg tiles to conv layers, then reconstruct them together
     """
 
-    def __init__(self, args, num_cls) -> None:
+    def __init__(self, args, num_cls, depth, num_heads) -> None:
         super().__init__()
         self.select_model = TileSelection(args, num_cls)
         self.sr_model = TileRefinement(
@@ -23,9 +23,9 @@ class SSR(nn.Module):
             img_size=64,
             window_size=16,
             img_range=1.0,
-            depths=[6, 6, 6, 6, 6, 6],
+            depths=depth,
             embed_dim=180,
-            num_heads=[6, 6, 6, 6, 6, 6],
+            num_heads=num_heads,
             mlp_ratio=2,
             upsampler="pixelshuffle",
         )
@@ -73,7 +73,7 @@ class SSR_wo_conv(nn.Module):
     simply feed pos tiles to TR module, neg tiles to upsample layer
     """
 
-    def __init__(self, args, num_cls) -> None:
+    def __init__(self, args, num_cls, depth, num_heads) -> None:
         super().__init__()
         self.select_model = TileSelection(args, num_cls)
         self.sr_model = TileRefinement(
@@ -81,9 +81,9 @@ class SSR_wo_conv(nn.Module):
             img_size=64,
             window_size=16,
             img_range=1.0,
-            depths=[6, 6, 6, 6, 6, 6],
+            depths=depth,
             embed_dim=180,
-            num_heads=[6, 6, 6, 6, 6, 6],
+            num_heads=num_heads,
             mlp_ratio=2,
             upsampler="pixelshuffle",
         )

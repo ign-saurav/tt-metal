@@ -51,7 +51,7 @@ class TTSSR(LightweightModule):
     then reconstructs them together.
     """
 
-    def __init__(self, device, parameters, args, num_cls, memory_config=None):
+    def __init__(self, device, parameters, args, num_cls, depth, num_heads, memory_config=None):
         super().__init__()
 
         self.device = device
@@ -74,9 +74,9 @@ class TTSSR(LightweightModule):
             img_size=64,
             window_size=16,
             img_range=1.0,
-            depths=[6, 6, 6, 6, 6, 6],
+            depths=depth,
             embed_dim=180,
-            num_heads=[6, 6, 6, 6, 6, 6],
+            num_heads=num_heads,
             mlp_ratio=2,
             upsampler="pixelshuffle",
             memory_config=self.memory_config,
@@ -235,7 +235,7 @@ class TTSSR(LightweightModule):
 
 
 class TTSSR_wo_conv(LightweightModule):
-    def __init__(self, device, parameters, args, num_cls, memory_config=None, dtype=ttnn.bfloat16):
+    def __init__(self, device, parameters, args, num_cls, depth, num_heads, memory_config=None, dtype=ttnn.bfloat16):
         super().__init__()
         self.device = device
         self.parameters = parameters
@@ -259,9 +259,9 @@ class TTSSR_wo_conv(LightweightModule):
             img_size=64,
             window_size=16,
             img_range=1.0,
-            depths=[6, 6, 6, 6, 6, 6],
+            depths=depth,
             embed_dim=180,
-            num_heads=[6, 6, 6, 6, 6, 6],
+            num_heads=num_heads,
             mlp_ratio=2,
             upsampler="pixelshuffle",
             memory_config=self.memory_config,

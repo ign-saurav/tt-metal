@@ -98,8 +98,8 @@ class TTOCAB(LightweightModule):
             value,
             is_causal=False,
             scale=self.scale,
-            program_config=sdpa_program_config,
-            compute_kernel_config=compute_kernel_config,
+            # program_config=sdpa_program_config,
+            # compute_kernel_config=compute_kernel_config,
             memory_config=ttnn.L1_MEMORY_CONFIG,
         )
 

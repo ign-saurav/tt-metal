@@ -21,7 +21,7 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 
 
 def create_tile_refinement_preprocessor(
-    device, forward_params, window_size, rpi_sa, weight_dtype=ttnn.bfloat16, input_dtype=ttnn.bfloat16
+    device, forward_params, window_size, rpi_sa, depth=[6], weight_dtype=ttnn.bfloat16, input_dtype=ttnn.bfloat16
 ):
     """Custom preprocessor for TileRefinement model"""
 
@@ -102,7 +102,7 @@ def create_tile_refinement_preprocessor(
                         initialize_model=lambda: torch_model.layers[i],
                         custom_preprocessor=create_rhag_preprocessor(
                             device,
-                            depth=6,
+                            depth=depth[i],
                             window_size=window_size,
                             rpi_sa=rpi_sa,
                             weight_dtype=weight_dtype,
@@ -120,7 +120,8 @@ def create_tile_refinement_preprocessor(
 @pytest.mark.parametrize(
     "img_size, patch_size, embed_dim, depths, num_heads, window_size, mlp_ratio, upscale, input_shape",
     [
-        (64, 2, 180, (6, 6, 6, 6, 6, 6), (6, 6, 6, 6, 6, 6), 16, 2, 4, (3, 3, 64, 64)),
+        (64, 2, 180, [1], [1], 16, 2, 4, (3, 3, 64, 64)),
+        (64, 2, 180, [6, 6, 6, 6, 6, 6], [6, 6, 6, 6, 6, 6], 16, 2, 4, (3, 3, 64, 64)),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
@@ -198,7 +199,7 @@ def test_tile_refinement(
         parameters = preprocess_model_parameters(
             initialize_model=lambda: ref_model,
             custom_preprocessor=create_tile_refinement_preprocessor(
-                device, tt_params, window_size, rpi_sa, weight_dtype=weight_dtype, input_dtype=input_dtype
+                device, tt_params, window_size, rpi_sa, depth=depths, weight_dtype=weight_dtype, input_dtype=input_dtype
             ),
             device=device,
         )

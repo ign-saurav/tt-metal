@@ -81,7 +81,7 @@ class TTHAT(LightweightModule):
                 parameters=self.parameters[f"layers.{i_layer}"],
                 dim=embed_dim,
                 input_resolution=(64, 64),
-                depth=6,
+                depth=depths[i_layer],
                 num_heads=num_heads[i_layer],
                 window_size=window_size,
                 compress_ratio=3,

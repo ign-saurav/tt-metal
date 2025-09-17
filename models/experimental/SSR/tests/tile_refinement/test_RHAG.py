@@ -93,7 +93,9 @@ def create_rhag_preprocessor(device, depth, window_size, rpi_sa, weight_dtype=tt
 @pytest.mark.parametrize(
     "batch_size, height, width, dim, num_heads, window_size, depth, overlap_ratio, mlp_ratio, resi_connection",
     [
-        (1, 64, 64, 180, 6, 16, 6, 0.5, 2, "1conv"),  # SSR config
+        # SSR config
+        (1, 64, 64, 180, 3, 16, 3, 0.5, 2, "1conv"),
+        (1, 64, 64, 180, 6, 16, 6, 0.5, 2, "1conv"),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)

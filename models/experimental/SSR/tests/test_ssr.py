@@ -21,7 +21,7 @@ from models.utility_functions import tt2torch_tensor
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
-def create_ssr_preprocessor(device, args, num_cls, weight_dtype=ttnn.bfloat16):
+def create_ssr_preprocessor(device, args, num_cls, depth, weight_dtype=ttnn.bfloat16):
     """Custom preprocessor for SSR model"""
 
     def custom_preprocessor(torch_model, name, ttnn_module_args):
@@ -56,7 +56,7 @@ def create_ssr_preprocessor(device, args, num_cls, weight_dtype=ttnn.bfloat16):
             sr_params = preprocess_model_parameters(
                 initialize_model=lambda: torch_model.sr_model,
                 custom_preprocessor=create_tile_refinement_preprocessor(
-                    device, forward_params, window_size=16, rpi_sa=rpi_sa
+                    device, forward_params, window_size=16, rpi_sa=rpi_sa, depth=depth
                 ),
                 device=device,
             )
@@ -107,15 +107,16 @@ class MockArgs:
 
 
 @pytest.mark.parametrize(
-    "input_shape, num_cls, with_conv",
+    "input_shape, num_cls, with_conv, depth, num_heads",
     [
         # ((1, 3, 256, 256), 1, True),
-        ((1, 3, 256, 256), 1, False),
+        ((1, 3, 256, 256), 1, False, [1], [1]),
+        ((1, 3, 256, 256), 1, False, [6, 6, 6, 6, 6, 6], [6, 6, 6, 6, 6, 6]),
     ],
 )
 @pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
-def test_ssr_model(input_shape, num_cls, with_conv, input_dtype, weight_dtype):
+def test_ssr_model(input_shape, num_cls, with_conv, depth, num_heads, input_dtype, weight_dtype):
     """Test TTSSR model against PyTorch reference"""
     # Create input tensor
     x = torch.randn(input_shape)
@@ -126,9 +127,9 @@ def test_ssr_model(input_shape, num_cls, with_conv, input_dtype, weight_dtype):
 
     # Create reference PyTorch model
     if with_conv:
-        ref_model = SSR(args, num_cls)
+        ref_model = SSR(args, num_cls, depth, num_heads)
     else:
-        ref_model = SSR_wo_conv(args, num_cls)
+        ref_model = SSR_wo_conv(args, num_cls, depth, num_heads)
     ref_model.eval()
 
     # Get reference output
@@ -141,7 +142,7 @@ def test_ssr_model(input_shape, num_cls, with_conv, input_dtype, weight_dtype):
         # Preprocess model parameters
         parameters = preprocess_model_parameters(
             initialize_model=lambda: ref_model,
-            custom_preprocessor=create_ssr_preprocessor(device, args, num_cls, weight_dtype),
+            custom_preprocessor=create_ssr_preprocessor(device, args, num_cls, depth, weight_dtype),
             device=device,
         )
         # Create TTNN model
@@ -151,6 +152,8 @@ def test_ssr_model(input_shape, num_cls, with_conv, input_dtype, weight_dtype):
                 parameters=parameters,
                 args=args,
                 num_cls=num_cls,
+                depth=depth,
+                num_heads=num_heads,
             )
         else:
             tt_model = TTSSR_wo_conv(
@@ -158,6 +161,8 @@ def test_ssr_model(input_shape, num_cls, with_conv, input_dtype, weight_dtype):
                 parameters=parameters,
                 args=args,
                 num_cls=num_cls,
+                depth=depth,
+                num_heads=num_heads,
                 dtype=input_dtype,
             )
 
