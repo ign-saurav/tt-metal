@@ -1,13 +1,16 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+
+# Reference:
+# https://github.com/destiny301/SSR
+
 import torch.nn as nn
 import torch
 
 from models.experimental.SSR.reference.SSR.model.tile_refinement import TileRefinement, Upsample
 from models.experimental.SSR.reference.SSR.model.tile_selection import TileSelection
 from models.experimental.SSR.reference.SSR.model.net_blocks import window_partition, window_reverse
-
-# from tile_refinement import TileRefinement, Upsample
-# from tile_selection import TileSelection
-# from net_blocks import window_partition, window_reverse
 
 
 class SSR(nn.Module):

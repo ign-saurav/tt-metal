@@ -1,5 +1,9 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+
 # Reference:
-# https://github.com/microsoft/Swin-Transformer
+# https://github.com/destiny301/SSR
 
 import torch
 import torch.nn as nn

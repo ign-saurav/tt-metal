@@ -16,6 +16,7 @@ from models.experimental.SSR.tests.tile_selection.test_mask_token_inference impo
 )
 from models.utility_functions import tt2torch_tensor
 from tests.ttnn.utils_for_testing import check_with_pcc
+from models.experimental.SSR.tests.tile_refinement.test_tile_refinement import get_precision_config
 
 
 def create_tile_selection_preprocessor(device, dim=96, weight_dtype=ttnn.bfloat16):
@@ -103,10 +104,19 @@ def create_tile_selection_preprocessor(device, dim=96, weight_dtype=ttnn.bfloat1
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}])
-@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
-@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
-def test_tile_selection(device, image_size, patch_size, token_size, num_cls, input_dtype, weight_dtype):
+@pytest.mark.parametrize(
+    "precision_config",
+    [
+        lambda: get_precision_config("performance"),
+        lambda: get_precision_config("accuracy"),
+    ],
+    ids=["performance", "accuracy"],
+)
+def test_tile_selection(device, image_size, patch_size, token_size, num_cls, precision_config):
     """Test TileSelection module against PyTorch reference for correctness"""
+
+    # Get data types from precision configuration
+    input_dtype, weight_dtype = precision_config()
 
     # Create mock args object
     class Args:

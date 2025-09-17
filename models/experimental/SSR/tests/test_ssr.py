@@ -14,6 +14,7 @@ from models.experimental.SSR.tests.tile_selection.test_tile_selection import cre
 from models.experimental.SSR.tests.tile_refinement.test_tile_refinement import create_tile_refinement_preprocessor
 from models.experimental.SSR.tests.tile_refinement.test_HAB import create_relative_position_index
 from models.experimental.SSR.reference.SSR.model.net_blocks import window_reverse
+from models.experimental.SSR.tests.tile_refinement.test_tile_refinement import get_precision_config
 
 
 from ttnn.model_preprocessing import preprocess_model_parameters
@@ -114,10 +115,22 @@ class MockArgs:
         ((1, 3, 256, 256), 1, False, [6, 6, 6, 6, 6, 6], [6, 6, 6, 6, 6, 6]),
     ],
 )
-@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
-@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
-def test_ssr_model(input_shape, num_cls, with_conv, depth, num_heads, input_dtype, weight_dtype):
+@pytest.mark.parametrize(
+    "precision_config",
+    [
+        lambda: get_precision_config("performance"),
+        lambda: get_precision_config("accuracy"),
+    ],
+    ids=["performance", "accuracy"],
+)
+def test_ssr_model(input_shape, num_cls, with_conv, depth, num_heads, precision_config):
     """Test TTSSR model against PyTorch reference"""
+    # Get data types from precision configuration
+
+    torch.manual_seed(0)
+
+    input_dtype, weight_dtype = precision_config()
+
     # Create input tensor
     x = torch.randn(input_shape)
     _, _, H, W = x.shape

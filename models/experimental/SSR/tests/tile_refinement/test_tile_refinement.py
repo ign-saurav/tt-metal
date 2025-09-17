@@ -117,6 +117,16 @@ def create_tile_refinement_preprocessor(
     return custom_preprocessor
 
 
+def get_precision_config(precision_type):
+    """Get precision configuration for the given type"""
+    if precision_type == "performance":
+        return ttnn.bfloat8_b, ttnn.bfloat8_b
+    elif precision_type == "accuracy":
+        return ttnn.bfloat16, ttnn.bfloat16
+    else:
+        raise ValueError(f"Unknown precision type: {precision_type}")
+
+
 @pytest.mark.parametrize(
     "img_size, patch_size, embed_dim, depths, num_heads, window_size, mlp_ratio, upscale, input_shape",
     [
@@ -125,8 +135,14 @@ def create_tile_refinement_preprocessor(
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-@pytest.mark.parametrize("input_dtype", [ttnn.bfloat8_b])
-@pytest.mark.parametrize("weight_dtype", [ttnn.bfloat8_b])
+@pytest.mark.parametrize(
+    "precision_config",
+    [
+        lambda: get_precision_config("performance"),
+        lambda: get_precision_config("accuracy"),
+    ],
+    ids=["performance", "accuracy"],
+)
 def test_tile_refinement(
     device,
     img_size,
@@ -138,10 +154,12 @@ def test_tile_refinement(
     mlp_ratio,
     upscale,
     input_shape,
-    input_dtype,
-    weight_dtype,
+    precision_config,
 ):
     """Test TTTileRefinement model against PyTorch reference"""
+
+    # Get data types from precision configuration
+    input_dtype, weight_dtype = precision_config()
 
     # Create input tensor
     x = torch.randn(input_shape)

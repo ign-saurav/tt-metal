@@ -1,5 +1,10 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+
 # Reference:
-# https://github.com/XPixelGroup/HAT/tree/main
+# https://github.com/destiny301/SSR
+
 
 import math
 import torch
