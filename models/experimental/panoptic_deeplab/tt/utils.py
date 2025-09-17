@@ -248,6 +248,10 @@ class TTUpsample:
         sent_to_dram=False,
         dtype=ttnn.bfloat8_b,
     ):
+        # Convert a **sharded** tensor (distributed across cores) into a single **interleaved** tensor, choosing the backing memory
+        # - DRAM: use when tensors are large or when later ops expect DRAM residency.
+        # - L1  : fastest on-chip memory; use when the tensor fits and you’ll run
+        #         compute-heavy kernels immediately after.
         if sent_to_dram:
             input_tensor = ttnn.sharded_to_interleaved(input_tensor, ttnn.DRAM_MEMORY_CONFIG)
         else:
@@ -256,6 +260,7 @@ class TTUpsample:
         input_tensor = ttnn.to_layout(input_tensor, ttnn.ROW_MAJOR_LAYOUT)
         input_tensor = ttnn.reshape(input_tensor, input_shape)
 
+        # Optionally pad channels to a multiple of 32 to match TT tile/channel alignment.
         if pad_ch_to_32:
             input_tensor = ttnn.pad(input_tensor, [(0, 0), (0, 0), (0, 0), (0, 32 - input_tensor.shape[-1] % 32)], 0)
 
@@ -267,6 +272,7 @@ class TTUpsample:
             compute_kernel_config=self.compute_kernel_config,
         )
 
+        # Remove channel padding if added.
         if pad_ch_to_32:
             output_tensor = ttnn.slice(
                 output_tensor,
@@ -275,18 +281,10 @@ class TTUpsample:
             )
 
         if reshape_output:
-            output_tensor = ttnn.from_device(output_tensor)
-            output_tensor = ttnn.to_dtype(output_tensor, dtype)
-            output_tensor = ttnn.to_device(output_tensor, device)
-
-            output_tensor = ttnn.reshape(
-                output_tensor,
-                [
-                    1,
-                    1,
-                    output_tensor.shape[0] * output_tensor.shape[1] * output_tensor.shape[2],
-                    output_tensor.shape[3],
-                ],
-            )
+            host = ttnn.from_device(output_tensor)
+            host = ttnn.to_dtype(host, dtype)
+            B, H, W, C = host.shape
+            host = ttnn.reshape(host, [1, 1, B * H * W, C])
+            output_tensor = ttnn.to_device(host, device)
 
         return output_tensor
