@@ -83,6 +83,8 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
     x = load_image(input_image_path)
     logger.info(f"Input image shape: {x.shape}")
 
+    torch.manual_seed(0)
+
     # Create output directory if it doesn't exist
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -90,12 +92,14 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
     # Create args
     args = Args()
     num_cls = 1
+    depth = [1]
+    num_heads = [1]
 
     # Create reference PyTorch model
     if with_conv:
-        ref_model = SSR(args, num_cls)
+        ref_model = SSR(args, num_cls, depth=depth, num_heads=num_heads)
     else:
-        ref_model = SSR_wo_conv(args, num_cls)
+        ref_model = SSR_wo_conv(args, num_cls, depth=depth, num_heads=num_heads)
     ref_model.eval()
 
     # Get reference output
@@ -116,7 +120,7 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
         logger.info("Preprocessing model parameters...")
         parameters = preprocess_model_parameters(
             initialize_model=lambda: ref_model,
-            custom_preprocessor=create_ssr_preprocessor(device, args, num_cls),
+            custom_preprocessor=create_ssr_preprocessor(device, args, num_cls, depth),
             device=device,
         )
 
@@ -128,6 +132,8 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
                 parameters=parameters,
                 args=args,
                 num_cls=num_cls,
+                depth=depth,
+                num_heads=num_heads,
             )
         else:
             tt_model = TTSSR_wo_conv(
@@ -135,6 +141,8 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
                 parameters=parameters,
                 args=args,
                 num_cls=num_cls,
+                depth=depth,
+                num_heads=num_heads,
             )
 
         # Convert input to TTNN tensor
