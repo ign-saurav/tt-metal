@@ -4,7 +4,7 @@
 import torch.nn as nn
 import torch
 from torch import Tensor
-from models.experimental.panoptic_deeplab.tt.common import Conv2d
+from models.experimental.panoptic_deeplab.reference.utils import Conv2d
 
 
 class ResModel(torch.nn.Module):
@@ -21,7 +21,13 @@ class ResModel(torch.nn.Module):
     def __init__(self, in_channels, intermediate_channels, out_channels) -> None:
         super().__init__()
         self.conv1 = Conv2d(
-            in_channels, in_channels // 8, kernel_size=1, stride=1, bias=False, norm=nn.BatchNorm2d(in_channels // 8), activation=nn.ReLU()
+            in_channels,
+            in_channels // 8,
+            kernel_size=1,
+            stride=1,
+            bias=False,
+            norm=nn.BatchNorm2d(in_channels // 8),
+            activation=nn.ReLU(),
         )
         self.conv2 = Conv2d(
             intermediate_channels,

@@ -21,7 +21,7 @@ from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
 from post_processing import PostProcessing
 from models.experimental.panoptic_deeplab.demo.config import DemoConfig
-from models.experimental.panoptic_deeplab.tt.common import (
+from models.experimental.panoptic_deeplab.common import (
     _populate_all_decoders,
     preprocess_image,
     save_preprocessed_inputs,

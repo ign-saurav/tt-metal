@@ -4,7 +4,7 @@
 import torch.nn as nn
 import torch
 from torch import Tensor
-from models.experimental.panoptic_deeplab.tt.common import Conv2d
+from models.experimental.panoptic_deeplab.reference.utils import Conv2d
 
 
 class HeadModel(torch.nn.Module):
@@ -23,7 +23,14 @@ class HeadModel(torch.nn.Module):
 
         if out_channels == 1:  # instance center head
             self.conv1 = Conv2d(
-                in_channels, in_channels, kernel_size=3, stride=1, padding=1, bias=False, norm=nn.BatchNorm2d(in_channels), activation=nn.ReLU()
+                in_channels,
+                in_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                bias=False,
+                norm=nn.BatchNorm2d(in_channels),
+                activation=nn.ReLU(),
             )
             self.conv2 = Conv2d(
                 in_channels,

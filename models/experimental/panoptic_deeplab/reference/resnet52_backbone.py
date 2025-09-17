@@ -5,7 +5,7 @@ import torch.nn as nn
 from typing import Callable, List, Optional
 from torch import Tensor
 from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
-from models.experimental.panoptic_deeplab.tt.common import Conv2d
+from models.experimental.panoptic_deeplab.reference.utils import Conv2d
 from models.experimental.panoptic_deeplab.reference.resnet52_bottleneck import Bottleneck
 
 

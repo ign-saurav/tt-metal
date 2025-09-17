@@ -22,7 +22,7 @@ from models.experimental.panoptic_deeplab.tt.custom_preprocessing import (
     create_custom_mesh_preprocessor,
 )
 from models.experimental.panoptic_deeplab.reference.decoder import DecoderModel
-from models.experimental.panoptic_deeplab.tt.common import (
+from models.experimental.panoptic_deeplab.common import (
     _populate_decoder,
     load_torch_model_state,
 )

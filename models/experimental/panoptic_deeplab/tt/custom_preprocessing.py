@@ -1,22 +1,20 @@
-# SPDX-FileCopyrightText: © 2024 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+import ttnn
 import torch
+
 from ttnn.model_preprocessing import convert_torch_model_to_ttnn_model, fold_batch_norm2d_into_conv2d
 
-import ttnn
-from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
-
-from models.experimental.panoptic_deeplab.reference.decoder import (
-    DecoderModel,
-)
+from models.experimental.panoptic_deeplab.reference.decoder import DecoderModel
 from models.experimental.panoptic_deeplab.reference.aspp import ASPPModel
 from models.experimental.panoptic_deeplab.reference.head import HeadModel
 from models.experimental.panoptic_deeplab.reference.res_block import ResModel
+from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
 from models.experimental.panoptic_deeplab.reference.resnet52_bottleneck import Bottleneck
 from models.experimental.panoptic_deeplab.reference.resnet52_backbone import ResNet52BackBone as TorchBackbone
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
-from models.experimental.panoptic_deeplab.tt.common import Conv2d
+from models.experimental.panoptic_deeplab.reference.utils import Conv2d
 
 
 def preprocess_conv_parameter(parameter, *, dtype):

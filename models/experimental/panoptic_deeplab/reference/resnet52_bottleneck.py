@@ -3,7 +3,7 @@
 
 from torch import nn
 from torch import Tensor
-from models.experimental.panoptic_deeplab.tt.common import Conv2d
+from models.experimental.panoptic_deeplab.reference.utils import Conv2d
 
 
 class Bottleneck(nn.Module):

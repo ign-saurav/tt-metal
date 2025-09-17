@@ -11,7 +11,7 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
 from models.experimental.panoptic_deeplab.tt.stem import resnet52Stem, neck_optimisations
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
-from models.experimental.panoptic_deeplab.tt.common import load_torch_model_state
+from models.experimental.panoptic_deeplab.common import load_torch_model_state
 
 
 class Resnet52StemTestInfra:

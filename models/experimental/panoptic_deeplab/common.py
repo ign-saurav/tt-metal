@@ -1,17 +1,17 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
-
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import pickle
+from typing import Tuple, Optional, Any
+
+import numpy as np
+from PIL import Image
+
 import torch
+import torchvision.transforms as transforms
 from loguru import logger
 
-import pickle
-import numpy as np
-import os
-from PIL import Image
-from typing import Tuple
-import torchvision.transforms as transforms
-from typing import Optional, Any
 import ttnn
 from models.experimental.panoptic_deeplab.reference.resnet52_backbone import ResNet52BackBone as TorchBackbone
 from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
@@ -20,8 +20,13 @@ from models.experimental.panoptic_deeplab.reference.decoder import DecoderModel
 from models.experimental.panoptic_deeplab.reference.res_block import ResModel
 from models.experimental.panoptic_deeplab.reference.head import HeadModel
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
+from ttnn.model_preprocessing import infer_ttnn_module_args
 from models.experimental.panoptic_deeplab.reference.resnet52_bottleneck import Bottleneck
 
+
+# ---------------------------
+# Key mapping & model loading
+# ---------------------------
 
 key_mappings = {
     # SEMANTIC HEAD MAPPINGS
@@ -142,96 +147,47 @@ def load_torch_model_state(torch_model: torch.nn.Module = None, layer_name: str 
     return torch_model.eval()
 
 
-def parameter_conv_args(torch_model: torch.nn.Module = None, parameters: dict = None):
-    from ttnn.model_preprocessing import infer_ttnn_module_args
+def _infer_and_set(module, params_holder, attr_name, run_fn):
+    """Infer conv args for a TTNN module and set them if present in parameters."""
+    if hasattr(params_holder, attr_name):
+        args = infer_ttnn_module_args(model=module, run_model=run_fn, device=None)
+        getattr(params_holder, attr_name).conv_args = args
 
-    if isinstance(torch_model, TorchPanopticDeepLab):
-        parameters.conv_args = {}
-        sample_x = torch.randn(1, 2048, 32, 64)
-        sample_res3 = torch.randn(1, 512, 64, 128)
-        sample_res2 = torch.randn(1, 256, 128, 256)
 
-        # For semantic decoder
-        if hasattr(parameters, "semantic_decoder"):
-            # ASPP
-            aspp_args = infer_ttnn_module_args(
-                model=torch_model.semantic_decoder.aspp, run_model=lambda model: model(sample_x), device=None
-            )
-            if hasattr(parameters.semantic_decoder, "aspp"):
-                parameters.semantic_decoder.aspp.conv_args = aspp_args
+def _populate_decoder(torch_dec: torch.nn.Module = None, params_dec: dict = None):
+    """Warm up a single decoder (semantic or instance) to populate conv_args."""
+    if not (torch_dec and params_dec):
+        return
 
-            # Res3
-            aspp_out = torch_model.semantic_decoder.aspp(sample_x)
-            res3_args = infer_ttnn_module_args(
-                model=torch_model.semantic_decoder.res3,
-                run_model=lambda model: model(aspp_out, sample_res3),
-                device=None,
-            )
-            if hasattr(parameters.semantic_decoder, "res3"):
-                parameters.semantic_decoder.res3.conv_args = res3_args
+    # Synthetic tensors that match typical Panoptic-DeepLab strides
+    input_tensor = torch.randn(1, 2048, 32, 64)
+    res3_tensor = torch.randn(1, 512, 64, 128)
+    res2_tensor = torch.randn(1, 256, 128, 256)
 
-            # Res2
-            res3_out = torch_model.semantic_decoder.res3(aspp_out, sample_res3)
-            res2_args = infer_ttnn_module_args(
-                model=torch_model.semantic_decoder.res2,
-                run_model=lambda model: model(res3_out, sample_res2),
-                device=None,
-            )
-            if hasattr(parameters.semantic_decoder, "res2"):
-                parameters.semantic_decoder.res2.conv_args = res2_args
+    # ASPP
+    _infer_and_set(torch_dec.aspp, params_dec, "aspp", lambda m: m(input_tensor))
+    aspp_out = torch_dec.aspp(input_tensor)
 
-            # Head
-            res2_out = torch_model.semantic_decoder.res2(res3_out, sample_res2)
-            head_args = infer_ttnn_module_args(
-                model=torch_model.semantic_decoder.head_1, run_model=lambda model: model(res2_out), device=None
-            )
-            if hasattr(parameters.semantic_decoder, "head_1"):
-                parameters.semantic_decoder.head_1.conv_args = head_args
+    # res3
+    _infer_and_set(torch_dec.res3, params_dec, "res3", lambda m: m(aspp_out, res3_tensor))
+    res3_out = torch_dec.res3(aspp_out, res3_tensor)
 
-        # For instance decoder
-        if hasattr(parameters, "instance_decoder"):
-            # ASPP
-            aspp_args = infer_ttnn_module_args(
-                model=torch_model.instance_decoder.aspp, run_model=lambda model: model(sample_x), device=None
-            )
-            if hasattr(parameters.instance_decoder, "aspp"):
-                parameters.instance_decoder.aspp.conv_args = aspp_args
+    # res2
+    _infer_and_set(torch_dec.res2, params_dec, "res2", lambda m: m(res3_out, res2_tensor))
+    res2_out = torch_dec.res2(res3_out, res2_tensor)
 
-            # Res3
-            aspp_out = torch_model.instance_decoder.aspp(sample_x)
-            res3_args = infer_ttnn_module_args(
-                model=torch_model.instance_decoder.res3,
-                run_model=lambda model: model(aspp_out, sample_res3),
-                device=None,
-            )
-            if hasattr(parameters.instance_decoder, "res3"):
-                parameters.instance_decoder.res3.conv_args = res3_args
+    # heads (one or two, if present)
+    if hasattr(torch_dec, "head_1"):
+        _infer_and_set(torch_dec.head_1, params_dec, "head_1", lambda m: m(res2_out))
+    if hasattr(torch_dec, "head_2"):
+        _infer_and_set(torch_dec.head_2, params_dec, "head_2", lambda m: m(res2_out))
 
-            # Res2
-            res3_out = torch_model.instance_decoder.res3(aspp_out, sample_res3)
-            res2_args = infer_ttnn_module_args(
-                model=torch_model.instance_decoder.res2,
-                run_model=lambda model: model(res3_out, sample_res2),
-                device=None,
-            )
-            if hasattr(parameters.instance_decoder, "res2"):
-                parameters.instance_decoder.res2.conv_args = res2_args
 
-            # Head
-            res2_out = torch_model.instance_decoder.res2(res3_out, sample_res2)
-            head_args_1 = infer_ttnn_module_args(
-                model=torch_model.instance_decoder.head_1, run_model=lambda model: model(res2_out), device=None
-            )
-            head_args_2 = infer_ttnn_module_args(
-                model=torch_model.instance_decoder.head_2, run_model=lambda model: model(res2_out), device=None
-            )
-            if hasattr(parameters.instance_decoder, "head_1"):
-                parameters.instance_decoder.head_1.conv_args = head_args_1
-            if hasattr(parameters.instance_decoder, "head_2"):
-                parameters.instance_decoder.head_2.conv_args = head_args_2
-    else:
-        raise NotImplementedError("Unknown torch model. Parameter conv args not implemented")
-    return parameters
+def _populate_all_decoders(torch_model: torch.nn.Module = None, parameters: dict = None):
+    if hasattr(parameters, "semantic_decoder"):
+        _populate_decoder(torch_model.semantic_decoder, parameters.semantic_decoder)
+    if hasattr(parameters, "instance_decoder"):
+        _populate_decoder(torch_model.instance_decoder, parameters.instance_decoder)
 
 
 def preprocess_image(
@@ -264,7 +220,7 @@ def preprocess_image(
     )
 
     if ttnn_tensor is not None:
-        ttnn_as_torch = ttnn.to_torch(ttnn_tensor)
+        _ = ttnn.to_torch(ttnn_tensor)
 
     return torch_tensor, ttnn_tensor, original_array, original_size
 

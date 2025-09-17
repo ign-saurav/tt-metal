@@ -15,7 +15,7 @@ from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_
 from pathlib import Path
 import os
 from ttnn.model_preprocessing import preprocess_model_parameters
-from models.experimental.panoptic_deeplab.tt.common import (
+from models.experimental.panoptic_deeplab.common import (
     load_torch_model_state,
     preprocess_image,
     save_preprocessed_inputs,

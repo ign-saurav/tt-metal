@@ -10,7 +10,7 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.panoptic_deeplab.reference.resnet52_backbone import ResNet52BackBone as TorchBackbone
 from models.experimental.panoptic_deeplab.tt.backbone import TTBackbone
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
-from models.experimental.panoptic_deeplab.tt.common import load_torch_model_state
+from models.experimental.panoptic_deeplab.common import load_torch_model_state
 
 
 class BackboneTestInfra:

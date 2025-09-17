@@ -10,7 +10,7 @@ from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_mod
 from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.panoptic_deeplab.reference.res_block import ResModel
 from models.experimental.panoptic_deeplab.tt.res_block import TTRes, res_layer_optimisations
-from models.experimental.panoptic_deeplab.tt.common import load_torch_model_state
+from models.experimental.panoptic_deeplab.common import load_torch_model_state
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 
 
