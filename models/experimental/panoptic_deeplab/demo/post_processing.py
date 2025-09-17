@@ -1,20 +1,23 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
-
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
 import torch.nn.functional as F
-from typing import Tuple, Optional, Any
-import ttnn
-from typing import Dict
+from typing import Tuple, Optional, Dict, Any
 import numpy as np
 import cv2
 import logging
+from collections import Counter
 
 logger = logging.getLogger(__name__)
 
 
 class PostProcessing:
+    """
+    Post-processing for Panoptic-DeepLab, aligned with Detectron2 implementation.
+    Reference: https://github.com/facebookresearch/detectron2/blob/main/projects/Panoptic-DeepLab/
+    """
+
     def __init__(
         self,
         center_threshold: float = 0.1,
@@ -22,8 +25,9 @@ class PostProcessing:
         top_k_instance: int = 200,
         thing_classes: Optional[list] = None,
         stuff_classes: Optional[list] = None,
-        stuff_area_threshold: int = 4096,
+        stuff_area_threshold: int = 2048,
         label_divisor: int = 256,
+        instance_score_threshold: float = 0.5,
     ):
         self.center_threshold = center_threshold
         self.nms_kernel = nms_kernel
@@ -32,442 +36,292 @@ class PostProcessing:
         self.stuff_classes = stuff_classes or [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         self.stuff_area_threshold = stuff_area_threshold
         self.label_divisor = label_divisor
+        self.instance_score_threshold = instance_score_threshold
 
-    def find_instance_center(
-        self,
-        center_heatmap: torch.Tensor,
-        threshold: Optional[float] = None,
-        nms_kernel: Optional[int] = None,
-        top_k: Optional[int] = None,
-    ) -> torch.Tensor:
+        # Create lookup sets for faster checking
+        self.thing_set = set(self.thing_classes)
+        self.stuff_set = set(self.stuff_classes)
+
+    def find_instance_center(self, center_heatmap, threshold=0.1, nms_kernel=3, top_k=None):
         """
-        Find center points from center heatmap.
+        Find the center points from the center heatmap.
         """
-        threshold = threshold if threshold is not None else self.center_threshold
-        nms_kernel = nms_kernel if nms_kernel is not None else self.nms_kernel
-        top_k = top_k if top_k is not None else self.top_k_instance
-
-        # Ensure 4D tensor [B, C, H, W]
-        if center_heatmap.dim() == 3:
-            center_heatmap = center_heatmap.unsqueeze(0)
-
-        # Apply threshold
+        # Thresholding, setting values below threshold to -1.
         center_heatmap = F.threshold(center_heatmap, threshold, -1)
 
-        # NMS via max pooling
+        # NMS
         nms_padding = (nms_kernel - 1) // 2
-        max_pooled = F.max_pool2d(center_heatmap, kernel_size=nms_kernel, stride=1, padding=nms_padding)
-        # Set non-maximal values
-        center_heatmap[center_heatmap != max_pooled] = -1
+        center_heatmap_max_pooled = F.max_pool2d(center_heatmap, kernel_size=nms_kernel, stride=1, padding=nms_padding)
+        center_heatmap[center_heatmap != center_heatmap_max_pooled] = -1
 
-        # Squeeze to 2D
+        # Squeeze first two dimensions.
         center_heatmap = center_heatmap.squeeze()
-        if center_heatmap.dim() == 3:
-            center_heatmap = center_heatmap[0]
+        assert len(center_heatmap.size()) == 2, "Something is wrong with center heatmap dimension."
 
-        # Find centers with positive values only
+        # Find non-zero elements.
         if top_k is None:
-            return torch.nonzero(center_heatmap > 0, as_tuple=False)
+            return torch.nonzero(center_heatmap > 0)
         else:
-            # Get top-k based on actual scores
-            flat = center_heatmap[center_heatmap > 0]
-            if flat.numel() == 0:
-                return torch.empty((0, 2), dtype=torch.long, device=center_heatmap.device)
+            # find top k centers.
+            top_k_scores, _ = torch.topk(torch.flatten(center_heatmap), top_k)
+            return torch.nonzero(center_heatmap > top_k_scores[-1].clamp_(min=0))
 
-            k = min(top_k, flat.numel())
-            if k == 0:
-                return torch.empty((0, 2), dtype=torch.long, device=center_heatmap.device)
-
-            top_k_scores, _ = torch.topk(flat, k)
-            threshold_score = top_k_scores[-1]
-            return torch.nonzero(center_heatmap >= threshold_score, as_tuple=False)
-
-    def group_pixels(self, center_points: torch.Tensor, offsets: torch.Tensor) -> torch.Tensor:
+    def group_pixels(self, center_points, offsets):
         """
-        Assign each pixel to nearest center based on offset predictions.
+        Gives each pixel in the image an instance id.
         """
-        # Handle different input shapes for offsets
-        if offsets.dim() == 4:
-            if offsets.size(0) != 1:
-                raise ValueError("Only supports inference for batch size = 1")
-            offsets = offsets.squeeze(0)
+        height, width = offsets.size()[1:]
 
-        if offsets.dim() == 3:
-            channels, height, width = offsets.shape
-            if channels != 2:
-                raise ValueError(f"Expected 2 offset channels (x, y), got {channels}")
-        else:
-            raise ValueError(f"Unexpected offset tensor shape: {offsets.shape}")
-
-        device = offsets.device
-
-        # Generate coordinate map
+        # Generates a coordinate map, where each location is the coordinate of
+        # that location.
         y_coord, x_coord = torch.meshgrid(
-            torch.arange(height, dtype=offsets.dtype, device=device),
-            torch.arange(width, dtype=offsets.dtype, device=device),
+            torch.arange(height, dtype=offsets.dtype, device=offsets.device),
+            torch.arange(width, dtype=offsets.dtype, device=offsets.device),
             indexing="ij",
         )
-        coord = torch.stack((y_coord, x_coord), dim=0)
+        coord = torch.cat((y_coord.unsqueeze(0), x_coord.unsqueeze(0)), dim=0)
 
-        # Add offsets to get predicted centers
         center_loc = coord + offsets
-        center_loc = center_loc.flatten(1).T.unsqueeze(0)
+        center_loc = center_loc.flatten(1).T.unsqueeze_(0)  # [1, H*W, 2]
+        center_points = center_points.unsqueeze(1)  # [K, 1, 2]
 
-        # Handle center_points shape
-        if center_points.numel() == 0:
-            # No centers found, return zeros
-            return torch.zeros((1, height, width), dtype=torch.long, device=device)
-
-        if center_points.dim() == 1:
-            center_points = center_points.unsqueeze(0)
-
-        center_points = center_points.float().unsqueeze(1)
-
-        # Compute distances
+        # Distance: [K, H*W].
         distance = torch.norm(center_points - center_loc, dim=-1)
 
-        # Find nearest center for each pixel
-        instance_id = torch.argmin(distance, dim=0).reshape(1, height, width) + 1
-
+        # Finds center with minimum distance at each location, offset by 1, to
+        # reserve id=0 for stuff.
+        instance_id = torch.argmin(distance, dim=0).reshape((1, height, width)) + 1
         return instance_id
 
     def get_instance_segmentation(
-        self, sem_seg: torch.Tensor, center_heatmap: torch.Tensor, offsets: torch.Tensor, thing_seg: torch.Tensor
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        self, sem_seg, center_heatmap, offsets, thing_seg, thing_ids, threshold=0.1, nms_kernel=3, top_k=None
+    ):
         """
-        Generate instance segmentation from centers and offsets.
+        Post-processing for instance segmentation, gets class agnostic instance id.
         """
-        # Ensure consistent dimensions
-        if sem_seg.dim() == 3 and sem_seg.size(0) == 1:
-            sem_seg = sem_seg.squeeze(0)  # [H, W]
-
-        if center_heatmap.dim() == 3 and center_heatmap.size(0) == 1:
-            center_heatmap = center_heatmap.squeeze(0)
-
-        if center_heatmap.dim() == 3 and center_heatmap.size(0) == 1:
-            center_heatmap = center_heatmap.squeeze(0)
-
-        # Add batch dimension back for find_instance_center
-        if center_heatmap.dim() == 2:
-            center_heatmap = center_heatmap.unsqueeze(0).unsqueeze(0)
-        elif center_heatmap.dim() == 3:
-            center_heatmap = center_heatmap.unsqueeze(0)
-
-        center_points = self.find_instance_center(center_heatmap)
-
+        center_points = self.find_instance_center(
+            center_heatmap, threshold=threshold, nms_kernel=nms_kernel, top_k=top_k
+        )
         if center_points.size(0) == 0:
-            height, width = sem_seg.shape[-2:]
-            return torch.zeros((1, height, width), dtype=torch.long, device=sem_seg.device), center_points.unsqueeze(0)
-
-        # Ensure offsets has the right shape for group_pixels
-        if offsets.dim() == 3 and offsets.size(0) == 1:
-            offsets = offsets.squeeze(0)
-
+            return torch.zeros_like(sem_seg), center_points.unsqueeze(0)
         ins_seg = self.group_pixels(center_points, offsets)
-
-        # Apply thing mask
-        if thing_seg.dim() == 3:
-            thing_seg = thing_seg.squeeze(0)
-
-        # Ensure thing_seg matches ins_seg dimensions
-        if ins_seg.dim() == 3:
-            thing_seg = thing_seg.unsqueeze(0)
-
         return thing_seg * ins_seg, center_points.unsqueeze(0)
 
     def merge_semantic_and_instance(
-        self, sem_seg: torch.Tensor, ins_seg: torch.Tensor, thing_seg: torch.Tensor, void_label: int = -1
-    ) -> torch.Tensor:
+        self, sem_seg, ins_seg, semantic_thing_seg, label_divisor, thing_ids, stuff_area, void_label
+    ):
         """
-        Merge semantic and instance predictions for panoptic output.
+        Post-processing for panoptic segmentation, by merging semantic segmentation
+            label and class agnostic instance segmentation label.
         """
-        # Initialize
-        pan_seg = torch.full_like(sem_seg, void_label, dtype=torch.int32)
+        # In case thing mask does not align with semantic prediction.
+        pan_seg = torch.zeros_like(sem_seg) + void_label
+        is_thing = (ins_seg > 0) & (semantic_thing_seg > 0)
 
-        # Track instance IDs for each class
-        class_id_tracker = {}
+        # Keep track of instance id for each class.
+        class_id_tracker = Counter()
 
-        # First, assign all stuff classes (including road)
-        for stuff_class in self.stuff_classes:
-            stuff_mask = sem_seg == stuff_class
-            if stuff_mask.sum() > 0:
-                pan_seg[stuff_mask] = stuff_class * self.label_divisor
-
-        # Process thing instances with majority voting
-        for ins_id in torch.unique(ins_seg):
+        # Paste thing by majority voting.
+        instance_ids = torch.unique(ins_seg)
+        for ins_id in instance_ids:
             if ins_id == 0:
                 continue
-
-            # Get mask for this instance
-            ins_mask = ins_seg == ins_id
-
-            # Only consider pixels that are predicted as thing classes
-            thing_mask = torch.zeros_like(sem_seg, dtype=torch.bool)
-            for thing_class in self.thing_classes:
-                thing_mask |= sem_seg == thing_class
-
-            final_mask = ins_mask & thing_mask
-
-            if final_mask.sum() == 0:
+            # Make sure only do majority voting within `semantic_thing_seg`.
+            thing_mask = (ins_seg == ins_id) & is_thing
+            if torch.nonzero(thing_mask).size(0) == 0:
                 continue
+            class_id, _ = torch.mode(sem_seg[thing_mask].view(-1))
+            class_id_tracker[class_id.item()] += 1
+            new_ins_id = class_id_tracker[class_id.item()]
+            pan_seg[thing_mask] = class_id * label_divisor + new_ins_id
 
-            semantic_votes = sem_seg[final_mask]
-            class_id = torch.mode(semantic_votes)[0].item()
-
-            # Ensure it's a valid thing class
-            if class_id not in self.thing_classes:
+        # Paste stuff to unoccupied area.
+        class_ids = torch.unique(sem_seg)
+        for class_id in class_ids:
+            if class_id.item() in thing_ids:
+                # thing class
                 continue
-
-            # Track instance count for this class
-            if class_id not in class_id_tracker:
-                class_id_tracker[class_id] = 0
-            class_id_tracker[class_id] += 1
-
-            # Assign panoptic ID (overwrites stuff assignments where things are detected)
-            pan_seg[final_mask] = class_id * self.label_divisor + class_id_tracker[class_id]
-
-        # Apply area threshold for small stuff regions
-        for stuff_class in self.stuff_classes:
-            if stuff_class == 0:
-                continue
-            stuff_mask = pan_seg == stuff_class * self.label_divisor
-            if stuff_mask.sum() > 0 and stuff_mask.sum() < self.stuff_area_threshold:
-                pan_seg[stuff_mask] = void_label
-
-        # Convert any remaining void pixels
-        pan_seg[pan_seg == void_label] = 0
+            # Calculate stuff area.
+            stuff_mask = (sem_seg == class_id) & (ins_seg == 0)
+            if stuff_mask.sum().item() >= stuff_area:
+                pan_seg[stuff_mask] = class_id * label_divisor
+            pan_seg = torch.clamp(pan_seg, min=0)
 
         return pan_seg
 
-    def panoptic_fusion(
-        self, semantic_logits: torch.Tensor, center_heatmap: torch.Tensor, offset_map: torch.Tensor
-    ) -> torch.Tensor:
+    def get_panoptic_segmentation(
+        self,
+        sem_seg,
+        center_heatmap,
+        offsets,
+        thing_ids=[11, 12, 13, 14, 15, 16, 17, 18],
+        label_divisor=256,
+        stuff_area=2048,
+        void_label=0,
+        threshold=0.1,
+        nms_kernel=7,
+        top_k=200,
+        foreground_mask=None,
+    ):
         """
-        Main panoptic segmentation fusion with proper tensor handling.
+        Post-processing for panoptic segmentation.
         """
-        batch_size = semantic_logits.shape[0]
-        semantic_pred = torch.argmax(semantic_logits, dim=1)
-        panoptic_pred = torch.zeros_like(semantic_pred, dtype=torch.int32)
+        if sem_seg.dim() == 4 and sem_seg.shape[1] > 1:
+            sem_seg = torch.argmax(sem_seg, dim=1, keepdim=True)  # [B, 1, H, W]
+        else:
+            sem_seg = sem_seg
 
-        for b in range(batch_size):
-            sem_seg = semantic_pred[b]
-            center_heat = center_heatmap[b]
-            offsets = offset_map[b]
+        if sem_seg.dim() == 4 and sem_seg.shape[0] == 1:
+            sem_seg = sem_seg.squeeze(0)  # [1, H, W]
+        if center_heatmap.dim() == 2:  # [H, W]
+            center_heatmap = center_heatmap.unsqueeze(0)
+        elif center_heatmap.dim() == 4:  # [B, 1, H, W]
+            center_heatmap = center_heatmap.squeeze(0)
+        if offsets.dim() == 2:  # [H, W]
+            offsets = offsets.unsqueeze(0)
+        elif offsets.dim() == 4:  # [B, 2, H, W]
+            offsets = offsets.squeeze(0)
+        if sem_seg.dim() != 3 and sem_seg.size(0) != 1:
+            raise ValueError("Semantic prediction with un-supported shape: {}.".format(sem_seg.size()))
 
-            # Create thing mask - keep semantic classes for thing regions
+        if center_heatmap.dim() != 3:
+            raise ValueError("Center prediction with un-supported dimension: {}.".format(center_heatmap.dim()))
+        if offsets.dim() != 3:
+            raise ValueError("Offset prediction with un-supported dimension: {}.".format(offsets.dim()))
+        if foreground_mask is not None:
+            if foreground_mask.dim() != 3 and foreground_mask.size(0) != 1:
+                raise ValueError("Foreground prediction with un-supported shape: {}.".format(sem_seg.size()))
+            thing_seg = foreground_mask
+        else:
+            # inference from semantic segmentation
             thing_seg = torch.zeros_like(sem_seg)
-            for thing_class in self.thing_classes:
+            for thing_class in list(thing_ids):
                 thing_seg[sem_seg == thing_class] = 1
 
-            # Debug tensor shapes
-            logger.debug(f"sem_seg shape: {sem_seg.shape}")
-            logger.debug(f"center_heat shape: {center_heat.shape}")
-            logger.debug(f"offsets shape: {offsets.shape}")
-            logger.debug(f"thing_seg shape: {thing_seg.shape}")
+        if sem_seg.shape[1] > 1:  # Multi-class
+            semantic_pred = torch.argmax(sem_seg, dim=1)
+        else:
+            semantic_pred = sem_seg.squeeze(1)
 
-            # Get instance segmentation
-            ins_seg, _ = self.get_instance_segmentation(
-                sem_seg.unsqueeze(0), center_heat.unsqueeze(0), offsets.unsqueeze(0), thing_seg.unsqueeze(0)
-            )
-            ins_seg = ins_seg[0]
+        instance, center = self.get_instance_segmentation(
+            semantic_pred,
+            center_heatmap,
+            offsets,
+            thing_seg,
+            thing_ids,
+            threshold=threshold,
+            nms_kernel=nms_kernel,
+            top_k=top_k,
+        )
+        panoptic = self.merge_semantic_and_instance(
+            sem_seg, instance, thing_seg, label_divisor, thing_ids, stuff_area, void_label
+        )
 
-            # Merge to create panoptic
-            panoptic_img = self.merge_semantic_and_instance(sem_seg, ins_seg, thing_seg)
-            panoptic_pred[b] = panoptic_img
-
-        return panoptic_pred
+        return panoptic, center
 
     def postprocess_outputs(
         self,
         torch_outputs: torch.Tensor,
         torch_outputs_2: torch.Tensor,
         torch_outputs_3: torch.Tensor,
-        ttnn_outputs: ttnn.Tensor,
-        ttnn_outputs_2: ttnn.Tensor,
-        ttnn_outputs_3: ttnn.Tensor,
+        ttnn_outputs,
+        ttnn_outputs_2,
+        ttnn_outputs_3,
         original_size: Tuple[int, int],
-        ttnn_device: ttnn.Device,
+        ttnn_device,
         output_mesh_composer: Optional[Any],
     ) -> Dict[str, Dict]:
-        """Postprocess outputs from both pipelines"""
+        """Process outputs from both PyTorch and TTNN pipelines."""
         results = {"torch": {}, "ttnn": {}}
 
         # Process PyTorch outputs
-        if torch_outputs is not None and torch_outputs_2 is not None and torch_outputs_3 is not None:
+        if torch_outputs is not None:
             logger.info("Processing PyTorch outputs...")
             try:
-                semantic_logits = torch_outputs
-                offset_map = torch_outputs_2
-                center_heatmap = torch_outputs_3
+                # Run panoptic fusion
+                panoptic_pred, _ = self.get_panoptic_segmentation(torch_outputs, torch_outputs_3, torch_outputs_2)
+                void_pixels = (panoptic_pred == -1).sum()
+                total_pixels = panoptic_pred.numel()
+                logger.info(f"Void pixels: {void_pixels}/{total_pixels} ({100*void_pixels/total_pixels:.1f}%)")
 
-                # semantic_logits
-                if semantic_logits is not None and isinstance(semantic_logits, torch.Tensor):
-                    np_array = semantic_logits.squeeze(0).cpu().numpy()
-                    semantic_pred = np.argmax(np_array, axis=0)
-                    results["torch"]["semantic_pred"] = cv2.resize(
-                        semantic_pred.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
-                    )
-                    logger.debug(f"PyTorch semantic_pred shape: {results['torch']['semantic_pred'].shape}")
+                # Extract individual outputs
+                semantic_pred = torch.argmax(torch_outputs, dim=1)
 
-                # center_heatmap
-                if center_heatmap is not None and isinstance(center_heatmap, torch.Tensor):
-                    np_array = center_heatmap.squeeze(0).cpu().numpy()
-                    if len(np_array.shape) == 3 and np_array.shape[0] == 1:
-                        center_data = np_array[0]  # Remove channel dim
-                    elif len(np_array.shape) == 2:
-                        center_data = np_array
-                    else:
-                        center_data = np_array  # Use as is
-
-                    results["torch"]["center_heatmap"] = cv2.resize(
-                        center_data, original_size, interpolation=cv2.INTER_LINEAR
-                    )
-                    logger.debug(f"PyTorch center_heatmap shape: {results['torch']['center_heatmap'].shape}")
-
-                # offset_map
-                if offset_map is not None and isinstance(offset_map, torch.Tensor):
-                    np_array = offset_map.squeeze(0).cpu().numpy()
-                    if len(np_array.shape) == 3 and np_array.shape[0] == 2:
-                        results["torch"]["offset_map"] = np.stack(
-                            [
-                                cv2.resize(np_array[0], original_size, interpolation=cv2.INTER_LINEAR),
-                                cv2.resize(np_array[1], original_size, interpolation=cv2.INTER_LINEAR),
-                            ]
-                        )
-                    else:
-                        logger.warning(f"Unexpected offset_map shape: {np_array.shape}")
-                # panoptic_pred
-                panoptic_pred = self.panoptic_fusion(
-                    semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map
+                # Convert to numpy and resize
+                results["torch"]["semantic_pred"] = cv2.resize(
+                    semantic_pred[0].cpu().numpy().astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
                 )
-                if panoptic_pred is not None and isinstance(panoptic_pred, torch.Tensor):
-                    np_array = panoptic_pred.squeeze(0).cpu().numpy()
-                    results["torch"]["panoptic_pred"] = cv2.resize(
-                        np_array.astype(np.int32), original_size, interpolation=cv2.INTER_NEAREST
-                    )
-                    logger.debug(f"PyTorch panoptic_pred shape: {results['torch']['panoptic_pred'].shape}")
+
+                results["torch"]["panoptic_pred"] = cv2.resize(
+                    panoptic_pred[0].cpu().numpy().astype(np.int32), original_size, interpolation=cv2.INTER_NEAREST
+                )
+
+                # Optional: save center heatmap
+                center_np = torch_outputs_3[0, 0].cpu().numpy()
+                results["torch"]["center_heatmap"] = cv2.resize(
+                    center_np, original_size, interpolation=cv2.INTER_LINEAR
+                )
+
+                # Optional: save offset map
+                offset_np = torch_outputs_2[0].cpu().numpy()
+                results["torch"]["offset_map"] = np.stack(
+                    [
+                        cv2.resize(offset_np[0], original_size, interpolation=cv2.INTER_LINEAR),
+                        cv2.resize(offset_np[1], original_size, interpolation=cv2.INTER_LINEAR),
+                    ]
+                )
 
             except Exception as e:
                 logger.error(f"Error processing PyTorch outputs: {e}")
+                import traceback
 
-        # Process TTNN outputs
-        if ttnn_outputs is not None and ttnn_outputs_2 is not None and ttnn_outputs_3 is not None:
+                traceback.print_exc()
+
+        # Process TTNN outputs (similar structure)
+        if ttnn_outputs is not None:
             logger.info("Processing TTNN outputs...")
+            import ttnn
+
             try:
-                # Convert TTNN to torch tensor
-                torch_tensor = ttnn.to_torch(ttnn_outputs, device=ttnn_device, mesh_composer=output_mesh_composer)
-                torch_tensor_2 = ttnn.to_torch(ttnn_outputs_2, device=ttnn_device, mesh_composer=output_mesh_composer)
-                torch_tensor_3 = ttnn.to_torch(ttnn_outputs_3, device=ttnn_device, mesh_composer=output_mesh_composer)
+                # Convert to PyTorch tensors
+                semantic_logits = ttnn.to_torch(ttnn_outputs, device=ttnn_device, mesh_composer=output_mesh_composer)
+                offset_map = ttnn.to_torch(ttnn_outputs_2, device=ttnn_device, mesh_composer=output_mesh_composer)
+                center_heatmap = ttnn.to_torch(ttnn_outputs_3, device=ttnn_device, mesh_composer=output_mesh_composer)
 
-                # Debug: Log raw TTNN output stats
-                logger.debug(
-                    f"TTNN raw output 1 (semantic): shape={torch_tensor.shape}, "
-                    f"min={torch_tensor.min():.4f}, max={torch_tensor.max():.4f}, "
-                    f"mean={torch_tensor.mean():.4f}"
-                )
-                logger.debug(
-                    f"TTNN raw output 2 (offset): shape={torch_tensor_2.shape}, "
-                    f"min={torch_tensor_2.min():.4f}, max={torch_tensor_2.max():.4f}, "
-                    f"mean={torch_tensor_2.mean():.4f}"
-                )
-                logger.debug(
-                    f"TTNN raw output 3 (center): shape={torch_tensor_3.shape}, "
-                    f"min={torch_tensor_3.min():.4f}, max={torch_tensor_3.max():.4f}, "
-                    f"mean={torch_tensor_3.mean():.4f}"
-                )
+                # Reshape if needed (handle TTNN's NHWC format)
+                semantic_logits = self._reshape_ttnn_output(semantic_logits, "semantic_logits")
+                offset_map = self._reshape_ttnn_output(offset_map, "offset_map")
+                center_heatmap = self._reshape_ttnn_output(center_heatmap, "center_heatmap")
 
-                # Reshape to proper format
-                reshaped_tensor = self._reshape_ttnn_output(torch_tensor, "semantic_logits")
-                reshaped_tensor_2 = self._reshape_ttnn_output(torch_tensor_2, "offset_map")
-                reshaped_tensor_3 = self._reshape_ttnn_output(torch_tensor_3, "center_heatmap")
+                # Run panoptic fusion
+                panoptic_pred, _ = self.get_panoptic_segmentation(semantic_logits, center_heatmap, offset_map)
 
-                # Process semantic segmentation
-                np_array = reshaped_tensor.squeeze(0).cpu().float().numpy()
-                semantic_pred = np.argmax(np_array, axis=0)
+                # Extract outputs
+                semantic_pred = torch.argmax(semantic_logits, dim=1)
+
+                # Convert and resize
                 results["ttnn"]["semantic_pred"] = cv2.resize(
-                    semantic_pred.astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
-                )
-                logger.debug(f"TTNN semantic_pred shape: {results['ttnn']['semantic_pred'].shape}")
-
-                # Process center heatmap - FIXED: This was in elif block before
-                np_array_3 = reshaped_tensor_3.squeeze(0).cpu().float().numpy()
-
-                # Debug center heatmap values
-                logger.debug(
-                    f"TTNN center heatmap stats: shape={np_array_3.shape}, "
-                    f"min={np_array_3.min():.4f}, max={np_array_3.max():.4f}, "
-                    f"mean={np_array_3.mean():.4f}, std={np_array_3.std():.4f}"
+                    semantic_pred[0].cpu().numpy().astype(np.uint8), original_size, interpolation=cv2.INTER_NEAREST
                 )
 
-                if len(np_array_3.shape) == 3 and np_array_3.shape[0] == 1:
-                    center_data = np_array_3[0]  # Remove channel dim
-                elif len(np_array_3.shape) == 2:
-                    center_data = np_array_3
-                else:
-                    center_data = np_array_3
-                    logger.warning(f"Unexpected center heatmap shape: {np_array_3.shape}, using as is")
-
-                # Check if center data has very small values and scale if needed
-                if center_data.max() < 0.01:
-                    logger.warning(f"Center heatmap has very small values (max={center_data.max():.6f}), scaling up")
-                    center_data = center_data * 100
-
-                results["ttnn"]["center_heatmap"] = cv2.resize(
-                    center_data, original_size, interpolation=cv2.INTER_LINEAR
+                results["ttnn"]["panoptic_pred"] = cv2.resize(
+                    panoptic_pred[0].cpu().numpy().astype(np.int32), original_size, interpolation=cv2.INTER_NEAREST
                 )
-                logger.debug(f"TTNN center_heatmap shape: {results['ttnn']['center_heatmap'].shape}")
 
-                # Process offset map
-                np_array_2 = reshaped_tensor_2.squeeze(0).cpu().float().numpy()
-                if len(np_array_2.shape) == 3 and np_array_2.shape[0] == 2:
-                    results["ttnn"]["offset_map"] = np.stack(
-                        [
-                            cv2.resize(np_array_2[0], original_size, interpolation=cv2.INTER_LINEAR),
-                            cv2.resize(np_array_2[1], original_size, interpolation=cv2.INTER_LINEAR),
-                        ]
-                    )
-                    logger.debug(f"TTNN offset_map shape: {results['ttnn']['offset_map'].shape}")
-                else:
-                    logger.warning(f"Unexpected TTNN offset_map shape: {np_array_2.shape}")
+                # Optional outputs
+                center_np = center_heatmap[0, 0].cpu().float().numpy()
+                results["ttnn"]["center_heatmap"] = cv2.resize(center_np, original_size, interpolation=cv2.INTER_LINEAR)
 
-                semantic_logits = reshaped_tensor
-                center_heatmap = reshaped_tensor_3
-                offset_map = reshaped_tensor_2
-
-                panoptic_pred_ttnn = self.panoptic_fusion(
-                    semantic_logits=semantic_logits, center_heatmap=center_heatmap, offset_map=offset_map
+                offset_np = offset_map[0].cpu().float().numpy()
+                results["ttnn"]["offset_map"] = np.stack(
+                    [
+                        cv2.resize(offset_np[0], original_size, interpolation=cv2.INTER_LINEAR),
+                        cv2.resize(offset_np[1], original_size, interpolation=cv2.INTER_LINEAR),
+                    ]
                 )
-                panoptic_pred = ttnn.from_torch(panoptic_pred_ttnn, dtype=ttnn.int32)
-
-                if panoptic_pred is not None and isinstance(panoptic_pred, ttnn.Tensor):
-                    # Convert TTNN tensor to numpy
-                    torch_tensor = ttnn.to_torch(panoptic_pred, device=ttnn_device, mesh_composer=output_mesh_composer)
-                    np_array = torch_tensor.squeeze().cpu().numpy()
-
-                    # Debug information
-                    logger.debug(f"Panoptic array shape: {np_array.shape}")
-                    logger.debug(f"Original size for resize: {original_size}")
-
-                    # Validate original_size before resize
-                    if not original_size or len(original_size) != 2 or original_size[0] <= 0 or original_size[1] <= 0:
-                        logger.error(f"Invalid original_size: {original_size}")
-                        original_size = (1024, 512)
-                        logger.warning(f"Using fallback size: {original_size}")
-
-                    # Ensure valid array dimensions
-                    if np_array.size > 0 and len(np_array.shape) >= 2:
-                        if len(np_array.shape) > 2:
-                            np_array = np_array.squeeze()
-
-                        results["ttnn"]["panoptic_pred"] = cv2.resize(
-                            np_array.astype(np.int32), original_size, interpolation=cv2.INTER_NEAREST
-                        )
-                        logger.debug(f"TTNN panoptic_pred shape: {results['ttnn']['panoptic_pred'].shape}")
-                    else:
-                        logger.error("Invalid array for resize - skipping panoptic processing")
 
             except Exception as e:
-                logger.error(f"Error processing TTNN output: {e}")
+                logger.error(f"Error processing TTNN outputs: {e}")
                 import traceback
 
                 traceback.print_exc()
@@ -475,56 +329,22 @@ class PostProcessing:
         return results
 
     def _reshape_ttnn_output(self, tensor: torch.Tensor, key: str) -> torch.Tensor:
-        """Reshape TTNN output tensor to proper format"""
-
-        logger.debug(f"Reshaping TTNN output for {key}: input shape = {tensor.shape}")
-
+        """Handle TTNN's NHWC to NCHW conversion."""
         if len(tensor.shape) == 4:
-            B, H, W, C = tensor.shape
+            # Assume NHWC format from TTNN
+            N, H, W, C = tensor.shape
 
             if key == "semantic_logits":
-                # Should have num_classes channels
-                expected_c = 19
+                expected_c = 19  # Cityscapes classes
                 if C == expected_c:
-                    result = tensor.permute(0, 3, 1, 2)  # BHWC -> BCHW
-                else:
-                    # Try to reshape if flattened
-                    total_elements = B * H * W * C
-                    expected_h = 512 // 4
-                    expected_w = 1024 // 4
-                    if total_elements == B * expected_h * expected_w * expected_c:
-                        tensor = tensor.reshape(B, expected_h, expected_w, expected_c)
-                        result = tensor.permute(0, 3, 1, 2)
-                    else:
-                        logger.warning(f"Unexpected semantic_logits shape: {tensor.shape}")
-                        result = tensor
+                    return tensor.permute(0, 3, 1, 2)  # NHWC -> NCHW
 
             elif key == "center_heatmap":
-                # Should have 1 channel
-                if C == 1:
-                    result = tensor.permute(0, 3, 1, 2)  # BHWC -> BCHW
-                else:
-                    # Take first channel or reshape
-                    if C > 1:
-                        tensor = tensor[:, :, :, :1]  # Take first channel
-                    result = tensor.permute(0, 3, 1, 2)
+                if C == 1 or C == 19:  # Could be 1 channel or per-class
+                    return tensor.permute(0, 3, 1, 2)
 
             elif key == "offset_map":
-                # Should have 2 channels (x, y offsets)
-                if C == 2:
-                    result = tensor.permute(0, 3, 1, 2)  # BHWC -> BCHW
-                else:
-                    logger.warning(f"Unexpected offset_map channels: {C}, expected 2")
-                    result = tensor
-            else:
-                result = tensor
+                if C == 2:  # x, y offsets
+                    return tensor.permute(0, 3, 1, 2)
 
-        elif len(tensor.shape) == 3:  # BHW format
-            result = tensor
-
-        else:
-            logger.warning(f"Unexpected tensor shape for {key}: {tensor.shape}")
-            result = tensor
-
-        logger.debug(f"Reshaped TTNN output for {key}: output shape = {result.shape}")
-        return result
+        return tensor

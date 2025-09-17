@@ -128,53 +128,8 @@ class Demo:
         return outputs  # (ttnn_outputs, ttnn_outputs_2, ttnn_outputs_3)
 
     # ---------------------------------------------------------------------
-    # Comparison / Visualization / I/O
+    # Visualization / I/O
     # ---------------------------------------------------------------------
-
-    def compare_outputs(self, results: Dict[str, Dict[str, np.ndarray]]) -> Dict[str, float]:
-        """Compare PyTorch and TTNN outputs via Pearson correlation (PCC).
-
-        Returns a dict of PCC scores per key, logging stats and handling shape mismatches robustly.
-        """
-        if not (self.config.compare_outputs and "torch" in results and "ttnn" in results):
-            return {}
-
-        logger.info("Comparing PyTorch and TTNN outputs…")
-        pcc_scores: Dict[str, float] = {}
-        keys = ["semantic_pred", "center_heatmap", "offset_map", "panoptic_pred"]
-
-        for key in keys:
-            torch_arr = results.get("torch", {}).get(key)
-            ttnn_arr = results.get("ttnn", {}).get(key)
-            if torch_arr is None or ttnn_arr is None:
-                logger.debug("Skipping {}: missing in one of the pipelines.", key)
-                continue
-
-            # Flatten and align lengths (robust to layout differences)
-            t_flat = np.asarray(torch_arr).ravel()
-            n_flat = np.asarray(ttnn_arr).ravel()
-            if t_flat.size == 0 or n_flat.size == 0:
-                logger.debug("Skipping {}: empty output.", key)
-                continue
-
-            if t_flat.size != n_flat.size:
-                min_sz = min(t_flat.size, n_flat.size)
-                logger.warning(
-                    "Shape mismatch for {} ({} vs {}), truncating to {}.", key, t_flat.size, n_flat.size, min_sz
-                )
-                t_flat = t_flat[:min_sz]
-                n_flat = n_flat[:min_sz]
-
-            # Compute PCC
-            if np.std(t_flat) == 0 or np.std(n_flat) == 0:
-                logger.warning("Zero-variance arrays for {}, PCC undefined. Skipping.", key)
-                continue
-
-            pcc = float(np.corrcoef(t_flat, n_flat)[0, 1])
-            pcc_scores[key] = pcc
-            logger.info("PCC[{}] = {:.4f}", key, pcc)
-
-        return pcc_scores
 
     def visualize_results(
         self, original_image: np.ndarray, results: Dict[str, Dict[str, np.ndarray]], save_path: str
@@ -334,7 +289,7 @@ class Demo:
 
         for pipeline, pipeline_results in results.items():
             # choose destination dir
-            if self.config.compare_outputs:
+            if self.config.dual_pipeline:
                 pipeline_dir = os.path.join(output_dir, pipeline)
             else:
                 pipeline_dir = "models/experimental/panoptic_deeplab/resources"
@@ -418,12 +373,6 @@ class Demo:
             self.ttnn_device,
             self.output_mesh_composer,
         )
-
-        # Compare outputs (optional)
-        if self.config.compare_outputs:
-            _ = self.compare_outputs(results)
-        else:
-            logger.info("Skipping output comparison per config.")
 
         # Persist artifacts
         if self.config.save_results:

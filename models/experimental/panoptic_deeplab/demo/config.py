@@ -1,5 +1,4 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
-
 # SPDX-License-Identifier: Apache-2.0
 
 from dataclasses import dataclass
@@ -26,10 +25,11 @@ class DemoConfig:
     std: List[float] = None
 
     # Inference configuration
-    center_threshold: float = 0.07
+    center_threshold: float = 0.1
     nms_kernel: int = 7
-    top_k_instances: int = 300
-    stuff_area_threshold: int = 512
+    top_k_instances: int = 200
+    stuff_area_threshold: int = 2048
+    instance_score_threshold: float = 0.5
     label_divisor: int = 256
 
     # Device configuration
@@ -44,7 +44,7 @@ class DemoConfig:
     save_panoptic: bool = True
     save_visualization: bool = False
     save_comparison: bool = False
-    compare_outputs: bool = False
+    dual_pipeline: bool = False
 
     # Dataset configuration (Cityscapes default)
     thing_classes: List[int] = None
