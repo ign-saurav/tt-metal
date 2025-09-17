@@ -75,7 +75,14 @@ def save_tensor_as_image(tensor, output_path):
     logger.info(f"Image saved to: {output_path}")
 
 
-def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo/images/", with_conv=True):
+def run_ssr_inference(
+    input_image_path,
+    output_dir="models/experimental/SSR/demo/images/",
+    with_conv=False,
+    accuracy_mode=False,
+    depth="1",
+    num_heads="1",
+):
     """Run SSR model inference on input image"""
 
     # Load input image
@@ -89,17 +96,20 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
 
+    depth_map = {"1": [1], "6": [6, 6, 6, 6, 6, 6]}
+    num_heads_map = {"1": [1], "6": [6, 6, 6, 6, 6, 6]}
+    actual_depth = depth_map[depth]
+    actual_num_heads = num_heads_map[num_heads]
+
     # Create args
     args = Args()
     num_cls = 1
-    depth = [1]
-    num_heads = [1]
 
     # Create reference PyTorch model
     if with_conv:
-        ref_model = SSR(args, num_cls, depth=depth, num_heads=num_heads)
+        ref_model = SSR(args, num_cls, depth=actual_depth, num_heads=actual_num_heads)
     else:
-        ref_model = SSR_wo_conv(args, num_cls, depth=depth, num_heads=num_heads)
+        ref_model = SSR_wo_conv(args, num_cls, depth=actual_depth, num_heads=actual_num_heads)
     ref_model.eval()
 
     # Get reference output
@@ -120,7 +130,7 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
         logger.info("Preprocessing model parameters...")
         parameters = preprocess_model_parameters(
             initialize_model=lambda: ref_model,
-            custom_preprocessor=create_ssr_preprocessor(device, args, num_cls, depth),
+            custom_preprocessor=create_ssr_preprocessor(device, args, num_cls, actual_depth),
             device=device,
         )
 
@@ -132,8 +142,8 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
                 parameters=parameters,
                 args=args,
                 num_cls=num_cls,
-                depth=depth,
-                num_heads=num_heads,
+                depth=actual_depth,
+                num_heads=actual_num_heads,
             )
         else:
             tt_model = TTSSR_wo_conv(
@@ -141,13 +151,15 @@ def run_ssr_inference(input_image_path, output_dir="models/experimental/SSR/demo
                 parameters=parameters,
                 args=args,
                 num_cls=num_cls,
-                depth=depth,
-                num_heads=num_heads,
+                depth=actual_depth,
+                num_heads=actual_num_heads,
             )
 
         # Convert input to TTNN tensor
         logger.info("Converting input to TTNN tensor...")
-        tt_input = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat8_b)
+        tt_input = ttnn.from_torch(
+            x, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16 if accuracy_mode else ttnn.bfloat8_b
+        )
 
         # Run TTNN model
         logger.info("Running TTNN model inference...")
@@ -196,7 +208,10 @@ if __name__ == "__main__":
         "--output-dir", type=str, default="models/experimental/SSR/demo/images/", help="Directory to save output images"
     )
     parser.add_argument("--with-conv", action="store_true", default=False, help="Use SSR model with conv layers")
+    parser.add_argument("--accuracy", action="store_true", default=False, help="Set flag to run in bfloat16 precision")
+    parser.add_argument("--depth", choices=["1", "6"], default="6", help="SSR depth configuration")
+    parser.add_argument("--num_heads", choices=["1", "6"], default="6", help="SSR num heads configuration")
 
     args = parser.parse_args()
 
-    run_ssr_inference(args.input, args.output_dir, args.with_conv)
+    run_ssr_inference(args.input, args.output_dir, args.with_conv, args.accuracy, args.depth, args.num_heads)
