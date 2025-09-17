@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
+from torch import Tensor
+from typing import Tuple
+
 from models.experimental.panoptic_deeplab.reference.aspp import ASPPModel
 from models.experimental.panoptic_deeplab.reference.head import HeadModel
 from models.experimental.panoptic_deeplab.reference.res_block import ResModel
-from torch import Tensor
-from typing import Tuple
 
 
 class DecoderModel(torch.nn.Module):

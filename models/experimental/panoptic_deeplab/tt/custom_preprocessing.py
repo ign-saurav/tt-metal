@@ -14,7 +14,7 @@ from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLab
 from models.experimental.panoptic_deeplab.reference.resnet52_bottleneck import Bottleneck
 from models.experimental.panoptic_deeplab.reference.resnet52_backbone import ResNet52BackBone as TorchBackbone
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
-from models.experimental.panoptic_deeplab.reference.utils import Conv2d
+from models.experimental.panoptic_deeplab.reference.utils import Conv2d, DepthwiseSeparableConv2d
 
 
 def preprocess_conv_parameter(parameter, *, dtype):
@@ -39,6 +39,7 @@ def custom_preprocessor(
     elif isinstance(
         model,
         (
+            DepthwiseSeparableConv2d,
             Bottleneck,
             DeepLabStem,
             TorchBackbone,

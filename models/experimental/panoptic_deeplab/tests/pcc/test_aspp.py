@@ -8,6 +8,7 @@ import ttnn
 
 from ttnn.model_preprocessing import preprocess_model_parameters
 from tests.ttnn.utils_for_testing import check_with_pcc
+
 from models.experimental.panoptic_deeplab.reference.aspp import ASPPModel
 from models.experimental.panoptic_deeplab.tt.aspp import TTASPP
 from models.experimental.panoptic_deeplab.common import load_torch_model_state

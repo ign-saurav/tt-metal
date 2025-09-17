@@ -1,12 +1,14 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-import pytest
-import torch
-from loguru import logger
 import ttnn
+import torch
+import pytest
+
+from loguru import logger
 from ttnn.model_preprocessing import preprocess_model_parameters
 from tests.ttnn.utils_for_testing import check_with_pcc
+
 from models.experimental.panoptic_deeplab.reference.resnet52_backbone import ResNet52BackBone as TorchBackbone
 from models.experimental.panoptic_deeplab.tt.backbone import TTBackbone
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor

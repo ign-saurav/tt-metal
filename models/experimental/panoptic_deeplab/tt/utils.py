@@ -2,12 +2,19 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
+from dataclasses import dataclass
 from tests.ttnn.ttnn_utility_fuction import get_shard_grid_from_num_cores
 
 
 # ---------------------------
 # TTNN utility modules
 # ---------------------------
+
+
+@dataclass
+class DepthwiseSeparableOptimizer:
+    depthwise: dict
+    pointwise: dict
 
 
 class TTConv2D:
@@ -163,6 +170,52 @@ class TTConv2D:
             )
             output_tensor = ttnn.permute(output_tensor, (0, 3, 1, 2))
         return output_tensor, (input_tensor.shape[0], _out_height, _out_width, output_tensor.shape[-1])
+
+
+class TTDepthwiseSeparableConv2D:
+    def __init__(
+        self,
+        kernel_size,
+        stride,
+        padding,
+        dilation,
+        groups,
+        parameters,
+        model_config,
+        activation,
+        optimisations,
+    ):
+        super().__init__()
+
+        # Depthwise
+        self.depthwise = TTConv2D(
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=groups,
+            parameters=parameters.depthwise,
+            kernel_fidelity=model_config,
+            activation=activation,
+            **optimisations.depthwise,
+        )
+
+        # Pointwise
+        self.pointwise = TTConv2D(
+            kernel_size=1,
+            stride=1,
+            padding=0,
+            groups=1,
+            parameters=parameters.pointwise,
+            kernel_fidelity=model_config,
+            activation=activation,
+            **optimisations.pointwise,
+        )
+
+    def __call__(self, device, x, in_shape):
+        out, shape = self.depthwise(device, x, in_shape)
+        out, shape = self.pointwise(device, out, shape)
+        return out, shape
 
 
 class TTUpsample:

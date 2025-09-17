@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-from models.experimental.panoptic_deeplab.tt.utils import TTConv2D
 from dataclasses import dataclass
+from models.experimental.panoptic_deeplab.tt.utils import TTConv2D
 
 
 @dataclass

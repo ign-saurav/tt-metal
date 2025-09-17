@@ -1,20 +1,20 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import pytest
 import torch
-from loguru import logger
 import ttnn
-from ttnn.model_preprocessing import preprocess_model_parameters
 import numpy as np
+
+from pathlib import Path
+from loguru import logger
+from ttnn.model_preprocessing import preprocess_model_parameters
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
 from models.experimental.panoptic_deeplab.tt.panoptic_deeplab import TTPanopticDeepLab
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
-from pathlib import Path
-import os
-from ttnn.model_preprocessing import preprocess_model_parameters
 from models.experimental.panoptic_deeplab.common import (
     load_torch_model_state,
     preprocess_image,
@@ -105,7 +105,6 @@ class PanopticDeepLabTestInfra:
 
         # Initialize TTNN model
         logger.info("Initializing TTNN model...")
-        print("Initializing TTNN model...")
         self.ttnn_model = TTPanopticDeepLab(
             parameters=parameters,
             model_config=model_config,

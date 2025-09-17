@@ -2,60 +2,68 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-from models.experimental.panoptic_deeplab.tt.utils import TTConv2D, TTUpsample
-from dataclasses import dataclass
 from typing import Dict, Any
+from dataclasses import dataclass
+from models.experimental.panoptic_deeplab.tt.utils import (
+    TTConv2D,
+    TTUpsample,
+    TTDepthwiseSeparableConv2D,
+    DepthwiseSeparableOptimizer,
+)
 
 
 @dataclass
 class ResOptimizer:
-    conv1: Dict[Any, Any]
-    conv2: Dict[Any, Any]
-    conv3: Dict[Any, Any]
+    project_conv: Dict[Any, Any]
+    fuse_conv: DepthwiseSeparableOptimizer
     shape: tuple
 
 
 res_layer_optimisations = {
     "default": ResOptimizer(
-        conv1={"act_block_h": 32, "memory_config": ttnn.DRAM_MEMORY_CONFIG},
-        conv2={
-            "act_block_h": 32,
-            "memory_config": ttnn.DRAM_MEMORY_CONFIG,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-        },
-        conv3={
-            "memory_config": ttnn.DRAM_MEMORY_CONFIG,
-            "deallocate_activation": True,
-        },
+        project_conv={"act_block_h": 32, "memory_config": ttnn.DRAM_MEMORY_CONFIG},
+        fuse_conv=DepthwiseSeparableOptimizer(
+            depthwise={
+                "act_block_h": 32,
+                "memory_config": ttnn.DRAM_MEMORY_CONFIG,
+                "deallocate_activation": True,
+                "reallocate_halo_output": True,
+            },
+            pointwise={
+                "memory_config": ttnn.DRAM_MEMORY_CONFIG,
+                "deallocate_activation": True,
+            },
+        ),
         shape=(0, 0, 0, 0),
     ),
     "instance_decoder.res3": ResOptimizer(
-        conv1={
+        project_conv={
             "memory_config": ttnn.L1_MEMORY_CONFIG,
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "deallocate_activation": True,
         },
-        conv2={
-            "act_block_h": 256,
-            "memory_config": ttnn.L1_MEMORY_CONFIG,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-            "reshard_if_not_optimal": True,
-        },
-        conv3={
-            "act_block_h": 32,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-        },
+        fuse_conv=DepthwiseSeparableOptimizer(
+            depthwise={
+                "act_block_h": 256,
+                "memory_config": ttnn.L1_MEMORY_CONFIG,
+                "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+                "deallocate_activation": True,
+                "reallocate_halo_output": True,
+                "enable_act_double_buffer": True,
+                "enable_weights_double_buffer": True,
+                "reshard_if_not_optimal": True,
+            },
+            pointwise={
+                "act_block_h": 32,
+                "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+                "deallocate_activation": True,
+                "reallocate_halo_output": True,
+            },
+        ),
         shape=(1, 64, 128, 512),
     ),
     "instance_decoder.res2": ResOptimizer(
-        conv1={
+        project_conv={
             "act_block_h": 128,
             "memory_config": ttnn.DRAM_MEMORY_CONFIG,
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
@@ -64,67 +72,73 @@ res_layer_optimisations = {
             "enable_act_double_buffer": True,
             "enable_weights_double_buffer": True,
         },
-        conv2={
-            "act_block_h": 32,
-            "memory_config": ttnn.DRAM_MEMORY_CONFIG,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-        },
-        conv3={
-            "memory_config": ttnn.DRAM_MEMORY_CONFIG,
-            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-        },
+        fuse_conv=DepthwiseSeparableOptimizer(
+            depthwise={
+                "act_block_h": 32,
+                "memory_config": ttnn.DRAM_MEMORY_CONFIG,
+                "deallocate_activation": True,
+                "reallocate_halo_output": True,
+            },
+            pointwise={
+                "memory_config": ttnn.DRAM_MEMORY_CONFIG,
+                "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+                "deallocate_activation": True,
+                "reallocate_halo_output": True,
+            },
+        ),
         shape=(1, 128, 256, 256),
     ),
     "semantic_decoder.res3": ResOptimizer(
-        conv1={
+        project_conv={
             "act_block_h": 32,
             "memory_config": ttnn.L1_MEMORY_CONFIG,
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "deallocate_activation": True,
             "reallocate_halo_output": True,
         },
-        conv2={
-            "act_block_h": 256,
-            "memory_config": ttnn.L1_MEMORY_CONFIG,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-        },
-        conv3={
-            "act_block_h": 32,
-            "memory_config": ttnn.L1_MEMORY_CONFIG,
-            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-        },
+        fuse_conv=DepthwiseSeparableOptimizer(
+            depthwise={
+                "act_block_h": 256,
+                "memory_config": ttnn.L1_MEMORY_CONFIG,
+                "deallocate_activation": True,
+                "reallocate_halo_output": True,
+                "enable_act_double_buffer": True,
+                "enable_weights_double_buffer": True,
+            },
+            pointwise={
+                "act_block_h": 32,
+                "memory_config": ttnn.L1_MEMORY_CONFIG,
+                "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+                "deallocate_activation": True,
+                "reallocate_halo_output": True,
+            },
+        ),
         shape=(1, 64, 128, 512),
     ),
     "semantic_decoder.res2": ResOptimizer(
-        conv1={
+        project_conv={
             "act_block_h": 32,
             "memory_config": ttnn.L1_MEMORY_CONFIG,
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "deallocate_activation": True,
             "reallocate_halo_output": True,
         },
-        conv2={
-            "act_block_h": 160,
-            "memory_config": ttnn.L1_MEMORY_CONFIG,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-        },
-        conv3={
-            "act_block_h": 32,
-            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-        },
+        fuse_conv=DepthwiseSeparableOptimizer(
+            depthwise={
+                "act_block_h": 160,
+                "memory_config": ttnn.L1_MEMORY_CONFIG,
+                "deallocate_activation": True,
+                "reallocate_halo_output": True,
+                "enable_act_double_buffer": True,
+                "enable_weights_double_buffer": True,
+            },
+            pointwise={
+                "act_block_h": 32,
+                "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+                "deallocate_activation": True,
+                "reallocate_halo_output": True,
+            },
+        ),
         shape=(1, 128, 256, 256),
     ),
 }
@@ -147,39 +161,30 @@ class TTRes:
             fp32_dest_acc_en=False,
         )
 
-        # conv1
-        self.conv1 = TTConv2D(
-            kernel_size=parameters.conv_args["conv1"].kernel_size,
-            stride=parameters.conv_args["conv1"].stride,
-            padding=parameters.conv_args["conv1"].padding,
-            dilation=parameters.conv_args["conv1"].dilation,
-            groups=parameters.conv_args["conv1"].groups,
-            parameters=parameters.conv1,
+        # Project conv
+        self.project_conv = TTConv2D(
+            kernel_size=parameters.conv_args["project_conv"].kernel_size,
+            stride=parameters.conv_args["project_conv"].stride,
+            padding=parameters.conv_args["project_conv"].padding,
+            dilation=parameters.conv_args["project_conv"].dilation,
+            groups=parameters.conv_args["project_conv"].groups,
+            parameters=parameters.project_conv,
             kernel_fidelity=model_config,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            **layer_optimisations.conv1,
+            **layer_optimisations.project_conv,
         )
-        # conv2
-        self.conv2 = TTConv2D(
-            kernel_size=parameters.conv_args["conv2"].kernel_size,
-            stride=parameters.conv_args["conv2"].stride,
-            padding=parameters.conv_args["conv2"].padding,
-            groups=parameters.conv_args["conv2"].groups,
-            parameters=parameters.conv2,
-            kernel_fidelity=model_config,
+
+        # Fuse conv
+        self.fuse_conv = TTDepthwiseSeparableConv2D(
+            kernel_size=parameters.conv_args["fuse_conv"]["depthwise"].kernel_size,
+            stride=parameters.conv_args["fuse_conv"]["depthwise"].stride,
+            padding=parameters.conv_args["fuse_conv"]["depthwise"].padding,
+            groups=parameters.conv_args["fuse_conv"]["depthwise"].groups,
+            dilation=1,
+            parameters=parameters.fuse_conv,
+            model_config=model_config,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            **layer_optimisations.conv2,
-        )
-        # conv3
-        self.conv3 = TTConv2D(
-            kernel_size=parameters.conv_args["conv3"].kernel_size,
-            stride=parameters.conv_args["conv3"].stride,
-            padding=parameters.conv_args["conv3"].padding,
-            groups=parameters.conv_args["conv3"].groups,
-            parameters=parameters.conv3,
-            kernel_fidelity=model_config,
-            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            **layer_optimisations.conv3,
+            optimisations=layer_optimisations.fuse_conv,
         )
         self.shape = layer_optimisations.shape
 
@@ -194,12 +199,11 @@ class TTRes:
 
         out = self.upsample(device, x, shape, sent_to_dram=True, reshape_output=True)
 
-        out_res, shape = self.conv1(device, res, self.shape)
+        out_res, shape = self.project_conv(device, res, self.shape)
 
         out = ttnn.concat([out_res, out], dim=3)
 
         shape = (self.shape[-4], self.shape[-3], self.shape[-2], upsample_channels + shape[-1])
-        out, shape = self.conv2(device, out, shape)
 
-        out, shape = self.conv3(device, out, shape)
+        out, shape = self.fuse_conv(device, out, shape)
         return out

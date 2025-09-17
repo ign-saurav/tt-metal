@@ -63,7 +63,7 @@ class HeadModel(torch.nn.Module):
                 norm=nn.BatchNorm2d(intermediate_channels),
                 activation=nn.ReLU(),
             )
-        self.conv3 = Conv2d(intermediate_channels, out_channels, kernel_size=1, stride=1)
+        self.predictor = Conv2d(intermediate_channels, out_channels, kernel_size=1, stride=1)
 
     def forward(self, x: Tensor) -> Tensor:
         """
@@ -77,6 +77,6 @@ class HeadModel(torch.nn.Module):
         """
         out = self.conv1(x)
         out = self.conv2(out)
-        out = self.conv3(out)
+        out = self.predictor(out)
         out = nn.functional.interpolate(out, scale_factor=4, mode="bilinear")
         return out

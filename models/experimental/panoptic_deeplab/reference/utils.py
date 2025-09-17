@@ -39,3 +39,52 @@ class Conv2d(torch.nn.Conv2d):
         if self.activation is not None:
             x = self.activation(x)
         return x
+
+
+class DepthwiseSeparableConv2d(torch.nn.Module):
+    """
+    A kxk depthwise convolution + a 1x1 convolution.
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        kernel_size=3,
+        padding=1,
+        dilation=1,
+        *,
+        norm1=None,
+        activation1=None,
+        norm2=None,
+        activation2=None,
+    ):
+        """
+        Args:
+            norm1, norm2 (str or callable): normalization for the two conv layers.
+            activation1, activation2 (callable(Tensor) -> Tensor): activation
+                function for the two conv layers.
+        """
+        super().__init__()
+        self.depthwise = Conv2d(
+            in_channels,
+            in_channels,
+            kernel_size=kernel_size,
+            padding=padding,
+            dilation=dilation,
+            groups=in_channels,
+            bias=not norm1,
+            norm=norm1,
+            activation=activation1,
+        )
+        self.pointwise = Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=1,
+            bias=not norm2,
+            norm=norm2,
+            activation=activation2,
+        )
+
+    def forward(self, x):
+        return self.pointwise(self.depthwise(x))

@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch.nn as nn
 import torch
+import torch.nn as nn
+
 from torch import Tensor
-from models.experimental.panoptic_deeplab.reference.utils import Conv2d
+from copy import deepcopy
+from models.experimental.panoptic_deeplab.reference.utils import Conv2d, DepthwiseSeparableConv2d
 
 
 class ASPPModel(torch.nn.Module):
@@ -15,26 +17,59 @@ class ASPPModel(torch.nn.Module):
 
     def __init__(self) -> None:
         super().__init__()
-        self.ASPP_0_Conv = Conv2d(2048, 256, 1, 1, bias=False, norm=nn.BatchNorm2d(256), activation=nn.ReLU())
-        self.ASPP_1_Depthwise = Conv2d(
-            2048, 2048, 3, 1, 6, 6, 2048, bias=False, norm=nn.BatchNorm2d(2048), activation=nn.ReLU()
+        dilations = [6, 12, 18]
+        in_channels = 2048
+        out_channels = 256
+        pool_kernel_size = (32, 64)
+        norm = nn.BatchNorm2d
+        activation = nn.ReLU()
+        use_bias = norm == ""
+        self.convs = nn.ModuleList()
+
+        # conv 1x1
+        self.convs.append(
+            Conv2d(
+                in_channels,
+                out_channels,
+                kernel_size=1,
+                bias=use_bias,
+                norm=nn.BatchNorm2d(out_channels),
+                activation=deepcopy(activation),
+            )
         )
-        self.ASPP_1_pointwise = Conv2d(2048, 256, 1, 1, bias=False, norm=nn.BatchNorm2d(256), activation=nn.ReLU())
+        # atrous convs
+        for dilation in dilations:
+            self.convs.append(
+                DepthwiseSeparableConv2d(
+                    in_channels,
+                    out_channels,
+                    kernel_size=3,
+                    padding=dilation,
+                    dilation=dilation,
+                    norm1=nn.BatchNorm2d(in_channels),
+                    activation1=deepcopy(activation),
+                    norm2=nn.BatchNorm2d(out_channels),
+                    activation2=deepcopy(activation),
+                )
+            )
 
-        self.ASPP_2_Depthwise = Conv2d(
-            2048, 2048, 3, 1, 12, 12, 2048, bias=False, norm=nn.BatchNorm2d(2048), activation=nn.ReLU()
+        # image pooling
+        # We do not add BatchNorm because the spatial resolution is 1x1,
+        # the original TF implementation has BatchNorm.
+        image_pooling = nn.Sequential(
+            nn.AvgPool2d(kernel_size=pool_kernel_size, stride=1),
+            Conv2d(in_channels, out_channels, 1, bias=True, activation=deepcopy(activation)),
         )
-        self.ASPP_2_pointwise = Conv2d(2048, 256, 1, 1, bias=False, norm=nn.BatchNorm2d(256), activation=nn.ReLU())
+        self.convs.append(image_pooling)
 
-        self.ASPP_3_Depthwise = Conv2d(
-            2048, 2048, 3, 1, 18, 18, 2048, bias=False, norm=nn.BatchNorm2d(2048), activation=nn.ReLU()
+        self.project = Conv2d(
+            5 * out_channels,
+            out_channels,
+            kernel_size=1,
+            bias=use_bias,
+            norm=nn.BatchNorm2d(out_channels),
+            activation=deepcopy(activation),
         )
-        self.ASPP_3_pointwise = Conv2d(2048, 256, 1, 1, bias=False, norm=nn.BatchNorm2d(256), activation=nn.ReLU())
-
-        self.ASPP_4_avg_pool = torch.nn.AvgPool2d((32, 64), stride=1, count_include_pad=True)
-        self.ASPP_4_Conv_1 = Conv2d(2048, 256, 1, 1, activation=nn.ReLU())
-
-        self.ASPP_project = Conv2d(1280, 256, 1, 1, bias=False, norm=nn.BatchNorm2d(256), activation=nn.ReLU())
 
     def forward(self, x: Tensor) -> Tensor:
         """
@@ -46,20 +81,11 @@ class ASPPModel(torch.nn.Module):
         Returns:
             out: ASPP output
         """
-        t0 = self.ASPP_0_Conv(x)
-        t1 = self.ASPP_1_Depthwise(x)
-        t2 = self.ASPP_2_Depthwise(x)
-        t3 = self.ASPP_3_Depthwise(x)
-        t4 = self.ASPP_4_avg_pool(x)
-
-        t4 = self.ASPP_4_Conv_1(t4)
-        t4 = nn.functional.interpolate(t4, (32, 64), mode="bilinear")
-
-        t1 = self.ASPP_1_pointwise(t1)
-        t2 = self.ASPP_2_pointwise(t2)
-        t3 = self.ASPP_3_pointwise(t3)
-
-        out = torch.cat((t0, t1, t2, t3, t4), dim=1)
-        out = self.ASPP_project(out)
-
-        return out
+        size = x.shape[-2:]
+        res = []
+        for conv in self.convs:
+            res.append(conv(x))
+        res[-1] = nn.functional.interpolate(res[-1], size=size, mode="bilinear", align_corners=False)
+        res = torch.cat(res, dim=1)
+        res = self.project(res)
+        return res

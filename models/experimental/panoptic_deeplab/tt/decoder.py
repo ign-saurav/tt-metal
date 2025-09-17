@@ -1,13 +1,14 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+import ttnn
+from dataclasses import dataclass
+
 from models.experimental.panoptic_deeplab.tt.aspp import TTASPP
 from models.experimental.panoptic_deeplab.tt.head import TTHead
 from models.experimental.panoptic_deeplab.tt.res_block import TTRes
 from models.experimental.panoptic_deeplab.tt.res_block import res_layer_optimisations
 from models.experimental.panoptic_deeplab.tt.head import head_layer_optimisations
-from dataclasses import dataclass
-import ttnn
 
 
 @dataclass
@@ -59,7 +60,7 @@ class TTDecoder:
         self.shape = layer_optimisations.shape
         self.name = name
 
-        self.aspp = TTASPP(parameters.aspp, model_config, layer_optimisations=None)
+        self.aspp = TTASPP(parameters.aspp, model_config)
         self.res3 = TTRes(
             parameters.res3,
             model_config,

@@ -3,16 +3,16 @@
 
 import os
 import pickle
-from typing import Tuple, Optional, Any
-
-import numpy as np
-from PIL import Image
-
-import torch
-import torchvision.transforms as transforms
-from loguru import logger
-
 import ttnn
+import torch
+import numpy as np
+import torchvision.transforms as transforms
+
+from PIL import Image
+from loguru import logger
+from typing import Tuple, Optional, Any
+from ttnn.model_preprocessing import infer_ttnn_module_args
+
 from models.experimental.panoptic_deeplab.reference.resnet52_backbone import ResNet52BackBone as TorchBackbone
 from models.experimental.panoptic_deeplab.reference.resnet52_stem import DeepLabStem
 from models.experimental.panoptic_deeplab.reference.aspp import ASPPModel
@@ -20,7 +20,6 @@ from models.experimental.panoptic_deeplab.reference.decoder import DecoderModel
 from models.experimental.panoptic_deeplab.reference.res_block import ResModel
 from models.experimental.panoptic_deeplab.reference.head import HeadModel
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
-from ttnn.model_preprocessing import infer_ttnn_module_args
 from models.experimental.panoptic_deeplab.reference.resnet52_bottleneck import Bottleneck
 
 
@@ -29,38 +28,25 @@ from models.experimental.panoptic_deeplab.reference.resnet52_bottleneck import B
 # ---------------------------
 
 key_mappings = {
-    # SEMANTIC HEAD MAPPINGS
+    # Semantic head mappings
     "sem_seg_head.": "semantic_decoder.",
-    ".predictor.": ".head_1.conv3.",
+    ".predictor.": ".head_1.predictor.",
     ".head.pointwise.": ".head_1.conv2.",
     ".head.depthwise.": ".head_1.conv1.",
-    # INSTANCE HEAD MAPPINGS
+    # Instance head mappings
     "ins_embed_head.": "instance_decoder.",
     ".center_head.0.": ".head_2.conv1.",
     ".center_head.1.": ".head_2.conv2.",
-    ".center_predictor.": ".head_2.conv3.",
+    ".center_predictor.": ".head_2.predictor.",
     ".offset_head.depthwise.": ".head_1.conv1.",
     ".offset_head.pointwise.": ".head_1.conv2.",
-    ".offset_predictor.": ".head_1.conv3.",
+    ".offset_predictor.": ".head_1.predictor.",
     # ASPP mappings (res5 -> aspp)
     "decoder.res5.project_conv": "aspp",
-    ".aspp.convs.3.depthwise.": ".aspp.ASPP_3_Depthwise.",
-    ".aspp.convs.0.": ".aspp.ASPP_0_Conv.",
-    ".aspp.convs.1.depthwise.": ".aspp.ASPP_1_Depthwise.",
-    ".aspp.convs.1.pointwise.": ".aspp.ASPP_1_pointwise.",
-    ".aspp.convs.2.depthwise.": ".aspp.ASPP_2_Depthwise.",
-    ".aspp.convs.2.pointwise.": ".aspp.ASPP_2_pointwise.",
-    ".aspp.convs.3.pointwise.": ".aspp.ASPP_3_pointwise.",
-    ".aspp.convs.4.1.": ".aspp.ASPP_4_Conv_1.",
-    ".aspp.project.": ".aspp.ASPP_project.",
     # Decoder res3 mappings
-    ".decoder.res3.project_conv.": ".res3.conv1.",
-    ".decoder.res3.fuse_conv.depthwise.": ".res3.conv2.",
-    ".decoder.res3.fuse_conv.pointwise.": ".res3.conv3.",
+    ".decoder.res3.": ".res3.",
     # Decoder res2 mappings
-    ".decoder.res2.project_conv.": ".res2.conv1.",
-    ".decoder.res2.fuse_conv.depthwise.": ".res2.conv2.",
-    ".decoder.res2.fuse_conv.pointwise.": ".res2.conv3.",
+    ".decoder.res2.": ".res2.",
 }
 
 
