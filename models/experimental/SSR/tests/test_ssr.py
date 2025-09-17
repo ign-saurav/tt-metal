@@ -151,6 +151,7 @@ def test_ssr_model(input_shape, num_cls, with_conv, depth, num_heads, precision_
     # Open TTNN device with larger L1 cache to handle memory requirements
     device = ttnn.open_device(device_id=0, l1_small_size=32768)  # 128KB instead of 32KB
 
+    memory_config = ttnn.L1_MEMORY_CONFIG
     try:
         # Preprocess model parameters
         parameters = preprocess_model_parameters(
@@ -167,6 +168,7 @@ def test_ssr_model(input_shape, num_cls, with_conv, depth, num_heads, precision_
                 num_cls=num_cls,
                 depth=depth,
                 num_heads=num_heads,
+                memory_config=memory_config,
             )
         else:
             tt_model = TTSSR_wo_conv(
@@ -177,6 +179,7 @@ def test_ssr_model(input_shape, num_cls, with_conv, depth, num_heads, precision_
                 depth=depth,
                 num_heads=num_heads,
                 dtype=input_dtype,
+                memory_config=memory_config,
             )
 
         # Convert input to TTNN tensor

@@ -239,7 +239,7 @@ class TTSSR_wo_conv(LightweightModule):
         super().__init__()
         self.device = device
         self.parameters = parameters
-        self.memory_config = ttnn.DRAM_MEMORY_CONFIG
+        self.memory_config = memory_config or ttnn.DRAM_MEMORY_CONFIG
         self.dtype = dtype
 
         # Only need select_model and sr_model - no conv layers
@@ -307,13 +307,11 @@ class TTSSR_wo_conv(LightweightModule):
 
                 # Convert back to NHWC and to TTNN tensor
                 negX_torch = negX_torch.permute(0, 2, 3, 1)  # Back to (1, H, W, C)
-                negX = ttnn.from_torch(negX_torch, device=self.device, dtype=ttnn.bfloat16)
-                if negX.layout == ttnn.ROW_MAJOR_LAYOUT:
-                    negX = ttnn.to_layout(negX, ttnn.TILE_LAYOUT, dtype=self.dtype)
+                negX = ttnn.from_torch(negX_torch, device=self.device, dtype=self.dtype, layout=ttnn.TILE_LAYOUT)
                 sr_patches.append(negX)
 
         ttnn.deallocate(patch_x)
 
         # Concatenate and reconstruct
-        sr = ttnn.concat(sr_patches, dim=0)
+        sr = ttnn.concat(sr_patches, dim=0, memory_config=self.memory_config)
         return sr, patch_fea3
