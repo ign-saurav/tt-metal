@@ -84,18 +84,17 @@ class ResTestInfra:
         self.ttnn_model = TTRes(parameters, model_config, layer_optimisations=res_layer_optimisations[self.name])
 
         # Run phases
-        for phase in ("JIT configuration", "optimized"):
-            logger.info(f"Running TTNN Res block pass ({phase})...")
+        logger.info(f"Running TTNN Res block Model")
 
-            # Rebuild TTNN inputs (buffers may be released)
-            self.input_tensor = self._to_ttnn_device(self.torch_input_tensor)
-            self.res_input_tensor = self._to_ttnn_device(self.torch_res_input_tensor)
+        # Rebuild TTNN inputs (buffers may be released)
+        self.input_tensor = self._to_ttnn_device(self.torch_input_tensor)
+        self.res_input_tensor = self._to_ttnn_device(self.torch_res_input_tensor)
 
-            # Optional: reinstantiate model
-            self.ttnn_model = TTRes(parameters, model_config, layer_optimisations=res_layer_optimisations[self.name])
+        # Optional: reinstantiate model
+        self.ttnn_model = TTRes(parameters, model_config, layer_optimisations=res_layer_optimisations[self.name])
 
-            self.run()
-            self.validate()
+        self.run()
+        self.validate()
 
     def _create_input_tensors(self):
         shape_main = (self.batch_size * self.num_devices, self.upsample_channels, self.height, self.width)

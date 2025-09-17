@@ -21,6 +21,7 @@ from models.experimental.panoptic_deeplab.common import (
     save_preprocessed_inputs,
     _populate_all_decoders,
 )
+import tracy
 
 
 class PanopticDeepLabTestInfra:
@@ -112,10 +113,12 @@ class PanopticDeepLabTestInfra:
 
         # First run configures JIT, second run is optimized
         for phase in ("JIT configuration", "optimized"):
+            tracy.signpost("start")
             logger.info(f"Running TTNN model pass ({phase})...")
             self.input_tensor = ttnn.to_device(tt_host_tensor, device)
             self.run()
             self.validate()
+            tracy.signpost("stop")
 
     def load_real_input(self, input_path: str) -> torch.Tensor:
         """Load real input from saved file"""

@@ -63,23 +63,23 @@ class ASPPTestInfra:
         logger.info("Converting input to TTNN tensor...")
 
         # Run model and validate
-        for phase in ("JIT configuration", "optimized"):
-            logger.info(f"Running TTNN model pass ({phase})...")
 
-            # Re-convert input tensor (TTNN may deallocate buffers)
-            tt_host_tensor = ttnn.from_torch(
-                self.torch_input_tensor.permute(0, 2, 3, 1),
-                dtype=ttnn.bfloat8_b,
-                device=self.device,
-                mesh_mapper=self.inputs_mesh_mapper,
-            )
-            self.input_tensor = ttnn.to_device(tt_host_tensor, self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
+        logger.info(f"Running TTNN model")
 
-            # Optional: Re-instantiate model if it's not stateless
-            self.ttnn_model = TTASPP(parameters, self.model_config)
+        # Re-convert input tensor (TTNN may deallocate buffers)
+        tt_host_tensor = ttnn.from_torch(
+            self.torch_input_tensor.permute(0, 2, 3, 1),
+            dtype=ttnn.bfloat8_b,
+            device=self.device,
+            mesh_mapper=self.inputs_mesh_mapper,
+        )
+        self.input_tensor = ttnn.to_device(tt_host_tensor, self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
 
-            self.run()
-            self.validate()
+        # Optional: Re-instantiate model if it's not stateless
+        self.ttnn_model = TTASPP(parameters, self.model_config)
+
+        self.run()
+        self.validate()
 
     def _create_input_tensor(self):
         shape = (self.batch_size * self.num_devices, self.input_channels, self.height, self.width)

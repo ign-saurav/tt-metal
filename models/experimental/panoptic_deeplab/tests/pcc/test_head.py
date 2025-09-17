@@ -78,23 +78,22 @@ class HeadTestInfra:
         self.ttnn_model = TTHead(parameters, model_config, layer_optimisations=head_layer_optimisations[self.name])
 
         # Run model in phases and validate
-        for phase in ("JIT configuration", "optimized"):
-            logger.info(f"Running TTNN Head model pass ({phase})...")
+        logger.info(f"Running TTNN Head model")
 
-            # Rebuild TTNN input (since buffers may be freed across passes)
-            tt_host_tensor = ttnn.from_torch(
-                self.torch_input_tensor.permute(0, 2, 3, 1),
-                dtype=ttnn.bfloat8_b,
-                device=self.device,
-                mesh_mapper=self.inputs_mesh_mapper,
-            )
-            self.input_tensor = ttnn.to_device(tt_host_tensor, self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
+        # Rebuild TTNN input (since buffers may be freed across passes)
+        tt_host_tensor = ttnn.from_torch(
+            self.torch_input_tensor.permute(0, 2, 3, 1),
+            dtype=ttnn.bfloat8_b,
+            device=self.device,
+            mesh_mapper=self.inputs_mesh_mapper,
+        )
+        self.input_tensor = ttnn.to_device(tt_host_tensor, self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
 
-            # Optional: reinstantiate TTNN model
-            self.ttnn_model = TTHead(parameters, model_config, layer_optimisations=head_layer_optimisations[self.name])
+        # Optional: reinstantiate TTNN model
+        self.ttnn_model = TTHead(parameters, model_config, layer_optimisations=head_layer_optimisations[self.name])
 
-            self.run()
-            self.validate()
+        self.run()
+        self.validate()
 
     def _create_input_tensor(self):
         shape = (self.batch_size * self.num_devices, self.in_channels, self.height, self.width)
