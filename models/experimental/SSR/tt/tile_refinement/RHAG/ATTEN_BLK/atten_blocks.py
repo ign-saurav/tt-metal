@@ -45,12 +45,6 @@ class TTAttenBlocks(LightweightModule):
             # Calculate shift size: 0 for even indices, window_size // 2 for odd indices
             shift_size = 0 if (i % 2 == 0) else window_size // 2
 
-            # Handle drop_path - can be a list or single value
-            if isinstance(drop_path, list):
-                current_drop_path = drop_path[i]
-            else:
-                current_drop_path = drop_path
-
             hab_block = TTHAB(
                 device=device,
                 parameters=parameters["blocks"][i],
@@ -78,6 +72,7 @@ class TTAttenBlocks(LightweightModule):
             qk_scale=qk_scale,
             mlp_ratio=mlp_ratio,
             dtype=dtype,
+            depth=depth,
         )
 
         self.downsample = None

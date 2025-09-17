@@ -19,6 +19,7 @@ class TTOCAB(LightweightModule):
         qk_scale=None,
         mlp_ratio=2,
         dtype=ttnn.bfloat16,
+        depth=[6, 6, 6, 6, 6, 6],
     ):
         super().__init__()
 
@@ -29,7 +30,7 @@ class TTOCAB(LightweightModule):
         self.num_heads = num_heads
         self.overlap_ratio = overlap_ratio
         self.dtype = dtype
-
+        self.depth = depth
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim**-0.5
         self.overlap_win_size = int(window_size * overlap_ratio) + window_size
@@ -98,8 +99,8 @@ class TTOCAB(LightweightModule):
             value,
             is_causal=False,
             scale=self.scale,
-            # program_config=sdpa_program_config,
-            # compute_kernel_config=compute_kernel_config,
+            program_config=sdpa_program_config if self.depth == [6, 6, 6, 6, 6, 6] else None,
+            compute_kernel_config=compute_kernel_config if self.depth == [6, 6, 6, 6, 6, 6] else None,
             memory_config=ttnn.L1_MEMORY_CONFIG,
         )
 
