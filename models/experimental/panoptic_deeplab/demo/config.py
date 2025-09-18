@@ -24,13 +24,20 @@ class DemoConfig:
     mean: List[float] = None
     std: List[float] = None
 
-    # Inference configuration
-    center_threshold: float = 0.1
+    # thing instances
+    center_threshold: float = 0.01
     nms_kernel: int = 7
-    top_k_instances: int = 200
-    stuff_area_threshold: int = 2048
-    instance_score_threshold: float = 0.5
+    top_k_instances: int = 400
+    instance_score_threshold: float = 0.1
+
+    # stuff classes
+    stuff_area_threshold: int = 100
+    min_stuff_area: int = 100
+
+    # For all detections
     label_divisor: int = 256
+    min_instance_area: int = 300
+    max_distance: int = 150
 
     # Device configuration
     device_id: int = 0
@@ -40,11 +47,8 @@ class DemoConfig:
 
     # Output configuration
     save_results: bool = True
-    save_heads: bool = False
-    save_panoptic: bool = True
-    save_visualization: bool = False
-    save_comparison: bool = False
-    dual_pipeline: bool = False
+    save_comparison: bool = False  # for different heads visualization
+    dual_pipeline: bool = False  # for saving results in different pipelines
 
     # Dataset configuration (Cityscapes default)
     thing_classes: List[int] = None
@@ -85,12 +89,12 @@ class DemoConfig:
             ]
 
     def _get_cityscapes_colors(self) -> np.ndarray:
-        """Get Cityscapes color palette"""
+        """Get Cityscapes color palette with enhanced visibility"""
         return np.array(
             [
-                [128, 64, 128],  # road
-                [244, 35, 232],  # sidewalk
-                [70, 70, 70],  # building
+                [128, 64, 128],  # road (stuff)
+                [244, 35, 232],  # sidewalk (stuff)
+                [70, 70, 70],  # building (stuff)
                 [102, 102, 156],  # wall
                 [190, 153, 153],  # fence
                 [153, 153, 153],  # pole
@@ -99,13 +103,14 @@ class DemoConfig:
                 [107, 142, 35],  # vegetation
                 [152, 251, 152],  # terrain
                 [70, 130, 180],  # sky
-                [220, 20, 60],  # person
-                [255, 0, 0],  # rider
-                [0, 0, 142],  # car
-                [0, 0, 70],  # truck
-                [0, 60, 100],  # bus
-                [0, 80, 100],  # train
-                [0, 0, 230],  # motorcycle
-                [119, 11, 32],  # bicycle
-            ]
+                [220, 20, 60],  # person (thing)
+                [255, 0, 0],  # rider (thing)
+                [0, 0, 142],  # car (thing)
+                [0, 0, 70],  # truck (thing)
+                [0, 60, 100],  # bus (thing)
+                [0, 80, 100],  # train (thing)
+                [0, 0, 230],  # motorcycle (thing)
+                [119, 11, 32],  # bicycle (thing)
+            ],
+            dtype=np.uint8,
         )

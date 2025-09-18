@@ -38,9 +38,9 @@ models/
     └── panoptic_deeplab/
         ├── resources/
         │   ├── test_inputs/
-        │   │   └── input_torch_input.pt
+        │   │   └── input_torch_input.pt # generated and stored during runtime
         │   ├── input.png
-        │   ├── Panoptic_Deeplab_R52.pkl
+        │   ├── Panoptic_Deeplab_R52.pkl # downloaded during runtime if not present in the directory
         │   └── panoptic_deeplab_weights_download.sh
         ├── reference/
         │   ├── aspp.py
@@ -128,6 +128,8 @@ python models/experimental/panoptic_deeplab/demo/panoptic_deeplab_demo.py
 -i models/experimental/panoptic_deeplab/resources/input.png
 -o models/experimental/panoptic_deeplab/resources
 ```
+
+For visualizing heads comparison of PyTorch and TTNN implementation, enable save_comparison in demo/config.
 
 
 ## Performance

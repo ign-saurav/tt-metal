@@ -19,7 +19,7 @@ from loguru import logger
 from models.experimental.panoptic_deeplab.tt.panoptic_deeplab import TTPanopticDeepLab
 from models.experimental.panoptic_deeplab.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from models.experimental.panoptic_deeplab.reference.panoptic_deeplab import TorchPanopticDeepLab
-from post_processing import PostProcessing
+from post_processing import PostProcessing, PanopticVisualizer
 from models.experimental.panoptic_deeplab.demo.config import DemoConfig
 from models.experimental.panoptic_deeplab.common import (
     _populate_all_decoders,
@@ -40,6 +40,7 @@ class Demo:
 
         # Visualization palette (Cityscapes)
         self.colors = self.config._get_cityscapes_colors()
+        self.visualizer = PanopticVisualizer(self.config, alpha=0.4)
 
         # Mesh mappers for TTNN
         self.inputs_mesh_mapper = None
@@ -61,7 +62,7 @@ class Demo:
         """Initialize TTNN model, preprocess parameters, and build runtime graph."""
         logger.info("Initializing TTNN Panoptic-DeepLab model…")
 
-        # Initialize TT device (L1 size tuned for demo)
+        # Initialize TT device
         self.ttnn_device = ttnn.open_device(device_id=self.config.device_id, l1_small_size=16384)
 
         # Setup mesh mappers
@@ -128,21 +129,18 @@ class Demo:
         return outputs  # (ttnn_outputs, ttnn_outputs_2, ttnn_outputs_3)
 
     # ---------------------------------------------------------------------
-    # Visualization / I/O
+    # Visualization heads / IO
     # ---------------------------------------------------------------------
-
-    def visualize_results(
+    def _create_head_visualization(
         self, original_image: np.ndarray, results: Dict[str, Dict[str, np.ndarray]], save_path: str
     ) -> None:
-        """Create a comprehensive visualization with panoptic results optionally side-by-side."""
-        from mpl_toolkits.axes_grid1 import make_axes_locatable  # local import to avoid heavy import on startup
+        """visualization method for heads comparison."""
+        from mpl_toolkits.axes_grid1 import make_axes_locatable
 
-        logger.info("Creating visualization…")
         has_torch = "torch" in results and results["torch"]
         has_ttnn = "ttnn" in results and results["ttnn"]
 
         if has_torch and has_ttnn:
-            # 4 rows: original, torch outputs, ttnn outputs, panoptic comparison
             fig = plt.figure(figsize=(16, 20))
             gs = fig.add_gridspec(4, 4, height_ratios=[0.8, 1, 1, 1], hspace=0.3, wspace=0.2)
             pipelines = ["torch", "ttnn"]
@@ -151,25 +149,24 @@ class Demo:
             gs = fig.add_gridspec(3, 4, height_ratios=[0.8, 1, 1], hspace=0.3, wspace=0.2)
             pipelines = ["torch"] if has_torch else ["ttnn"]
 
-        # Row 0: Original image (centered)
+        # Row 0: Original image
         ax_orig = fig.add_subplot(gs[0, 1:3])
         ax_orig.imshow(original_image)
         ax_orig.set_title("Original Image", fontsize=14, fontweight="bold")
         ax_orig.axis("off")
 
-        # Hide unused cells in first row
         for i in [0, 3]:
             ax = fig.add_subplot(gs[0, i])
             ax.axis("off")
 
-        # Rows 1-2: Pipeline outputs (semantic, centers, offset)
+        # Rows 1-2: Pipeline outputs
         for i, pipeline in enumerate(pipelines):
             if pipeline not in results:
                 continue
             pipeline_results = results[pipeline]
             row = i + 1
 
-            if self.config.save_heads:
+            if self.config.save_comparison:
                 # Semantic segmentation
                 ax_sem = fig.add_subplot(gs[row, 0])
                 if "semantic_pred" in pipeline_results:
@@ -201,90 +198,40 @@ class Demo:
                     im = ax_offset.imshow(mag, cmap="viridis", vmin=0, vmax=vmax)
                     ax_offset.set_title(f"{pipeline.upper()} Offset", fontsize=11)
 
-                    # Small colorbar
                     divider = make_axes_locatable(ax_offset)
                     cax = divider.append_axes("right", size="5%", pad=0.05)
                     plt.colorbar(im, cax=cax)
                 ax_offset.axis("off")
 
-                # Hide the 4th column in these rows
                 fig.add_subplot(gs[row, 3]).axis("off")
-
-        # Row 3 (or 2 for single pipeline): Panoptic comparison
-        if self.config.save_panoptic:
-            if has_torch and has_ttnn:
-                for i, pipeline in enumerate(pipelines):
-                    ax_pan = fig.add_subplot(gs[3, i * 2 : (i * 2) + 2])
-                    if "panoptic_pred" in results[pipeline]:
-                        panoptic_colored = self._colorize_panoptic(results[pipeline]["panoptic_pred"])
-                        ax_pan.imshow(panoptic_colored)
-                        ax_pan.set_title(f"{pipeline.upper()} Panoptic", fontsize=10)
-                        ax_pan.axis("off")
-            else:
-                # Single pipeline panoptic in last row (row=2)
-                ax_pan = fig.add_subplot(gs[2, 1:3])
-                single = pipelines[0]
-                if "panoptic_pred" in results[single]:
-                    panoptic_colored = self._colorize_panoptic(results[single]["panoptic_pred"])
-                    ax_pan.imshow(panoptic_colored)
-                    ax_pan.set_title(f"{single.upper()} Panoptic", fontsize=10)
-                ax_pan.axis("off")
 
         Path(save_path).parent.mkdir(parents=True, exist_ok=True)
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         plt.close(fig)
-        logger.info("Visualization saved: {}", save_path)
 
+    # ---------------------------------------------------------------------
+    # Colorize segmentation
+    # ---------------------------------------------------------------------
     def _colorize_segmentation(self, segmentation: np.ndarray) -> np.ndarray:
-        """Convert segmentation map to color image using the predefined palette."""
+        """segmentation color."""
         h, w = segmentation.shape[-2], segmentation.shape[-1]
         colored = np.zeros((h, w, 3), dtype=np.uint8)
+
+        # ENSURE proper color mapping for each class
         for class_id in range(min(self.config.num_classes, len(self.colors))):
             mask = segmentation == class_id
-            colored[mask] = self.colors[class_id]
-        return colored
-
-    def _colorize_panoptic(self, panoptic: np.ndarray) -> np.ndarray:
-        """Convert panoptic prediction to colored image with per-instance color jitter."""
-        colored = np.zeros((*panoptic.shape, 3), dtype=np.uint8)
-        taken = set()
-
-        def pick_color(base: np.ndarray, instance_id: int, max_dist: int = 40) -> np.ndarray:
-            rng = np.random.default_rng(instance_id)
-            for attempt in range(8):
-                if attempt == 0:
-                    rgb = tuple(int(x) for x in base)
-                else:
-                    jitter = rng.integers(-max_dist, max_dist + 1, size=3)
-                    rgb = tuple(int(np.clip(base.astype(float) + jitter, 0, 255)[i]) for i in range(3))
-                if rgb not in taken:
-                    taken.add(rgb)
-                    return np.array(rgb, dtype=np.uint8)
-            return base
-
-        unique_ids = np.unique(panoptic)
-        for pan_id in unique_ids:
-            mask = panoptic == pan_id
-            semantic_class = int(pan_id // self.config.label_divisor)
-            instance_id = int(pan_id % self.config.label_divisor)
-
-            if pan_id == 0:
-                colored[mask] = self.colors[0]
-                continue
-
-            if semantic_class < len(self.colors):
-                base = self.colors[semantic_class]
-                if instance_id == 0:  # stuff
-                    colored[mask] = base
-                else:  # thing instance
-                    colored[mask] = pick_color(base, int(pan_id))
-            else:
-                colored[mask] = np.array([128, 128, 128], dtype=np.uint8)  # unknown
+            if mask.any():  # Only apply color if class exists
+                colored[mask] = self.colors[class_id]
 
         return colored
 
-    def save_results(self, results: Dict[str, Dict[str, np.ndarray]], output_dir: str, filename: str) -> None:
-        """Save panoptic predictions (and optionally heads) to disk."""
+    # ---------------------------------------------------------------------
+    # Save results
+    # ---------------------------------------------------------------------
+    def save_results(
+        self, results: Dict[str, Dict[str, np.ndarray]], original_image: np.ndarray, output_dir: str, filename: str
+    ) -> None:
+        """Save panoptic predictions to output directory."""
         Path(output_dir).mkdir(parents=True, exist_ok=True)
 
         for pipeline, pipeline_results in results.items():
@@ -295,29 +242,25 @@ class Demo:
                 pipeline_dir = "models/experimental/panoptic_deeplab/resources"
             Path(pipeline_dir).mkdir(parents=True, exist_ok=True)
 
-            # Required: panoptic
             if "panoptic_pred" in pipeline_results:
-                panoptic_colored = self._colorize_panoptic(pipeline_results["panoptic_pred"])
-                panoptic_path = os.path.join(pipeline_dir, f"{filename}_panoptic.png")
-                Image.fromarray(panoptic_colored).save(panoptic_path)
+                transparent_overlay = self.visualizer.create_transparent_overlay(
+                    original_image, pipeline_results["panoptic_pred"], alpha=0.7
+                )
 
-            # Optional heads (if requested)
-            if self.config.save_heads:
-                if "semantic_pred" in pipeline_results:
-                    semantic_colored = self._colorize_segmentation(pipeline_results["semantic_pred"])
-                    Image.fromarray(semantic_colored).save(os.path.join(pipeline_dir, f"{filename}_semantic.png"))
-                if "center_heatmap" in pipeline_results:
-                    center = pipeline_results["center_heatmap"]
-                    cmin, cmax = float(np.min(center)), float(np.max(center))
-                    norm = (center - cmin) / (cmax - cmin + 1e-8)
-                    plt.figure()
-                    plt.imshow(norm, cmap="hot", vmin=0, vmax=1)
-                    plt.axis("off")
-                    plt.savefig(os.path.join(pipeline_dir, f"{filename}_centers.png"), dpi=150, bbox_inches="tight")
-                    plt.close()
+                # Then add labels to the transparent overlay
+                labeled_image = self.visualizer.add_labels_to_panoptic(
+                    transparent_overlay,  # Use transparent overlay
+                    pipeline_results["panoptic_pred"],
+                )
 
-        logger.info("Results saved under {}", output_dir)
+                # Save labeled version
+                labeled_path = os.path.join(pipeline_dir, f"{filename}_panoptic.png")
+                Image.fromarray(labeled_image).save(labeled_path)
+        logger.info(f"Panoptic Segmentation Predictions Saved: {labeled_path}")
 
+    # ---------------------------------------------------------------------
+    # Save metadata
+    # ---------------------------------------------------------------------
     def _save_metadata(
         self, image_path: str, results: Dict[str, Dict[str, Any]], output_dir: str, filename: str
     ) -> None:
@@ -327,23 +270,20 @@ class Demo:
             "config": asdict(self.config),
             "results": {"pipelines_run": list(results.keys())},
             "output_files": {
+                "panoptic": f"{filename}_panoptic.png",
                 "visualization": f"{filename}_comparison.png",
-                "original": f"{filename}_original.png",
+                "original": f"{filename}.png",
             },
         }
-
-        for pipeline in results.keys():
-            meta["output_files"][pipeline] = {
-                "semantic": f"{pipeline}/{filename}_semantic.png",
-                "centers": f"{pipeline}/{filename}_centers.png",
-                "panoptic": f"{pipeline}/{filename}_panoptic.png",
-            }
 
         path = os.path.join(output_dir, f"{filename}_metadata.json")
         with open(path, "w") as f:
             json.dump(meta, f, indent=2)
         logger.info("Metadata saved: {}", path)
 
+    # ---------------------------------------------------------------------
+    # Run demo
+    # ---------------------------------------------------------------------
     def run_demo(self, image_path: str, output_dir: str) -> None:
         """Run the full demo pipeline end-to-end."""
         logger.info("Starting demo for image: {}", image_path)
@@ -366,7 +306,7 @@ class Demo:
         ttnn_outputs = self.run_ttnn_inference(ttnn_input)  # (o1, o2, o3)
 
         # Postprocess to comparable outputs
-        results = PostProcessing().postprocess_outputs(
+        results = PostProcessing(self.config).postprocess_outputs(
             *torch_outputs,
             *ttnn_outputs,
             original_size,
@@ -374,19 +314,14 @@ class Demo:
             self.output_mesh_composer,
         )
 
-        # Persist artifacts
+        # Save results
         if self.config.save_results:
-            self.save_results(results, output_dir, base_name)
-
-        if self.config.save_visualization:
-            viz_path = os.path.join(output_dir, f"{base_name}_comparison.png")
-            self.visualize_results(original_image, results, viz_path)
+            self.save_results(results, original_image, output_dir, base_name)
 
         if self.config.save_comparison:
+            viz_path = os.path.join(output_dir, f"{base_name}_comparison.png")
+            self._create_head_visualization(original_image, results, viz_path)
             self._save_metadata(image_path, results, output_dir, base_name)
-
-        # Save original image for reference
-        Image.fromarray(original_image).save(os.path.join(output_dir, f"{base_name}_original.png"))
 
         logger.info("Demo completed. Output dir: {}", output_dir)
 
@@ -400,10 +335,18 @@ class Demo:
                 self.ttnn_device = None
 
 
+# ---------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------
 def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="TT Panoptic-DeepLab Demo")
     parser.add_argument("--input", "-i", required=True, help="Path to input image")
-    parser.add_argument("--output", "-o", default="outputs/demo", help="Output directory for results")
+    parser.add_argument(
+        "--output",
+        "-o",
+        default="models/experimental/panoptic_deeplab/resources/outputs",
+        help="Output directory for results",
+    )
     return parser.parse_args(argv)
 
 
@@ -416,7 +359,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 1
 
     # Prepare output directory
-    out_dir = args.output or "outputs/demo"
+    out_dir = args.output or "models/experimental/panoptic_deeplab/resources/outputs"
     Path(out_dir).mkdir(parents=True, exist_ok=True)
 
     config = DemoConfig()
@@ -426,7 +369,6 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         demo = Demo(config)
         demo.run_demo(args.input, out_dir)
-        logger.info("Demo completed successfully.")
         return 0
     except Exception as e:
         logger.exception("Demo failed: {}", e)
