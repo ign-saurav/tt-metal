@@ -16,7 +16,6 @@ class NeckOptimizer:
 neck_optimisations = NeckOptimizer(
     conv1={
         "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-        "deallocate_activation": True,
         "reallocate_halo_output": True,
         "reshard_if_not_optimal": True,
         "enable_act_double_buffer": True,

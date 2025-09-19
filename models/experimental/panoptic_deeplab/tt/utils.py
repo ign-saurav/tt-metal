@@ -281,10 +281,14 @@ class TTUpsample:
             )
 
         if reshape_output:
-            host = ttnn.from_device(output_tensor)
-            host = ttnn.to_dtype(host, dtype)
-            B, H, W, C = host.shape
-            host = ttnn.reshape(host, [1, 1, B * H * W, C])
-            output_tensor = ttnn.to_device(host, device)
+            B, H, W, C = output_tensor.shape
+            output_tensor = ttnn.reshape(output_tensor, [1, 1, B * H * W, C])
+            output_tensor = ttnn.to_layout(output_tensor, ttnn.TILE_LAYOUT, dtype=dtype)
+
+            # TODO: Remove the cpu fallback code
+            # host = ttnn.from_device(output_tensor)
+            # host = ttnn.to_dtype(host, dtype)
+            # host = ttnn.reshape(host, [1, 1, B * H * W, C])
+            # output_tensor = ttnn.to_device(host, device)
 
         return output_tensor

@@ -19,7 +19,9 @@ def test_perf_device_bare_metal_panoptic_deeplab(batch_size, model_name, expecte
     num_iterations = 1
     margin = 0.04
 
-    command = f"pytest models/experimental/panoptic_deeplab/tests/pcc/test_panoptic_deeplab.py"
+    command = (
+        f"pytest models/experimental/panoptic_deeplab/tests/pcc/test_panoptic_deeplab.py::test_panoptic_deeplab_infra"
+    )
 
     cols = ["DEVICE FW", "DEVICE KERNEL", "DEVICE BRISC KERNEL"]
 
