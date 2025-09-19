@@ -158,34 +158,38 @@ class PanopticDeepLabPerformanceRunnerInfra:
             self.input_tensor, self.device
         )
 
-    def validate(self):
+    def validate(self, tt_output_sem_seg=None, tt_output_ins_seg_offset=None, tt_output_ins_seg_center=None):
         """Validate three heads (semantic, offsets, centers) in a uniform loop."""
+
+        tt_output_sem_seg = self.tt_output_sem_seg if tt_output_sem_seg is None else tt_output_sem_seg
+        tt_output_ins_seg_offset = (
+            self.tt_output_ins_seg_offset if tt_output_ins_seg_offset is None else tt_output_ins_seg_offset
+        )
+        tt_output_ins_seg_center = (
+            self.tt_output_ins_seg_center if tt_output_ins_seg_center is None else tt_output_ins_seg_center
+        )
         checks = [
-            ("Semantic Segmentation Head", self.tt_output_sem_seg, self.torch_output_sem_seg),
-            ("Instance Segmentation Offset Head", self.tt_output_ins_seg_offset, self.torch_output_ins_seg_offset),
-            ("Instance Segmentation Center Head", self.tt_output_ins_seg_center, self.torch_output_ins_seg_center),
+            ("Semantic Segmentation Head", tt_output_sem_seg, self.torch_output_sem_seg),
+            ("Instance Segmentation Offset Head", tt_output_ins_seg_offset, self.torch_output_ins_seg_offset),
+            ("Instance Segmentation Center Head", tt_output_ins_seg_center, self.torch_output_ins_seg_center),
         ]
 
         self._PCC_THRESH = 0.97
         self.pcc_passed = self.pcc_message = []
 
+        logger.info(
+            f"Panoptic DeepLab: batch_size={self.batch_size}, "
+            f"act_dtype={self.act_dtype}, "
+            f"weight_dtype={self.weight_dtype}, "
+        )
         for name, tt_out, torch_ref in checks:
             out = self._tt_to_torch_nchw(tt_out, self.device, self.outputs_mesh_composer, torch_ref.shape)
             passed, msg = check_with_pcc(torch_ref, out, pcc=self._PCC_THRESH)
             self.pcc_passed.append(passed)
             self.pcc_message.append(msg)
+            logger.info(f"{name}: " f"PCC {msg}, " f"shape={tt_out.shape}")
 
         assert all(self.pcc_passed), logger.error(f"{name} PCC check failed: {self.pcc_message}")
-        logger.info(
-            f"Panoptic DeepLab - {name}: batch_size={self.batch_size}, "
-            f"act_dtype={self.act_dtype}, "
-            f"weight_dtype={self.weight_dtype}, "
-            f"math_fidelity={self.math_fidelity}, "
-            f"PCC Semantic={self.pcc_message[0]}, "
-            f"PCC Instance Offset={self.pcc_message[1]}, "
-            f"PCC Instance Center={self.pcc_message[2]}, "
-            f"shape={tt_out.shape}"
-        )
 
     def dealloc_output(self):
         ttnn.deallocate(self.tt_output_sem_seg)
