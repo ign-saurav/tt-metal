@@ -1,0 +1,170 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+import ttnn
+from dataclasses import dataclass
+from models.experimental.panoptic_deeplab.tt.utils import TTConv2D, TTUpsample
+
+
+@dataclass
+class HeadOptimizer:
+    conv1: dict
+    conv2: dict
+    predictor: dict
+    shape: tuple
+
+
+head_layer_optimisations = {
+    "default": HeadOptimizer(
+        conv1={"act_block_h": 32, "memory_config": ttnn.DRAM_MEMORY_CONFIG},
+        conv2={
+            "act_block_h": 32,
+            "memory_config": ttnn.DRAM_MEMORY_CONFIG,
+            "deallocate_activation": True,
+            "reallocate_halo_output": True,
+        },
+        predictor={
+            "memory_config": ttnn.DRAM_MEMORY_CONFIG,
+            "deallocate_activation": True,
+        },
+        shape=(0, 0, 0, 0),
+    ),
+    "semantic_decoder.head_1": HeadOptimizer(
+        conv1={
+            "act_block_h": 256,
+            "deallocate_activation": True,
+            "reallocate_halo_output": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "reshard_if_not_optimal": True,
+        },
+        conv2={
+            "act_block_h": 32,
+            "deallocate_activation": True,
+            "reallocate_halo_output": True,
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+        },
+        predictor={
+            "act_block_h": 32,
+            "deallocate_activation": True,
+            "reallocate_halo_output": True,
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+        },
+        shape=(1, 128, 256, 256),
+    ),
+    "instance_decoder.head_1": HeadOptimizer(
+        conv1={
+            "act_block_h": 128,
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "deallocate_activation": True,
+            "reallocate_halo_output": True,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+        },
+        conv2={
+            "act_block_h": 128,
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "deallocate_activation": True,
+            "reallocate_halo_output": True,
+        },
+        predictor={
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "deallocate_activation": True,
+        },
+        shape=(1, 128, 256, 128),
+    ),
+    "instance_decoder.head_2": HeadOptimizer(
+        conv1={
+            "act_block_h": 128,
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "deallocate_activation": True,
+            "reallocate_halo_output": True,
+        },
+        conv2={
+            "act_block_h": 128,
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "deallocate_activation": True,
+            "reallocate_halo_output": True,
+        },
+        predictor={
+            "act_block_h": 64,
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "deallocate_activation": True,
+            "input_channels_alignment": 32,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        shape=(1, 128, 256, 128),
+    ),
+}
+
+
+class TTHead:
+    def __init__(
+        self,
+        parameters,
+        model_config,
+        layer_optimisations=head_layer_optimisations["default"],
+    ) -> None:
+        self.layer_optimisations = layer_optimisations
+        # Conv1
+        self.conv1 = TTConv2D(
+            kernel_size=parameters.conv_args["conv1"].kernel_size,
+            stride=parameters.conv_args["conv1"].stride,
+            padding=parameters.conv_args["conv1"].padding,
+            dilation=parameters.conv_args["conv1"].dilation,
+            groups=parameters.conv_args["conv1"].groups,
+            parameters=parameters.conv1,
+            kernel_fidelity=model_config,
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+            **layer_optimisations.conv1,
+        )
+        # Conv2
+        self.conv2 = TTConv2D(
+            kernel_size=parameters.conv_args["conv2"].kernel_size,
+            stride=parameters.conv_args["conv2"].stride,
+            padding=parameters.conv_args["conv2"].padding,
+            groups=parameters.conv_args["conv2"].groups,
+            parameters=parameters.conv2,
+            kernel_fidelity=model_config,
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+            **layer_optimisations.conv2,
+        )
+        # Predictor
+        self.predictor = TTConv2D(
+            kernel_size=parameters.conv_args["predictor"].kernel_size,
+            stride=parameters.conv_args["predictor"].stride,
+            padding=parameters.conv_args["predictor"].padding,
+            groups=parameters.conv_args["predictor"].groups,
+            parameters=parameters.predictor,
+            kernel_fidelity=model_config,
+            **layer_optimisations.predictor,
+        )
+
+        # Upsample
+        self.upsample = TTUpsample(
+            scale_factor=(4),
+            mode="bilinear",
+            math_fidelity=ttnn.MathFidelity.HiFi2,
+            math_approx_mode=True,
+            fp32_dest_acc_en=False,
+        )
+
+    def __call__(
+        self,
+        x,
+        device,
+    ):
+        shape = self.layer_optimisations.shape
+
+        out, shape = self.conv1(device, x, shape)
+
+        out, shape = self.conv2(device, out, shape)
+
+        out, shape = self.predictor(device, out, shape)
+
+        out = self.upsample(device, out, shape, reshape_output=False, pad_ch_to_32=True, sent_to_dram=False)
+        out = ttnn.to_memory_config(out, ttnn.DRAM_MEMORY_CONFIG)
+        return out
