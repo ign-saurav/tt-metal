@@ -14,6 +14,9 @@ from PIL import Image, ImageDraw, ImageFont
 logger = logging.getLogger(__name__)
 
 
+# ---------------------------------------------------------------------
+# Post-processing class
+# ---------------------------------------------------------------------
 class PostProcessing:
     """
     Post-processing for Panoptic-DeepLab
@@ -423,6 +426,9 @@ class PostProcessing:
         return tensor
 
 
+# ---------------------------------------------------------------------
+# Panoptic visualizer class
+# ---------------------------------------------------------------------
 class PanopticVisualizer:
     """Visualizer that adds labels to panoptic segmentation results."""
 
@@ -501,12 +507,15 @@ class PanopticVisualizer:
 
         return output
 
+    # ---------------------------------------------------------------------
+    # Add text labels and instance IDs to panoptic segmentation results
+    # ---------------------------------------------------------------------
     def add_labels_to_panoptic(
         self,
         image: np.ndarray,
         panoptic_pred: np.ndarray,
     ) -> np.ndarray:
-        """Add text labels to panoptic segmentation results."""
+        """Add labels to panoptic segmentation results."""
 
         labeled_image = image.copy()
         h, w = labeled_image.shape[:2]
@@ -532,7 +541,7 @@ class PanopticVisualizer:
                     class_segments[semantic_class] = []
                 class_segments[semantic_class].append((pan_id, area))
 
-        # Special consolidation for cars (class 13)
+        # Process cars (class 13)
         if 13 in class_segments:
             car_segments = class_segments[13]
             # Filter out very small car segments
@@ -541,11 +550,13 @@ class PanopticVisualizer:
             # Group nearby car segments
             consolidated_cars = self._consolidate_car_segments(panoptic_pred, car_segments)
 
-            # Label consolidated cars
-            for i, (merged_mask, total_area) in enumerate(consolidated_cars):
-                if total_area < 800:  # Skip very small consolidated cars
-                    continue
+            # Filter out very small consolidated cars
+            valid_cars = [
+                (merged_mask, total_area) for merged_mask, total_area in consolidated_cars if total_area >= 800
+            ]
 
+            # Label cars with simple sequential numbering based on actual count
+            for car_num, (merged_mask, total_area) in enumerate(valid_cars, 1):
                 coords = np.column_stack(np.where(merged_mask))
                 if len(coords) == 0:
                     continue
@@ -561,7 +572,12 @@ class PanopticVisualizer:
                     if upper_coords.shape[0] > coords.shape[0] * 0.3:
                         centroid_y, centroid_x = alt_y, alt_x
 
-                label = "car"
+                # Sequential numbering: car#1, car#2, car#3, car#4 (for multiple cars)
+                if len(valid_cars) > 1:
+                    label = f"car#{car_num}"
+                else:
+                    label = "car"
+
                 bbox = draw.textbbox((0, 0), label, font=font)
                 text_width = bbox[2] - bbox[0]
                 text_height = bbox[3] - bbox[1]
@@ -570,14 +586,13 @@ class PanopticVisualizer:
                 label_x = max(5, min(centroid_x - text_width // 2, w - text_width - 5))
                 label_y = max(5, min(centroid_y - text_height // 2, h - text_height - 5))
 
-                # Check overlap with existing labels - use stricter spacing for cars
+                # Check overlap with existing labels
                 overlap = False
                 for lx, ly, lw, lh in labeled_regions:
-                    # Calculate distance between label centers
                     center_dist = np.sqrt(
                         (label_x + text_width / 2 - lx - lw / 2) ** 2 + (label_y + text_height / 2 - ly - lh / 2) ** 2
                     )
-                    if center_dist < 120:  # Minimum 120 pixels between car labels
+                    if center_dist < 100:  # overlap distance
                         overlap = True
                         break
 
@@ -609,12 +624,14 @@ class PanopticVisualizer:
         for vehicle_class in [14, 15, 16, 17, 18]:  # truck, bus, train, motorcycle, bicycle
             if vehicle_class in class_segments:
                 segments = class_segments[vehicle_class]
-                # Only label the largest instance of each vehicle type
-                if segments:
-                    largest_segment = max(segments, key=lambda x: x[1])
-                    pan_id, area = largest_segment
+                # Filter by size and sort by area (largest first)
+                valid_segments = [(pid, area) for pid, area in segments if area > 1000]
 
-                    if area > 1000:  # size threshold
+                if valid_segments:
+                    valid_segments.sort(key=lambda x: x[1], reverse=True)
+
+                    # Label each instance with sequential numbering
+                    for instance_num, (pan_id, area) in enumerate(valid_segments, 1):
                         mask = panoptic_pred == pan_id
                         coords = np.column_stack(np.where(mask))
 
@@ -622,9 +639,15 @@ class PanopticVisualizer:
                             centroid_y, centroid_x = coords.mean(axis=0).astype(int)
 
                             if vehicle_class < len(self.class_names):
-                                label = self.class_names[vehicle_class]
+                                base_name = self.class_names[vehicle_class]
                             else:
-                                label = f"vehicle_{vehicle_class}"
+                                base_name = f"vehicle_{vehicle_class}"
+
+                            # Add sequential numbering if multiple instances
+                            if len(valid_segments) > 1:
+                                label = f"{base_name}#{instance_num}"
+                            else:
+                                label = base_name
 
                             bbox = draw.textbbox((0, 0), label, font=font)
                             text_width = bbox[2] - bbox[0]
@@ -669,6 +692,138 @@ class PanopticVisualizer:
                                 )
 
                 labeled_classes.add(vehicle_class)
+
+        # Process people (class 11)
+        if 11 in class_segments:
+            person_segments = class_segments[11]
+            # Filter by size and sort by area
+            valid_persons = [(pid, area) for pid, area in person_segments if area > 800]
+
+            if valid_persons:
+                valid_persons.sort(key=lambda x: x[1], reverse=True)
+
+                # Label each person with sequential numbering
+                for person_num, (pan_id, area) in enumerate(valid_persons, 1):
+                    mask = panoptic_pred == pan_id
+                    coords = np.column_stack(np.where(mask))
+
+                    if len(coords) > 0:
+                        centroid_y, centroid_x = coords.mean(axis=0).astype(int)
+
+                        # Add sequential numbering if multiple persons
+                        if len(valid_persons) > 1:
+                            label = f"person#{person_num}"
+                        else:
+                            label = "person"
+
+                        bbox = draw.textbbox((0, 0), label, font=font)
+                        text_width = bbox[2] - bbox[0]
+                        text_height = bbox[3] - bbox[1]
+
+                        label_x = max(5, min(centroid_x - text_width // 2, w - text_width - 5))
+                        label_y = max(5, min(centroid_y - text_height // 2, h - text_height - 5))
+
+                        # Check overlap
+                        overlap = False
+                        for lx, ly, lw, lh in labeled_regions:
+                            center_dist = np.sqrt(
+                                (label_x + text_width / 2 - lx - lw / 2) ** 2
+                                + (label_y + text_height / 2 - ly - lh / 2) ** 2
+                            )
+                            if center_dist < 80:
+                                overlap = True
+                                break
+
+                        if not overlap:
+                            padding = 3
+                            draw.rectangle(
+                                [
+                                    label_x - padding,
+                                    label_y - padding,
+                                    label_x + text_width + padding,
+                                    label_y + text_height + padding,
+                                ],
+                                fill=(255, 255, 255, 220),
+                            )
+
+                            draw.text((label_x, label_y), label, fill=(0, 0, 0), font=font)
+
+                            labeled_regions.append(
+                                (
+                                    label_x - padding,
+                                    label_y - padding,
+                                    text_width + 2 * padding,
+                                    text_height + 2 * padding,
+                                )
+                            )
+
+            labeled_classes.add(11)
+
+        # Process rider (class 12)
+        if 12 in class_segments:
+            rider_segments = class_segments[12]
+            # Filter by size and sort by area
+            valid_riders = [(pid, area) for pid, area in rider_segments if area > 600]
+
+            if valid_riders:
+                valid_riders.sort(key=lambda x: x[1], reverse=True)
+
+                # Label each rider with sequential numbering
+                for rider_num, (pan_id, area) in enumerate(valid_riders, 1):
+                    mask = panoptic_pred == pan_id
+                    coords = np.column_stack(np.where(mask))
+
+                    if len(coords) > 0:
+                        centroid_y, centroid_x = coords.mean(axis=0).astype(int)
+
+                        # Add sequential numbering if multiple riders
+                        if len(valid_riders) > 1:
+                            label = f"rider#{rider_num}"
+                        else:
+                            label = "rider"
+
+                        bbox = draw.textbbox((0, 0), label, font=font)
+                        text_width = bbox[2] - bbox[0]
+                        text_height = bbox[3] - bbox[1]
+
+                        label_x = max(5, min(centroid_x - text_width // 2, w - text_width - 5))
+                        label_y = max(5, min(centroid_y - text_height // 2, h - text_height - 5))
+
+                        # Check overlap
+                        overlap = False
+                        for lx, ly, lw, lh in labeled_regions:
+                            center_dist = np.sqrt(
+                                (label_x + text_width / 2 - lx - lw / 2) ** 2
+                                + (label_y + text_height / 2 - ly - lh / 2) ** 2
+                            )
+                            if center_dist < 80:
+                                overlap = True
+                                break
+
+                        if not overlap:
+                            padding = 3
+                            draw.rectangle(
+                                [
+                                    label_x - padding,
+                                    label_y - padding,
+                                    label_x + text_width + padding,
+                                    label_y + text_height + padding,
+                                ],
+                                fill=(255, 255, 255, 220),
+                            )
+
+                            draw.text((label_x, label_y), label, fill=(0, 0, 0), font=font)
+
+                            labeled_regions.append(
+                                (
+                                    label_x - padding,
+                                    label_y - padding,
+                                    text_width + 2 * padding,
+                                    text_height + 2 * padding,
+                                )
+                            )
+
+            labeled_classes.add(12)
 
         # Process stuff classes (road, sidewalk, building, etc.) - one label per class
         for stuff_class in self.stuff_classes:
@@ -878,6 +1033,9 @@ class PanopticVisualizer:
 
         return np.array(pil_image)
 
+    # ---------------------------------------------------------------------
+    # Consolidate nearby car segments into single labels
+    # ---------------------------------------------------------------------
     def _consolidate_car_segments(self, panoptic_pred, car_segments):
         """Consolidate nearby car segments into single labels."""
         if not car_segments:

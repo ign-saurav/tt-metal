@@ -95,6 +95,7 @@ If missing, the code will attempt to run:
 ```
 models/experimental/panoptic_deeplab/resources/panoptic_deeplab_weights_download.sh
 ```
+Note: The weights are for Cityscapes panoptic segmentation with an R-52 backbone.
 
 ## Quickstart
 ### Run Tests
@@ -128,6 +129,7 @@ python models/experimental/panoptic_deeplab/demo/panoptic_deeplab_demo.py
 -i models/experimental/panoptic_deeplab/resources/input.png
 -o models/experimental/panoptic_deeplab/resources
 ```
+Note: Currently, the input image is taken from the Cityscapes dataset, and accordingly, post-processing is applied.
 
 For visualizing heads comparison of PyTorch and TTNN implementation, enable save_comparison in demo/config.
 
