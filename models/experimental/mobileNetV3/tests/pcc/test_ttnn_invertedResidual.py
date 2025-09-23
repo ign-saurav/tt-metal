@@ -6,15 +6,14 @@ import torch
 import ttnn
 import pytest
 
-from functools import partial
 from torchvision import models
 from models.experimental.mobileNetV3.tt.ttnn_invertedResidual import (
     ttnn_InvertedResidual,
-    InvertedResidualConfig,
 )
 from ttnn.model_preprocessing import preprocess_model_parameters
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from models.experimental.mobileNetV3.tt.custom_preprocessor import create_custom_preprocessor
+from models.experimental.mobileNetV3.tests.pcc.common import inverted_residual_setting
 
 
 @pytest.mark.parametrize(
@@ -48,26 +47,6 @@ def test_invertedResidual(device, reset_seeds, batch_size, channels, height, wid
     )
 
     torch_output_tensor = torch_model(torch_input_tensor)
-
-    reduce_divider = 1
-    dilation = 1
-
-    bneck_conf = partial(InvertedResidualConfig, width_mult=1.0)
-    adjust_channels = partial(InvertedResidualConfig.adjust_channels, width_mult=1.0)
-
-    inverted_residual_setting = [
-        bneck_conf(16, 3, 16, 16, True, "RE", 2, 1),
-        bneck_conf(16, 3, 72, 24, False, "RE", 2, 1),
-        bneck_conf(24, 3, 88, 24, False, "RE", 1, 1),
-        bneck_conf(24, 5, 96, 40, True, "HS", 2, 1),
-        bneck_conf(40, 5, 240, 40, True, "HS", 1, 1),
-        bneck_conf(40, 5, 240, 40, True, "HS", 1, 1),
-        bneck_conf(40, 5, 120, 48, True, "HS", 1, 1),
-        bneck_conf(48, 5, 144, 48, True, "HS", 1, 1),
-        bneck_conf(48, 5, 288, 96 // reduce_divider, True, "HS", 2, dilation),  # C4
-        bneck_conf(96 // reduce_divider, 5, 576 // reduce_divider, 96 // reduce_divider, True, "HS", 1, dilation),
-        bneck_conf(96 // reduce_divider, 5, 576 // reduce_divider, 96 // reduce_divider, True, "HS", 1, dilation),
-    ]
 
     ttnn_model = ttnn_InvertedResidual(inverted_residual_setting[feature_i - 1], parameters=parameters)
 
