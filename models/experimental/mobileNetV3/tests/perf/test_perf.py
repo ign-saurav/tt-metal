@@ -9,16 +9,16 @@ from models.perf.device_perf_utils import check_device_perf, prep_device_perf_re
 @pytest.mark.parametrize(
     "batch_size, model_name, expected_perf",
     [
-        (1, "mobileNetV3", 200),
+        (1, "ttnn_mobileNetV3", 215),
     ],
 )
 @pytest.mark.models_device_performance_bare_metal
-def test_perf_device_bare_metal_panoptic_deeplab(batch_size, model_name, expected_perf):
+def test_perf_device_bare_metal_mobilenetV3(batch_size, model_name, expected_perf):
     subdir = model_name
     num_iterations = 1
-    margin = 100
+    margin = 0.1
 
-    command = f"pytest models/experimental/mobileNetV3/test/pcc/test_mobilenetv3.py"
+    command = f"pytest models/experimental/mobileNetV3/tests/pcc/test_mobilenetv3.py"
 
     cols = ["DEVICE FW", "DEVICE KERNEL", "DEVICE BRISC KERNEL"]
 
