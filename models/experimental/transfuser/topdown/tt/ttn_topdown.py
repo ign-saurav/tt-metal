@@ -73,7 +73,7 @@ class TtTopDown:
             p5 = ttnn.to_layout(p5, ttnn.ROW_MAJOR_LAYOUT)
 
         # First upsample stage
-        p5_upsampled = ttnn.upsample(p5, (self.bev_upsample_factor, self.bev_upsample_factor))
+        p5_upsampled = ttnn.upsample(p5, (self.bev_upsample_factor, self.bev_upsample_factor), mode="bilinear")
         up_height = input_height * self.bev_upsample_factor
         up_width = input_width * self.bev_upsample_factor
 
@@ -97,6 +97,7 @@ class TtTopDown:
         p4_flat = ttnn.relu(p4_flat)
 
         # Reshape back to 4D for upsampling with explicit interleaved memory config
+        p4_flat = ttnn.sharded_to_interleaved(p4_flat, ttnn.DRAM_MEMORY_CONFIG)
         p4 = ttnn.reshape(
             p4_flat,
             (batch_size, up_height, up_width, self.bev_features_channels),
@@ -108,7 +109,7 @@ class TtTopDown:
             p4 = ttnn.to_layout(p4, ttnn.ROW_MAJOR_LAYOUT)
 
         # Second upsample stage
-        p4_upsampled = ttnn.upsample(p4, (self.bev_upsample_factor, self.bev_upsample_factor))
+        p4_upsampled = ttnn.upsample(p4, (self.bev_upsample_factor, self.bev_upsample_factor), mode="bilinear")
         up_height2 = up_height * self.bev_upsample_factor
         up_width2 = up_width * self.bev_upsample_factor
 
@@ -143,7 +144,7 @@ class TtTopDown:
             p3 = ttnn.to_layout(p3, ttnn.ROW_MAJOR_LAYOUT)
 
         # Third upsample stage
-        p3_upsampled = ttnn.upsample(p3, (self.bev_upsample_factor, self.bev_upsample_factor))
+        p3_upsampled = ttnn.upsample(p3, (self.bev_upsample_factor, self.bev_upsample_factor), mode="bilinear")
         up_height3 = up_height2 * self.bev_upsample_factor
         up_width3 = up_width2 * self.bev_upsample_factor
 
