@@ -111,6 +111,7 @@ class MobileNetV3PerformanceRunnerInfra:
         tt_output = self.tt_output if tt_output is None else tt_output
 
         tt_output = ttnn.reshape(tt_output, (1, -1))
+        tt_output = ttnn.to_torch(tt_output)
 
         self._PCC_THRESH = 0.6
         self.pcc_passed = self.pcc_message = []

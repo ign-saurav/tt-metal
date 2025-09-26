@@ -106,7 +106,7 @@ class MobileNetV3PerformantRunner:
     def _validate(self):
         self._PCC_THRESH = 0.6
         checks = [
-            ("MobileNetV3", self.tt_output, self.runner_infra.torch_output),
+            ("MobileNetV3", ttnn.to_torch(self.tt_output), self.runner_infra.torch_output),
         ]
         for name, tt_out, torch_ref in checks:
             assert_with_pcc(torch_ref, tt_out, pcc=self._PCC_THRESH)
