@@ -17,7 +17,13 @@ from torchvision.models.mobilenetv3 import MobileNetV3, InvertedResidual, SElaye
 # ------------------------
 def conv_bn_to_params(conv, bn, mesh_mapper):
     """Fold BN into Conv and return as TTNN params."""
-    weight, bias = fold_batch_norm2d_into_conv2d(conv, bn)
+    if bn is None:
+        # No BN: keep conv weight/bias
+        weight = conv.weight
+        bias = conv.bias if conv.bias is not None else torch.zeros(conv.out_channels)
+    else:
+        weight, bias = fold_batch_norm2d_into_conv2d(conv, bn)
+
     return {
         "weight": ttnn.from_torch(weight, dtype=ttnn.bfloat16, mesh_mapper=mesh_mapper),
         "bias": ttnn.from_torch(torch.reshape(bias, (1, 1, 1, -1)), dtype=ttnn.bfloat16, mesh_mapper=mesh_mapper),
@@ -42,7 +48,7 @@ def se_to_params(se, mesh_mapper):
             ),
         },
         "fc2": {
-            "weight": ttnn.from_torch(se.fc2.weight, dtype=ttnn.bfloat16),
+            "weight": ttnn.from_torch(se.fc2.weight, dtype=ttnn.bfloat16, mesh_mapper=mesh_mapper),
             "bias": ttnn.from_torch(
                 torch.reshape(se.fc2.bias, (1, 1, 1, -1)), dtype=ttnn.bfloat16, mesh_mapper=mesh_mapper
             ),
@@ -53,8 +59,11 @@ def se_to_params(se, mesh_mapper):
 # ------------------------
 # Unified Preprocessor
 # ------------------------
-def create_custom_preprocessor(mesh_mapper=None):
-    def custom_preprocessor(model, name, ttnn_module_args):
+def create_custom_preprocessor(mesh_mapper=None, debug=False):
+    def custom_preprocessor(model, name="", ttnn_module_args=None):
+        if debug:
+            print(f"[Preprocess] {name}: {type(model).__name__}")
+
         parameters = {}
 
         # Case 1: Full MobileNetV3
@@ -62,15 +71,19 @@ def create_custom_preprocessor(mesh_mapper=None):
             features = {}
             for idx, child in enumerate(model.features.children()):
                 if isinstance(child, Conv2dNormActivation):
-                    features[idx] = {0: conv_bn_to_params(child[0], child[1], mesh_mapper)}
+                    conv = child[0]
+                    bn = child[1] if len(child) > 1 and hasattr(child[1], "weight") else None
+                    features[idx] = {0: conv_bn_to_params(conv, bn, mesh_mapper)}
                 elif isinstance(child, InvertedResidual):
-                    features[idx] = {"block": custom_preprocessor(child, name, ttnn_module_args)}
+                    features[idx] = {"block": custom_preprocessor(child, f"IR_{idx}", ttnn_module_args)}
             parameters["features"] = features
 
-            parameters["classifier"] = {
-                0: linear_to_params(model.classifier[0].weight, model.classifier[0].bias, mesh_mapper),
-                3: linear_to_params(model.classifier[3].weight, model.classifier[3].bias, mesh_mapper),
-            }
+            # Classifier (Linear layers only)
+            classifier = {}
+            for idx, layer in enumerate(model.classifier):
+                if isinstance(layer, torch.nn.Linear):
+                    classifier[idx] = linear_to_params(layer.weight, layer.bias, mesh_mapper)
+            parameters["classifier"] = classifier
 
         # Case 2: InvertedResidual
         elif isinstance(model, InvertedResidual):
@@ -78,7 +91,9 @@ def create_custom_preprocessor(mesh_mapper=None):
                 if isinstance(child, SElayer):
                     parameters[idx] = se_to_params(child, mesh_mapper)
                 elif isinstance(child, Conv2dNormActivation):
-                    parameters[idx] = {0: conv_bn_to_params(child[0], child[1], mesh_mapper)}
+                    conv = child[0]
+                    bn = child[1] if len(child) > 1 and hasattr(child[1], "weight") else None
+                    parameters[idx] = {0: conv_bn_to_params(conv, bn, mesh_mapper)}
 
         # Case 3: SElayer
         elif isinstance(model, SElayer):
