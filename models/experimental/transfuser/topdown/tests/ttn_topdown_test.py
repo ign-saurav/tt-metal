@@ -45,4 +45,4 @@ def test_topdown_pcc_comparison(device):
     assert_with_pcc(torch_p4, tt_p4_torch, pcc_threshold)
     assert_with_pcc(torch_p5, tt_p5_torch, pcc_threshold)
 
-    print("✅ TopDown TT-NN vs PyTorch PCC test passed.")
+    print("PCC test passed.")
