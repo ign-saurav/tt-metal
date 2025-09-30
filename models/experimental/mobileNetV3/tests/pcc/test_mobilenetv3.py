@@ -57,8 +57,9 @@ class MobilenetV3TestInfra:
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model, custom_preprocessor=create_custom_preprocessor(None), device=None
         )
-
-        self.torch_output_tensor = torch_model(torch_input_tensor)
+        with torch.no_grad():
+            torch_model.eval()
+            self.torch_output_tensor = torch_model(torch_input_tensor)
 
         self.ttnn_model = ttnn_MobileNetV3(
             inverted_residual_setting=inverted_residual_setting, last_channel=last_channel, parameters=parameters

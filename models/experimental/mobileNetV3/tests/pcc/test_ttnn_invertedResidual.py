@@ -7,6 +7,7 @@ import ttnn
 import pytest
 
 from torchvision import models
+from torchvision.models import MobileNet_V3_Small_Weights
 from models.experimental.mobileNetV3.tt.ttnn_invertedResidual import (
     ttnn_InvertedResidual,
 )
@@ -39,7 +40,7 @@ def test_invertedResidual(device, reset_seeds, batch_size, channels, height, wid
         torch_input_tensor.permute(0, 2, 3, 1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, device=device
     )
 
-    mobilenet = models.mobilenet_v3_small(weights=True)
+    mobilenet = models.mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.IMAGENET1K_V1)
     torch_model = mobilenet.features[feature_i]
 
     parameters = preprocess_model_parameters(
