@@ -339,13 +339,10 @@ def custom_preprocessor(
         # Downsample
         if hasattr(model, "downsample") and model.downsample is not None:
             weight, bias = fold_batch_norm2d_into_conv2d(model.downsample[0], model.downsample[1])
-            parameters["downsample"] = []
-            parameters["downsample"].append({})
-            parameters["downsample"][0]["weight"] = ttnn.from_torch(
-                weight, dtype=ttnn.bfloat16, mesh_mapper=mesh_mapper
-            )
+            parameters["downsample"] = {}
+            parameters["downsample"]["weight"] = ttnn.from_torch(weight, dtype=ttnn.bfloat16, mesh_mapper=mesh_mapper)
             bias = bias.reshape((1, 1, 1, -1))
-            parameters["downsample"][0]["bias"] = ttnn.from_torch(bias, dtype=ttnn.bfloat16, mesh_mapper=mesh_mapper)
+            parameters["downsample"]["bias"] = ttnn.from_torch(bias, dtype=ttnn.bfloat16, mesh_mapper=mesh_mapper)
     return parameters
 
 

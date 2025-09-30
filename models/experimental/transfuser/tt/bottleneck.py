@@ -17,6 +17,9 @@ class TTRegNetBottleneck:
     ):
         self.stride = stride
         self.downsample = downsample
+        # self.downsample = downsample
+        print("....................................................................")
+
         self.groups = groups
         self.model_config = model_config
         # print(parameters)
@@ -65,7 +68,7 @@ class TTRegNetBottleneck:
         )
 
         # SE Module
-        print(parameters["se"]["fc1"])
+        # print(parameters["se"]["fc1"])
         self.se_fc1 = TTConv2D(
             kernel_size=1,
             stride=1,
@@ -121,12 +124,15 @@ class TTRegNetBottleneck:
 
         # Downsample layer if needed
         if downsample:
+            print(f"{self.downsample =}")
+            print(parameters)
             self.downsample_layer = TTConv2D(
                 kernel_size=1,
-                stride=stride,
+                stride=2,
                 padding=0,
-                # parameters=parameters["downsample"],
-                parameters=parameters["downsample"][0],
+                groups=1,
+                parameters=parameters["downsample"],
+                # parameters=parameters["downsample"][0],
                 kernel_fidelity=model_config,
                 activation=None,
                 shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
@@ -145,6 +151,7 @@ class TTRegNetBottleneck:
         identity = x
         logger.info(f"conv1- 1x1 convolution")
         logger.info(f"{x.shape=}")
+        logger.info(f"{identity.shape=}")
         # conv1: 1x1 expansion
         out, shape_ = self.conv1(device, x, x.shape)
 
@@ -168,23 +175,38 @@ class TTRegNetBottleneck:
         se_out, shape_ = self.se_fc2(device, se_out, shape_)
         se_out = ttnn.sigmoid(se_out)
 
+        logger.info(f"SE scaling")
         # Apply SE scaling
         out = ttnn.multiply(out, se_out)
         shape_ = out.shape
 
+        logger.info(f"Conv3 - 1x1 projection")
         # conv3: 1x1 projection
         out, shape_ = self.conv3(device, out, shape_)
+        # return out
 
         # Handle downsample
         if self.downsample_layer is not None:
+            logger.info(f"downsample block")
             print(f"{identity.shape=}")
             identity, shape_ = self.downsample_layer(device, identity, identity.shape)
 
         # Residual connection
-        if identity.shape != shape_:
-            identity = ttnn.reshape(identity, shape_)
-        out = ttnn.reshape(out, shape_)
+        # if identity.shape != out.shape:
+        #     identity = ttnn.reshape(identity, out.shape)
+        # out = ttnn.reshape(out, shape_)
+        print(f"{out.shape, identity.shape =}")
+        # out = ttnn.reshape(out, shape_)
+        # print(f"{out.shape, identity.shape =}")
 
+        return out, identity
+        # Before the final addition
+        if identity.shape != out.shape:
+            identity = ttnn.reshape(identity, out.shape)
+
+        # out = ttnn.to_memory_config(out, ttnn.DRAM_MEMORY_CONFIG)
+        # identity = ttnn.to_memory_config(identity, ttnn.DRAM_MEMORY_CONFIG)
+        print(f"{out.shape, identity.shape =}")
         out = ttnn.add(out, identity)
         out = ttnn.relu(out)  # Final ReLU activation
 
