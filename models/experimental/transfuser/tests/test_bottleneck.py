@@ -114,17 +114,18 @@ def test_regnet_bottleneck_pcc(in_chs, out_chs, stride, input_size):
 
         # PyTorch forward pass
         with torch.no_grad():
-            shortcut = torch_input
-            x = torch_model.conv1(torch_input)
-            x = torch_model.conv2(x)
-            x = torch_model.se(x)
-            torch_main_path = torch_model.conv3(x)
-            # torch_output = torch_model(torch_input)
-            tt_main_path, tt_identity_path = torch_model(torch_input)
-            if torch_model.downsample is not None:
-                torch_identity_path = torch_model.downsample(shortcut)
-            else:
-                torch_identity_path = shortcut
+            # shortcut = torch_input
+            # x = torch_model.conv1(torch_input)
+            # x = torch_model.conv2(x)
+            # x = torch_model.se(x)
+            # torch_main_path = torch_model.conv3(x)
+
+            torch_output = torch_model(torch_input)
+            # tt_main_path, tt_identity_path = torch_model(torch_input)
+            # if torch_model.downsample is not None:
+            #     torch_identity_path = torch_model.downsample(shortcut)
+            # else:
+            #     torch_identity_path = shortcut
 
         inputs_mesh_mapper, weights_mesh_mapper, output_mesh_composer = get_mesh_mappers(device)
         parameters = preprocess_model_parameters(
@@ -162,63 +163,63 @@ def test_regnet_bottleneck_pcc(in_chs, out_chs, stride, input_size):
         )
         tt_input = ttnn.to_device(tt_input, device)
         tt_input = ttnn.permute(tt_input, (0, 2, 3, 1))
-        # tt_output = ttnn_model(tt_input, device)
-        # tt_torch_output = ttnn.to_torch(
-        #     tt_output,
-        #     device=device,
-        #     mesh_composer=output_mesh_composer,
-        # )
-        tt_main_path, tt_identity_path = ttnn_model(tt_input, device)
+        tt_output = ttnn_model(tt_input, device)
+        tt_torch_output = ttnn.to_torch(
+            tt_output,
+            device=device,
+            mesh_composer=output_mesh_composer,
+        )
+        # tt_main_path, tt_identity_path = ttnn_model(tt_input, device)
 
         # Convert TTNN outputs to torch
-        tt_main_torch = ttnn.to_torch(tt_main_path, device=device, mesh_composer=output_mesh_composer)
-        tt_identity_torch = ttnn.to_torch(tt_identity_path, device=device, mesh_composer=output_mesh_composer)
-        # expected_image_shape = torch_output.shape
-        # tt_torch_output = torch.reshape(
-        #     tt_torch_output,
-        #     (expected_image_shape[0], expected_image_shape[2], expected_image_shape[3], expected_image_shape[1]),
-        # )
+        # tt_main_torch = ttnn.to_torch(tt_main_path, device=device, mesh_composer=output_mesh_composer)
+        # tt_identity_torch = ttnn.to_torch(tt_identity_path, device=device, mesh_composer=output_mesh_composer)
+        expected_image_shape = torch_output.shape
+        tt_torch_output = torch.reshape(
+            tt_torch_output,
+            (expected_image_shape[0], expected_image_shape[2], expected_image_shape[3], expected_image_shape[1]),
+        )
         # Reshape to match PyTorch format
-        expected_main_shape = torch_main_path.shape
-        tt_main_torch = torch.reshape(
-            tt_main_torch,
-            (expected_main_shape[0], expected_main_shape[2], expected_main_shape[3], expected_main_shape[1]),
-        )
-        tt_main_torch = torch.permute(tt_main_torch, (0, 3, 1, 2))
+        # expected_main_shape = torch_main_path.shape
+        # tt_main_torch = torch.reshape(
+        #     tt_main_torch,
+        #     (expected_main_shape[0], expected_main_shape[2], expected_main_shape[3], expected_main_shape[1]),
+        # )
+        # tt_main_torch = torch.permute(tt_main_torch, (0, 3, 1, 2))
 
-        expected_identity_shape = torch_identity_path.shape
-        tt_identity_torch = torch.reshape(
-            tt_identity_torch,
-            (
-                expected_identity_shape[0],
-                expected_identity_shape[2],
-                expected_identity_shape[3],
-                expected_identity_shape[1],
-            ),
-        )
-        tt_identity_torch = torch.permute(tt_identity_torch, (0, 3, 1, 2))
+        # expected_identity_shape = torch_identity_path.shape
+        # tt_identity_torch = torch.reshape(
+        #     tt_identity_torch,
+        #     (
+        #         expected_identity_shape[0],
+        #         expected_identity_shape[2],
+        #         expected_identity_shape[3],
+        #         expected_identity_shape[1],
+        #     ),
+        # )
+        # tt_identity_torch = torch.permute(tt_identity_torch, (0, 3, 1, 2))
 
-        # tt_torch_output = torch.permute(tt_torch_output, (0, 3, 1, 2))
+        tt_torch_output = torch.permute(tt_torch_output, (0, 3, 1, 2))
         # Test main path PCC
-        main_pcc_passed, main_pcc_message = check_with_pcc(torch_main_path, tt_main_torch, pcc=0.99)
-        logger.info(f"Main Path PCC: {main_pcc_message}")
+        # main_pcc_passed, main_pcc_message = check_with_pcc(torch_main_path, tt_main_torch, pcc=0.99)
+        # logger.info(f"Main Path PCC: {main_pcc_message}")
 
-        # Test identity path PCC
-        identity_pcc_passed, identity_pcc_message = check_with_pcc(torch_identity_path, tt_identity_torch, pcc=0.99)
-        logger.info(f"Identity Path PCC: {identity_pcc_message}")
+        # # Test identity path PCC
+        # identity_pcc_passed, identity_pcc_message = check_with_pcc(torch_identity_path, tt_identity_torch, pcc=0.99)
+        # logger.info(f"Identity Path PCC: {identity_pcc_message}")
 
-        # Assert both paths pass
-        assert main_pcc_passed, f"Main path PCC check failed: {main_pcc_message}"
-        assert identity_pcc_passed, f"Identity path PCC check failed: {identity_pcc_message}"
+        # # Assert both paths pass
+        # assert main_pcc_passed, f"Main path PCC check failed: {main_pcc_message}"
+        # assert identity_pcc_passed, f"Identity path PCC check failed: {identity_pcc_message}"
 
-        print("✓ Both main path and identity path match PyTorch with PCC > 0.99")
+        # print("✓ Both main path and identity path match PyTorch with PCC > 0.99")
 
-        # pcc_passed, pcc_message = check_with_pcc(torch_output, tt_torch_output, pcc=0.99)
+        pcc_passed, pcc_message = check_with_pcc(torch_output, tt_torch_output, pcc=0.99)
 
-        # logger.info(f"Image Output PCC: {pcc_message}")
-        # assert pcc_passed, logger.error(f"PCC check failed - pcc_message: {pcc_message}")
+        logger.info(f"Image Output PCC: {pcc_message}")
+        assert pcc_passed, logger.error(f"PCC check failed - pcc_message: {pcc_message}")
 
-        # print("✓ RegNet bottleneck TTNN implementation matches PyTorch with PCC > 0.99")
+        print("✓ RegNet bottleneck TTNN implementation matches PyTorch with PCC > 0.99")
 
     finally:
         ttnn.close_device(device)

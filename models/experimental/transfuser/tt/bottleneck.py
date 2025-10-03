@@ -36,7 +36,7 @@ class TTRegNetBottleneck:
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
             shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            deallocate_activation=True,
+            deallocate_activation=False,
             reallocate_halo_output=True,
             reshard_if_not_optimal=True,
             enable_act_double_buffer=True,
@@ -150,13 +150,10 @@ class TTRegNetBottleneck:
     def __call__(self, x, device):
         identity = x
         logger.info(f"conv1- 1x1 convolution")
-        logger.info(f"{x.shape=}")
-        logger.info(f"{identity.shape=}")
         # conv1: 1x1 expansion
         out, shape_ = self.conv1(device, x, x.shape)
 
         logger.info(f"conv2- 3x3 grouped convolution")
-        logger.info(f"{out.shape=}")
         # conv2: 3x3 grouped convolution
         out, shape_ = self.conv2(device, out, shape_)
 
@@ -183,31 +180,14 @@ class TTRegNetBottleneck:
         logger.info(f"Conv3 - 1x1 projection")
         # conv3: 1x1 projection
         out, shape_ = self.conv3(device, out, shape_)
-        # return out
 
         # Handle downsample
         if self.downsample_layer is not None:
             logger.info(f"downsample block")
-            print(f"{identity.shape=}")
             identity, shape_ = self.downsample_layer(device, identity, identity.shape)
 
-        # Residual connection
-        # if identity.shape != out.shape:
-        #     identity = ttnn.reshape(identity, out.shape)
-        # out = ttnn.reshape(out, shape_)
-        print(f"{out.shape, identity.shape =}")
-        # out = ttnn.reshape(out, shape_)
-        # print(f"{out.shape, identity.shape =}")
-
-        return out, identity
-        # Before the final addition
-        if identity.shape != out.shape:
-            identity = ttnn.reshape(identity, out.shape)
-
-        # out = ttnn.to_memory_config(out, ttnn.DRAM_MEMORY_CONFIG)
-        # identity = ttnn.to_memory_config(identity, ttnn.DRAM_MEMORY_CONFIG)
-        print(f"{out.shape, identity.shape =}")
         out = ttnn.add(out, identity)
+        out = ttnn.reshape(out, shape_)
         out = ttnn.relu(out)  # Final ReLU activation
 
         return out

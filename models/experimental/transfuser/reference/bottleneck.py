@@ -220,7 +220,7 @@ class Bottleneck(nn.Module):
         # return x
         if self.downsample is not None:
             y = self.downsample(shortcut)
-            return x, y
+            # return x, y
             x = self.drop_path(x) + self.downsample(shortcut)
 
         x = self.act3(x)
