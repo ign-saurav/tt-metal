@@ -185,8 +185,8 @@ class TTRegNetBottleneck:
         if self.downsample_layer is not None:
             logger.info(f"downsample block")
             identity, shape_ = self.downsample_layer(device, identity, identity.shape)
+            out = ttnn.add(out, identity)
 
-        out = ttnn.add(out, identity)
         out = ttnn.reshape(out, shape_)
         out = ttnn.relu(out)  # Final ReLU activation
 

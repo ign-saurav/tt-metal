@@ -16,6 +16,7 @@ def preprocess_conv_parameter(parameter, *, dtype):
 def custom_preprocessor(
     model, name, ttnn_module_args, convert_to_ttnn, custom_preprocessor_func=None, mesh_mapper=None
 ):
+    print("PLEASE")
     parameters = {}
     if isinstance(model, Conv2d):
         if model.norm is not None:
@@ -337,7 +338,11 @@ def custom_preprocessor(
         )
 
         # Downsample
-        if hasattr(model, "downsample") and model.downsample is not None:
+        if (
+            hasattr(model, "downsample")
+            and model.downsample is not None
+            and model.downsample.__class__.__name__ != "Identity"
+        ):
             weight, bias = fold_batch_norm2d_into_conv2d(model.downsample[0], model.downsample[1])
             parameters["downsample"] = {}
             parameters["downsample"]["weight"] = ttnn.from_torch(weight, dtype=ttnn.bfloat16, mesh_mapper=mesh_mapper)

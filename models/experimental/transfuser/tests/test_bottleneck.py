@@ -97,7 +97,7 @@ def preprocess_parameters_for_ttnn(torch_model, device):
     "in_chs, out_chs, stride, input_size",
     [
         (32, 72, 2, (1, 32, 80, 352)),  # stage 1 DS
-        # (72, 72, 1, (1, 72, 40, 176)),  # stage 1 NDS
+        (72, 72, 1, (1, 72, 40, 176)),  # stage 1 NDS
     ],
 )
 def test_regnet_bottleneck_pcc(in_chs, out_chs, stride, input_size):
@@ -145,7 +145,7 @@ def test_regnet_bottleneck_pcc(in_chs, out_chs, stride, input_size):
         # so setting downsample to true to test the first bottle neck block
         downsample = True
         if in_chs == out_chs and stride == 1:
-            downsample = True
+            downsample = False
 
         bottle_ratio = 1.0
         group_size = 24
