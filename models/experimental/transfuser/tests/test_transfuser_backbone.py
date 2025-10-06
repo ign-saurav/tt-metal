@@ -47,6 +47,7 @@ class TransfuserBackboneInfra:
         # setting machine to avoid loading files
         self.config = GlobalConfig(setting="eval")
         self.config.n_layer = self.n_layer
+        self.config.use_velocity = self.use_velocity
         if use_target_point_image:
             self.config.use_target_point_image = use_target_point_image
 

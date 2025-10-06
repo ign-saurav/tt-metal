@@ -174,16 +174,19 @@ class TtTransfuserBackbone:
         logger.info(f"image_encoder_layer1")
         # image_out = ttnn.reshape(image_out, (1, 80, 352, 32))
         image_out = ttnn.reshape(image_out, image_shape)
+        print(f"After conv1 reshape - image_out.shape: {image_out.shape}")
         # Process layer1 blocks
         for block in self.image_layer1:
             image_out = block(image_out, device)
 
         logger.info(f"lidar_encoder_layer1")
+        print(f"After layer1 - image_out.shape: {image_out.shape}")
         lidar_out = ttnn.reshape(lidar_out, lidar_shape)
+        print(f"After conv1 reshape - image_out.shape: {image_out.shape}")
         # lidar_out = ttnn.reshape(lidar_out, (1, 128, 128, 32))
         for block in self.lidar_layer1:
             lidar_out = block(lidar_out, device)
-
+        print(f"After layer1 - lidar_out.shape: {lidar_out.shape}")
         image_h_orig = image_out.shape[1]
         image_w_orig = image_out.shape[2]
         lidar_h_orig = lidar_out.shape[1]
@@ -199,34 +202,55 @@ class TtTransfuserBackbone:
         image_w = image_out.shape[2]
         image_c = image_out.shape[3]
 
+        if image_out.layout != ttnn.ROW_MAJOR_LAYOUT:
+            image_out = ttnn.to_layout(image_out, ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         image_features_flat = ttnn.reshape(image_out, (1, 1, image_out.shape[0] * image_h * image_w, image_c))
         print(f"{image_out.shape=}")
-        print(f"image_features_flat shape{image_features_flat.shape=}")
-        image_embd_layer1 = ttnn.adaptive_avg_pool2d(
+        # print(f"image_features_flat shape{image_features_flat.shape=}")
+        image_embd_layer1 = ttnn.avg_pool2d(
             input_tensor=image_features_flat,
-            batch_size=image_out.shape[0],
-            input_h=image_h,
-            input_w=image_w,
-            channels=image_c,
-            output_size=[1, 1],  # Pool to 1x1 spatial dimensions
+            batch_size=1,
+            input_h=image_h,  # 40
+            input_w=image_w,  # 176
+            channels=image_c,  # 72
+            kernel_size=[8, 8],
+            stride=[8, 8],
+            padding=[0, 0, 0, 0],
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
+        # image_embd_layer1 = ttnn.adaptive_avg_pool2d(
+        #   input_tensor=image_features_flat,
+
+        #  batch_size=image_out.shape[0],
+        #    input_h=image_h,
+        #    input_w=image_w,
+        #    channels=image_c,
+        #    output_size=[1, 1],  # Pool to 1x1 spatial dimensions
+        # )
+        print(f"After avgpool - image_embd_layer1.shape: {image_embd_layer1.shape}")
         logger.info(f"lidar_avgpool")
         lidar_h = lidar_out.shape[1]
         lidar_w = lidar_out.shape[2]
         lidar_c = lidar_out.shape[3]
 
+        if lidar_out.layout != ttnn.ROW_MAJOR_LAYOUT:
+            lidar_out = ttnn.to_layout(lidar_out, ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         lidar_features_flat = ttnn.reshape(lidar_out, (1, 1, lidar_out.shape[0] * lidar_h * lidar_w, lidar_c))
-        print(f"lidar_flatten shape{lidar_features_flat.shape=}")
-
-        lidar_embd_layer1 = ttnn.adaptive_avg_pool2d(
+        print(f"{lidar_out.shape=}")
+        lidar_embd_layer1 = ttnn.avg_pool2d(
             input_tensor=lidar_features_flat,
-            batch_size=lidar_out.shape[0],
-            input_h=lidar_h,
-            input_w=lidar_w,
-            channels=lidar_c,
-            output_size=[1, 1],
+            batch_size=1,
+            input_h=lidar_h,  # 40
+            input_w=lidar_w,  # 176
+            channels=lidar_c,  # 72
+            kernel_size=[8, 8],
+            stride=[8, 8],
+            padding=[0, 0, 0, 0],
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
+
+        print(f"After avgpool - lidar_embd_layer1.shape: {lidar_embd_layer1.shape}")
         print(img_vert_anchors)
         print(img_horz_anchors)
         # image_embd_layer1 = ttnn.reshape(

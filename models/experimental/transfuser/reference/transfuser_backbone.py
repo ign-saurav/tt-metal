@@ -276,6 +276,7 @@ class TransfuserBackbone(nn.Module):
             lidar_list (list): list of input LiDAR BEV
             velocity (tensor): input velocity from speedometer
         """
+        print(">>> ENTERED FORWARD <<<", flush=True)
         intermediates = {}
         if self.image_encoder.normalize:
             image_tensor = normalize_imagenet(image)
@@ -288,10 +289,12 @@ class TransfuserBackbone(nn.Module):
         image_features = self.image_encoder.features.bn1(image_features)
         image_features = self.image_encoder.features.act1(image_features)
         image_features = self.image_encoder.features.maxpool(image_features)
+        print(f"After maxpool - image_features.shape: {image_features.shape}")
         lidar_features = self.lidar_encoder._model.conv1(lidar_tensor)
         lidar_features = self.lidar_encoder._model.bn1(lidar_features)
         lidar_features = self.lidar_encoder._model.act1(lidar_features)
         lidar_features = self.lidar_encoder._model.maxpool(lidar_features)
+        print(f"After maxpool - lidar_features.shape: {lidar_features.shape}")
         # print(self.image_encoder.features.layer1)
         # print(self.image_encoder.features.layer1)
         image_features = self.image_encoder.features.layer1(image_features)
@@ -301,6 +304,8 @@ class TransfuserBackbone(nn.Module):
         # Lidar fusion at (B, 72, 64, 64)
         image_embd_layer1 = self.avgpool_img(image_features)
         lidar_embd_layer1 = self.avgpool_lidar(lidar_features)
+        print(f"After avgpool - image_embd_layer1.shape: {image_embd_layer1.shape}")
+        print(f"After avgpool - lidar_embd_layer1.shape: {lidar_embd_layer1.shape}")
         # return image_embd_layer1, lidar_embd_layer1
         print(f"{image_embd_layer1.shape=}")
 
