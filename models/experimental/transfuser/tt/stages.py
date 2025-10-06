@@ -16,22 +16,13 @@ class Ttstages:
         self.inplanes = 32
 
         self.layer = self._make_layer(
-            parameters=parameters.image_encoder.features.layer1,
+            parameters=parameters,
             planes=72,
-            blocks=2,
+            blocks=len(parameters.keys()),
             stride=stride,
             groups=3,
             model_config=model_config,
         )
-
-        # self.layer = TTRegNetBottleneck(
-        #     parameters=parameters.layer1.b1,
-        #     # parameters=parameters.image_encoder.features.layer1.b1,
-        #     model_config=model_config,
-        #     stride=stride,
-        #     downsample=True,
-        #     groups=3,
-        # )
 
     def _make_layer(
         self,
@@ -77,7 +68,5 @@ class Ttstages:
         # Process image input
         for block in self.layer:
             x = block(x, device)
-        #     return x
-        # x = self.layer(x, device)
 
         return x
