@@ -84,7 +84,6 @@ class ttnn_MobileNetV3:
             x = layer(device, x)
 
         x = self.avgpool(x)
-        x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT)
         x = ttnn.reshape(x, (x.shape[0], -1))
         x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
 

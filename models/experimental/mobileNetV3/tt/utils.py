@@ -24,7 +24,7 @@ class Conv:
         memory_config=ttnn.L1_MEMORY_CONFIG,
         act_block_h=None,
         act_block_w=None,
-        deallocate_activation=True,
+        deallocate_activation=False,
         reallocate_halo_output=True,
         shard_layout=None,
         activation=None,

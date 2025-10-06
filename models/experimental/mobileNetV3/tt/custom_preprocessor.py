@@ -33,8 +33,8 @@ def conv_bn_to_params(conv, bn, mesh_mapper):
 def linear_to_params(weight, bias, mesh_mapper):
     """Preprocess Linear weight + bias to TTNN format."""
     return {
-        "weight": preprocess_linear_weight(weight, dtype=ttnn.float32),
-        "bias": preprocess_linear_bias(bias, dtype=ttnn.float32),
+        "weight": preprocess_linear_weight(weight, dtype=ttnn.bfloat16),
+        "bias": preprocess_linear_bias(bias, dtype=ttnn.bfloat16),
     }
 
 
