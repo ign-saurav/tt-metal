@@ -70,6 +70,7 @@ class TransfuserBackboneInfra:
         self.torch_image_input = torch.randn(self.img_input_shape)
         self.torch_lidar_input = torch.randn(self.lidar_input_shape)
         self.torch_velocity_input = torch.randn(1, 1)
+
         with torch.no_grad():
             self.torch_image_output, self.torch_lidar_output = torch_model(
                 # self.torch_output_tensor = torch_model(
@@ -91,16 +92,27 @@ class TransfuserBackboneInfra:
             device=device,
             mesh_mapper=self.inputs_mesh_mapper,
         )
+        tt_velocity_input = ttnn.from_torch(
+            self.torch_velocity_input,
+            # self.torch_velocity_input.permute(0, 2, 3, 1),
+            device=device,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+        )
+
         self.input_image_tensor = ttnn.to_device(tt_image_input, device)
         # self.input_image_tensor = ttnn.permute(self.input_image_tensor, (0, 2, 3, 1))
         self.input_lidar_tensor = ttnn.to_device(tt_lidar_input, device)
+        self.input_velocity_tensor = ttnn.to_device(tt_velocity_input, device)
         # self.input_lidar_tensor = ttnn.permute(self.input_lidar_tensor, (0, 2, 3, 1))
 
         # Build TTNN model
         self.ttnn_model = TtTransfuserBackbone(
+            device=self.device,
             parameters=parameters,
             stride=2,
             model_config=model_config,
+            config=self.config,
         )
 
         # Run + validate
@@ -125,7 +137,7 @@ class TransfuserBackboneInfra:
 
     def run(self):
         self.output_image_tensor, self.output_lidar_tensor = self.ttnn_model(
-            self.input_image_tensor, self.input_lidar_tensor, self.device
+            self.input_image_tensor, self.input_lidar_tensor, self.input_velocity_tensor, self.device
         )
         return self.output_image_tensor, self.output_lidar_tensor
 

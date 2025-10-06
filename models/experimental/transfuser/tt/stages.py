@@ -13,26 +13,25 @@ class Ttstages:
         model_config,
         # layer_optimisations=neck_optimisations,
     ) -> None:
-        # self.inplanes = 32
+        self.inplanes = 32
 
-        # self.layer = self._make_layer(
-        #     parameters=parameters.image_encoder.features.layer1,
-        #     planes=72,
-        #     blocks=2,
-        #     stride=stride,
-        #     groups=3,
-        #     model_config=model_config,
-        # )
-
-        print(parameters)
-        self.layer = TTRegNetBottleneck(
-            parameters=parameters.layer1.b1,
-            # parameters=parameters.image_encoder.features.layer1.b1,
-            model_config=model_config,
+        self.layer = self._make_layer(
+            parameters=parameters.image_encoder.features.layer1,
+            planes=72,
+            blocks=2,
             stride=stride,
-            downsample=True,
             groups=3,
+            model_config=model_config,
         )
+
+        # self.layer = TTRegNetBottleneck(
+        #     parameters=parameters.layer1.b1,
+        #     # parameters=parameters.image_encoder.features.layer1.b1,
+        #     model_config=model_config,
+        #     stride=stride,
+        #     downsample=True,
+        #     groups=3,
+        # )
 
     def _make_layer(
         self,
@@ -48,7 +47,6 @@ class Ttstages:
 
         # First block (may have downsample)
         downsample = stride != 1 or self.inplanes != planes
-        print(f"downsampleeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee ..  .......{downsample}")
         layers.append(
             TTRegNetBottleneck(
                 parameters=parameters["b1"],
@@ -77,9 +75,9 @@ class Ttstages:
 
     def __call__(self, x, device):
         # Process image input
-        # for block in self.layer:
-        #     x = block(x, device)
+        for block in self.layer:
+            x = block(x, device)
         #     return x
-        x = self.layer(x, device)
+        # x = self.layer(x, device)
 
         return x

@@ -7,6 +7,7 @@ from models.experimental.transfuser.reference.transfuser_backbone import Transfu
 from models.experimental.transfuser.reference.bottleneck import Bottleneck
 from models.experimental.transfuser.reference.stage import Stage
 from models.experimental.transfuser.reference.common import Conv2d
+from ttnn.model_preprocessing import preprocess_linear_weight, preprocess_linear_bias
 
 
 def preprocess_conv_parameter(parameter, *, dtype):
@@ -28,21 +29,7 @@ def custom_preprocessor(
             )
         parameters["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
         parameters["bias"] = ttnn.from_torch(torch.reshape(bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
-    # elif isinstance(
-    #     model,
-    #     (TransfuserBackbone,),
-    # ):
-    #     # Let the sub-modules handle their own preprocessing
-    #     for child_name, child in model.named_children():
-    #         parameters[child_name] = convert_torch_model_to_ttnn_model(
-    #             child,
-    #             name=f"{name}.{child_name}",
-    #             custom_preprocessor=custom_preprocessor_func,
-    #             convert_to_ttnn=convert_to_ttnn,
-    #             ttnn_module_args=ttnn_module_args,
-    #         )
     elif isinstance(model, TransfuserBackbone):
-        print(f"{model=}")
         # Image encoder conv1
         if hasattr(model, "image_encoder") and hasattr(model.image_encoder, "features"):
             weight, bias = fold_batch_norm2d_into_conv2d(
@@ -297,6 +284,113 @@ def custom_preprocessor(
             parameters["lidar_encoder"]["_model"]["layer1"]["b2"]["se"]["fc2"]["weight"] = ttnn.from_torch(
                 b2_block.se.fc2.weight, dtype=ttnn.bfloat16, mesh_mapper=mesh_mapper
             )
+        # Add transformer1 preprocessing
+    if hasattr(model, "transformer1"):
+        parameters["transformer1"] = {}
+
+        # Layer norm parameters (final layer norm after all blocks)
+        if hasattr(model.transformer1, "ln_f"):
+            parameters["transformer1"]["ln_f_weight"] = preprocess_linear_weight(
+                model.transformer1.ln_f.weight, dtype=ttnn.bfloat16
+            )
+            parameters["transformer1"]["ln_f_bias"] = preprocess_linear_bias(
+                model.transformer1.ln_f.bias, dtype=ttnn.bfloat16
+            )
+
+        # Velocity embedding parameters (if exists)
+        if hasattr(model.transformer1, "vel_emb"):
+            parameters["transformer1"]["vel_emb_weight"] = ttnn.from_torch(
+                model.vel_emb.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+            )
+            parameters["transformer1"]["vel_emb_bias"] = ttnn.from_torch(
+                model.vel_emb.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+            )
+
+        # Transformer blocks - iterate over actual blocks
+        if hasattr(model.transformer1, "blocks"):
+            for i in range(len(model.transformer1.blocks)):
+                block = model.transformer1.blocks[i]
+                parameters["transformer1"][f"blocks_{i}"] = {}
+
+                # Layer norm 1
+                if hasattr(block, "ln1"):
+                    parameters["transformer1"][f"blocks_{i}"]["ln1_weight"] = preprocess_linear_weight(
+                        block.ln1.weight, dtype=ttnn.bfloat16
+                    )
+                    parameters["transformer1"][f"blocks_{i}"]["ln1_bias"] = preprocess_linear_bias(
+                        block.ln1.bias, dtype=ttnn.bfloat16
+                    )
+
+                # Layer norm 2
+                if hasattr(block, "ln2"):
+                    parameters["transformer1"][f"blocks_{i}"]["ln2_weight"] = preprocess_linear_weight(
+                        block.ln2.weight, dtype=ttnn.bfloat16
+                    )
+                    parameters["transformer1"][f"blocks_{i}"]["ln2_bias"] = preprocess_linear_bias(
+                        block.ln2.bias, dtype=ttnn.bfloat16
+                    )
+
+                # Attention
+                if hasattr(block, "attn"):
+                    attn = block.attn
+                    parameters["transformer1"][f"blocks_{i}"]["attn"] = {}
+
+                    if (
+                        hasattr(attn, "key")
+                        and hasattr(attn, "query")
+                        and hasattr(attn, "value")
+                        and hasattr(attn, "proj")
+                    ):
+                        # Query
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["query"] = {}
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["query"]["weight"] = preprocess_linear_weight(
+                            attn.query.weight, dtype=ttnn.bfloat16
+                        )
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["query"]["bias"] = preprocess_linear_bias(
+                            attn.query.bias, dtype=ttnn.bfloat16
+                        )
+
+                        # Key
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["key"] = {}
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["key"]["weight"] = preprocess_linear_weight(
+                            attn.key.weight, dtype=ttnn.bfloat16
+                        )
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["key"]["bias"] = preprocess_linear_bias(
+                            attn.key.bias, dtype=ttnn.bfloat16
+                        )
+
+                        # Value
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["value"] = {}
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["value"]["weight"] = preprocess_linear_weight(
+                            attn.value.weight, dtype=ttnn.bfloat16
+                        )
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["value"]["bias"] = preprocess_linear_bias(
+                            attn.value.bias, dtype=ttnn.bfloat16
+                        )
+
+                        # Projection
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"] = {}
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"]["weight"] = preprocess_linear_weight(
+                            attn.proj.weight, dtype=ttnn.bfloat16
+                        )
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"]["bias"] = preprocess_linear_bias(
+                            attn.proj.bias, dtype=ttnn.bfloat16
+                        )
+
+                # MLP
+                if hasattr(block, "mlp"):
+                    parameters["transformer1"][f"blocks_{i}"]["mlp_0_weight"] = preprocess_linear_weight(
+                        block.mlp[0].weight, dtype=ttnn.bfloat16
+                    )
+                    parameters["transformer1"][f"blocks_{i}"]["mlp_0_bias"] = preprocess_linear_bias(
+                        block.mlp[0].bias, dtype=ttnn.bfloat16
+                    )
+                    parameters["transformer1"][f"blocks_{i}"]["mlp_2_weight"] = preprocess_linear_weight(
+                        block.mlp[2].weight, dtype=ttnn.bfloat16
+                    )
+                    parameters["transformer1"][f"blocks_{i}"]["mlp_2_bias"] = preprocess_linear_bias(
+                        block.mlp[2].bias, dtype=ttnn.bfloat16
+                    )
     elif isinstance(model, Bottleneck):
         # Handle standalone Bottleneck model
         # conv1 (1x1 convolution)
@@ -349,7 +443,7 @@ def custom_preprocessor(
         parameters[model.stage_name] = {}
 
         # Process each bottleneck in the stage
-        for block_idx, block_name in enumerate(["b1", "b2"]):  # Adjust based on your stage structure
+        for block_idx, block_name in enumerate(["b1", "b2"]):
             if hasattr(stage_layer, block_name):
                 block = getattr(stage_layer, block_name)
                 parameters[model.stage_name][block_name] = {}

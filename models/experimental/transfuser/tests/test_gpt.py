@@ -68,19 +68,51 @@ def post_process_output(
     return image_tensor_out, lidar_tensor_out
 
 
+# def create_gpt_preprocessor(device, n_layer, weight_dtype=ttnn.bfloat16):
+#     def custom_preprocessor(torch_model, name, ttnn_module_args):
+#         parameters = {}
+#         if hasattr(torch_model, "ln_f"):
+#             parameters["ln_f_weight"] = preprocess_linear_weight(torch_model.ln_f.weight, dtype=weight_dtype)
+#             parameters["ln_f_bias"] = preprocess_linear_weight(torch_model.ln_f.bias, dtype=weight_dtype)
+#         if hasattr(torch_model, "blocks"):
+#             for i in range(n_layer):
+#                 parameters[f"blocks_{i}"] = preprocess_model_parameters(
+#                     initialize_model=lambda: torch_model.blocks[i],
+#                     custom_preprocessor=create_gpt_block_preprocessor(device, weight_dtype),
+#                     device=device,
+#                 )
+#         return parameters
+
+#     return custom_preprocessor
+
+
 def create_gpt_preprocessor(device, n_layer, weight_dtype=ttnn.bfloat16):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
+
+        # Layer norm parameters
         if hasattr(torch_model, "ln_f"):
             parameters["ln_f_weight"] = preprocess_linear_weight(torch_model.ln_f.weight, dtype=weight_dtype)
             parameters["ln_f_bias"] = preprocess_linear_weight(torch_model.ln_f.bias, dtype=weight_dtype)
+
+        # Velocity embedding parameters (if exists)
+        if hasattr(torch_model, "vel_emb"):
+            parameters["vel_emb_weight"] = ttnn.from_torch(
+                torch_model.vel_emb.weight, dtype=weight_dtype, device=device, layout=ttnn.TILE_LAYOUT
+            )
+            parameters["vel_emb_bias"] = ttnn.from_torch(
+                torch_model.vel_emb.bias, dtype=weight_dtype, device=device, layout=ttnn.TILE_LAYOUT
+            )
+
+        # Transformer blocks
         if hasattr(torch_model, "blocks"):
             for i in range(n_layer):
                 parameters[f"blocks_{i}"] = preprocess_model_parameters(
-                    initialize_model=lambda: torch_model.blocks[i],
+                    initialize_model=lambda i=i: torch_model.blocks[i],  # Capture i in closure
                     custom_preprocessor=create_gpt_block_preprocessor(device, weight_dtype),
                     device=device,
                 )
+
         return parameters
 
     return custom_preprocessor
