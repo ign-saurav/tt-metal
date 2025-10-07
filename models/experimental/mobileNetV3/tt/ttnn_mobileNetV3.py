@@ -9,6 +9,8 @@ from models.experimental.mobileNetV3.tt.ttnn_invertedResidual import (
     Conv2dNormActivation,
 )
 from typing import List, Sequence
+import torch
+import torch.nn as nn
 
 
 class ttnn_MobileNetV3:
@@ -71,7 +73,8 @@ class ttnn_MobileNetV3:
         )
 
         self.features = layers
-        self.avgpool = ttnn.global_avg_pool2d
+        # self.avgpool = ttnn.global_avg_pool2d
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
         self.classifier = [
             ttnn.linear,
             ttnn.hardswish,
@@ -83,9 +86,18 @@ class ttnn_MobileNetV3:
         for i, layer in enumerate(self.features):
             x = layer(device, x)
 
-        x = self.avgpool(x)
-        x = ttnn.reshape(x, (x.shape[0], -1))
-        x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
+        # x = self.avgpool(x)
+        # x = ttnn.reshape(x, (x.shape[0], -1))
+        # x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
+
+        x = self.avgpool(torch.permute(ttnn.to_torch(x), (0, 3, 1, 2)))
+        x = torch.flatten(x, 1)
+        x = ttnn.from_torch(
+            x.reshape(1, 576),
+            dtype=ttnn.bfloat16,
+            device=device,
+            layout=ttnn.TILE_LAYOUT,
+        )
 
         self.parameters["classifier"][0].weight = ttnn.to_device(self.parameters["classifier"][0].weight, device=device)
         self.parameters["classifier"][3].weight = ttnn.to_device(self.parameters["classifier"][3].weight, device=device)
