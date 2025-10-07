@@ -271,11 +271,26 @@ def test_gpt(
         memory_config=ttnn.L1_MEMORY_CONFIG,
     )
 
+    img_h, img_w = img_input_shape[2], img_input_shape[3]
+    image_input_tokens = image_input.permute(0, 2, 3, 1).reshape(1, 1, img_h * img_w, n_embed)
+
+    # (1, 72, 8, 8) -> (1, 1, 64, 72)
+    lidar_h, lidar_w = lidar_input_shape[2], lidar_input_shape[3]
+    lidar_input_tokens = lidar_input.permute(0, 2, 3, 1).reshape(1, 1, lidar_h * lidar_w, n_embed)
+
     tt_image_input = ttnn.from_torch(
-        image_input, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype, memory_config=ttnn.L1_MEMORY_CONFIG
+        image_input_tokens,
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=input_dtype,
+        memory_config=ttnn.L1_MEMORY_CONFIG,
     )
     tt_lidar_input = ttnn.from_torch(
-        lidar_input, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype, memory_config=ttnn.L1_MEMORY_CONFIG
+        lidar_input_tokens,
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+        dtype=input_dtype,
+        memory_config=ttnn.L1_MEMORY_CONFIG,
     )
     tt_velocity_input = ttnn.from_torch(
         velocity_input, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype, memory_config=ttnn.L1_MEMORY_CONFIG

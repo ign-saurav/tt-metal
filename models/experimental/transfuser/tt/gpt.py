@@ -10,11 +10,11 @@ from models.experimental.transfuser.tt.gpt_block import TTGptBlock
 
 def generate_token_embeddings_tt(image_tensor, lidar_tensor, seq_len, n_embd):
     """
-    Generate token embeddings from NCHW format tensors.
+    Generate token embeddings from pre-flattened token format tensors.
 
     Args:
-        image_tensor: (batch, channels, height, width) - e.g., (1, 72, 5, 22)
-        lidar_tensor: (batch, channels, height, width) - e.g., (1, 72, 8, 8)
+        image_tensor: (batch, 1, num_image_tokens, channels) - e.g., (1, 1, 110, 72)
+        lidar_tensor: (batch, 1, num_lidar_tokens, channels) - e.g., (1, 1, 64, 72)
         seq_len: sequence length (should be 1)
         n_embd: embedding dimension (should be 72)
 
@@ -23,19 +23,24 @@ def generate_token_embeddings_tt(image_tensor, lidar_tensor, seq_len, n_embd):
         Additional metadata for post-processing
     """
     bz = image_tensor.shape[0]
-    img_c = image_tensor.shape[1]  # Should be 72
-    img_h, img_w = image_tensor.shape[2], image_tensor.shape[3]  # 5, 22
+    img_num_tokens = image_tensor.shape[2]  # 110
+    img_c = image_tensor.shape[3]  # 72
 
-    lidar_c = lidar_tensor.shape[1]  # Should be 72
-    lidar_h, lidar_w = lidar_tensor.shape[2], lidar_tensor.shape[3]  # 8, 8
+    lidar_num_tokens = lidar_tensor.shape[2]  # 64
+    lidar_c = lidar_tensor.shape[3]  # 72
 
-    # Permute from NCHW to NHWC format
-    # (batch, channels, height, width) -> (batch, height, width, channels)
-    image_tokens = ttnn.permute(image_tensor, (0, 2, 3, 1))  # (1, 5, 22, 72)
-    image_tokens = ttnn.reshape(image_tokens, (bz, img_h * img_w, n_embd))  # (1, 110, 72)
+    # Calculate original spatial dimensions
+    # Assuming img_num_tokens = img_h * img_w = 5 * 22 = 110
+    # Assuming lidar_num_tokens = lidar_h * lidar_w = 8 * 8 = 64
+    img_h, img_w = 5, 22  # These should match img_vert_anchors, img_horz_anchors
+    lidar_h, lidar_w = 8, 8  # These should match lidar_vert_anchors, lidar_horz_anchors
 
-    lidar_tokens = ttnn.permute(lidar_tensor, (0, 2, 3, 1))  # (1, 8, 8, 72)
-    lidar_tokens = ttnn.reshape(lidar_tokens, (bz, lidar_h * lidar_w, n_embd))  # (1, 64, 72)
+    # Reshape to remove the middle dimension
+    # (1, 1, 110, 72) -> (1, 110, 72)
+    image_tokens = ttnn.reshape(image_tensor, (bz, img_num_tokens, n_embd))
+
+    # (1, 1, 64, 72) -> (1, 64, 72)
+    lidar_tokens = ttnn.reshape(lidar_tensor, (bz, lidar_num_tokens, n_embd))
 
     # Concatenate image and lidar tokens along sequence dimension
     token_embeddings = ttnn.concat([image_tokens, lidar_tokens], dim=1)  # (1, 174, 72)
