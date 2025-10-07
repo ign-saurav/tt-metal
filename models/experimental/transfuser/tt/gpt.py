@@ -97,6 +97,20 @@ class TTGpt(LightweightModule):
         dtype=ttnn.bfloat16,
         memory_config=ttnn.L1_MEMORY_CONFIG,
     ):
+        print(f"[TTGpt.__init__] DEBUG: device = {device}")
+        print(f"[TTGpt.__init__] DEBUG: parameters keys = {list(parameters.keys()) if parameters else 'None'}")
+        print(f"[TTGpt.__init__] DEBUG: n_head = {n_head}")
+        print(f"[TTGpt.__init__] DEBUG: n_layer = {n_layer}")
+        print(f"[TTGpt.__init__] DEBUG: use_velocity = {use_velocity}")
+        print(f"[TTGpt.__init__] DEBUG: img_vert_anchors = {img_vert_anchors}")
+        print(f"[TTGpt.__init__] DEBUG: img_horz_anchors = {img_horz_anchors}")
+        print(f"[TTGpt.__init__] DEBUG: lidar_vert_anchors = {lidar_vert_anchors}")
+        print(f"[TTGpt.__init__] DEBUG: lidar_horz_anchors = {lidar_horz_anchors}")
+        print(f"[TTGpt.__init__] DEBUG: seq_len = {seq_len}")
+        print(f"[TTGpt.__init__] DEBUG: n_embd = {n_embd}")
+        print(f"[TTGpt.__init__] DEBUG: dtype = {dtype}")
+        print(f"[TTGpt.__init__] DEBUG: memory_config = {memory_config}")
+
         self.device = device
         self.parameters = parameters
         self.n_head = n_head
@@ -123,22 +137,52 @@ class TTGpt(LightweightModule):
         self.seq_len = seq_len
 
     def __call__(self, tt_image_input, tt_lidar_input, velocity, n_embed):
+        print(
+            f"[TTGpt.__call__] DEBUG: tt_image_input shape = {tt_image_input.shape if hasattr(tt_image_input, 'shape') else 'No shape attr'}"
+        )
+        print(
+            f"[TTGpt.__call__] DEBUG: tt_image_input dtype = {tt_image_input.dtype if hasattr(tt_image_input, 'dtype') else 'No dtype attr'}"
+        )
+        print(
+            f"[TTGpt.__call__] DEBUG: tt_lidar_input shape = {tt_lidar_input.shape if hasattr(tt_lidar_input, 'shape') else 'No shape attr'}"
+        )
+        print(
+            f"[TTGpt.__call__] DEBUG: tt_lidar_input dtype = {tt_lidar_input.dtype if hasattr(tt_lidar_input, 'dtype') else 'No dtype attr'}"
+        )
+        print(f"[TTGpt.__call__] DEBUG: velocity = {velocity}")
+        print(f"[TTGpt.__call__] DEBUG: velocity type = {type(velocity)}")
+        if hasattr(velocity, "shape"):
+            print(f"[TTGpt.__call__] DEBUG: velocity shape = {velocity.shape}")
+        if hasattr(velocity, "dtype"):
+            print(f"[TTGpt.__call__] DEBUG: velocity dtype = {velocity.dtype}")
+        print(f"[TTGpt.__call__] DEBUG: n_embed = {n_embed}")
+        print(f"[TTGpt.__call__] DEBUG: n_embed type = {type(n_embed)}")
+
         token_embeddings, bz, seq_len, img_h, img_w, lidar_h, lidar_w = generate_token_embeddings_tt(
             tt_image_input, tt_lidar_input, self.seq_len, n_embed
         )
 
         if self.use_velocity:
-            # Convert velocity to TTNN
-            velocity_torch = velocity if isinstance(velocity, torch.Tensor) else ttnn.to_torch(velocity)
-            velocity_embeddings = self.vel_emb(velocity_torch)
-            velocity_embeddings = ttnn.from_torch(
-                velocity_embeddings.unsqueeze(1),
-                device=self.device,
-                layout=ttnn.TILE_LAYOUT,
-                dtype=self.dtype,
+            # Convert velocity to TTNN if needed
+            if isinstance(velocity, torch.Tensor):
+                velocity = ttnn.from_torch(
+                    velocity,
+                    device=self.device,
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=self.dtype,
+                    memory_config=self.memory_config,
+                )
+
+            # Apply linear transformation using ttnn.linear
+            velocity_embeddings = ttnn.linear(
+                velocity,
+                self.vel_emb_weight,
+                bias=self.vel_emb_bias,
                 memory_config=self.memory_config,
+                dtype=self.dtype,
             )
-            # Now all tensors are TTNN tensors
+
+            # Add embeddings
             x = ttnn.add(self.pos_emb, token_embeddings)
             x = ttnn.add(x, velocity_embeddings)
         else:

@@ -255,6 +255,7 @@ def test_gpt(
         custom_preprocessor=create_gpt_preprocessor(device, n_layer, weight_dtype),
         device=device,
     )
+
     tt_layer = TTGpt(
         device,
         parameters,

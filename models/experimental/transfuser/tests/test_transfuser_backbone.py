@@ -16,6 +16,8 @@ from ttnn.model_preprocessing import (
 )
 from tests.ttnn.utils_for_testing import check_with_pcc
 
+from models.experimental.transfuser.tests.test_gpt import create_gpt_preprocessor
+
 
 class TransfuserBackboneInfra:
     def __init__(
@@ -65,6 +67,13 @@ class TransfuserBackboneInfra:
             custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper, device=device),
             device=None,
         )
+
+        gpt_parameters = preprocess_model_parameters(
+            initialize_model=lambda: torch_model.transformer1,
+            custom_preprocessor=create_gpt_preprocessor(device, n_layer, ttnn.bfloat16),
+            device=device,
+        )
+        parameters["transformer1"] = gpt_parameters
 
         # Prepare golden inputs/outputs
         self.torch_image_input = torch.randn(self.img_input_shape)
