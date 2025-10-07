@@ -18,39 +18,38 @@ from models.experimental.mobileNetV3.tests.pcc.common import inverted_residual_s
 from PIL import Image, ImageDraw, ImageFont
 import torchvision.transforms as transforms
 
-img = Image.open("models/experimental/mobileNetV3/resources/cup.jpg").convert("RGB")
-
-preprocess = transforms.Compose(
-    [
-        transforms.Resize(256),
-        transforms.CenterCrop(224),
-        transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-    ]
-)
-
-input_tensor = preprocess(img)
-torch_input_tensor_img = input_tensor.unsqueeze(0)  # shape [1,3,224,224]
-
 
 class MobilenetV3TestInfra:
-    def __init__(self, device, batch_size, input_channels, height, width, load_weights=True):
+    def __init__(self, device, batch_size, input_channels, height, width, load_weights=True, use_randn_input=False):
         super().__init__()
         self.device = device
         self.batch_size = batch_size
-        # torch_input_tensor = torch.randn(batch_size, input_channels, height, width)
-        torch_input_tensor = torch_input_tensor_img
+        self.use_randn_input = use_randn_input
+
+        if use_randn_input:
+            torch_input_tensor = torch.randn(batch_size, input_channels, height, width)
+        else:
+            self.img = Image.open("models/experimental/mobileNetV3/resources/cup.jpg").convert("RGB")
+            preprocess = transforms.Compose(
+                [
+                    transforms.Resize(256),
+                    transforms.CenterCrop(224),
+                    transforms.ToTensor(),
+                    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                ]
+            )
+            input_tensor = preprocess(self.img)
+            torch_input_tensor = input_tensor.unsqueeze(0)
+
         ttnn_input_tensor = ttnn.from_torch(
             torch_input_tensor.permute(0, 2, 3, 1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, device=device
         )
         self.ttnn_input_tensor = ttnn.to_device(ttnn_input_tensor, device, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         if load_weights:
-            mobilenet = models.mobilenet_v3_small(
-                weights=MobileNet_V3_Small_Weights.IMAGENET1K_V1
-            )  # 0.68 pcc with real weights #bias non 0(might be bias loading)
+            mobilenet = models.mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.IMAGENET1K_V1)
         else:
-            mobilenet = models.mobilenet_v3_small(weights=None)  # 0.99 pcc with random weights #bias 0
+            mobilenet = models.mobilenet_v3_small(weights=None)
 
         torch_model = mobilenet
 
@@ -77,26 +76,27 @@ class MobilenetV3TestInfra:
         logger.info("Validating TTNN output against PyTorch...")
         tt_output_tensor_torch = ttnn.to_torch(self.output_tensor)
 
-        # Postprocess
-        probs = torch.nn.functional.softmax(tt_output_tensor_torch, dim=1)[0]
-        top1_id = torch.argmax(probs).item()
-        label = MobileNet_V3_Small_Weights.IMAGENET1K_V1.meta["categories"][top1_id]
-        confidence = probs[top1_id].item()
+        if self.use_randn_input:
+            # Postprocess
+            probs = torch.nn.functional.softmax(tt_output_tensor_torch, dim=1)[0]
+            top1_id = torch.argmax(probs).item()
+            label = MobileNet_V3_Small_Weights.IMAGENET1K_V1.meta["categories"][top1_id]
+            confidence = probs[top1_id].item()
 
-        # Draw label on image
-        draw = ImageDraw.Draw(img)
-        try:
-            font = ImageFont.truetype("arial.ttf", 24)  # Windows
-        except:
-            font = ImageFont.load_default()  # fallback
+            # Draw label on image
+            draw = ImageDraw.Draw(self.img)
+            try:
+                font = ImageFont.truetype("arial.ttf", 24)  # Windows
+            except:
+                font = ImageFont.load_default()  # fallback
 
-        text = f"{label}: {confidence:.2%}"
-        draw.text((10, 10), text, fill="red", font=font)
+            text = f"{label}: {confidence:.2%}"
+            draw.text((10, 10), text, fill="red", font=font)
 
-        # Save / show
-        img.save("models/experimental/mobileNetV3/resources/image_with_label.jpg")
+            # Save / show
+            self.img.save("models/experimental/mobileNetV3/resources/image_with_label.jpg")
 
-        pcc_threshold = 0.6
+        pcc_threshold = 0.97
         passed, msg = check_with_pcc(self.torch_output_tensor, tt_output_tensor_torch, pcc=pcc_threshold)
         assert passed, logger.error(f"MobileNetV3 PCC check failed: {msg}")
 
