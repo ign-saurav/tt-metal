@@ -20,7 +20,7 @@ from models.experimental.mobileNetV3.tt.ttnn_invertedResidual import (
 from PIL import Image, ImageDraw, ImageFont
 import torchvision.transforms as transforms
 
-img = Image.open("models/experimental/mobileNetV3/resources/dog.jpeg").convert("RGB")
+img = Image.open("models/experimental/mobileNetV3/resources/1.jpg").convert("RGB")
 
 preprocess = transforms.Compose(
     [
@@ -40,7 +40,7 @@ torch_input_tensor = input_tensor.unsqueeze(0)  # shape [1,3,224,224]
         (1, 3, 224, 224, [0, 10], True, True, True),
     ],
 )
-@pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 65536}], indirect=True)
 def test_invertedResidual(
     device,
     reset_seeds,
@@ -137,12 +137,28 @@ def test_invertedResidual(
             parameters["classifier"][3].bias = ttnn.to_device(parameters["classifier"][3].bias, device=device)
 
             # x_torch = torch.nn.functional.adaptive_avg_pool2d(x_torch, (1, 1))
+            print("::::::::::::::::::::::::::::")
+            print(x_torch.shape)
+            print(x_tt.shape)
+            print("::::::::::::::::::::::::::::")
+
             x_torch = torch_model[-5](x_torch)
             x_torch = torch.flatten(x_torch, 1)
 
             x_tt = ttnn.global_avg_pool2d(x_tt)
             x_tt = ttnn.reshape(x_tt, (x_tt.shape[0], -1))
             x_tt = ttnn.to_layout(x_tt, layout=ttnn.TILE_LAYOUT)
+
+            # x_tt = torch_model[-5](tt_as_torch)
+            # x_tt = torch.flatten(x_tt, 1)
+
+            # x_tt = ttnn.from_torch(
+            #                     x_tt.reshape(1, 576),
+            #                     dtype=ttnn.bfloat16,
+            #                     device=device,
+            #                     layout=ttnn.TILE_LAYOUT,
+            #                 )
+
             idx += 1
 
             tt_as_torch = ttnn.to_torch(x_tt)
@@ -156,22 +172,52 @@ def test_invertedResidual(
             except:
                 print(f"[Block {idx} avg pool] PCC[{msg}] Failed")
 
-            x_torch = torch_model[-4](x_torch)
+            # from ttnn.model_preprocessing import preprocess_linear_weight, preprocess_linear_bias
+            # ttnn_weight = preprocess_linear_weight(mobilenet.classifier[0].weight, dtype=ttnn.bfloat16)
+            # ttnn_bias = preprocess_linear_bias(mobilenet.classifier[0].bias, dtype=ttnn.bfloat16)
+            # ttnn_weight = ttnn.to_device(ttnn_weight, device)
+            # ttnn_bias = ttnn.to_device(ttnn_bias, device)
+            import numpy as np
+
+            np.savetxt(
+                "weight_tt_pcc.txt",
+                ttnn.to_torch(parameters["classifier"][0].weight).flatten().to(torch.float32).detach().numpy(),
+            )
+            np.savetxt(
+                "bias_tt_pcc.txt",
+                ttnn.to_torch(parameters["classifier"][0].bias).flatten().to(torch.float32).detach().numpy(),
+            )
+
+            import pickle
+
+            with open("linear_1_input_tensor_tt_pcc.pkl", "wb") as f:
+                pickle.dump(ttnn.to_torch(x_tt), f)
+            with open("linear_1_input_tensor_torch_pcc.pkl", "wb") as f:
+                pickle.dump(x_torch, f)
+
+            # x_torch = torch_model[-4](x_torch)
+            x_torch = mobilenet.classifier[0](x_torch)
 
             x_tt = ttnn.linear(
                 x_tt,
                 parameters["classifier"][0].weight,
                 bias=parameters["classifier"][0].bias,
-                memory_config=ttnn.L1_MEMORY_CONFIG,
-                dtype=ttnn.bfloat16,
-                compute_kernel_config=ttnn.WormholeComputeKernelConfig(
-                    math_fidelity=ttnn.MathFidelity.HiFi4,  # Use HiFi4 instead of LoFi
-                    math_approx_mode=False,
-                    fp32_dest_acc_en=True,
-                    packer_l1_acc=True,
-                ),
+                # ttnn_weight,
+                # bias=ttnn_bias,
+                # memory_config=ttnn.L1_MEMORY_CONFIG,
+                # dtype=ttnn.bfloat16,
+                # compute_kernel_config=ttnn.WormholeComputeKernelConfig(
+                #     math_fidelity=ttnn.MathFidelity.HiFi4,  # Use HiFi4 instead of LoFi
+                #     math_approx_mode=False,
+                #     fp32_dest_acc_en=True,
+                #     packer_l1_acc=True,
+                # ),
             )
 
+            with open("linear_1_out_tensor_tt_pcc.pkl", "wb") as f:
+                pickle.dump(ttnn.to_torch(x_tt), f)
+            with open("linear_1_out_tensor_torch_pcc.pkl", "wb") as f:
+                pickle.dump(x_torch, f)
             idx += 1
 
             tt_as_torch = ttnn.to_torch(x_tt)
@@ -185,11 +231,9 @@ def test_invertedResidual(
             except:
                 print(f"[Block {idx} linear 1] PCC[{msg}] Failed")
 
-            # x_torch = torch_model[-3](x_torch)
-            # x_tt = ttnn.hardswish(x_tt)
+            x_torch = torch_model[-3](x_torch)
+            x_tt = ttnn.hardswish(x_tt)
 
-            x_torch = torch.relu(x_torch)
-            x_tt = ttnn.relu(x_tt)
             idx += 1
 
             tt_as_torch = ttnn.to_torch(x_tt)
@@ -211,6 +255,12 @@ def test_invertedResidual(
                 bias=parameters["classifier"][3].bias,
                 memory_config=ttnn.L1_MEMORY_CONFIG,
                 dtype=ttnn.bfloat16,
+                compute_kernel_config=ttnn.WormholeComputeKernelConfig(
+                    math_fidelity=ttnn.MathFidelity.HiFi4,  # Use HiFi4 instead of LoFi
+                    math_approx_mode=False,
+                    fp32_dest_acc_en=True,
+                    packer_l1_acc=True,
+                ),
             )
 
             idx += 1
@@ -226,32 +276,45 @@ def test_invertedResidual(
             except:
                 print(f"[Block {idx} final linear ] PCC[{msg}] Failed")
 
+        # Postprocess tt
+        probs = torch.nn.functional.softmax(tt_as_torch, dim=1)[0]
+        top1_id = torch.argmax(probs).item()
+        label = MobileNet_V3_Small_Weights.IMAGENET1K_V1.meta["categories"][top1_id]
+        confidence = probs[top1_id].item()
+
+        print("::::::::::::::::::")
+        print(label, " : ", confidence)
+        print("::::::::::::::::::")
+
+        # Draw label on image
+        draw = ImageDraw.Draw(img)
         try:
-            passed, msg = check_with_pcc(x_torch_og, x_torch, pcc=0.96)
-
-            # Postprocess
-            probs = torch.nn.functional.softmax(tt_as_torch, dim=1)[0]
-            top1_id = torch.argmax(probs).item()
-            label = MobileNet_V3_Small_Weights.IMAGENET1K_V1.meta["categories"][top1_id]
-            confidence = probs[top1_id].item()
-
-            # Draw label on image
-            draw = ImageDraw.Draw(img)
-            try:
-                font = ImageFont.truetype("arial.ttf", 24)  # Windows
-            except:
-                font = ImageFont.load_default()  # fallback
-
-            text = f"{label}: {confidence:.2%}"
-            draw.text((10, 10), text, fill="red", font=font)
-
-            # Save / show
-            img.save("models/experimental/mobileNetV3/resources/image_with_label.jpg")
-
-            if passed:
-                print(f"[Block full torch PCC[{msg}] passed")
-            else:
-                print(f"[Block full torch ] PCC[{msg}] Failed")
-
+            font = ImageFont.truetype("arial.ttf", 24)  # Windows
         except:
-            print(f"[Block full torch ] PCC[{msg}] Failed")
+            font = ImageFont.load_default()  # fallback
+
+        text = f"{label}: {confidence:.2%}"
+        draw.text((10, 10), text, fill="red", font=font)
+
+        # Save / show
+        img.save("models/experimental/mobileNetV3/resources/image_with_label.jpg")
+
+        # Postprocess torch
+        probs = torch.nn.functional.softmax(x_torch, dim=1)[0]
+        top1_id = torch.argmax(probs).item()
+        label = MobileNet_V3_Small_Weights.IMAGENET1K_V1.meta["categories"][top1_id]
+        confidence = probs[top1_id].item()
+
+        print("::::::::::::::::::")
+        print(label, " : ", confidence)
+        print("::::::::::::::::::")
+
+        # Postprocess torch
+        probs = torch.nn.functional.softmax(x_torch_og, dim=1)[0]
+        top1_id = torch.argmax(probs).item()
+        label = MobileNet_V3_Small_Weights.IMAGENET1K_V1.meta["categories"][top1_id]
+        confidence = probs[top1_id].item()
+
+        print("::::::::::::::::::")
+        print(label, " : ", confidence)
+        print("::::::::::::::::::")

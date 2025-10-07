@@ -12,7 +12,7 @@ class ttnn_SqueezeExcitation:
         input_channels: int,
         squeeze_channels: int,
         activation=ttnn.relu,
-        scale_activation=ttnn.sigmoid,
+        scale_activation=ttnn.hardsigmoid,
         parameters=None,
     ) -> None:
         super().__init__()
