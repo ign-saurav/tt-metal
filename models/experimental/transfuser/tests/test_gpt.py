@@ -22,19 +22,62 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 
 
 def generate_token_embeddings(image_tensor, lidar_tensor, seq_len, n_embd):
-    bz = lidar_tensor.shape[0]
-    lidar_h, lidar_w = lidar_tensor.shape[2:4]
-    img_h, img_w = image_tensor.shape[2:4]
+    print(f"{image_tensor.shape,lidar_tensor.shape, seq_len, n_embd =}")
+    # bz = lidar_tensor.shape[0]
+    # lidar_h, lidar_w = lidar_tensor.shape[2:4]
+    # img_h, img_w = image_tensor.shape[2:4]
 
-    assert seq_len == 1
-    image_tensor = (
-        image_tensor.view(bz, seq_len, -1, img_h, img_w).permute(0, 1, 3, 4, 2).contiguous().view(bz, -1, n_embd)
-    )
-    lidar_tensor = (
-        lidar_tensor.view(bz, seq_len, -1, lidar_h, lidar_w).permute(0, 1, 3, 4, 2).contiguous().view(bz, -1, n_embd)
-    )
+    # assert seq_len == 1
+    # image_tensor = (
+    #     image_tensor.view(bz, seq_len, -1, img_h, img_w).permute(0, 1, 3, 4, 2).contiguous().view(bz, -1, n_embd)
+    # )
+    # lidar_tensor = (
+    #     lidar_tensor.view(bz, seq_len, -1, lidar_h, lidar_w).permute(0, 1, 3, 4, 2).contiguous().view(bz, -1, n_embd)
+    # )
 
-    token_embeddings = torch.cat((image_tensor, lidar_tensor), dim=1)
+    # token_embeddings = torch.cat((image_tensor, lidar_tensor), dim=1)
+
+    # return token_embeddings, bz, seq_len, img_h, img_w, lidar_h, lidar_w
+
+    """
+    Generate token embeddings from NCHW format tensors.
+
+    Args:
+        image_tensor: (batch, channels, height, width) - e.g., (1, 72, 5, 22)
+        lidar_tensor: (batch, channels, height, width) - e.g., (1, 72, 8, 8)
+        seq_len: sequence length (should be 1)
+        n_embd: embedding dimension (should be 72)
+
+    Returns:
+        token_embeddings: (batch, total_tokens, n_embd)
+        Additional metadata for post-processing
+    """
+    print(f"{image_tensor.shape, lidar_tensor.shape, seq_len, n_embd =}")
+
+    bz = image_tensor.shape[0]
+    img_c = image_tensor.shape[1]  # Should be 72
+    img_h, img_w = image_tensor.shape[2:4]  # 5, 22
+
+    lidar_c = lidar_tensor.shape[1]  # Should be 72
+    lidar_h, lidar_w = lidar_tensor.shape[2:4]  # 8, 8
+
+    assert seq_len == 1, f"seq_len must be 1, got {seq_len}"
+    assert img_c == n_embd, f"Image channels {img_c} must match n_embd {n_embd}"
+    assert lidar_c == n_embd, f"LiDAR channels {lidar_c} must match n_embd {n_embd}"
+
+    # Reshape from NCHW to token sequence format
+    # (batch, channels, height, width) -> (batch, height*width, channels)
+    image_tokens = image_tensor.permute(0, 2, 3, 1).contiguous()  # (1, 5, 22, 72)
+    image_tokens = image_tokens.view(bz, img_h * img_w, n_embd)  # (1, 110, 72)
+
+    lidar_tokens = lidar_tensor.permute(0, 2, 3, 1).contiguous()  # (1, 8, 8, 72)
+    lidar_tokens = lidar_tokens.view(bz, lidar_h * lidar_w, n_embd)  # (1, 64, 72)
+
+    # Concatenate image and lidar tokens along sequence dimension
+    token_embeddings = torch.cat((image_tokens, lidar_tokens), dim=1)  # (1, 174, 72)
+
+    print(f"Generated token_embeddings shape: {token_embeddings.shape}")
+    print(f"  Image tokens: {img_h * img_w}, LiDAR tokens: {lidar_h * lidar_w}")
 
     return token_embeddings, bz, seq_len, img_h, img_w, lidar_h, lidar_w
 

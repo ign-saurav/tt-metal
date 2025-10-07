@@ -7,7 +7,6 @@ from models.experimental.transfuser.reference.transfuser_backbone import Transfu
 from models.experimental.transfuser.reference.bottleneck import Bottleneck
 from models.experimental.transfuser.reference.stage import Stage
 from models.experimental.transfuser.reference.common import Conv2d
-from ttnn.model_preprocessing import preprocess_linear_weight, preprocess_linear_bias
 
 
 def preprocess_conv_parameter(parameter, *, dtype):
@@ -16,7 +15,7 @@ def preprocess_conv_parameter(parameter, *, dtype):
 
 
 def custom_preprocessor(
-    model, name, ttnn_module_args, convert_to_ttnn, custom_preprocessor_func=None, mesh_mapper=None
+    model, name, ttnn_module_args, convert_to_ttnn, custom_preprocessor_func=None, mesh_mapper=None, device=None
 ):
     parameters = {}
     if isinstance(model, Conv2d):
@@ -288,22 +287,47 @@ def custom_preprocessor(
     if hasattr(model, "transformer1"):
         parameters["transformer1"] = {}
 
-        # Layer norm parameters (final layer norm after all blocks)
         if hasattr(model.transformer1, "ln_f"):
-            parameters["transformer1"]["ln_f_weight"] = preprocess_linear_weight(
-                model.transformer1.ln_f.weight, dtype=ttnn.bfloat16
+            # )
+            parameters["transformer1"]["ln_f_weight"] = ttnn.from_torch(
+                model.transformer1.ln_f.weight,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=device,
+                mesh_mapper=mesh_mapper,
             )
-            parameters["transformer1"]["ln_f_bias"] = preprocess_linear_bias(
-                model.transformer1.ln_f.bias, dtype=ttnn.bfloat16
+            parameters["transformer1"]["ln_f_bias"] = ttnn.from_torch(
+                model.transformer1.ln_f.bias.reshape((1, -1)),
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=device,
+                mesh_mapper=mesh_mapper,
+            )
+
+        if hasattr(model.transformer1, "pos_emb"):
+            parameters["transformer1"]["pos_emb"] = ttnn.from_torch(
+                model.transformer1.pos_emb,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=device,
+                mesh_mapper=mesh_mapper,
             )
 
         # Velocity embedding parameters (if exists)
         if hasattr(model.transformer1, "vel_emb"):
             parameters["transformer1"]["vel_emb_weight"] = ttnn.from_torch(
-                model.vel_emb.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+                model.transformer1.vel_emb.weight,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=device,
+                mesh_mapper=mesh_mapper,
             )
             parameters["transformer1"]["vel_emb_bias"] = ttnn.from_torch(
-                model.vel_emb.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+                model.transformer1.vel_emb.bias.reshape((1, -1)),
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=device,
+                mesh_mapper=mesh_mapper,
             )
 
         # Transformer blocks - iterate over actual blocks
@@ -314,20 +338,36 @@ def custom_preprocessor(
 
                 # Layer norm 1
                 if hasattr(block, "ln1"):
-                    parameters["transformer1"][f"blocks_{i}"]["ln1_weight"] = preprocess_linear_weight(
-                        block.ln1.weight, dtype=ttnn.bfloat16
+                    parameters["transformer1"][f"blocks_{i}"]["ln1_weight"] = ttnn.from_torch(
+                        block.ln1.weight,
+                        dtype=ttnn.bfloat16,
+                        device=device,
+                        layout=ttnn.TILE_LAYOUT,
+                        mesh_mapper=mesh_mapper,
                     )
-                    parameters["transformer1"][f"blocks_{i}"]["ln1_bias"] = preprocess_linear_bias(
-                        block.ln1.bias, dtype=ttnn.bfloat16
+                    parameters["transformer1"][f"blocks_{i}"]["ln1_bias"] = ttnn.from_torch(
+                        block.ln1.bias.reshape((1, -1)),
+                        dtype=ttnn.bfloat16,
+                        layout=ttnn.TILE_LAYOUT,
+                        device=device,
+                        mesh_mapper=mesh_mapper,
                     )
 
                 # Layer norm 2
                 if hasattr(block, "ln2"):
-                    parameters["transformer1"][f"blocks_{i}"]["ln2_weight"] = preprocess_linear_weight(
-                        block.ln2.weight, dtype=ttnn.bfloat16
+                    parameters["transformer1"][f"blocks_{i}"]["ln2_weight"] = ttnn.from_torch(
+                        block.ln2.weight,
+                        dtype=ttnn.bfloat16,
+                        device=device,
+                        layout=ttnn.TILE_LAYOUT,
+                        mesh_mapper=mesh_mapper,
                     )
-                    parameters["transformer1"][f"blocks_{i}"]["ln2_bias"] = preprocess_linear_bias(
-                        block.ln2.bias, dtype=ttnn.bfloat16
+                    parameters["transformer1"][f"blocks_{i}"]["ln2_bias"] = ttnn.from_torch(
+                        block.ln2.bias.reshape((1, -1)),
+                        dtype=ttnn.bfloat16,
+                        layout=ttnn.TILE_LAYOUT,
+                        device=device,
+                        mesh_mapper=mesh_mapper,
                     )
 
                 # Attention
@@ -343,53 +383,102 @@ def custom_preprocessor(
                     ):
                         # Query
                         parameters["transformer1"][f"blocks_{i}"]["attn"]["query"] = {}
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["query"]["weight"] = preprocess_linear_weight(
-                            attn.query.weight, dtype=ttnn.bfloat16
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["query"]["weight"] = ttnn.from_torch(
+                            attn.query.weight.T.contiguous(),
+                            dtype=ttnn.bfloat16,
+                            device=device,
+                            layout=ttnn.TILE_LAYOUT,
+                            mesh_mapper=mesh_mapper,
                         )
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["query"]["bias"] = preprocess_linear_bias(
-                            attn.query.bias, dtype=ttnn.bfloat16
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["query"]["bias"] = ttnn.from_torch(
+                            attn.query.bias.reshape((1, -1)),
+                            dtype=ttnn.bfloat16,
+                            layout=ttnn.TILE_LAYOUT,
+                            device=device,
+                            mesh_mapper=mesh_mapper,
                         )
 
                         # Key
                         parameters["transformer1"][f"blocks_{i}"]["attn"]["key"] = {}
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["key"]["weight"] = preprocess_linear_weight(
-                            attn.key.weight, dtype=ttnn.bfloat16
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["key"]["weight"] = ttnn.from_torch(
+                            attn.key.weight.T.contiguous(),
+                            dtype=ttnn.bfloat16,
+                            device=device,
+                            layout=ttnn.TILE_LAYOUT,
+                            mesh_mapper=mesh_mapper,
                         )
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["key"]["bias"] = preprocess_linear_bias(
-                            attn.key.bias, dtype=ttnn.bfloat16
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["key"]["bias"] = ttnn.from_torch(
+                            attn.key.bias.reshape((1, -1)),
+                            dtype=ttnn.bfloat16,
+                            layout=ttnn.TILE_LAYOUT,
+                            device=device,
+                            mesh_mapper=mesh_mapper,
                         )
 
                         # Value
                         parameters["transformer1"][f"blocks_{i}"]["attn"]["value"] = {}
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["value"]["weight"] = preprocess_linear_weight(
-                            attn.value.weight, dtype=ttnn.bfloat16
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["value"]["weight"] = ttnn.from_torch(
+                            attn.value.weight.T.contiguous(),
+                            dtype=ttnn.bfloat16,
+                            device=device,
+                            layout=ttnn.TILE_LAYOUT,
+                            mesh_mapper=mesh_mapper,
                         )
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["value"]["bias"] = preprocess_linear_bias(
-                            attn.value.bias, dtype=ttnn.bfloat16
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["value"]["bias"] = ttnn.from_torch(
+                            attn.value.bias.reshape((1, -1)),
+                            dtype=ttnn.bfloat16,
+                            layout=ttnn.TILE_LAYOUT,
+                            device=device,
+                            mesh_mapper=mesh_mapper,
                         )
 
                         # Projection
                         parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"] = {}
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"]["weight"] = preprocess_linear_weight(
-                            attn.proj.weight, dtype=ttnn.bfloat16
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"]["weight"] = ttnn.from_torch(
+                            attn.proj.weight.T.contiguous(),
+                            dtype=ttnn.bfloat16,
+                            device=device,
+                            layout=ttnn.TILE_LAYOUT,
+                            mesh_mapper=mesh_mapper,
                         )
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"]["bias"] = preprocess_linear_bias(
-                            attn.proj.bias, dtype=ttnn.bfloat16
+                        parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"]["bias"] = ttnn.from_torch(
+                            attn.proj.bias.reshape((1, -1)),
+                            dtype=ttnn.bfloat16,
+                            layout=ttnn.TILE_LAYOUT,
+                            device=device,
+                            mesh_mapper=mesh_mapper,
                         )
 
                 # MLP
                 if hasattr(block, "mlp"):
-                    parameters["transformer1"][f"blocks_{i}"]["mlp_0_weight"] = preprocess_linear_weight(
-                        block.mlp[0].weight, dtype=ttnn.bfloat16
+                    parameters["transformer1"][f"blocks_{i}"]["mlp_0_weight"] = ttnn.from_torch(
+                        block.mlp[0].weight.T.contiguous(),
+                        dtype=ttnn.bfloat16,
+                        device=device,
+                        layout=ttnn.TILE_LAYOUT,
+                        mesh_mapper=mesh_mapper,
                     )
-                    parameters["transformer1"][f"blocks_{i}"]["mlp_0_bias"] = preprocess_linear_bias(
-                        block.mlp[0].bias, dtype=ttnn.bfloat16
+                    parameters["transformer1"][f"blocks_{i}"]["mlp_0_bias"] = ttnn.from_torch(
+                        block.mlp[0].bias.reshape((1, -1)),
+                        dtype=ttnn.bfloat16,
+                        layout=ttnn.TILE_LAYOUT,
+                        device=device,
+                        mesh_mapper=mesh_mapper,
                     )
-                    parameters["transformer1"][f"blocks_{i}"]["mlp_2_weight"] = preprocess_linear_weight(
-                        block.mlp[2].weight, dtype=ttnn.bfloat16
+
+                    parameters["transformer1"][f"blocks_{i}"]["mlp_2_weight"] = ttnn.from_torch(
+                        block.mlp[2].weight.T.contiguous(),
+                        dtype=ttnn.bfloat16,
+                        device=device,
+                        layout=ttnn.TILE_LAYOUT,
+                        mesh_mapper=mesh_mapper,
                     )
-                    parameters["transformer1"][f"blocks_{i}"]["mlp_2_bias"] = preprocess_linear_bias(
-                        block.mlp[2].bias, dtype=ttnn.bfloat16
+                    parameters["transformer1"][f"blocks_{i}"]["mlp_2_bias"] = ttnn.from_torch(
+                        block.mlp[2].bias.reshape((1, -1)),
+                        dtype=ttnn.bfloat16,
+                        layout=ttnn.TILE_LAYOUT,
+                        device=device,
+                        mesh_mapper=mesh_mapper,
                     )
     elif isinstance(model, Bottleneck):
         # Handle standalone Bottleneck model
@@ -495,10 +584,10 @@ def custom_preprocessor(
     return parameters
 
 
-def create_custom_mesh_preprocessor(mesh_mapper=None):
+def create_custom_mesh_preprocessor(mesh_mapper=None, device=None):
     def custom_mesh_preprocessor(model, name, ttnn_module_args, convert_to_ttnn):
         return custom_preprocessor(
-            model, name, ttnn_module_args, convert_to_ttnn, custom_mesh_preprocessor, mesh_mapper
+            model, name, ttnn_module_args, convert_to_ttnn, custom_mesh_preprocessor, mesh_mapper, device
         )
 
     return custom_mesh_preprocessor

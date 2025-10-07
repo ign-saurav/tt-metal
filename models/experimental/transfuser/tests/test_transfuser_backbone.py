@@ -62,7 +62,7 @@ class TransfuserBackboneInfra:
         # Preprocess parameters for TTNN
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
-            custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
+            custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper, device=device),
             device=None,
         )
 

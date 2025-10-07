@@ -4,6 +4,7 @@ import os
 class GlobalConfig:
     """base architecture configurations"""
 
+    use_velocity = False
     # Data
     seq_len = 1  # input timesteps
     # use different seq len for image and lidar

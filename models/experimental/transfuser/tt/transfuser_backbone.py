@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-import torch
 from models.experimental.transfuser.tt.utils import TTConv2D
 from typing import List
 from loguru import logger
 from models.experimental.transfuser.tt.bottleneck import TTRegNetBottleneck
 from models.experimental.transfuser.tt.gpt import TTGpt
+from models.experimental.transfuser.tests.test_gpt import generate_token_embeddings
 
 
 class TtTransfuserBackbone:
@@ -161,19 +161,14 @@ class TtTransfuserBackbone:
         logger.info(f"image_encoder_conv1")
         image_x = self.normalize_imagenet_ttnn(image_x)
         image_out, image_shape = self.conv1(device, image_x, image_x.shape)
-        # Reshape to spatial dimensions: 80 * 352 = 28160
-        # out = ttnn.reshape(out, (1, 80, 352, 32))
-        # out = ttnn.permute(out, (0, 3, 1, 2))
         logger.info(f"lidar_encoder_conv1")
         # Process lidar input
         lidar_out, lidar_shape = self.lidar_conv1(device, lidar_x, lidar_x.shape)
-        print("..........................................")
-        print(lidar_shape)
-        print(image_shape)
 
         logger.info(f"image_encoder_layer1")
         # image_out = ttnn.reshape(image_out, (1, 80, 352, 32))
         image_out = ttnn.reshape(image_out, image_shape)
+
         # Process layer1 blocks
         for block in self.image_layer1:
             image_out = block(image_out, device)
@@ -200,15 +195,13 @@ class TtTransfuserBackbone:
         image_c = image_out.shape[3]
 
         image_features_flat = ttnn.reshape(image_out, (1, 1, image_out.shape[0] * image_h * image_w, image_c))
-        print(f"{image_out.shape=}")
-        print(f"image_features_flat shape{image_features_flat.shape=}")
         image_embd_layer1 = ttnn.adaptive_avg_pool2d(
             input_tensor=image_features_flat,
             batch_size=image_out.shape[0],
             input_h=image_h,
             input_w=image_w,
             channels=image_c,
-            output_size=[1, 1],  # Pool to 1x1 spatial dimensions
+            output_size=[self.config.img_vert_anchors, self.config.img_horz_anchors],
         )
 
         logger.info(f"lidar_avgpool")
@@ -217,7 +210,6 @@ class TtTransfuserBackbone:
         lidar_c = lidar_out.shape[3]
 
         lidar_features_flat = ttnn.reshape(lidar_out, (1, 1, lidar_out.shape[0] * lidar_h * lidar_w, lidar_c))
-        print(f"lidar_flatten shape{lidar_features_flat.shape=}")
 
         lidar_embd_layer1 = ttnn.adaptive_avg_pool2d(
             input_tensor=lidar_features_flat,
@@ -225,23 +217,8 @@ class TtTransfuserBackbone:
             input_h=lidar_h,
             input_w=lidar_w,
             channels=lidar_c,
-            output_size=[1, 1],
+            output_size=[self.config.lidar_vert_anchors, self.config.lidar_horz_anchors],
         )
-        print(img_vert_anchors)
-        print(img_horz_anchors)
-        # image_embd_layer1 = ttnn.reshape(
-        # image_embd_layer1,
-        #     (1, img_vert_anchors, img_horz_anchors, 72)
-        # )
-        # print(lidar_vert_anchors)
-        # print(lidar_horz_anchors)
-        # lidar_embd_layer1 = ttnn.reshape(
-        #     lidar_embd_layer1,
-        #     (1, lidar_vert_anchors, lidar_horz_anchors, 72)
-        # )
-        # image_embd_layer1=ttnn.reshape(image_embd_layer1,(1,1,1,72))
-        # lidar_embd_layer1=ttnn.reshape(lidar_embd_layer1,(1,1,1,72))
-        # return image_embd_layer1, lidar_embd_layer1
 
         # Reshape pooled features to proper format for transformer
         image_embd_layer1 = ttnn.reshape(
@@ -250,32 +227,59 @@ class TtTransfuserBackbone:
         lidar_embd_layer1 = ttnn.reshape(
             lidar_embd_layer1, (1, self.config.lidar_vert_anchors, self.config.lidar_horz_anchors, 72)
         )
+        print(f"{image_embd_layer1.shape,lidar_embd_layer1.shape=}")
+
+        logger.info(f"gpt layer")
+
+        image_embd_layer1 = ttnn.to_memory_config(
+            image_embd_layer1, memory_config=ttnn.DRAM_MEMORY_CONFIG  # or ttnn.L1_MEMORY_CONFIG
+        )
+        lidar_embd_layer1 = ttnn.to_memory_config(
+            lidar_embd_layer1, memory_config=ttnn.DRAM_MEMORY_CONFIG  # or ttnn.L1_MEMORY_CONFIG
+        )
 
         # Generate token embeddings (concatenate image and lidar)
         # Convert to NCHW for token generation
         image_embd_nchw = ttnn.permute(image_embd_layer1, (0, 3, 1, 2))
         lidar_embd_nchw = ttnn.permute(lidar_embd_layer1, (0, 3, 1, 2))
+        print(f"{image_embd_nchw.shape}")
+        print(f"{lidar_embd_nchw.shape}")
 
         # Convert to torch for token embedding generation
         image_tensor_torch = ttnn.to_torch(image_embd_nchw)
         lidar_tensor_torch = ttnn.to_torch(lidar_embd_nchw)
+        print("............................................................")
+        print(f"{image_tensor_torch.shape}")
+        print(f"{lidar_tensor_torch.shape}")
 
-        # Generate token embeddings using your test's helper function pattern
-        bz = 1
-        seq_len = self.config.seq_len
-        img_h, img_w = self.config.img_vert_anchors, self.config.img_horz_anchors
-        lidar_h, lidar_w = self.config.lidar_vert_anchors, self.config.lidar_horz_anchors
+        # # Generate token embeddings (batch, seq_len, n_embd)
+        # bz = 1
+        # seq_len = self.config.seq_len
+        # n_embd = 72
 
-        image_tokens = (
-            image_tensor_torch.view(bz, seq_len, -1, img_h, img_w).permute(0, 1, 3, 4, 2).contiguous().view(bz, -1, 72)
+        # # Reshape and permute to create token sequences
+        # image_tokens = image_embd_nchw.view(bz, seq_len, -1, img_vert_anchors, img_horz_anchors)
+        # image_tokens = image_tokens.permute(0, 1, 3, 4, 2).contiguous()
+        # image_tokens = image_tokens.view(bz, -1, n_embd)
+
+        # lidar_tokens = lidar_embd_nchw.view(bz, seq_len, -1, lidar_vert_anchors, lidar_horz_anchors)
+        # lidar_tokens = lidar_tokens.permute(0, 1, 3, 4, 2).contiguous()
+        # lidar_tokens = lidar_tokens.view(bz, -1, n_embd)
+
+        # # Concatenate image and lidar tokens
+        # token_embeddings = torch.cat((image_tokens, lidar_tokens), dim=1)
+        token_embeddings, bz, seq_len, img_h, img_w, lidar_h, lidar_w = generate_token_embeddings(
+            image_tensor_torch, lidar_tensor_torch, seq_len=self.config.seq_len, n_embd=72
         )
-        lidar_tokens = (
-            lidar_tensor_torch.view(bz, seq_len, -1, lidar_h, lidar_w)
-            .permute(0, 1, 3, 4, 2)
-            .contiguous()
-            .view(bz, -1, 72)
-        )
-        token_embeddings = torch.cat((image_tokens, lidar_tokens), dim=1)
+
+        # token_embeddings = ttnn.from_torch(
+        #     token_embeddings,
+        #     device=self.device,
+        #     layout=ttnn.TILE_LAYOUT,
+        #     dtype=ttnn.bfloat16,
+        #     memory_config=ttnn.DRAM_MEMORY_CONFIG
+        # )
+        # image_tensor.shape,lidar_tensor.shape, seq_len, n_embd =(torch.Size([1, 72, 5, 22]), torch.Size([1, 72, 8, 8]), 1, 72)
 
         # Apply transformer fusion
         fused_output = self.transformer1(token_embeddings, velocity)
@@ -309,18 +313,20 @@ class TtTransfuserBackbone:
             dtype=ttnn.bfloat16,
             layout=ttnn.TILE_LAYOUT,
         )
-
+        return image_features_layer1, lidar_features_layer1
+        logger.info(f"bilinear_image")
         # Bilinear upsample back to original spatial dimensions
         image_features_layer1 = ttnn.upsample(
             image_features_layer1, scale_factor=(image_h_orig / img_h, image_w_orig / img_w), mode="bilinear"
         )
-
+        logger.info(f"bilinear_lidar")
         lidar_features_layer1 = ttnn.upsample(
             lidar_features_layer1, scale_factor=(lidar_h_orig / lidar_h, lidar_w_orig / lidar_w), mode="bilinear"
         )
-
+        logger.info(f"image add")
         # Residual connection
         image_features = ttnn.add(image_out, image_features_layer1)
+        logger.info(f"lidar add")
         lidar_features = ttnn.add(lidar_out, lidar_features_layer1)
 
         return image_features, lidar_features

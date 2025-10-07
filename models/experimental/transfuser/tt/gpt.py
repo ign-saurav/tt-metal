@@ -31,17 +31,31 @@ class TTGpt(LightweightModule):
         self.n_head = n_head
         self.n_layer = n_layer
         self.use_velocity = use_velocity
-        self.pos_emb = nn.Parameter(
-            torch.zeros(
+        # self.pos_emb = nn.Parameter(
+        #     torch.zeros(
+        #         1,
+        #         seq_len * img_vert_anchors * img_horz_anchors + seq_len * lidar_vert_anchors * lidar_horz_anchors,
+        #         n_embd,
+        #     )
+        # )
+        if "pos_emb" in parameters:
+            self.pos_emb = parameters["pos_emb"]
+        else:
+            # Fallback for standalone tests
+            pos_emb_torch = torch.zeros(
                 1,
                 seq_len * img_vert_anchors * img_horz_anchors + seq_len * lidar_vert_anchors * lidar_horz_anchors,
                 n_embd,
             )
-        )
+            self.pos_emb = ttnn.from_torch(
+                pos_emb_torch, device=device, layout=ttnn.TILE_LAYOUT, dtype=dtype, memory_config=memory_config
+            )
         if self.use_velocity:
             self.vel_emb = nn.Linear(1, n_embd)
         self.tt_blocks = []
         for i in range(n_layer):
+            print(f"self.parameters...............")
+            print(parameters[f"blocks_{i}"])
             self.tt_blocks.append(
                 TTGptBlock(device, parameters[f"blocks_{i}"], n_head, dtype=dtype, memory_config=memory_config)
             )
@@ -65,17 +79,8 @@ class TTGpt(LightweightModule):
     #     x = ttnn.layer_norm(x, weight=self.parameters["ln_f_weight"], bias=self.parameters["ln_f_bias"])
     #     return x
     def __call__(self, token_embeddings, velocity):
-        # Convert positional embeddings to TTNN format once
-        pos_emb_tt = ttnn.from_torch(
-            self.pos_emb.data,  # Use .data to get the tensor without gradient tracking
-            device=self.device,
-            layout=ttnn.TILE_LAYOUT,
-            dtype=self.dtype,
-            memory_config=self.memory_config,
-        )
-
-        # Convert token embeddings to TTNN
-        token_emb_tt = ttnn.from_torch(
+        # Convert token_embeddings to TTNN first
+        token_embeddings = ttnn.from_torch(
             token_embeddings,
             device=self.device,
             layout=ttnn.TILE_LAYOUT,
@@ -84,32 +89,25 @@ class TTGpt(LightweightModule):
         )
 
         if self.use_velocity:
-            # Velocity is already a TTNN tensor from the test
-            velocity_torch = ttnn.to_torch(velocity)
-            velocity_embeddings = self.vel_emb(velocity_torch)  # (B, C)
-            velocity_emb_tt = ttnn.from_torch(
-                velocity_embeddings,
+            # Convert velocity to TTNN
+            velocity_torch = velocity if isinstance(velocity, torch.Tensor) else ttnn.to_torch(velocity)
+            velocity_embeddings = self.vel_emb(velocity_torch)
+            velocity_embeddings = ttnn.from_torch(
+                velocity_embeddings.unsqueeze(1),
                 device=self.device,
                 layout=ttnn.TILE_LAYOUT,
                 dtype=self.dtype,
                 memory_config=self.memory_config,
             )
-            # Broadcast velocity embeddings across sequence length
-            # velocity_emb_tt shape: (B, C) -> (B, 1, C) for broadcasting
-            velocity_emb_tt = ttnn.unsqueeze(velocity_emb_tt, dim=1)
-
-            # Add positional + token + velocity embeddings
-            x = ttnn.add(pos_emb_tt, token_emb_tt)
-            x = ttnn.add(x, velocity_emb_tt)
+            # Now all tensors are TTNN tensors
+            x = ttnn.add(self.pos_emb, token_embeddings)
+            x = ttnn.add(x, velocity_embeddings)
         else:
-            # Add positional + token embeddings
-            x = ttnn.add(pos_emb_tt, token_emb_tt)
+            x = ttnn.add(self.pos_emb, token_embeddings)
 
-        # Pass through transformer blocks
+        # Continue with transformer blocks
         for i in range(self.n_layer):
             x = self.tt_blocks[i](x)
 
-        # Final layer normalization
         x = ttnn.layer_norm(x, weight=self.parameters["ln_f_weight"], bias=self.parameters["ln_f_bias"])
-
         return x
