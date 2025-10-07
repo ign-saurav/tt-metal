@@ -23,22 +23,6 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 
 def generate_token_embeddings(image_tensor, lidar_tensor, seq_len, n_embd):
     print(f"{image_tensor.shape,lidar_tensor.shape, seq_len, n_embd =}")
-    # bz = lidar_tensor.shape[0]
-    # lidar_h, lidar_w = lidar_tensor.shape[2:4]
-    # img_h, img_w = image_tensor.shape[2:4]
-
-    # assert seq_len == 1
-    # image_tensor = (
-    #     image_tensor.view(bz, seq_len, -1, img_h, img_w).permute(0, 1, 3, 4, 2).contiguous().view(bz, -1, n_embd)
-    # )
-    # lidar_tensor = (
-    #     lidar_tensor.view(bz, seq_len, -1, lidar_h, lidar_w).permute(0, 1, 3, 4, 2).contiguous().view(bz, -1, n_embd)
-    # )
-
-    # token_embeddings = torch.cat((image_tensor, lidar_tensor), dim=1)
-
-    # return token_embeddings, bz, seq_len, img_h, img_w, lidar_h, lidar_w
-
     """
     Generate token embeddings from NCHW format tensors.
 
@@ -82,6 +66,41 @@ def generate_token_embeddings(image_tensor, lidar_tensor, seq_len, n_embd):
     return token_embeddings, bz, seq_len, img_h, img_w, lidar_h, lidar_w
 
 
+def generate_token_embeddings_tt(image_tensor, lidar_tensor, seq_len, n_embd):
+    """
+    Generate token embeddings from NCHW format tensors.
+
+    Args:
+        image_tensor: (batch, channels, height, width) - e.g., (1, 72, 5, 22)
+        lidar_tensor: (batch, channels, height, width) - e.g., (1, 72, 8, 8)
+        seq_len: sequence length (should be 1)
+        n_embd: embedding dimension (should be 72)
+
+    Returns:
+        token_embeddings: (batch, total_tokens, n_embd)
+        Additional metadata for post-processing
+    """
+    bz = image_tensor.shape[0]
+    img_c = image_tensor.shape[1]  # Should be 72
+    img_h, img_w = image_tensor.shape[2], image_tensor.shape[3]  # 5, 22
+
+    lidar_c = lidar_tensor.shape[1]  # Should be 72
+    lidar_h, lidar_w = lidar_tensor.shape[2], lidar_tensor.shape[3]  # 8, 8
+
+    # Permute from NCHW to NHWC format
+    # (batch, channels, height, width) -> (batch, height, width, channels)
+    image_tokens = ttnn.permute(image_tensor, (0, 2, 3, 1))  # (1, 5, 22, 72)
+    image_tokens = ttnn.reshape(image_tokens, (bz, img_h * img_w, n_embd))  # (1, 110, 72)
+
+    lidar_tokens = ttnn.permute(lidar_tensor, (0, 2, 3, 1))  # (1, 8, 8, 72)
+    lidar_tokens = ttnn.reshape(lidar_tokens, (bz, lidar_h * lidar_w, n_embd))  # (1, 64, 72)
+
+    # Concatenate image and lidar tokens along sequence dimension
+    token_embeddings = ttnn.concat([image_tokens, lidar_tokens], dim=1)  # (1, 174, 72)
+
+    return token_embeddings, bz, seq_len, img_h, img_w, lidar_h, lidar_w
+
+
 def post_process_output(
     x,
     bz,
@@ -111,28 +130,46 @@ def post_process_output(
     return image_tensor_out, lidar_tensor_out
 
 
-# def create_gpt_preprocessor(device, n_layer, weight_dtype=ttnn.bfloat16):
-#     def custom_preprocessor(torch_model, name, ttnn_module_args):
-#         parameters = {}
-#         if hasattr(torch_model, "ln_f"):
-#             parameters["ln_f_weight"] = preprocess_linear_weight(torch_model.ln_f.weight, dtype=weight_dtype)
-#             parameters["ln_f_bias"] = preprocess_linear_weight(torch_model.ln_f.bias, dtype=weight_dtype)
-#         if hasattr(torch_model, "blocks"):
-#             for i in range(n_layer):
-#                 parameters[f"blocks_{i}"] = preprocess_model_parameters(
-#                     initialize_model=lambda: torch_model.blocks[i],
-#                     custom_preprocessor=create_gpt_block_preprocessor(device, weight_dtype),
-#                     device=device,
-#                 )
-#         return parameters
+def post_process_output_tt(
+    x,
+    bz,
+    seq_len,
+    img_vert_anchors,
+    img_horz_anchors,
+    lidar_vert_anchors,
+    lidar_horz_anchors,
+    n_embed,
+    img_h,
+    img_w,
+    lidar_h,
+    lidar_w,
+):
+    # Reshape to [bz, total_seq, n_embed]
+    total_seq = seq_len * img_vert_anchors * img_horz_anchors + seq_len * lidar_vert_anchors * lidar_horz_anchors
+    x = ttnn.reshape(x, (bz, total_seq, n_embed))
 
-#     return custom_preprocessor
+    # Split image and lidar tensors
+    img_seq_len = seq_len * img_vert_anchors * img_horz_anchors
+
+    # Slice image tensor
+    image_tensor = x[:, :img_seq_len, :]
+    image_tensor_out = ttnn.reshape(image_tensor, (bz * seq_len, -1, img_h, img_w))
+
+    # Slice lidar tensor
+    lidar_tensor = x[:, img_seq_len:, :]
+    lidar_tensor_out = ttnn.reshape(lidar_tensor, (bz * seq_len, -1, lidar_h, lidar_w))
+
+    return image_tensor_out, lidar_tensor_out
 
 
 def create_gpt_preprocessor(device, n_layer, weight_dtype=ttnn.bfloat16):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
 
+        if hasattr(torch_model, "pos_emb"):
+            parameters["pos_emb"] = ttnn.from_torch(
+                torch_model.pos_emb, dtype=weight_dtype, device=device, layout=ttnn.TILE_LAYOUT
+            )
         # Layer norm parameters
         if hasattr(torch_model, "ln_f"):
             parameters["ln_f_weight"] = preprocess_linear_weight(torch_model.ln_f.weight, dtype=weight_dtype)
@@ -213,10 +250,6 @@ def test_gpt(
 
     ref_image_output, ref_lidar_output = ref_layer(image_input, lidar_input, velocity_input)
 
-    token_embeddings, bz, seq_len, img_h, img_w, lidar_h, lidar_w = generate_token_embeddings(
-        image_input, lidar_input, seq_len, n_embed
-    )
-
     parameters = preprocess_model_parameters(
         initialize_model=lambda: ref_layer,
         custom_preprocessor=create_gpt_preprocessor(device, n_layer, weight_dtype),
@@ -237,28 +270,21 @@ def test_gpt(
         dtype=weight_dtype,
         memory_config=ttnn.L1_MEMORY_CONFIG,
     )
-    # tt_token_embeddings = ttnn.from_torch(
-    #     token_embeddings, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype, memory_config=ttnn.L1_MEMORY_CONFIG
-    # )
+
+    tt_image_input = ttnn.from_torch(
+        image_input, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype, memory_config=ttnn.L1_MEMORY_CONFIG
+    )
+    tt_lidar_input = ttnn.from_torch(
+        lidar_input, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype, memory_config=ttnn.L1_MEMORY_CONFIG
+    )
     tt_velocity_input = ttnn.from_torch(
         velocity_input, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype, memory_config=ttnn.L1_MEMORY_CONFIG
     )
-    tt_output = tt_layer(token_embeddings, tt_velocity_input)
-    tt_torch_output = tt2torch_tensor(tt_output)
-    tt_image_output, tt_lidar_output = post_process_output(
-        tt_torch_output,
-        bz,
-        seq_len,
-        img_vert_anchors,
-        img_horz_anchors,
-        lidar_vert_anchors,
-        lidar_horz_anchors,
-        n_embed,
-        img_h,
-        img_w,
-        lidar_h,
-        lidar_w,
-    )
+
+    tt_image_output, tt_lidar_output = tt_layer(tt_image_input, tt_lidar_input, tt_velocity_input, n_embed)
+
+    tt_image_output = tt2torch_tensor(tt_image_output)
+    tt_lidar_output = tt2torch_tensor(tt_lidar_output)
     does_pass, image_out_pcc_message = check_with_pcc(ref_image_output, tt_image_output, 0.95)
 
     logger.info(f"Image Output PCC: {image_out_pcc_message}")
