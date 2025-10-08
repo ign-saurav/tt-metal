@@ -29,7 +29,7 @@ class MobilenetV3TestInfra:
         if use_randn_input:
             torch_input_tensor = torch.randn(batch_size, input_channels, height, width)
         else:
-            self.img = Image.open("models/experimental/mobileNetV3/resources/cup.jpg").convert("RGB")
+            self.img = Image.open("models/experimental/mobileNetV3/resources/dog.jpeg").convert("RGB")
             preprocess = transforms.Compose(
                 [
                     transforms.Resize(256),

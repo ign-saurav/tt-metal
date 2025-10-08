@@ -42,7 +42,7 @@ def test_MobileNetV3_stability(
         batch_size,
         resolution=resolution,
         model_location_generator=None,
-        input_path=".models/experimental/mobileNetV3/resources/cup.jpg",
+        input_path=".models/experimental/mobileNetV3/resources/dog.jpeg",
     )
 
     logger.info(f"Running stability test for MobileNetV3 with resolution: {resolution} and batch size: {batch_size}")

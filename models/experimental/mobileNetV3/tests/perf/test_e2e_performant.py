@@ -76,7 +76,7 @@ def run_perf_e2e_mobilenetV3(
         resolution=resolution,
         inputs_mesh_mapper=inputs_mesh_mapper,
         outputs_mesh_composer=output_mesh_composer,
-        input_path=".models/experimental/mobileNetV3/resources/cup.jpg",
+        input_path=".models/experimental/mobileNetV3/resources/dog.jpeg",
     )
 
     num_measurement_iterations = 32
