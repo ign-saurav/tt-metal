@@ -71,6 +71,23 @@ class TtTransfuserBackbone:
             groups=3,
             model_config=model_config,
         )
+        # Layer2 for both encoders
+        self.image_layer2 = self._make_layer(
+            parameters=parameters.image_encoder.features.layer2,
+            planes=72,
+            blocks=5,  # b1 and b2
+            stride=2,
+            groups=3,  # conv2
+            model_config=model_config,
+        )
+        self.lidar_layer2 = self._make_layer(
+            parameters=parameters.lidar_encoder._model.layer2,
+            planes=72,
+            blocks=5,
+            stride=2,
+            groups=3,
+            model_config=model_config,
+        )
 
         self.transformer1 = TTGpt(
             device=self.device,
@@ -262,5 +279,15 @@ class TtTransfuserBackbone:
         image_features = ttnn.add(image_out, image_features_layer1)
         logger.info(f"lidar add")
         lidar_features = ttnn.add(lidar_out, lidar_features_layer1)
+
+        logger.info(f"layer2 image")
+
+        print(f"{image_features.shape,lidar_features.shape=}")
+        # Layer 2 fusion
+        for block in self.image_layer2:
+            image_features = block(image_features, device)
+        logger.info(f"layer2 lidar")
+        for block in self.lidar_layer2:
+            lidar_features = block(lidar_features, device)
 
         return image_features, lidar_features
