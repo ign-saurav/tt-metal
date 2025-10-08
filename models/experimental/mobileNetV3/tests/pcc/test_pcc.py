@@ -152,19 +152,24 @@ def test_invertedResidual(
             x_torch = torch_model[-5](x_torch)
             x_torch = torch.flatten(x_torch, 1)
 
-            x_tt = ttnn.global_avg_pool2d(x_tt)
+            # x_tt = ttnn.global_avg_pool2d(x_tt)
+            # x_tt = ttnn.reshape(x_tt, (x_tt.shape[0], -1))
+            # x_tt = ttnn.to_layout(x_tt, layout=ttnn.TILE_LAYOUT)
+
+            x_tt = ttnn.reshape(x_tt, (1, 1, x_tt.shape[0] * x_tt.shape[1] * x_tt.shape[2], -1))
+            x_tt = ttnn.adaptive_avg_pool2d(
+                input_tensor=x_tt,
+                batch_size=x_tt.shape[0],
+                input_h=x_tt.shape[1],
+                input_w=x_tt.shape[2],
+                channels=x_tt.shape[-1],
+                output_size=[1, 1],
+            )
+
+            padded_width = ((576 + 31) // 32) * 32  # = 608
             x_tt = ttnn.reshape(x_tt, (x_tt.shape[0], -1))
-            x_tt = ttnn.to_layout(x_tt, layout=ttnn.TILE_LAYOUT)
-
-            # x_tt = torch_model[-5](tt_as_torch)
-            # x_tt = torch.flatten(x_tt, 1)
-
-            # x_tt = ttnn.from_torch(
-            #                     x_tt.reshape(1, 576),
-            #                     dtype=ttnn.bfloat16,
-            #                     device=device,
-            #                     layout=ttnn.TILE_LAYOUT,
-            #                 )
+            x_tt = torch.nn.functional.pad(ttnn.to_torch(x_tt), (0, padded_width - 576))
+            x_tt = ttnn.from_torch(x_tt, device=device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
 
             idx += 1
 

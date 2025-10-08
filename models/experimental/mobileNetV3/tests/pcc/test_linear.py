@@ -17,6 +17,7 @@ from torchvision.models import MobileNet_V3_Small_Weights
 @pytest.mark.parametrize("output_features", [1024])  # MobileNetV3 classifier output
 @pytest.mark.parametrize("use_bias", [True])
 @pytest.mark.parametrize("bias_shape", ["2d"])  # Test both (1, -1) and (1, 1, 1, -1)
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 65536}], indirect=True)
 def test_mobilenetv3_linear_layer(
     batch_size,
     input_features,
@@ -44,6 +45,9 @@ def test_mobilenetv3_linear_layer(
 
     # PyTorch forward pass
     torch_output = torch_average_pool(torch_input)
+    print("::::::::::::::::::")
+    print(torch_output.shape)
+    torch_output = torch.flatten(torch_output, 1)
     torch_output = torch_linear(torch_output)
 
     # Preprocess weights using standard TTNN preprocessing
@@ -67,8 +71,29 @@ def test_mobilenetv3_linear_layer(
     np.savetxt("bias_tt_unit.txt", ttnn.to_torch(ttnn_bias).flatten().to(torch.float32).detach().numpy())
 
     # TTNN forward pass
-    ttnn_output = ttnn.global_avg_pool2d(ttnn_input)
+    # ttnn_output = ttnn.global_avg_pool2d(ttnn_input)
+    ttnn_input = ttnn.reshape(ttnn_input, (1, 1, ttnn_input.shape[0] * ttnn_input.shape[1] * ttnn_input.shape[2], -1))
+    ttnn_output = ttnn.adaptive_avg_pool2d(
+        input_tensor=ttnn_input,
+        batch_size=ttnn_input.shape[0],
+        input_h=ttnn_input.shape[1],
+        input_w=ttnn_input.shape[2],
+        channels=ttnn_input.shape[-1],
+        output_size=[1, 1],
+    )
+    print("::::::::::::::::::")
+    print(ttnn_output.shape)
+    # ttnn_output = ttnn.reshape(ttnn_output, (ttnn_output.shape[0], -1), memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    # ttnn_output = ttnn.to_layout(ttnn_output, layout=ttnn.TILE_LAYOUT)
+    padded_width = ((576 + 31) // 32) * 32  # = 608
     ttnn_output = ttnn.reshape(ttnn_output, (ttnn_output.shape[0], -1))
+    ttnn_output = torch.nn.functional.pad(ttnn.to_torch(ttnn_output), (0, padded_width - 576))
+    ttnn_output = ttnn.from_torch(
+        ttnn_output, device=device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG
+    )
+    print("::::::::::::::::::")
+    print(ttnn_output.shape)
+
     ttnn_output = ttnn.linear(
         ttnn_output,
         ttnn_weight,
