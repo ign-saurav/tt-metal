@@ -795,203 +795,403 @@ def custom_preprocessor(
                 b5_block.se.fc2.weight, dtype=ttnn.bfloat16, mesh_mapper=mesh_mapper
             )
         # Add transformer1 preprocessing
-    if hasattr(model, "transformer1"):
-        parameters["transformer1"] = {}
+        if hasattr(model, "transformer1"):
+            parameters["transformer1"] = {}
 
-        if hasattr(model.transformer1, "ln_f"):
-            # )
-            parameters["transformer1"]["ln_f_weight"] = ttnn.from_torch(
-                model.transformer1.ln_f.weight,
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=device,
-                mesh_mapper=mesh_mapper,
-            )
-            parameters["transformer1"]["ln_f_bias"] = ttnn.from_torch(
-                model.transformer1.ln_f.bias.reshape((1, -1)),
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=device,
-                mesh_mapper=mesh_mapper,
-            )
+            if hasattr(model.transformer1, "ln_f"):
+                # )
+                parameters["transformer1"]["ln_f_weight"] = ttnn.from_torch(
+                    model.transformer1.ln_f.weight,
+                    dtype=ttnn.bfloat16,
+                    layout=ttnn.TILE_LAYOUT,
+                    device=device,
+                    mesh_mapper=mesh_mapper,
+                )
+                parameters["transformer1"]["ln_f_bias"] = ttnn.from_torch(
+                    model.transformer1.ln_f.bias.reshape((1, -1)),
+                    dtype=ttnn.bfloat16,
+                    layout=ttnn.TILE_LAYOUT,
+                    device=device,
+                    mesh_mapper=mesh_mapper,
+                )
 
-        if hasattr(model.transformer1, "pos_emb"):
-            parameters["transformer1"]["pos_emb"] = ttnn.from_torch(
-                model.transformer1.pos_emb,
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=device,
-                mesh_mapper=mesh_mapper,
-            )
+            if hasattr(model.transformer1, "pos_emb"):
+                parameters["transformer1"]["pos_emb"] = ttnn.from_torch(
+                    model.transformer1.pos_emb,
+                    dtype=ttnn.bfloat16,
+                    layout=ttnn.TILE_LAYOUT,
+                    device=device,
+                    mesh_mapper=mesh_mapper,
+                )
 
-        # Velocity embedding parameters (if exists)
-        if hasattr(model.transformer1, "vel_emb"):
-            parameters["transformer1"]["vel_emb_weight"] = ttnn.from_torch(
-                model.transformer1.vel_emb.weight,
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=device,
-                mesh_mapper=mesh_mapper,
-            )
-            parameters["transformer1"]["vel_emb_bias"] = ttnn.from_torch(
-                model.transformer1.vel_emb.bias.reshape((1, -1)),
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=device,
-                mesh_mapper=mesh_mapper,
-            )
+            # Velocity embedding parameters (if exists)
+            if hasattr(model.transformer1, "vel_emb"):
+                parameters["transformer1"]["vel_emb_weight"] = ttnn.from_torch(
+                    model.transformer1.vel_emb.weight,
+                    dtype=ttnn.bfloat16,
+                    layout=ttnn.TILE_LAYOUT,
+                    device=device,
+                    mesh_mapper=mesh_mapper,
+                )
+                parameters["transformer1"]["vel_emb_bias"] = ttnn.from_torch(
+                    model.transformer1.vel_emb.bias.reshape((1, -1)),
+                    dtype=ttnn.bfloat16,
+                    layout=ttnn.TILE_LAYOUT,
+                    device=device,
+                    mesh_mapper=mesh_mapper,
+                )
 
-        # Transformer blocks - iterate over actual blocks
-        if hasattr(model.transformer1, "blocks"):
-            for i in range(len(model.transformer1.blocks)):
-                block = model.transformer1.blocks[i]
-                parameters["transformer1"][f"blocks_{i}"] = {}
+            # Transformer blocks - iterate over actual blocks
+            if hasattr(model.transformer1, "blocks"):
+                for i in range(len(model.transformer1.blocks)):
+                    block = model.transformer1.blocks[i]
+                    parameters["transformer1"][f"blocks_{i}"] = {}
 
-                # Layer norm 1
-                if hasattr(block, "ln1"):
-                    parameters["transformer1"][f"blocks_{i}"]["ln1_weight"] = ttnn.from_torch(
-                        block.ln1.weight,
-                        dtype=ttnn.bfloat16,
-                        device=device,
-                        layout=ttnn.TILE_LAYOUT,
-                        mesh_mapper=mesh_mapper,
-                    )
-                    parameters["transformer1"][f"blocks_{i}"]["ln1_bias"] = ttnn.from_torch(
-                        block.ln1.bias.reshape((1, -1)),
-                        dtype=ttnn.bfloat16,
-                        layout=ttnn.TILE_LAYOUT,
-                        device=device,
-                        mesh_mapper=mesh_mapper,
-                    )
-
-                # Layer norm 2
-                if hasattr(block, "ln2"):
-                    parameters["transformer1"][f"blocks_{i}"]["ln2_weight"] = ttnn.from_torch(
-                        block.ln2.weight,
-                        dtype=ttnn.bfloat16,
-                        device=device,
-                        layout=ttnn.TILE_LAYOUT,
-                        mesh_mapper=mesh_mapper,
-                    )
-                    parameters["transformer1"][f"blocks_{i}"]["ln2_bias"] = ttnn.from_torch(
-                        block.ln2.bias.reshape((1, -1)),
-                        dtype=ttnn.bfloat16,
-                        layout=ttnn.TILE_LAYOUT,
-                        device=device,
-                        mesh_mapper=mesh_mapper,
-                    )
-
-                # Attention
-                if hasattr(block, "attn"):
-                    attn = block.attn
-                    parameters["transformer1"][f"blocks_{i}"]["attn"] = {}
-
-                    if (
-                        hasattr(attn, "key")
-                        and hasattr(attn, "query")
-                        and hasattr(attn, "value")
-                        and hasattr(attn, "proj")
-                    ):
-                        # Query
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["query"] = {}
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["query"]["weight"] = ttnn.from_torch(
-                            attn.query.weight,
+                    # Layer norm 1
+                    if hasattr(block, "ln1"):
+                        parameters["transformer1"][f"blocks_{i}"]["ln1_weight"] = ttnn.from_torch(
+                            block.ln1.weight,
                             dtype=ttnn.bfloat16,
                             device=device,
                             layout=ttnn.TILE_LAYOUT,
                             mesh_mapper=mesh_mapper,
                         )
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["query"]["bias"] = ttnn.from_torch(
-                            attn.query.bias.reshape((1, -1)),
+                        parameters["transformer1"][f"blocks_{i}"]["ln1_bias"] = ttnn.from_torch(
+                            block.ln1.bias.reshape((1, -1)),
                             dtype=ttnn.bfloat16,
                             layout=ttnn.TILE_LAYOUT,
                             device=device,
                             mesh_mapper=mesh_mapper,
                         )
 
-                        # Key
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["key"] = {}
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["key"]["weight"] = ttnn.from_torch(
-                            attn.key.weight,
+                    # Layer norm 2
+                    if hasattr(block, "ln2"):
+                        parameters["transformer1"][f"blocks_{i}"]["ln2_weight"] = ttnn.from_torch(
+                            block.ln2.weight,
                             dtype=ttnn.bfloat16,
                             device=device,
                             layout=ttnn.TILE_LAYOUT,
                             mesh_mapper=mesh_mapper,
                         )
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["key"]["bias"] = ttnn.from_torch(
-                            attn.key.bias.reshape((1, -1)),
-                            dtype=ttnn.bfloat16,
-                            layout=ttnn.TILE_LAYOUT,
-                            device=device,
-                            mesh_mapper=mesh_mapper,
-                        )
-
-                        # Value
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["value"] = {}
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["value"]["weight"] = ttnn.from_torch(
-                            attn.value.weight,
-                            dtype=ttnn.bfloat16,
-                            device=device,
-                            layout=ttnn.TILE_LAYOUT,
-                            mesh_mapper=mesh_mapper,
-                        )
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["value"]["bias"] = ttnn.from_torch(
-                            attn.value.bias.reshape((1, -1)),
+                        parameters["transformer1"][f"blocks_{i}"]["ln2_bias"] = ttnn.from_torch(
+                            block.ln2.bias.reshape((1, -1)),
                             dtype=ttnn.bfloat16,
                             layout=ttnn.TILE_LAYOUT,
                             device=device,
                             mesh_mapper=mesh_mapper,
                         )
 
-                        # Projection
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"] = {}
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"]["weight"] = ttnn.from_torch(
-                            attn.proj.weight,
+                    # Attention
+                    if hasattr(block, "attn"):
+                        attn = block.attn
+                        parameters["transformer1"][f"blocks_{i}"]["attn"] = {}
+
+                        if (
+                            hasattr(attn, "key")
+                            and hasattr(attn, "query")
+                            and hasattr(attn, "value")
+                            and hasattr(attn, "proj")
+                        ):
+                            # Query
+                            parameters["transformer1"][f"blocks_{i}"]["attn"]["query"] = {}
+                            parameters["transformer1"][f"blocks_{i}"]["attn"]["query"]["weight"] = ttnn.from_torch(
+                                attn.query.weight,
+                                dtype=ttnn.bfloat16,
+                                device=device,
+                                layout=ttnn.TILE_LAYOUT,
+                                mesh_mapper=mesh_mapper,
+                            )
+                            parameters["transformer1"][f"blocks_{i}"]["attn"]["query"]["bias"] = ttnn.from_torch(
+                                attn.query.bias.reshape((1, -1)),
+                                dtype=ttnn.bfloat16,
+                                layout=ttnn.TILE_LAYOUT,
+                                device=device,
+                                mesh_mapper=mesh_mapper,
+                            )
+
+                            # Key
+                            parameters["transformer1"][f"blocks_{i}"]["attn"]["key"] = {}
+                            parameters["transformer1"][f"blocks_{i}"]["attn"]["key"]["weight"] = ttnn.from_torch(
+                                attn.key.weight,
+                                dtype=ttnn.bfloat16,
+                                device=device,
+                                layout=ttnn.TILE_LAYOUT,
+                                mesh_mapper=mesh_mapper,
+                            )
+                            parameters["transformer1"][f"blocks_{i}"]["attn"]["key"]["bias"] = ttnn.from_torch(
+                                attn.key.bias.reshape((1, -1)),
+                                dtype=ttnn.bfloat16,
+                                layout=ttnn.TILE_LAYOUT,
+                                device=device,
+                                mesh_mapper=mesh_mapper,
+                            )
+
+                            # Value
+                            parameters["transformer1"][f"blocks_{i}"]["attn"]["value"] = {}
+                            parameters["transformer1"][f"blocks_{i}"]["attn"]["value"]["weight"] = ttnn.from_torch(
+                                attn.value.weight,
+                                dtype=ttnn.bfloat16,
+                                device=device,
+                                layout=ttnn.TILE_LAYOUT,
+                                mesh_mapper=mesh_mapper,
+                            )
+                            parameters["transformer1"][f"blocks_{i}"]["attn"]["value"]["bias"] = ttnn.from_torch(
+                                attn.value.bias.reshape((1, -1)),
+                                dtype=ttnn.bfloat16,
+                                layout=ttnn.TILE_LAYOUT,
+                                device=device,
+                                mesh_mapper=mesh_mapper,
+                            )
+
+                            # Projection
+                            parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"] = {}
+                            parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"]["weight"] = ttnn.from_torch(
+                                attn.proj.weight,
+                                dtype=ttnn.bfloat16,
+                                device=device,
+                                layout=ttnn.TILE_LAYOUT,
+                                mesh_mapper=mesh_mapper,
+                            )
+                            parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"]["bias"] = ttnn.from_torch(
+                                attn.proj.bias.reshape((1, -1)),
+                                dtype=ttnn.bfloat16,
+                                layout=ttnn.TILE_LAYOUT,
+                                device=device,
+                                mesh_mapper=mesh_mapper,
+                            )
+
+                    # MLP
+                    if hasattr(block, "mlp"):
+                        parameters["transformer1"][f"blocks_{i}"]["mlp_0_weight"] = ttnn.from_torch(
+                            block.mlp[0].weight,
                             dtype=ttnn.bfloat16,
                             device=device,
                             layout=ttnn.TILE_LAYOUT,
                             mesh_mapper=mesh_mapper,
                         )
-                        parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"]["bias"] = ttnn.from_torch(
-                            attn.proj.bias.reshape((1, -1)),
+                        parameters["transformer1"][f"blocks_{i}"]["mlp_0_bias"] = ttnn.from_torch(
+                            block.mlp[0].bias.reshape((1, -1)),
                             dtype=ttnn.bfloat16,
                             layout=ttnn.TILE_LAYOUT,
                             device=device,
                             mesh_mapper=mesh_mapper,
                         )
 
-                # MLP
-                if hasattr(block, "mlp"):
-                    parameters["transformer1"][f"blocks_{i}"]["mlp_0_weight"] = ttnn.from_torch(
-                        block.mlp[0].weight,
-                        dtype=ttnn.bfloat16,
-                        device=device,
-                        layout=ttnn.TILE_LAYOUT,
-                        mesh_mapper=mesh_mapper,
-                    )
-                    parameters["transformer1"][f"blocks_{i}"]["mlp_0_bias"] = ttnn.from_torch(
-                        block.mlp[0].bias.reshape((1, -1)),
-                        dtype=ttnn.bfloat16,
-                        layout=ttnn.TILE_LAYOUT,
-                        device=device,
-                        mesh_mapper=mesh_mapper,
-                    )
+                        parameters["transformer1"][f"blocks_{i}"]["mlp_2_weight"] = ttnn.from_torch(
+                            block.mlp[2].weight,
+                            # block.mlp[2].weight.T.contiguous(),
+                            dtype=ttnn.bfloat16,
+                            device=device,
+                            layout=ttnn.TILE_LAYOUT,
+                            mesh_mapper=mesh_mapper,
+                        )
+                        parameters["transformer1"][f"blocks_{i}"]["mlp_2_bias"] = ttnn.from_torch(
+                            block.mlp[2].bias.reshape((1, -1)),
+                            dtype=ttnn.bfloat16,
+                            layout=ttnn.TILE_LAYOUT,
+                            device=device,
+                            mesh_mapper=mesh_mapper,
+                        )
 
-                    parameters["transformer1"][f"blocks_{i}"]["mlp_2_weight"] = ttnn.from_torch(
-                        block.mlp[2].weight,
-                        # block.mlp[2].weight.T.contiguous(),
-                        dtype=ttnn.bfloat16,
-                        device=device,
-                        layout=ttnn.TILE_LAYOUT,
-                        mesh_mapper=mesh_mapper,
-                    )
-                    parameters["transformer1"][f"blocks_{i}"]["mlp_2_bias"] = ttnn.from_torch(
-                        block.mlp[2].bias.reshape((1, -1)),
-                        dtype=ttnn.bfloat16,
-                        layout=ttnn.TILE_LAYOUT,
-                        device=device,
-                        mesh_mapper=mesh_mapper,
-                    )
+        if hasattr(model, "transformer2"):
+            parameters["transformer2"] = {}
+
+            if hasattr(model.transformer2, "ln_f"):
+                # )
+                parameters["transformer2"]["ln_f_weight"] = ttnn.from_torch(
+                    model.transformer2.ln_f.weight,
+                    dtype=ttnn.bfloat16,
+                    layout=ttnn.TILE_LAYOUT,
+                    device=device,
+                    mesh_mapper=mesh_mapper,
+                )
+                parameters["transformer2"]["ln_f_bias"] = ttnn.from_torch(
+                    model.transformer2.ln_f.bias.reshape((1, -1)),
+                    dtype=ttnn.bfloat16,
+                    layout=ttnn.TILE_LAYOUT,
+                    device=device,
+                    mesh_mapper=mesh_mapper,
+                )
+
+            if hasattr(model.transformer2, "pos_emb"):
+                print(f"Reference transformer2.pos_emb shape: {model.transformer2.pos_emb.shape}")
+                parameters["transformer2"]["pos_emb"] = ttnn.from_torch(
+                    model.transformer2.pos_emb,
+                    dtype=ttnn.bfloat16,
+                    layout=ttnn.TILE_LAYOUT,
+                    device=device,
+                    mesh_mapper=mesh_mapper,
+                )
+
+            # Velocity embedding parameters (if exists)
+            if hasattr(model.transformer2, "vel_emb"):
+                parameters["transformer2"]["vel_emb_weight"] = ttnn.from_torch(
+                    model.transformer2.vel_emb.weight,
+                    dtype=ttnn.bfloat16,
+                    layout=ttnn.TILE_LAYOUT,
+                    device=device,
+                    mesh_mapper=mesh_mapper,
+                )
+                parameters["transformer2"]["vel_emb_bias"] = ttnn.from_torch(
+                    model.transformer2.vel_emb.bias.reshape((1, -1)),
+                    dtype=ttnn.bfloat16,
+                    layout=ttnn.TILE_LAYOUT,
+                    device=device,
+                    mesh_mapper=mesh_mapper,
+                )
+
+            # Transformer blocks - iterate over actual blocks
+            if hasattr(model.transformer2, "blocks"):
+                for i in range(len(model.transformer2.blocks)):
+                    block = model.transformer2.blocks[i]
+                    parameters["transformer2"][f"blocks_{i}"] = {}
+
+                    # Layer norm 1
+                    if hasattr(block, "ln1"):
+                        parameters["transformer2"][f"blocks_{i}"]["ln1_weight"] = ttnn.from_torch(
+                            block.ln1.weight,
+                            dtype=ttnn.bfloat16,
+                            device=device,
+                            layout=ttnn.TILE_LAYOUT,
+                            mesh_mapper=mesh_mapper,
+                        )
+                        parameters["transformer2"][f"blocks_{i}"]["ln1_bias"] = ttnn.from_torch(
+                            block.ln1.bias.reshape((1, -1)),
+                            dtype=ttnn.bfloat16,
+                            layout=ttnn.TILE_LAYOUT,
+                            device=device,
+                            mesh_mapper=mesh_mapper,
+                        )
+
+                    # Layer norm 2
+                    if hasattr(block, "ln2"):
+                        parameters["transformer2"][f"blocks_{i}"]["ln2_weight"] = ttnn.from_torch(
+                            block.ln2.weight,
+                            dtype=ttnn.bfloat16,
+                            device=device,
+                            layout=ttnn.TILE_LAYOUT,
+                            mesh_mapper=mesh_mapper,
+                        )
+                        parameters["transformer2"][f"blocks_{i}"]["ln2_bias"] = ttnn.from_torch(
+                            block.ln2.bias.reshape((1, -1)),
+                            dtype=ttnn.bfloat16,
+                            layout=ttnn.TILE_LAYOUT,
+                            device=device,
+                            mesh_mapper=mesh_mapper,
+                        )
+
+                    # Attention
+                    if hasattr(block, "attn"):
+                        attn = block.attn
+                        parameters["transformer2"][f"blocks_{i}"]["attn"] = {}
+
+                        if (
+                            hasattr(attn, "key")
+                            and hasattr(attn, "query")
+                            and hasattr(attn, "value")
+                            and hasattr(attn, "proj")
+                        ):
+                            # Query
+                            parameters["transformer2"][f"blocks_{i}"]["attn"]["query"] = {}
+                            parameters["transformer2"][f"blocks_{i}"]["attn"]["query"]["weight"] = ttnn.from_torch(
+                                attn.query.weight,
+                                dtype=ttnn.bfloat16,
+                                device=device,
+                                layout=ttnn.TILE_LAYOUT,
+                                mesh_mapper=mesh_mapper,
+                            )
+                            parameters["transformer2"][f"blocks_{i}"]["attn"]["query"]["bias"] = ttnn.from_torch(
+                                attn.query.bias.reshape((1, -1)),
+                                dtype=ttnn.bfloat16,
+                                layout=ttnn.TILE_LAYOUT,
+                                device=device,
+                                mesh_mapper=mesh_mapper,
+                            )
+
+                            # Key
+                            parameters["transformer2"][f"blocks_{i}"]["attn"]["key"] = {}
+                            parameters["transformer2"][f"blocks_{i}"]["attn"]["key"]["weight"] = ttnn.from_torch(
+                                attn.key.weight,
+                                dtype=ttnn.bfloat16,
+                                device=device,
+                                layout=ttnn.TILE_LAYOUT,
+                                mesh_mapper=mesh_mapper,
+                            )
+                            parameters["transformer2"][f"blocks_{i}"]["attn"]["key"]["bias"] = ttnn.from_torch(
+                                attn.key.bias.reshape((1, -1)),
+                                dtype=ttnn.bfloat16,
+                                layout=ttnn.TILE_LAYOUT,
+                                device=device,
+                                mesh_mapper=mesh_mapper,
+                            )
+
+                            # Value
+                            parameters["transformer2"][f"blocks_{i}"]["attn"]["value"] = {}
+                            parameters["transformer2"][f"blocks_{i}"]["attn"]["value"]["weight"] = ttnn.from_torch(
+                                attn.value.weight,
+                                dtype=ttnn.bfloat16,
+                                device=device,
+                                layout=ttnn.TILE_LAYOUT,
+                                mesh_mapper=mesh_mapper,
+                            )
+                            parameters["transformer2"][f"blocks_{i}"]["attn"]["value"]["bias"] = ttnn.from_torch(
+                                attn.value.bias.reshape((1, -1)),
+                                dtype=ttnn.bfloat16,
+                                layout=ttnn.TILE_LAYOUT,
+                                device=device,
+                                mesh_mapper=mesh_mapper,
+                            )
+
+                            # Projection
+                            parameters["transformer2"][f"blocks_{i}"]["attn"]["proj"] = {}
+                            parameters["transformer2"][f"blocks_{i}"]["attn"]["proj"]["weight"] = ttnn.from_torch(
+                                attn.proj.weight,
+                                dtype=ttnn.bfloat16,
+                                device=device,
+                                layout=ttnn.TILE_LAYOUT,
+                                mesh_mapper=mesh_mapper,
+                            )
+                            parameters["transformer2"][f"blocks_{i}"]["attn"]["proj"]["bias"] = ttnn.from_torch(
+                                attn.proj.bias.reshape((1, -1)),
+                                dtype=ttnn.bfloat16,
+                                layout=ttnn.TILE_LAYOUT,
+                                device=device,
+                                mesh_mapper=mesh_mapper,
+                            )
+
+                    # MLP
+                    if hasattr(block, "mlp"):
+                        parameters["transformer2"][f"blocks_{i}"]["mlp_0_weight"] = ttnn.from_torch(
+                            block.mlp[0].weight.T.contiguous(),
+                            dtype=ttnn.bfloat16,
+                            device=device,
+                            layout=ttnn.TILE_LAYOUT,
+                            mesh_mapper=mesh_mapper,
+                        )
+                        print(parameters["transformer2"][f"blocks_{i}"]["mlp_0_weight"])
+                        parameters["transformer2"][f"blocks_{i}"]["mlp_0_bias"] = ttnn.from_torch(
+                            block.mlp[0].bias.reshape((1, -1)),
+                            dtype=ttnn.bfloat16,
+                            layout=ttnn.TILE_LAYOUT,
+                            device=device,
+                            mesh_mapper=mesh_mapper,
+                        )
+
+                        parameters["transformer2"][f"blocks_{i}"]["mlp_2_weight"] = ttnn.from_torch(
+                            # block.mlp[2].weight,
+                            block.mlp[2].weight.T.contiguous(),
+                            dtype=ttnn.bfloat16,
+                            device=device,
+                            layout=ttnn.TILE_LAYOUT,
+                            mesh_mapper=mesh_mapper,
+                        )
+                        parameters["transformer2"][f"blocks_{i}"]["mlp_2_bias"] = ttnn.from_torch(
+                            block.mlp[2].bias.reshape((1, -1)),
+                            dtype=ttnn.bfloat16,
+                            layout=ttnn.TILE_LAYOUT,
+                            device=device,
+                            mesh_mapper=mesh_mapper,
+                        )
     elif isinstance(model, Bottleneck):
         # Handle standalone Bottleneck model
         # conv1 (1x1 convolution)

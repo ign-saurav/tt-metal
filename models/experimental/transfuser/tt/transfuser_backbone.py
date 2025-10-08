@@ -105,6 +105,22 @@ class TtTransfuserBackbone:
             memory_config=ttnn.L1_MEMORY_CONFIG,
         )
 
+        self.transformer2 = TTGpt(
+            device=self.device,
+            parameters=parameters["transformer2"],
+            n_head=config.n_head,
+            n_layer=config.n_layer,
+            use_velocity=config.use_velocity,
+            img_vert_anchors=config.img_vert_anchors,
+            img_horz_anchors=config.img_horz_anchors,
+            lidar_vert_anchors=config.lidar_vert_anchors,
+            lidar_horz_anchors=config.lidar_horz_anchors,
+            seq_len=config.seq_len,
+            n_embd=216,  # layer2 output channels
+            dtype=ttnn.bfloat16,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
+
     def _make_layer(
         self,
         parameters,
@@ -226,7 +242,7 @@ class TtTransfuserBackbone:
             channels=lidar_c,
             output_size=[self.config.lidar_vert_anchors, self.config.lidar_horz_anchors],
         )
-
+        print(f"{image_embd_layer1.shape,lidar_embd_layer1.shape=}")
         logger.info(f"gpt layer")
 
         # Convert from sharded to interleaved memory config first
@@ -329,5 +345,31 @@ class TtTransfuserBackbone:
         )
 
         print(f"{image_embd_layer2.shape,lidar_embd_layer2.shape=}")
+        # Flatten to match layer1 format before passing to transformer
+        img_h = self.config.img_vert_anchors  # 5
+        img_w = self.config.img_horz_anchors  # 22
+        lidar_h = self.config.lidar_vert_anchors  # 8
+        lidar_w = self.config.lidar_horz_anchors  # 8
+        image_embd_layer2 = ttnn.reshape(image_embd_layer2, (1, 1, img_h * img_w, 216))
+        lidar_embd_layer2 = ttnn.reshape(lidar_embd_layer2, (1, 1, lidar_h * lidar_w, 216))
+        print(".............................................................")
+        print(f"{image_embd_layer2.shape,lidar_embd_layer2.shape=}")
 
-        return image_embd_layer2, lidar_embd_layer2
+        logger.info(f"gpt layer2")
+
+        # Convert from sharded to interleaved memory config first
+        image_embd_layer2 = ttnn.to_memory_config(image_embd_layer2, ttnn.DRAM_MEMORY_CONFIG)
+        image_embd_layer2 = ttnn.to_layout(image_embd_layer2, ttnn.TILE_LAYOUT)
+
+        lidar_embd_layer2 = ttnn.to_memory_config(lidar_embd_layer2, ttnn.DRAM_MEMORY_CONFIG)
+        lidar_embd_layer2 = ttnn.to_layout(lidar_embd_layer2, ttnn.TILE_LAYOUT)
+
+        print(f"{image_embd_layer2,lidar_embd_layer2=}")
+        image_features_layer2, lidar_features_layer2 = self.transformer2(
+            image_embd_layer2, lidar_embd_layer2, velocity, 216
+        )
+        image_features_layer2 = ttnn.permute(image_features_layer2, (0, 2, 3, 1))
+        lidar_features_layer2 = ttnn.permute(lidar_features_layer2, (0, 2, 3, 1))
+        print(f"{image_features_layer2.shape,lidar_features_layer2.shape=}")
+
+        return image_features_layer2, lidar_features_layer2

@@ -331,7 +331,7 @@ class TransfuserBackbone(nn.Module):
         image_features = image_features + image_features_layer1
         lidar_features = lidar_features + lidar_features_layer1
 
-        print(self.image_encoder.features.layer2)
+        # print(self.image_encoder.features.layer2)
         image_features = self.image_encoder.features.layer2(image_features)
         lidar_features = self.lidar_encoder._model.layer2(lidar_features)
         # return image_features, lidar_features
@@ -341,9 +341,9 @@ class TransfuserBackbone(nn.Module):
         image_embd_layer2 = self.avgpool_img(image_features)
         lidar_embd_layer2 = self.avgpool_lidar(lidar_features)
         print(f"{image_embd_layer2.shape,lidar_embd_layer2.shape=}")
-        return image_embd_layer2, lidar_embd_layer2
+        # return image_embd_layer2, lidar_embd_layer2
         image_features_layer2, lidar_features_layer2 = self.transformer2(image_embd_layer2, lidar_embd_layer2, velocity)
-
+        return image_features_layer2, lidar_features_layer2
         image_features_layer2 = F.interpolate(
             image_features_layer2,
             size=(image_features.shape[2], image_features.shape[3]),
