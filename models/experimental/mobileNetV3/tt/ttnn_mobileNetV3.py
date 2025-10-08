@@ -9,7 +9,6 @@ from models.experimental.mobileNetV3.tt.ttnn_invertedResidual import (
     Conv2dNormActivation,
 )
 from typing import List, Sequence
-import torch
 
 
 class ttnn_MobileNetV3:
@@ -93,10 +92,9 @@ class ttnn_MobileNetV3:
             output_size=[1, 1],
         )
 
-        padded_width = ((576 + 31) // 32) * 32
         x = ttnn.reshape(x, (x.shape[0], -1))
-        x = torch.nn.functional.pad(ttnn.to_torch(x), (0, padded_width - 576))
-        x = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
+        x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
+        x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
 
         self.parameters["classifier"][0].weight = ttnn.to_device(self.parameters["classifier"][0].weight, device=device)
         self.parameters["classifier"][3].weight = ttnn.to_device(self.parameters["classifier"][3].weight, device=device)

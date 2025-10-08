@@ -113,7 +113,7 @@ class MobileNetV3PerformanceRunnerInfra:
         tt_output = ttnn.reshape(tt_output, (1, -1))
         tt_output = ttnn.to_torch(tt_output)
 
-        self._PCC_THRESH = 0.6
+        self._PCC_THRESH = 0.98
         self.pcc_passed = self.pcc_message = []
 
         logger.info(f"MobileNet V3: batch_size={self.batch_size}, ")

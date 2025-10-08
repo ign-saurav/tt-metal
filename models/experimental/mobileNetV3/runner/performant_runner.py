@@ -104,7 +104,7 @@ class MobileNetV3PerformantRunner:
         return self.runner_infra.tt_output
 
     def _validate(self):
-        self._PCC_THRESH = 0.6
+        self._PCC_THRESH = 0.98
         checks = [
             ("MobileNetV3", ttnn.to_torch(self.tt_output), self.runner_infra.torch_output),
         ]
