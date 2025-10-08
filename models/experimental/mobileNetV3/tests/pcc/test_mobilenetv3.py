@@ -76,12 +76,14 @@ class MobilenetV3TestInfra:
         logger.info("Validating TTNN output against PyTorch...")
         tt_output_tensor_torch = ttnn.to_torch(self.output_tensor)
 
-        if self.use_randn_input:
+        if not self.use_randn_input:
             # Postprocess
             probs = torch.nn.functional.softmax(tt_output_tensor_torch, dim=1)[0]
             top1_id = torch.argmax(probs).item()
             label = MobileNet_V3_Small_Weights.IMAGENET1K_V1.meta["categories"][top1_id]
             confidence = probs[top1_id].item()
+
+            logger.info(f"prediction : {label} : {confidence:.2%}")
 
             # Draw label on image
             draw = ImageDraw.Draw(self.img)

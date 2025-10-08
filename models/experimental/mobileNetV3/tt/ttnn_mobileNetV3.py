@@ -10,7 +10,6 @@ from models.experimental.mobileNetV3.tt.ttnn_invertedResidual import (
 )
 from typing import List, Sequence
 import torch
-import torch.nn as nn
 
 
 class ttnn_MobileNetV3:
@@ -23,7 +22,6 @@ class ttnn_MobileNetV3:
         parameters=None,
     ) -> None:
         super().__init__()
-        # _log_api_usage_once(self)
 
         if not inverted_residual_setting:
             raise ValueError("The inverted_residual_setting should not be empty")
@@ -73,8 +71,7 @@ class ttnn_MobileNetV3:
         )
 
         self.features = layers
-        # self.avgpool = ttnn.global_avg_pool2d
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+
         self.classifier = [
             ttnn.linear,
             ttnn.hardswish,
@@ -86,18 +83,20 @@ class ttnn_MobileNetV3:
         for i, layer in enumerate(self.features):
             x = layer(device, x)
 
-        # x = self.avgpool(x)
-        # x = ttnn.reshape(x, (x.shape[0], -1))
-        # x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
-
-        x = self.avgpool(torch.permute(ttnn.to_torch(x), (0, 3, 1, 2)))
-        x = torch.flatten(x, 1)
-        x = ttnn.from_torch(
-            x.reshape(1, 576),
-            dtype=ttnn.bfloat16,
-            device=device,
-            layout=ttnn.TILE_LAYOUT,
+        x = ttnn.reshape(x, (1, 1, x.shape[0] * x.shape[1] * x.shape[2], -1))
+        x = ttnn.adaptive_avg_pool2d(
+            input_tensor=x,
+            batch_size=x.shape[0],
+            input_h=x.shape[1],
+            input_w=x.shape[2],
+            channels=x.shape[-1],
+            output_size=[1, 1],
         )
+
+        padded_width = ((576 + 31) // 32) * 32
+        x = ttnn.reshape(x, (x.shape[0], -1))
+        x = torch.nn.functional.pad(ttnn.to_torch(x), (0, padded_width - 576))
+        x = ttnn.from_torch(x, device=device, layout=ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         self.parameters["classifier"][0].weight = ttnn.to_device(self.parameters["classifier"][0].weight, device=device)
         self.parameters["classifier"][3].weight = ttnn.to_device(self.parameters["classifier"][3].weight, device=device)
