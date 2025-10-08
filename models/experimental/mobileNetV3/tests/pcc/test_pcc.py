@@ -142,6 +142,13 @@ def test_invertedResidual(
             print(x_tt.shape)
             print("::::::::::::::::::::::::::::")
 
+            import pickle
+
+            with open("linear_1_input_tensor_tt_pcc.pkl", "wb") as f:
+                pickle.dump(ttnn.to_torch(x_tt), f)
+            with open("linear_1_input_tensor_torch_pcc.pkl", "wb") as f:
+                pickle.dump(x_torch, f)
+
             x_torch = torch_model[-5](x_torch)
             x_torch = torch.flatten(x_torch, 1)
 
@@ -187,13 +194,6 @@ def test_invertedResidual(
                 "bias_tt_pcc.txt",
                 ttnn.to_torch(parameters["classifier"][0].bias).flatten().to(torch.float32).detach().numpy(),
             )
-
-            import pickle
-
-            with open("linear_1_input_tensor_tt_pcc.pkl", "wb") as f:
-                pickle.dump(ttnn.to_torch(x_tt), f)
-            with open("linear_1_input_tensor_torch_pcc.pkl", "wb") as f:
-                pickle.dump(x_torch, f)
 
             # x_torch = torch_model[-4](x_torch)
             x_torch = mobilenet.classifier[0](x_torch)

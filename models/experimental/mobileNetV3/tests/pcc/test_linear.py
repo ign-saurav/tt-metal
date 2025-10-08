@@ -27,8 +27,8 @@ def test_mobilenetv3_linear_layer(
 ):
     """Test linear layer with different bias shapes to debug MobileNetV3 PCC issue."""
     mobilenet = models.mobilenet_v3_small(weights=MobileNet_V3_Small_Weights.IMAGENET1K_V1)
+    torch_average_pool = mobilenet.avgpool
     torch_linear = mobilenet.classifier[0]
-    # torch_input = torch.randn(batch_size, input_features, dtype=torch.bfloat16).float()
 
     with open("linear_1_input_tensor_torch_pcc.pkl", "rb") as f:
         torch_input = pickle.load(f)
@@ -36,14 +36,15 @@ def test_mobilenetv3_linear_layer(
     with open("linear_1_input_tensor_tt_pcc.pkl", "rb") as f:
         ttnn_input = pickle.load(f)
         ttnn_input = ttnn.from_torch(
-            ttnn_input.reshape(1, input_features),
+            ttnn_input,
             dtype=ttnn.bfloat16,
             device=device,
             layout=ttnn.TILE_LAYOUT,
         )
 
     # PyTorch forward pass
-    torch_output = torch_linear(torch_input)
+    torch_output = torch_average_pool(torch_input)
+    torch_output = torch_linear(torch_output)
 
     # Preprocess weights using standard TTNN preprocessing
     from ttnn.model_preprocessing import preprocess_linear_weight, preprocess_linear_bias
@@ -66,8 +67,10 @@ def test_mobilenetv3_linear_layer(
     np.savetxt("bias_tt_unit.txt", ttnn.to_torch(ttnn_bias).flatten().to(torch.float32).detach().numpy())
 
     # TTNN forward pass
+    ttnn_output = ttnn.global_avg_pool2d(ttnn_input)
+    ttnn_output = ttnn.reshape(ttnn_output, (ttnn_output.shape[0], -1))
     ttnn_output = ttnn.linear(
-        ttnn_input,
+        ttnn_output,
         ttnn_weight,
         bias=ttnn_bias,
     )
