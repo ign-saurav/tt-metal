@@ -171,6 +171,7 @@ class TransfuserBackboneInfra:
 
         # Reshape + permute image output back to NCHW
         expected_image_shape = self.torch_image_output.shape
+        print(f"{tt_image_tensor_torch.shape,tt_lidar_tensor_torch.shape, expected_image_shape=}")
         tt_image_tensor_torch = torch.reshape(
             tt_image_tensor_torch,
             (expected_image_shape[0], expected_image_shape[2], expected_image_shape[3], expected_image_shape[1]),
