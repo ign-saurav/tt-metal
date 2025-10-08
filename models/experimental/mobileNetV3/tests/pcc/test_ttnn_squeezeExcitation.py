@@ -23,7 +23,7 @@ def test_squeezeExcitation(device, reset_seeds):
     torch_model = mobilenet.features[1].block[1]
 
     parameters = preprocess_model_parameters(
-        initialize_model=lambda: torch_model, custom_preprocessor=create_custom_preprocessor(device), device=None
+        initialize_model=lambda: torch_model, custom_preprocessor=create_custom_preprocessor(None), device=None
     )
     torch_output_tensor = torch_model(torch_input_tensor)
 
