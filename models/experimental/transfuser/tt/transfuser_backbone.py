@@ -81,6 +81,7 @@ class TtTransfuserBackbone:
             stride=2,
             groups=3,  # conv2
             model_config=model_config,
+            stage_name="layer2",
         )
         self.lidar_layer2 = self._make_layer(
             parameters=parameters.lidar_encoder._model.layer2,
@@ -89,6 +90,7 @@ class TtTransfuserBackbone:
             stride=2,
             groups=3,
             model_config=model_config,
+            stage_name="layer2",
         )
 
         self.transformer1 = TTGpt(
