@@ -312,9 +312,8 @@ class TransfuserBackbone(nn.Module):
         print("...................................................")
         print(f"{image_features.shape[2], image_features.shape[3]=}")
         print(f"{lidar_features.shape[2], lidar_features.shape[3]=}")
-
-        return image_features_layer1, lidar_features_layer1
-
+        print("before interpolate")
+        print(f"{image_features_layer1.shape=}")
         image_features_layer1 = F.interpolate(
             image_features_layer1,
             size=(image_features.shape[2], image_features.shape[3]),
@@ -328,6 +327,7 @@ class TransfuserBackbone(nn.Module):
             mode="bilinear",
             align_corners=False,
         )
+        # return image_features_layer1, lidar_features_layer1
         image_features = image_features + image_features_layer1
         lidar_features = lidar_features + lidar_features_layer1
 

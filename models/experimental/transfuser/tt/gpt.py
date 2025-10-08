@@ -94,23 +94,12 @@ class TTGpt(LightweightModule):
         lidar_horz_anchors,
         seq_len,
         n_embd,
+        dropout_prob=0.0,
         dtype=ttnn.bfloat16,
         memory_config=ttnn.L1_MEMORY_CONFIG,
     ):
-        print(f"[TTGpt.__init__] DEBUG: device = {device}")
-        print(f"[TTGpt.__init__] DEBUG: parameters keys = {list(parameters.keys()) if parameters else 'None'}")
-        print(f"[TTGpt.__init__] DEBUG: n_head = {n_head}")
-        print(f"[TTGpt.__init__] DEBUG: n_layer = {n_layer}")
-        print(f"[TTGpt.__init__] DEBUG: use_velocity = {use_velocity}")
-        print(f"[TTGpt.__init__] DEBUG: img_vert_anchors = {img_vert_anchors}")
-        print(f"[TTGpt.__init__] DEBUG: img_horz_anchors = {img_horz_anchors}")
-        print(f"[TTGpt.__init__] DEBUG: lidar_vert_anchors = {lidar_vert_anchors}")
-        print(f"[TTGpt.__init__] DEBUG: lidar_horz_anchors = {lidar_horz_anchors}")
-        print(f"[TTGpt.__init__] DEBUG: seq_len = {seq_len}")
-        print(f"[TTGpt.__init__] DEBUG: n_embd = {n_embd}")
-        print(f"[TTGpt.__init__] DEBUG: dtype = {dtype}")
-        print(f"[TTGpt.__init__] DEBUG: memory_config = {memory_config}")
-
+        self.dropout_prob = dropout_prob
+        self.dropout_seed = 42
         self.device = device
         self.parameters = parameters
         self.n_head = n_head
@@ -137,27 +126,6 @@ class TTGpt(LightweightModule):
         self.seq_len = seq_len
 
     def __call__(self, tt_image_input, tt_lidar_input, velocity, n_embed):
-        print(
-            f"[TTGpt.__call__] DEBUG: tt_image_input shape = {tt_image_input.shape if hasattr(tt_image_input, 'shape') else 'No shape attr'}"
-        )
-        print(
-            f"[TTGpt.__call__] DEBUG: tt_image_input dtype = {tt_image_input.dtype if hasattr(tt_image_input, 'dtype') else 'No dtype attr'}"
-        )
-        print(
-            f"[TTGpt.__call__] DEBUG: tt_lidar_input shape = {tt_lidar_input.shape if hasattr(tt_lidar_input, 'shape') else 'No shape attr'}"
-        )
-        print(
-            f"[TTGpt.__call__] DEBUG: tt_lidar_input dtype = {tt_lidar_input.dtype if hasattr(tt_lidar_input, 'dtype') else 'No dtype attr'}"
-        )
-        print(f"[TTGpt.__call__] DEBUG: velocity = {velocity}")
-        print(f"[TTGpt.__call__] DEBUG: velocity type = {type(velocity)}")
-        if hasattr(velocity, "shape"):
-            print(f"[TTGpt.__call__] DEBUG: velocity shape = {velocity.shape}")
-        if hasattr(velocity, "dtype"):
-            print(f"[TTGpt.__call__] DEBUG: velocity dtype = {velocity.dtype}")
-        print(f"[TTGpt.__call__] DEBUG: n_embed = {n_embed}")
-        print(f"[TTGpt.__call__] DEBUG: n_embed type = {type(n_embed)}")
-
         token_embeddings, bz, seq_len, img_h, img_w, lidar_h, lidar_w = generate_token_embeddings_tt(
             tt_image_input, tt_lidar_input, self.seq_len, n_embed
         )
@@ -187,6 +155,11 @@ class TTGpt(LightweightModule):
             x = ttnn.add(x, velocity_embeddings)
         else:
             x = ttnn.add(self.pos_emb, token_embeddings)
+
+        if self.dropout_prob > 0:
+            x = ttnn.experimental.dropout(
+                x, probability=self.dropout_prob, scale=1.0 / (1.0 - self.dropout_prob), seed=self.dropout_seed
+            )
 
         # Continue with transformer blocks
         for i in range(self.n_layer):

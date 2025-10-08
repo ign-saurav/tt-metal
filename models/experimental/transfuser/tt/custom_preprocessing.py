@@ -384,7 +384,7 @@ def custom_preprocessor(
                         # Query
                         parameters["transformer1"][f"blocks_{i}"]["attn"]["query"] = {}
                         parameters["transformer1"][f"blocks_{i}"]["attn"]["query"]["weight"] = ttnn.from_torch(
-                            attn.query.weight.T.contiguous(),
+                            attn.query.weight,
                             dtype=ttnn.bfloat16,
                             device=device,
                             layout=ttnn.TILE_LAYOUT,
@@ -401,7 +401,7 @@ def custom_preprocessor(
                         # Key
                         parameters["transformer1"][f"blocks_{i}"]["attn"]["key"] = {}
                         parameters["transformer1"][f"blocks_{i}"]["attn"]["key"]["weight"] = ttnn.from_torch(
-                            attn.key.weight.T.contiguous(),
+                            attn.key.weight,
                             dtype=ttnn.bfloat16,
                             device=device,
                             layout=ttnn.TILE_LAYOUT,
@@ -418,7 +418,7 @@ def custom_preprocessor(
                         # Value
                         parameters["transformer1"][f"blocks_{i}"]["attn"]["value"] = {}
                         parameters["transformer1"][f"blocks_{i}"]["attn"]["value"]["weight"] = ttnn.from_torch(
-                            attn.value.weight.T.contiguous(),
+                            attn.value.weight,
                             dtype=ttnn.bfloat16,
                             device=device,
                             layout=ttnn.TILE_LAYOUT,
@@ -435,7 +435,7 @@ def custom_preprocessor(
                         # Projection
                         parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"] = {}
                         parameters["transformer1"][f"blocks_{i}"]["attn"]["proj"]["weight"] = ttnn.from_torch(
-                            attn.proj.weight.T.contiguous(),
+                            attn.proj.weight,
                             dtype=ttnn.bfloat16,
                             device=device,
                             layout=ttnn.TILE_LAYOUT,
@@ -452,7 +452,7 @@ def custom_preprocessor(
                 # MLP
                 if hasattr(block, "mlp"):
                     parameters["transformer1"][f"blocks_{i}"]["mlp_0_weight"] = ttnn.from_torch(
-                        block.mlp[0].weight.T.contiguous(),
+                        block.mlp[0].weight,
                         dtype=ttnn.bfloat16,
                         device=device,
                         layout=ttnn.TILE_LAYOUT,
@@ -467,7 +467,8 @@ def custom_preprocessor(
                     )
 
                     parameters["transformer1"][f"blocks_{i}"]["mlp_2_weight"] = ttnn.from_torch(
-                        block.mlp[2].weight.T.contiguous(),
+                        block.mlp[2].weight,
+                        # block.mlp[2].weight.T.contiguous(),
                         dtype=ttnn.bfloat16,
                         device=device,
                         layout=ttnn.TILE_LAYOUT,

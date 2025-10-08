@@ -178,16 +178,7 @@ class TtTransfuserBackbone:
         for block in self.lidar_layer1:
             lidar_out = block(lidar_out, device)
 
-        image_h_orig = image_out.shape[1]
-        image_w_orig = image_out.shape[2]
-        lidar_h_orig = lidar_out.shape[1]
-        lidar_w_orig = lidar_out.shape[2]
-
         logger.info(f"img_avgpool")
-        img_vert_anchors = self.config.img_vert_anchors  # e.g., 5
-        img_horz_anchors = self.config.img_horz_anchors  # e.g., 22
-        lidar_vert_anchors = self.config.lidar_vert_anchors  # e.g., 8
-        lidar_horz_anchors = self.config.lidar_horz_anchors  # e.g., 8
 
         image_h = image_out.shape[1]
         image_w = image_out.shape[2]
@@ -228,22 +219,44 @@ class TtTransfuserBackbone:
         lidar_embd_layer1 = ttnn.to_memory_config(lidar_embd_layer1, ttnn.DRAM_MEMORY_CONFIG)
         lidar_embd_layer1 = ttnn.to_layout(lidar_embd_layer1, ttnn.TILE_LAYOUT)
 
-        print(image_embd_layer1)
-        print(lidar_embd_layer1)
         image_features_layer1, lidar_features_layer1 = self.transformer1(
             image_embd_layer1, lidar_embd_layer1, velocity, 72
         )
+        image_features_layer1 = ttnn.permute(image_features_layer1, (0, 2, 3, 1))
+        lidar_features_layer1 = ttnn.permute(lidar_features_layer1, (0, 2, 3, 1))
 
-        return image_features_layer1, lidar_features_layer1
         logger.info(f"bilinear_image")
         # Bilinear upsample back to original spatial dimensions
+        image_features_layer1 = ttnn.to_layout(image_features_layer1, ttnn.ROW_MAJOR_LAYOUT)
+        image_features_layer1 = ttnn.to_memory_config(image_features_layer1, ttnn.DRAM_MEMORY_CONFIG)
+        print(f"before bilinear{image_features_layer1.shape=}")
+        image_features_layer1 = ttnn.pad(
+            image_features_layer1, padding=((0, 0), (0, 0), (0, 0), (0, 24)), value=0.0  # Pad 24 channels (96 - 72)
+        )
+        print(f"before bilinear{image_features_layer1.shape=}")
         image_features_layer1 = ttnn.upsample(
-            image_features_layer1, scale_factor=(image_h_orig / img_h, image_w_orig / img_w), mode="bilinear"
+            image_features_layer1, scale_factor=(8, 8), mode="bilinear", memory_config=ttnn.DRAM_MEMORY_CONFIG
         )
+        # Slice back to original 72 channels
+        image_features_layer1 = ttnn.slice(image_features_layer1, [0, 0, 0, 0], [1, 40, 176, 72])
+        print(f"before lidar{image_features_layer1.shape=}")
+        image_features_layer1 = ttnn.to_layout(image_features_layer1, ttnn.TILE_LAYOUT)
+
         logger.info(f"bilinear_lidar")
+        print(f"before lidar{lidar_features_layer1.shape=}")
+        lidar_features_layer1 = ttnn.to_layout(lidar_features_layer1, ttnn.ROW_MAJOR_LAYOUT)
+        lidar_features_layer1 = ttnn.to_memory_config(lidar_features_layer1, ttnn.DRAM_MEMORY_CONFIG)
+        print(f"before bilinear{lidar_features_layer1.shape=}")
+        lidar_features_layer1 = ttnn.pad(lidar_features_layer1, padding=((0, 0), (0, 0), (0, 0), (0, 24)), value=0.0)
+        print(f"before bilinear{lidar_features_layer1.shape=}")
         lidar_features_layer1 = ttnn.upsample(
-            lidar_features_layer1, scale_factor=(lidar_h_orig / lidar_h, lidar_w_orig / lidar_w), mode="bilinear"
+            lidar_features_layer1, scale_factor=(8, 8), mode="bilinear", memory_config=ttnn.DRAM_MEMORY_CONFIG
         )
+        print(f"after bilinear{lidar_features_layer1.shape=}")
+        # Slice back to original 72 channels
+        lidar_features_layer1 = ttnn.slice(lidar_features_layer1, [0, 0, 0, 0], [1, 64, 64, 72])
+        lidar_features_layer1 = ttnn.to_layout(lidar_features_layer1, ttnn.TILE_LAYOUT)
+        print(f"after bilinear{lidar_features_layer1.shape=}")
         logger.info(f"image add")
         # Residual connection
         image_features = ttnn.add(image_out, image_features_layer1)
