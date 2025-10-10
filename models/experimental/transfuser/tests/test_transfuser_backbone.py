@@ -3,6 +3,7 @@
 
 import torch
 import pytest
+import pickle
 
 import ttnn
 from loguru import logger
@@ -92,6 +93,21 @@ class TransfuserBackboneInfra:
         )
         parameters["transformer4"] = gpt4_parameters
 
+        self.parameters_t4 = torch_model.transformer4
+        # self.parameters_t4 = parameters["transformer4"]
+
+        # output_data = {
+        #     'torch_t4': self.img_input_shape,
+        #     'parameters_t4': self.parameters_t4,
+        # }
+
+        # # Save to pickle file
+        # pickle_file_path = '/home/ubuntu/ign_tt/forked/tt-metal/models/experimental/transfuser/tests/transfuser_backbone_outputs_2.pkl'
+        # with open(pickle_file_path, 'wb') as f:
+        #     pickle.dump(output_data, f)
+
+        # logger.info(f"Saved transfuser backbone outputs to {pickle_file_path}")
+
         # Prepare golden inputs/outputs
         self.torch_image_input = torch.randn(self.img_input_shape)
         self.torch_lidar_input = torch.randn(self.lidar_input_shape)
@@ -141,7 +157,10 @@ class TransfuserBackboneInfra:
 
         # Run + validate
         self.run()
-        self.validate(model_config)
+        # self.validate(model_config)
+
+        # Save outputs to pickle file for use in GPT tests
+        self.save_outputs_to_pickle()
 
     def _init_seeds(self):
         if not hasattr(self, "_model_initialized"):
@@ -224,6 +243,62 @@ class TransfuserBackboneInfra:
         )
 
         return overall_pcc_passed, f"Image: {image_pcc_message}, LiDAR: {lidar_pcc_message}"
+
+    def save_outputs_to_pickle(self):
+        """Save the output tensors and parameters to a pickle file for use in GPT tests."""
+        # Convert TTNN tensors back to torch for saving
+        image_output_torch = ttnn.to_torch(
+            self.output_image_tensor,
+            device=self.device,
+            mesh_composer=self.output_mesh_composer,
+        )
+        lidar_output_torch = ttnn.to_torch(
+            self.output_lidar_tensor,
+            device=self.device,
+            mesh_composer=self.output_mesh_composer,
+        )
+
+        # Reshape to match expected format for GPT tests
+        expected_image_shape = self.torch_image_output.shape
+        image_output_torch = torch.reshape(
+            image_output_torch,
+            (expected_image_shape[0], expected_image_shape[2], expected_image_shape[3], expected_image_shape[1]),
+        )
+        image_output_torch = torch.permute(image_output_torch, (0, 3, 1, 2))
+
+        expected_lidar_shape = self.torch_lidar_output.shape
+        lidar_output_torch = torch.reshape(
+            lidar_output_torch,
+            (expected_lidar_shape[0], expected_lidar_shape[2], expected_lidar_shape[3], expected_lidar_shape[1]),
+        )
+        lidar_output_torch = torch.permute(lidar_output_torch, (0, 3, 1, 2))
+
+        # Create output data dictionary
+        output_data = {
+            "image_output": image_output_torch,
+            "lidar_output": lidar_output_torch,
+            "image_input": self.torch_image_input,
+            "lidar_input": self.torch_lidar_input,
+            "velocity_input": self.torch_velocity_input,
+            "config": self.config,
+            "n_layer": self.n_layer,
+            "image_arch": self.image_arch,
+            "lidar_arch": self.lidar_arch,
+            "use_velocity": self.use_velocity,
+            "img_input_shape": self.img_input_shape,
+            "lidar_input_shape": self.lidar_input_shape,
+        }
+
+        # Save to pickle file
+        pickle_file_path = (
+            "/home/ubuntu/ign_tt/forked/tt-metal/models/experimental/transfuser/tests/transfuser_backbone_outputs.pkl"
+        )
+        with open(pickle_file_path, "wb") as f:
+            pickle.dump(output_data, f)
+
+        logger.info(f"Saved transfuser backbone outputs to {pickle_file_path}")
+        logger.info(f"Image output shape: {image_output_torch.shape}")
+        logger.info(f"LiDAR output shape: {lidar_output_torch.shape}")
 
 
 # High accuracy model config

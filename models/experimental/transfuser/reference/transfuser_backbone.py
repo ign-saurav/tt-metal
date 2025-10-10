@@ -220,6 +220,21 @@ class TransfuserBackbone(nn.Module):
             use_velocity=use_velocity,
         )
 
+        print("GPT args: Reference")
+        print("n_embd:", self.image_encoder.features.feature_info[4]["num_chs"])
+        print("n_head:", config.n_head)
+        print("block_exp:", config.block_exp)
+        print("n_layer:", config.n_layer)
+        print("img_vert_anchors:", config.img_vert_anchors)
+        print("img_horz_anchors:", config.img_horz_anchors)
+        print("lidar_vert_anchors:", config.lidar_vert_anchors)
+        print("lidar_horz_anchors:", config.lidar_horz_anchors)
+        print("seq_len:", config.seq_len)
+        print("embd_pdrop:", config.embd_pdrop)
+        print("attn_pdrop:", config.attn_pdrop)
+        print("resid_pdrop:", config.resid_pdrop)
+        print("use_velocity:", use_velocity)
+
         self.transformer4 = GPT(
             n_embd=self.image_encoder.features.feature_info[4]["num_chs"],
             n_head=config.n_head,

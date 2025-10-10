@@ -3,13 +3,12 @@
 
 import torch
 import pytest
-
+import pickle
+import os
 import ttnn
 
 from loguru import logger
 
-from models.experimental.transfuser.reference.config import GlobalConfig
-from models.experimental.transfuser.reference.gpt import GPT
 from models.experimental.transfuser.tt.gpt import TTGpt
 
 from models.experimental.transfuser.tests.test_gpt_block import create_gpt_block_preprocessor
@@ -19,6 +18,26 @@ from models.utility_functions import (
     tt2torch_tensor,
 )
 from tests.ttnn.utils_for_testing import check_with_pcc
+
+
+def load_transfuser_backbone_outputs():
+    """Load the saved transfuser backbone outputs from pickle file."""
+    pickle_file_path = (
+        "/home/ubuntu/ign_tt/forked/tt-metal/models/experimental/transfuser/tests/transfuser_backbone_outputs.pkl"
+    )
+
+    if not os.path.exists(pickle_file_path):
+        logger.warning(f"Pickle file not found at {pickle_file_path}. Using random inputs instead.")
+        return None
+
+    with open(pickle_file_path, "rb") as f:
+        data = pickle.load(f)
+
+    logger.info(f"Loaded transfuser backbone outputs from {pickle_file_path}")
+    logger.info(f"Image output shape: {data['image_output'].shape}")
+    logger.info(f"LiDAR output shape: {data['lidar_output'].shape}")
+
+    return data
 
 
 def generate_token_embeddings(image_tensor, lidar_tensor, seq_len, n_embd):
@@ -194,62 +213,49 @@ def create_gpt_preprocessor(device, n_layer, weight_dtype=ttnn.bfloat16):
     return custom_preprocessor
 
 
-@pytest.mark.parametrize(
-    "n_embed, n_head, block_exp, n_layer, img_vert_anchors, img_horz_anchors, lidar_vert_anchors, lidar_horz_anchors, seq_len, embd_pdrop, attn_pdrop, resid_pdrop, use_velocity, img_input_shape, lidar_input_shape",
-    # ((72, 4, 4, 4, 5, 22, 8, 8, 1, 0.1, 0.1, 0.1, False, (1, 72, 5, 22), (1, 72, 8, 8)),),  # GPT-SelfAttention 1
-    ((216, 4, 4, 4, 5, 22, 8, 8, 1, 0.1, 0.1, 0.1, False, (1, 216, 5, 22), (1, 216, 8, 8)),),  # GPT-SelfAttention 1
-)
+# @pytest.mark.parametrize(
+#     "n_embed, n_head, block_exp, n_layer, img_vert_anchors, img_horz_anchors, lidar_vert_anchors, lidar_horz_anchors, seq_len, embd_pdrop, attn_pdrop, resid_pdrop, use_velocity, img_input_shape, lidar_input_shape",
+#     ((1512, 4, 4, 4, 5, 22, 8, 8, 1, 0.1, 0.1, 0.1, False, (1, 1512, 5, 22), (1, 1512, 8, 8)),),  # GPT-SelfAttention 1
+# )
 @pytest.mark.parametrize("input_dtype", [ttnn.bfloat16])
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
 def test_gpt(
     device,
-    n_embed,
-    n_head,
-    block_exp,
-    n_layer,
-    img_vert_anchors,
-    img_horz_anchors,
-    lidar_vert_anchors,
-    lidar_horz_anchors,
-    seq_len,
-    embd_pdrop,
-    attn_pdrop,
-    resid_pdrop,
-    use_velocity,
-    img_input_shape,
-    lidar_input_shape,
+    # n_embed,
+    # n_head,
+    # block_exp,
+    # n_layer,
+    # img_vert_anchors,
+    # img_horz_anchors,
+    # lidar_vert_anchors,
+    # lidar_horz_anchors,
+    # seq_len,
+    # embd_pdrop,
+    # attn_pdrop,
+    # resid_pdrop,
+    # use_velocity,
+    # img_input_shape,
+    # lidar_input_shape,
     input_dtype,
     weight_dtype,
 ):
-    image_input = torch.randn(img_input_shape)
-    lidar_input = torch.randn(lidar_input_shape)
-    velocity_input = torch.randn(1, 1)
+    saved_data = load_transfuser_backbone_outputs()
+    # import pdb; pdb.set_trace()
+    image_input = saved_data["image_output"]
+    lidar_input = saved_data["lidar_output"]
+    velocity_input = saved_data["velocity_input"]
 
     # setting machine to avoid loading files
-    config = GlobalConfig(setting="eval")
+    # config = GlobalConfig(setting="eval")
+    config = saved_data["config"]
 
-    ref_layer = GPT(
-        n_embd=n_embed,
-        n_head=n_head,
-        block_exp=block_exp,
-        n_layer=n_layer,
-        img_vert_anchors=img_vert_anchors,
-        img_horz_anchors=img_horz_anchors,
-        lidar_vert_anchors=lidar_vert_anchors,
-        lidar_horz_anchors=lidar_horz_anchors,
-        seq_len=seq_len,
-        embd_pdrop=embd_pdrop,
-        attn_pdrop=attn_pdrop,
-        resid_pdrop=resid_pdrop,
-        config=config,
-        use_velocity=use_velocity,
-    ).eval()
+    ref_layer = saved_data["parameters"]
 
     ref_image_output, ref_lidar_output = ref_layer(image_input, lidar_input, velocity_input)
 
     parameters = preprocess_model_parameters(
         initialize_model=lambda: ref_layer,
-        custom_preprocessor=create_gpt_preprocessor(device, n_layer, weight_dtype),
+        custom_preprocessor=create_gpt_preprocessor(device, config.n_layer, weight_dtype),
         device=device,
     )
 
@@ -261,22 +267,24 @@ def test_gpt(
         packer_l1_acc=True,
     )
 
+    n_embed = 1512
     tt_layer = TTGpt(
         device,
         parameters,
-        n_head,
-        n_layer,
-        use_velocity=use_velocity,
-        img_vert_anchors=img_vert_anchors,
-        img_horz_anchors=img_horz_anchors,
-        lidar_vert_anchors=lidar_vert_anchors,
-        lidar_horz_anchors=lidar_horz_anchors,
-        seq_len=seq_len,
+        config.n_head,
+        config.n_layer,
+        use_velocity=config.use_velocity,
+        img_vert_anchors=config.img_vert_anchors,
+        img_horz_anchors=config.img_horz_anchors,
+        lidar_vert_anchors=config.lidar_vert_anchors,
+        lidar_horz_anchors=config.lidar_horz_anchors,
+        seq_len=config.seq_len,
         n_embd=n_embed,
         dtype=weight_dtype,
         memory_config=ttnn.L1_MEMORY_CONFIG,
         compute_kernel_config=compute_kernel_config,
     )
+    img_input_shape, lidar_input_shape = image_input.shape, lidar_input.shape
 
     img_h, img_w = img_input_shape[2], img_input_shape[3]
     image_input_tokens = image_input.permute(0, 2, 3, 1).reshape(1, 1, img_h * img_w, n_embed)
