@@ -20,18 +20,60 @@ class TTMlp(LightweightModule):
         self.memory_config = memory_config
         self.parameters = parameters
         self.compute_kernel_config = compute_kernel_config
+        # Add program configs
+        self.mlp_fc_program_config = ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(
+            compute_with_storage_grid_size=(6, 6),
+            in0_block_w=2,  # K=96/32=3 tiles, use 2
+            out_subblock_h=1,
+            out_subblock_w=2,
+            per_core_M=1,  # 192/32/6 = 1
+            per_core_N=2,  # 288/32/6 = 1.5 -> 2
+            transpose_mcast=False,
+            fused_activation=None,
+        )
+
+        self.mlp_proj_program_config = ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(
+            compute_with_storage_grid_size=(6, 6),
+            in0_block_w=2,  # K=288/32=9 tiles, use 2
+            out_subblock_h=1,
+            out_subblock_w=2,
+            per_core_M=1,  # 192/32/6 = 1
+            per_core_N=1,  # 96/32/6 = 0.5 -> 1
+            transpose_mcast=False,
+            fused_activation=None,
+        )
 
     def forward(self, x):
         if x.memory_config().buffer_type != ttnn.BufferType.L1:
             x = ttnn.to_memory_config(x, ttnn.L1_MEMORY_CONFIG)
 
+        # x = ttnn.linear(
+        #    x,
+        #    self.parameters["mlp_0_weight"],
+        #    bias=self.parameters["mlp_0_bias"],
+        #    compute_kernel_config=self.compute_kernel_config,
+        #    memory_config=self.memory_config,
+        #    core_grid=ttnn.CoreGrid(y=8, x=8),
+        #    activation="relu",
+        #    dtype=self.dtype,
+        # )
+
+        # x = ttnn.linear(
+        #    x,
+        #    self.parameters["mlp_2_weight"],
+        #    bias=self.parameters["mlp_2_bias"],
+        #    compute_kernel_config=self.compute_kernel_config,
+        #    memory_config=self.memory_config,
+        #    core_grid=ttnn.CoreGrid(y=8, x=8),
+        #    dtype=self.dtype,
+        # )
         x = ttnn.linear(
             x,
             self.parameters["mlp_0_weight"],
             bias=self.parameters["mlp_0_bias"],
+            program_config=self.mlp_fc_program_config,  # ADD THIS
             compute_kernel_config=self.compute_kernel_config,
-            memory_config=self.memory_config,
-            core_grid=ttnn.CoreGrid(y=8, x=8),
+            memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,  # CHANGE THIS
             activation="relu",
             dtype=self.dtype,
         )
@@ -40,12 +82,11 @@ class TTMlp(LightweightModule):
             x,
             self.parameters["mlp_2_weight"],
             bias=self.parameters["mlp_2_bias"],
+            program_config=self.mlp_proj_program_config,  # ADD THIS
             compute_kernel_config=self.compute_kernel_config,
-            memory_config=self.memory_config,
-            core_grid=ttnn.CoreGrid(y=8, x=8),
+            memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,  # CHANGE THIS
             dtype=self.dtype,
         )
-
         return x
 
 

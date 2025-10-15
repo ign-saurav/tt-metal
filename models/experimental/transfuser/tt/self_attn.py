@@ -23,6 +23,28 @@ class TTSelfAttention(LightweightModule):
         self.dtype = dtype
         self.memory_config = memory_config
         self.compute_kernel_config = compute_kernel_config
+        # Add program configs
+        self.qkv_program_config = ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(
+            compute_with_storage_grid_size=(6, 6),
+            in0_block_w=2,  # K=96/32=3 tiles, use 2
+            out_subblock_h=1,
+            out_subblock_w=2,
+            per_core_M=1,  # 192/32/6 = 1
+            per_core_N=2,  # 384/32/6 = 2
+            transpose_mcast=False,
+            fused_activation=None,
+        )
+
+        self.proj_program_config = ttnn.MatmulMultiCoreReuseMultiCastProgramConfig(
+            compute_with_storage_grid_size=(3, 3),
+            in0_block_w=2,
+            out_subblock_h=1,
+            out_subblock_w=2,
+            per_core_M=1,  # 192/32/3 = 2
+            per_core_N=1,  # 96/32/3 = 1
+            transpose_mcast=False,
+            fused_activation=None,
+        )
 
     def forward(self, x):
         B, T, C = x.shape
@@ -31,15 +53,25 @@ class TTSelfAttention(LightweightModule):
         x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
 
         # Fused QKV projection
+        # query_key_value = ttnn.linear(
+        #    x,
+        #    self.parameters["query_key_value"]["weight"],
+        #    bias=self.parameters["query_key_value"]["bias"],
+        #    memory_config=self.memory_config,
+        #    dtype=self.dtype,
+        #    core_grid=ttnn.CoreGrid(y=B, x=8),
+        # )
+
+        # Fused QKV projection
         query_key_value = ttnn.linear(
             x,
             self.parameters["query_key_value"]["weight"],
             bias=self.parameters["query_key_value"]["bias"],
-            memory_config=self.memory_config,
+            program_config=self.qkv_program_config,  # ADD THIS
+            compute_kernel_config=self.compute_kernel_config,
+            memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,  # CHANGE THIS
             dtype=self.dtype,
-            core_grid=ttnn.CoreGrid(y=B, x=8),
         )
-
         # Split QKV and split heads
         query, key, value = ttnn.transformer.split_query_key_value_and_split_heads(
             query_key_value, memory_config=ttnn.DRAM_MEMORY_CONFIG, num_heads=self.n_head, transpose_key=False

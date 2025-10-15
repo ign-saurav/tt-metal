@@ -177,6 +177,7 @@ class TTGpt(LightweightModule):
             x = self.tt_blocks[i](x)
 
         x = ttnn.layer_norm(x, weight=self.parameters["ln_f_weight"], bias=self.parameters["ln_f_bias"])
+
         tt_image_output, tt_lidar_output = post_process_output_tt(
             x,
             bz,

@@ -302,9 +302,10 @@ def test_gpt(
     tt_velocity_input = ttnn.from_torch(
         velocity_input, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype, memory_config=ttnn.L1_MEMORY_CONFIG
     )
-
+    # Capture trace
+    tid = ttnn.begin_trace_capture(device, cq_id=0)
     tt_image_output, tt_lidar_output = tt_layer(tt_image_input, tt_lidar_input, tt_velocity_input, n_embed)
-
+    ttnn.end_trace_capture(device, tid, cq_id=0)
     tt_image_output = tt2torch_tensor(tt_image_output)
     tt_lidar_output = tt2torch_tensor(tt_lidar_output)
     does_pass, image_out_pcc_message = check_with_pcc(ref_image_output, tt_image_output, 0.95)
