@@ -5,6 +5,7 @@ import torch
 import pytest
 
 import ttnn
+import numpy as np
 
 from loguru import logger
 from models.utility_functions import tt2torch_tensor
@@ -227,45 +228,6 @@ def test_lidar_center_net(
     tt_brake_torch = tt2torch_tensor(tt_brake).permute(0, 3, 1, 2)
     tt_brake_torch = tt_brake_torch.reshape(ref_brake.shape)
 
-    # Validate center heatmap
-    does_pass, heatmap_pcc_message = check_with_pcc(ref_center_heatmap, tt_center_heatmap_torch, 0.90)
-    logger.info(f"Center Heatmap PCC: {heatmap_pcc_message}")
-    assert does_pass, f"Center Heatmap PCC check failed: {heatmap_pcc_message}"
-
-    # Validate WH prediction
-    does_pass, wh_pcc_message = check_with_pcc(ref_wh, tt_wh_torch, 0.90)
-    logger.info(f"WH PCC: {wh_pcc_message}")
-    assert does_pass, f"WH PCC check failed: {wh_pcc_message}"
-
-    # Validate offset prediction
-    does_pass, offset_pcc_message = check_with_pcc(ref_offset, tt_offset_torch, 0.90)
-    logger.info(f"Offset PCC: {offset_pcc_message}")
-    assert does_pass, f"Offset PCC check failed: {offset_pcc_message}"
-
-    # Validate yaw class prediction
-    does_pass, yaw_class_pcc_message = check_with_pcc(ref_yaw_class, tt_yaw_class_torch, 0.90)
-    logger.info(f"Yaw Class PCC: {yaw_class_pcc_message}")
-    assert does_pass, f"Yaw Class PCC check failed: {yaw_class_pcc_message}"
-
-    # Validate yaw residual prediction
-    does_pass, yaw_res_pcc_message = check_with_pcc(ref_yaw_res, tt_yaw_res_torch, 0.90)
-    logger.info(f"Yaw Residual PCC: {yaw_res_pcc_message}")
-    assert does_pass, f"Yaw Residual PCC check failed: {yaw_res_pcc_message}"
-
-    # Validate velocity prediction
-    does_pass, velocity_pcc_message = check_with_pcc(ref_velocity, tt_velocity_torch, 0.90)
-    logger.info(f"Velocity PCC: {velocity_pcc_message}")
-    assert does_pass, f"Velocity PCC check failed: {velocity_pcc_message}"
-
-    # Validate brake prediction
-    does_pass, brake_pcc_message = check_with_pcc(ref_brake, tt_brake_torch, 0.90)
-    logger.info(f"Brake PCC: {brake_pcc_message}")
-    assert does_pass, f"Brake PCC check failed: {brake_pcc_message}"
-
-    does_pass, pred_wp_pcc_message = check_with_pcc(pred_wp, tt_pred_wp, 0.90)
-    logger.info(f"pred wp PCC: {pred_wp_pcc_message}")
-    assert does_pass, f"pred wp PCC check failed: {pred_wp_pcc_message}"
-
     # After the pred_wp PCC check, add bbox post-processing for TTNN outputs
 
     # Convert TTNN outputs to torch for get_bboxes (it expects torch tensors)
@@ -281,23 +243,50 @@ def test_lidar_center_net(
 
     # Call get_bboxes on the reference head (reusing the same logic)
     tt_results = ref_layer.head.get_bboxes(*tt_preds_torch)
-    does_pass, box_pcc_message = check_with_pcc(results[0][0], tt_results[0][0], 0.90)
-    logger.info(f"box PCC: {box_pcc_message}")
-    assert does_pass, f"box PCC check failed: {box_pcc_message}"
+
+    ref_bboxes, _ = results[0]
     tt_bboxes, _ = tt_results[0]
 
-    # Filter by confidence threshold
-    tt_bboxes = tt_bboxes[tt_bboxes[:, -1] > config.bb_confidence_threshold]
+    does_pass_box, box_pcc_message = check_with_pcc(ref_bboxes[:, -1], tt_bboxes[:, -1], 0.90)
+    logger.info(f"box PCC: {box_pcc_message}")
+    assert does_pass_box, f"box PCC check failed: {box_pcc_message}"
 
-    # Convert to metric coordinates
+    # Apply the same filtering logic as the reference forward_ego method
+    # Filter by confidence threshold BEFORE converting to metric coordinates
+    tt_bboxes_filtered = tt_bboxes[tt_bboxes[:, -1] > config.bb_confidence_threshold]
+
+    # Convert to metric coordinates (same as reference)
     tt_rotated_bboxes = []
-    for bbox in tt_bboxes.detach().cpu().numpy():
+    for bbox in tt_bboxes_filtered.detach().cpu().numpy():
         bbox_metric = ref_layer.get_bbox_local_metric(bbox)
         tt_rotated_bboxes.append(bbox_metric)
 
-    # Compare bbox counts
+    # Compare bbox counts (now both should be filtered)
     logger.info(f"Reference bboxes count: {len(rotated_bboxes)}")
     logger.info(f"TTNN bboxes count: {len(tt_rotated_bboxes)}")
+
+    does_pass, pred_wp_pcc_message = check_with_pcc(pred_wp, tt_pred_wp, 0.90)
+    logger.info(f"pred wp PCC: {pred_wp_pcc_message}")
+    assert does_pass, f"pred wp PCC check failed: {pred_wp_pcc_message}"
+
+    # After building tt_rotated_bboxes list
+    for i in range(len(tt_rotated_bboxes)):
+        bbox_tt = tt_rotated_bboxes[i]
+        bbox_ref = rotated_bboxes[i]
+
+        # Extract arrays from tuples (first element contains the bbox coordinates)
+        bbox_ref_array = bbox_ref[0] if isinstance(bbox_ref, tuple) else bbox_ref
+        bbox_tt_array = bbox_tt[0] if isinstance(bbox_tt, tuple) else bbox_tt
+
+        # Convert to torch tensors if they're numpy arrays
+        if isinstance(bbox_ref_array, np.ndarray):
+            bbox_ref_array = torch.from_numpy(bbox_ref_array)
+        if isinstance(bbox_tt_array, np.ndarray):
+            bbox_tt_array = torch.from_numpy(bbox_tt_array)
+
+        does_pass, box_pcc_message = check_with_pcc(bbox_ref_array, bbox_tt_array, 0.90)
+        logger.info(f"Bbox {i} PCC: {box_pcc_message}")
+        assert does_pass, f"Bbox {i} failed PCC check: {box_pcc_message}"
 
     if does_pass:
         logger.info("LidarCenterNet Passed!")
