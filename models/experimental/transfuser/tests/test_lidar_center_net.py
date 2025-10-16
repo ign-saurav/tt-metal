@@ -3,7 +3,7 @@
 
 import torch
 import pytest
-
+import numpy as np
 import ttnn
 
 from loguru import logger
@@ -83,6 +83,7 @@ def get_mesh_mappers(device):
         ("regnety_032", "regnety_032", 4, False, (1, 1, 256, 256), (1, 3, 160, 704), (1, 2, 256, 256)),
     ],  # GPT-SelfAttention 1
 )
+# @pytest.mark.parametrize("seed", list(range(10)))
 @pytest.mark.parametrize("input_dtype", [ttnn.bfloat16])
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
 def test_lidar_center_net(
@@ -94,10 +95,11 @@ def test_lidar_center_net(
     target_point_image_shape,
     img_shape,
     lidar_bev_shape,
+    # seed,
     input_dtype,
     weight_dtype,
 ):
-    torch.manual_seed(8)
+    # torch.manual_seed(seed)
     image = torch.randn(img_shape)
     lidar_bev = torch.randn(lidar_bev_shape)
     target_point = torch.randn(1, 2)
@@ -262,6 +264,10 @@ def test_lidar_center_net(
     logger.info(f"Reference bboxes count: {len(ref_rotated_bboxes)}")
     logger.info(f"TTNN bboxes count: {len(torch_rotated_bboxes)}")
 
+    box_match = ref_rotated_bboxes == torch_rotated_bboxes
+    logger.info(f"Box match: {box_match}")
+    assert box_match, "Box match failed"
+
     does_pass, wh_pcc_message = check_with_pcc(ref_wh, torch_wh, 0.90)
     logger.info(f"WH PCC: {wh_pcc_message}")
 
@@ -280,12 +286,32 @@ def test_lidar_center_net(
     does_pass, brake_pcc_message = check_with_pcc(ref_brake, torch_brake, 0.90)
     logger.info(f"Brake PCC: {brake_pcc_message}")
 
+    # After building tt_rotated_bboxes list
+    for i in range(len(torch_rotated_bboxes)):
+        bbox_tt = torch_rotated_bboxes[i]
+        bbox_ref = ref_rotated_bboxes[i]
+
+        # Extract arrays from tuples (first element contains the bbox coordinates)
+        bbox_ref_array = bbox_ref[0] if isinstance(bbox_ref, tuple) else bbox_ref
+        bbox_tt_array = bbox_tt[0] if isinstance(bbox_tt, tuple) else bbox_tt
+
+        # Convert to torch tensors if they're numpy arrays
+        if isinstance(bbox_ref_array, np.ndarray):
+            bbox_ref_array = torch.from_numpy(bbox_ref_array)
+        if isinstance(bbox_tt_array, np.ndarray):
+            bbox_tt_array = torch.from_numpy(bbox_tt_array)
+
+        does_pass, box_pcc_message = check_with_pcc(bbox_ref_array, bbox_tt_array, 0.90)
+        logger.info(f"Bbox {i} PCC: {box_pcc_message}")
+        assert does_pass, f"Bbox {i} failed PCC check: {box_pcc_message}"
+
     does_pass, heatmap_pcc_message = check_with_pcc(ref_center_heatmap, torch_center_heatmap, 0.90)
     logger.info(f"Center Heatmap PCC: {heatmap_pcc_message}")
 
     assert does_pass, f"Center Heatmap PCC Failed! PCC: {heatmap_pcc_message}"
 
     if does_pass:
+        print("SEED: ", torch.seed())
         logger.info("LidarCenterNet Passed!")
     else:
         logger.warning("LidarCenterNet Failed!")
