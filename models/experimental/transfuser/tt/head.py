@@ -38,6 +38,36 @@ class TTLidarCenterNetHead:
         self.yaw_res_head_params = parameters["yaw_res_head"]
         self.velocity_head_params = parameters["velocity_head"]
         self.brake_head_params = parameters["brake_head"]
+        # ADD: Create compute config
+        self.compute_config = ttnn.init_device_compute_kernel_config(
+            device.arch(),
+            math_fidelity=ttnn.MathFidelity.LoFi,
+            fp32_dest_acc_en=False,
+            packer_l1_acc=False,
+            math_approx_mode=True,
+        )
+
+        # ADD: Conv config for 3x3 convolutions with double buffering
+        self.conv_3x3_config = ttnn.Conv2dConfig(
+            weights_dtype=ttnn.bfloat16,
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            deallocate_activation=False,
+            enable_act_double_buffer=True,  # Enable double buffering
+            enable_weights_double_buffer=True,  # Enable double buffering
+            reshard_if_not_optimal=True,
+            act_block_h_override=64,
+        )
+
+        # ADD: Conv config for 1x1 convolutions with double buffering
+        self.conv_1x1_config = ttnn.Conv2dConfig(
+            weights_dtype=ttnn.bfloat16,
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            deallocate_activation=True,
+            enable_act_double_buffer=True,  # Enable double buffering
+            enable_weights_double_buffer=True,  # Enable double buffering
+            reshard_if_not_optimal=True,
+            act_block_h_override=64,
+        )
 
     def _apply_head(
         self,
@@ -86,7 +116,8 @@ class TTLidarCenterNetHead:
             batch_size=batch_size,
             input_height=height,
             input_width=width,
-            compute_config=compute_config,
+            conv_config=self.conv_3x3_config,  # ADD THIS
+            compute_config=self.compute_config,  # ADD THIS
         )
 
         # ReLU activation
@@ -106,7 +137,8 @@ class TTLidarCenterNetHead:
             batch_size=batch_size,
             input_height=height,
             input_width=width,
-            compute_config=compute_config,
+            conv_config=self.conv_1x1_config,  # ADD THIS
+            compute_config=self.compute_config,  # ADD THIS
         )
 
         return x
