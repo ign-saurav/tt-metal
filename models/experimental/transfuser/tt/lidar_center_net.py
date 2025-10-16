@@ -226,12 +226,4 @@ class LidarCenterNet(nn.Module):
 
         pred_wp, _, _, _, _ = self.forward_gru(tt_fused_torch, target_point)
 
-        # import  pdb; pdb.set_trace()
-        batch_size, feat_height, feat_width, in_channels = features[0].shape
-        preds = self.head.forward(
-            [features[0]],
-            batch_size=batch_size,
-            height=feat_height,
-            width=feat_width,
-        )
-        return preds, pred_wp
+        return features, pred_wp

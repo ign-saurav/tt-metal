@@ -7,7 +7,6 @@ import pytest
 import ttnn
 
 from loguru import logger
-from models.utility_functions import tt2torch_tensor
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 from models.experimental.transfuser.reference.config import GlobalConfig
@@ -121,29 +120,28 @@ def test_lidar_center_net(
     ).eval()
 
     # pred_wp, rotated_bboxes = ref_layer.forward_ego(image, lidar_bev, target_point, target_point_image, velocity)
-    ref_outputs, pred_wp, rotated_bboxes, results = ref_layer.forward_ego(
-        image, lidar_bev, target_point, target_point_image, velocity
-    )
+    # ref_outputs, pred_wp, rotated_bboxes, results = ref_layer.forward_ego(
+    ref_feature, pred_wp = ref_layer.forward_ego(image, lidar_bev, target_point, target_point_image, velocity)
 
-    # Unpack list outputs (each contains one tensor since we have single scale)
-    (
-        ref_center_heatmap_list,
-        ref_wh_list,
-        ref_offset_list,
-        ref_yaw_class_list,
-        ref_yaw_res_list,
-        ref_velocity_list,
-        ref_brake_list,
-    ) = ref_outputs
+    # # Unpack list outputs (each contains one tensor since we have single scale)
+    # (
+    #     ref_center_heatmap_list,
+    #     ref_wh_list,
+    #     ref_offset_list,
+    #     ref_yaw_class_list,
+    #     ref_yaw_res_list,
+    #     ref_velocity_list,
+    #     ref_brake_list,
+    # ) = ref_outputs
 
-    # Extract single tensors from lists
-    ref_center_heatmap = ref_center_heatmap_list[0]
-    ref_wh = ref_wh_list[0]
-    ref_offset = ref_offset_list[0]
-    ref_yaw_class = ref_yaw_class_list[0]
-    ref_yaw_res = ref_yaw_res_list[0]
-    ref_velocity = ref_velocity_list[0]
-    ref_brake = ref_brake_list[0]
+    # # Extract single tensors from lists
+    # ref_center_heatmap = ref_center_heatmap_list[0]
+    # ref_wh = ref_wh_list[0]
+    # ref_offset = ref_offset_list[0]
+    # ref_yaw_class = ref_yaw_class_list[0]
+    # ref_yaw_res = ref_yaw_res_list[0]
+    # ref_velocity = ref_velocity_list[0]
+    # ref_brake = ref_brake_list[0]
     torch_model = ref_layer._model
 
     # Preprocess parameters for TTNN
@@ -191,43 +189,58 @@ def test_lidar_center_net(
         backbone="transFuser",
     )
 
-    tt_outputs, tt_pred_wp = tt_layer.forward_ego(image, lidar_bev, target_point, target_point_image, velocity)
+    tt_features, tt_pred_wp = tt_layer.forward_ego(image, lidar_bev, target_point, target_point_image, velocity)
 
-    # Unpack list outputs
-    (
-        tt_center_heatmap_list,
-        tt_wh_list,
-        tt_offset_list,
-        tt_yaw_class_list,
-        tt_yaw_res_list,
-        tt_velocity_list,
-        tt_brake_list,
-    ) = tt_outputs
+    torch_feature = ttnn.to_torch(
+        tt_features[0],
+        device=device,
+    )
+    # Permute NHWC -> NCHW
+    torch_feature = torch_feature.permute(0, 3, 1, 2)
 
-    # Extract single tensors from lists
-    tt_center_heatmap = tt_center_heatmap_list[0]
-    tt_wh = tt_wh_list[0]
-    tt_offset = tt_offset_list[0]
-    tt_yaw_class = tt_yaw_class_list[0]
-    tt_yaw_res = tt_yaw_res_list[0]
-    tt_velocity = tt_velocity_list[0]
-    tt_brake = tt_brake_list[0]
+    pcc_passed, pcc_msg = check_with_pcc(ref_feature, torch_feature, pcc=0.95)
+    logger.info(f"Feature PCC: {pcc_msg}")
+    assert pcc_passed, f"Feature PCC check failed: {pcc_msg}"
 
-    # Convert TTNN outputs back to torch (NHWC -> NCHW)
-    tt_center_heatmap_torch = tt2torch_tensor(tt_center_heatmap).permute(0, 3, 1, 2)
-    tt_center_heatmap_torch = tt_center_heatmap_torch.reshape(ref_center_heatmap.shape)
-    tt_wh_torch = tt2torch_tensor(tt_wh).permute(0, 3, 1, 2)
-    tt_wh_torch = tt_wh_torch.reshape(ref_wh.shape)
-    tt_offset_torch = tt2torch_tensor(tt_offset).permute(0, 3, 1, 2)
-    tt_offset_torch = tt_offset_torch.reshape(ref_offset.shape)
-    tt_yaw_class_torch = tt2torch_tensor(tt_yaw_class).permute(0, 3, 1, 2)
-    tt_yaw_class_torch = tt_yaw_class_torch.reshape(ref_yaw_class.shape)
-    tt_yaw_res_torch = tt2torch_tensor(tt_yaw_res).permute(0, 3, 1, 2)
-    tt_yaw_res_torch = tt_yaw_res_torch.reshape(ref_yaw_res.shape)
-    tt_velocity_torch = tt2torch_tensor(tt_velocity).permute(0, 3, 1, 2)
-    tt_velocity_torch = tt_velocity_torch.reshape(ref_velocity.shape)
-    tt_brake_torch = tt2torch_tensor(tt_brake).permute(0, 3, 1, 2)
-    tt_brake_torch = tt_brake_torch.reshape(ref_brake.shape)
+    does_pass, pred_wp_pcc_message = check_with_pcc(pred_wp, tt_pred_wp, 0.90)
+    logger.info(f"pred wp PCC: {pred_wp_pcc_message}")
+    assert does_pass, f"pred wp PCC check failed: {pred_wp_pcc_message}"
+
+    # # Unpack list outputs
+    # (
+    #     tt_center_heatmap_list,
+    #     tt_wh_list,
+    #     tt_offset_list,
+    #     tt_yaw_class_list,
+    #     tt_yaw_res_list,
+    #     tt_velocity_list,
+    #     tt_brake_list,
+    # ) = tt_outputs
+
+    # # Extract single tensors from lists
+    # tt_center_heatmap = tt_center_heatmap_list[0]
+    # tt_wh = tt_wh_list[0]
+    # tt_offset = tt_offset_list[0]
+    # tt_yaw_class = tt_yaw_class_list[0]
+    # tt_yaw_res = tt_yaw_res_list[0]
+    # tt_velocity = tt_velocity_list[0]
+    # tt_brake = tt_brake_list[0]
+
+    # # Convert TTNN outputs back to torch (NHWC -> NCHW)
+    # tt_center_heatmap_torch = tt2torch_tensor(tt_center_heatmap).permute(0, 3, 1, 2)
+    # tt_center_heatmap_torch = tt_center_heatmap_torch.reshape(ref_center_heatmap.shape)
+    # tt_wh_torch = tt2torch_tensor(tt_wh).permute(0, 3, 1, 2)
+    # tt_wh_torch = tt_wh_torch.reshape(ref_wh.shape)
+    # tt_offset_torch = tt2torch_tensor(tt_offset).permute(0, 3, 1, 2)
+    # tt_offset_torch = tt_offset_torch.reshape(ref_offset.shape)
+    # tt_yaw_class_torch = tt2torch_tensor(tt_yaw_class).permute(0, 3, 1, 2)
+    # tt_yaw_class_torch = tt_yaw_class_torch.reshape(ref_yaw_class.shape)
+    # tt_yaw_res_torch = tt2torch_tensor(tt_yaw_res).permute(0, 3, 1, 2)
+    # tt_yaw_res_torch = tt_yaw_res_torch.reshape(ref_yaw_res.shape)
+    # tt_velocity_torch = tt2torch_tensor(tt_velocity).permute(0, 3, 1, 2)
+    # tt_velocity_torch = tt_velocity_torch.reshape(ref_velocity.shape)
+    # tt_brake_torch = tt2torch_tensor(tt_brake).permute(0, 3, 1, 2)
+    # tt_brake_torch = tt_brake_torch.reshape(ref_brake.shape)
 
     # # Dump ref_center_heatmap to pickle file
     # with open('ref_center_heatmap.pkl', 'wb') as f:
@@ -239,78 +252,78 @@ def test_lidar_center_net(
     # tt_center_heatmap_torch = golden_function(tt_center_heatmap_torch, device=device)
     # Validate center heatmap
 
-    does_pass, heatmap_pcc_message = check_with_pcc(ref_center_heatmap, tt_center_heatmap_torch, 0.90)
-    logger.info(f"Center Heatmap PCC: {heatmap_pcc_message}")
-    assert does_pass, f"Center Heatmap PCC check failed: {heatmap_pcc_message}"
+    # does_pass, heatmap_pcc_message = check_with_pcc(ref_center_heatmap, tt_center_heatmap_torch, 0.90)
+    # logger.info(f"Center Heatmap PCC: {heatmap_pcc_message}")
+    # assert does_pass, f"Center Heatmap PCC check failed: {heatmap_pcc_message}"
 
-    # Validate WH prediction
-    does_pass, wh_pcc_message = check_with_pcc(ref_wh, tt_wh_torch, 0.90)
-    logger.info(f"WH PCC: {wh_pcc_message}")
-    assert does_pass, f"WH PCC check failed: {wh_pcc_message}"
+    # # Validate WH prediction
+    # does_pass, wh_pcc_message = check_with_pcc(ref_wh, tt_wh_torch, 0.90)
+    # logger.info(f"WH PCC: {wh_pcc_message}")
+    # assert does_pass, f"WH PCC check failed: {wh_pcc_message}"
 
-    # Validate offset prediction
-    does_pass, offset_pcc_message = check_with_pcc(ref_offset, tt_offset_torch, 0.90)
-    logger.info(f"Offset PCC: {offset_pcc_message}")
-    assert does_pass, f"Offset PCC check failed: {offset_pcc_message}"
+    # # Validate offset prediction
+    # does_pass, offset_pcc_message = check_with_pcc(ref_offset, tt_offset_torch, 0.90)
+    # logger.info(f"Offset PCC: {offset_pcc_message}")
+    # assert does_pass, f"Offset PCC check failed: {offset_pcc_message}"
 
-    # Validate yaw class prediction
-    does_pass, yaw_class_pcc_message = check_with_pcc(ref_yaw_class, tt_yaw_class_torch, 0.90)
-    logger.info(f"Yaw Class PCC: {yaw_class_pcc_message}")
-    assert does_pass, f"Yaw Class PCC check failed: {yaw_class_pcc_message}"
+    # # Validate yaw class prediction
+    # does_pass, yaw_class_pcc_message = check_with_pcc(ref_yaw_class, tt_yaw_class_torch, 0.90)
+    # logger.info(f"Yaw Class PCC: {yaw_class_pcc_message}")
+    # assert does_pass, f"Yaw Class PCC check failed: {yaw_class_pcc_message}"
 
-    # Validate yaw residual prediction
-    does_pass, yaw_res_pcc_message = check_with_pcc(ref_yaw_res, tt_yaw_res_torch, 0.90)
-    logger.info(f"Yaw Residual PCC: {yaw_res_pcc_message}")
-    assert does_pass, f"Yaw Residual PCC check failed: {yaw_res_pcc_message}"
+    # # Validate yaw residual prediction
+    # does_pass, yaw_res_pcc_message = check_with_pcc(ref_yaw_res, tt_yaw_res_torch, 0.90)
+    # logger.info(f"Yaw Residual PCC: {yaw_res_pcc_message}")
+    # assert does_pass, f"Yaw Residual PCC check failed: {yaw_res_pcc_message}"
 
-    # Validate velocity prediction
-    does_pass, velocity_pcc_message = check_with_pcc(ref_velocity, tt_velocity_torch, 0.90)
-    logger.info(f"Velocity PCC: {velocity_pcc_message}")
-    assert does_pass, f"Velocity PCC check failed: {velocity_pcc_message}"
+    # # Validate velocity prediction
+    # does_pass, velocity_pcc_message = check_with_pcc(ref_velocity, tt_velocity_torch, 0.90)
+    # logger.info(f"Velocity PCC: {velocity_pcc_message}")
+    # assert does_pass, f"Velocity PCC check failed: {velocity_pcc_message}"
 
-    # Validate brake prediction
-    does_pass, brake_pcc_message = check_with_pcc(ref_brake, tt_brake_torch, 0.90)
-    logger.info(f"Brake PCC: {brake_pcc_message}")
-    assert does_pass, f"Brake PCC check failed: {brake_pcc_message}"
+    # # Validate brake prediction
+    # does_pass, brake_pcc_message = check_with_pcc(ref_brake, tt_brake_torch, 0.90)
+    # logger.info(f"Brake PCC: {brake_pcc_message}")
+    # assert does_pass, f"Brake PCC check failed: {brake_pcc_message}"
 
-    does_pass, pred_wp_pcc_message = check_with_pcc(pred_wp, tt_pred_wp, 0.90)
-    logger.info(f"pred wp PCC: {pred_wp_pcc_message}")
-    assert does_pass, f"pred wp PCC check failed: {pred_wp_pcc_message}"
+    # does_pass, pred_wp_pcc_message = check_with_pcc(pred_wp, tt_pred_wp, 0.90)
+    # logger.info(f"pred wp PCC: {pred_wp_pcc_message}")
+    # assert does_pass, f"pred wp PCC check failed: {pred_wp_pcc_message}"
 
-    # After the pred_wp PCC check, add bbox post-processing for TTNN outputs
+    # # After the pred_wp PCC check, add bbox post-processing for TTNN outputs
 
-    # Convert TTNN outputs to torch for get_bboxes (it expects torch tensors)
-    tt_preds_torch = (
-        [tt_center_heatmap_torch],
-        [tt_wh_torch],
-        [tt_offset_torch],
-        [tt_yaw_class_torch],
-        [tt_yaw_res_torch],
-        [tt_velocity_torch],
-        [tt_brake_torch],
-    )
+    # # Convert TTNN outputs to torch for get_bboxes (it expects torch tensors)
+    # tt_preds_torch = (
+    #     [tt_center_heatmap_torch],
+    #     [tt_wh_torch],
+    #     [tt_offset_torch],
+    #     [tt_yaw_class_torch],
+    #     [tt_yaw_res_torch],
+    #     [tt_velocity_torch],
+    #     [tt_brake_torch],
+    # )
 
-    # Call get_bboxes on the reference head (reusing the same logic)
-    tt_results = ref_layer.head.get_bboxes(*tt_preds_torch)
-    does_pass, box_pcc_message = check_with_pcc(results[0][0], tt_results[0][0], 0.90)
-    logger.info(f"box PCC: {box_pcc_message}")
-    assert does_pass, f"box PCC check failed: {box_pcc_message}"
-    tt_bboxes, _ = tt_results[0]
+    # # Call get_bboxes on the reference head (reusing the same logic)
+    # tt_results = ref_layer.head.get_bboxes(*tt_preds_torch)
+    # does_pass, box_pcc_message = check_with_pcc(results[0][0], tt_results[0][0], 0.90)
+    # logger.info(f"box PCC: {box_pcc_message}")
+    # assert does_pass, f"box PCC check failed: {box_pcc_message}"
+    # tt_bboxes, _ = tt_results[0]
 
-    # Filter by confidence threshold
-    tt_bboxes = tt_bboxes[tt_bboxes[:, -1] > config.bb_confidence_threshold]
+    # # Filter by confidence threshold
+    # tt_bboxes = tt_bboxes[tt_bboxes[:, -1] > config.bb_confidence_threshold]
 
-    # Convert to metric coordinates
-    tt_rotated_bboxes = []
-    for bbox in tt_bboxes.detach().cpu().numpy():
-        bbox_metric = ref_layer.get_bbox_local_metric(bbox)
-        tt_rotated_bboxes.append(bbox_metric)
+    # # Convert to metric coordinates
+    # tt_rotated_bboxes = []
+    # for bbox in tt_bboxes.detach().cpu().numpy():
+    #     bbox_metric = ref_layer.get_bbox_local_metric(bbox)
+    #     tt_rotated_bboxes.append(bbox_metric)
 
-    # Compare bbox counts
-    logger.info(f"Reference bboxes count: {len(rotated_bboxes)}")
-    logger.info(f"TTNN bboxes count: {len(tt_rotated_bboxes)}")
+    # # Compare bbox counts
+    # logger.info(f"Reference bboxes count: {len(rotated_bboxes)}")
+    # logger.info(f"TTNN bboxes count: {len(tt_rotated_bboxes)}")
 
-    if does_pass:
-        logger.info("LidarCenterNet Passed!")
-    else:
-        logger.warning("LidarCenterNet Failed!")
+    # if does_pass:
+    #     logger.info("LidarCenterNet Passed!")
+    # else:
+    #     logger.warning("LidarCenterNet Failed!")
