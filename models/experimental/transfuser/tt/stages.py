@@ -6,12 +6,175 @@ from typing import List
 from models.experimental.transfuser.tt.bottleneck import TTRegNetBottleneck
 
 
-shard_dict = {
-    # stage_name : shard_layout
-    "layer1": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-    "layer2": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-    "layer3": ttnn.TensorMemoryLayout.WIDTH_SHARDED,
-    "layer4": ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+optimization_dict = {
+    "layer1": {
+        "conv1": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "act_block_h": 64,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+        },
+        "conv2": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "se_fc1": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "act_block_h": 64,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "se_fc2": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "act_block_h": 64,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "conv3": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "act_block_h": 64,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "downsample": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "act_block_h": 64,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+    },
+    "layer2": {
+        "conv1": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "act_block_h": 32,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+        },
+        "conv2": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "se_fc1": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "act_block_h": 32,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "se_fc2": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "act_block_h": 32,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "conv3": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "act_block_h": 32,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "downsample": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "act_block_h": 32,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+    },
+    "layer3": {
+        "conv1": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            "act_block_h": 32,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+        },
+        "conv2": {
+            "shard_layout": ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "se_fc1": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,  # for image width
+            "act_block_h": 64,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "se_fc2": {
+            "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,  # for image width
+            "act_block_h": 64,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "conv3": {
+            "shard_layout": ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+            "act_block_h": 32,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "downsample": {
+            "shard_layout": ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+            "act_block_h": 64,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+    },
+    "layer4": {
+        "conv1": {
+            "shard_layout": ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+            "act_block_h": 32,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+        },
+        "conv2": {
+            "shard_layout": ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "se_fc1": {
+            "shard_layout": ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+            "act_block_h": 32,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "se_fc2": {
+            "shard_layout": ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+            "act_block_h": 32,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "conv3": {
+            "shard_layout": ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+            "act_block_h": 64,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+        "downsample": {
+            "shard_layout": ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+            "act_block_h": 64,
+            "enable_act_double_buffer": True,
+            "enable_weights_double_buffer": True,
+            "memory_config": ttnn.L1_MEMORY_CONFIG,
+        },
+    },
 }
 
 
@@ -22,15 +185,25 @@ class Ttstages:
         stride,
         model_config,
         stage_name,
-        # layer_optimisations=neck_optimisations,
+        device,
     ) -> None:
+        self.device = device
         self.inplanes = 32
+        # Define stage-specific parameters
+        stage_config = {
+            "layer1": {"planes": 72, "groups": 3},
+            "layer2": {"planes": 216, "groups": 9},
+            "layer3": {"planes": 576, "groups": 24},
+            "layer4": {"planes": 1512, "groups": 63},
+        }
+
+        config = stage_config[stage_name]
         self.layer = self._make_layer(
             parameters=parameters,
-            planes=72,
+            planes=config["planes"],
             blocks=len(parameters.keys()),
             stride=stride,
-            groups=3,
+            groups=config["groups"],
             model_config=model_config,
             stage_name=stage_name,
         )
@@ -48,7 +221,7 @@ class Ttstages:
         layers = []
         self.inplanes = 32
 
-        shard_layout = shard_dict[stage_name]
+        layer_config = optimization_dict[stage_name]
 
         # First block (may have downsample)
         downsample = stride != 1 or self.inplanes != planes
@@ -56,10 +229,11 @@ class Ttstages:
             TTRegNetBottleneck(
                 parameters=parameters["b1"],
                 model_config=model_config,
+                layer_config=layer_config,
                 stride=stride,
                 downsample=downsample,
                 groups=groups,
-                shard_layout=shard_layout,
+                device=self.device,
             )
         )
         self.inplanes = planes
@@ -71,10 +245,11 @@ class Ttstages:
                 TTRegNetBottleneck(
                     parameters=parameters[block_name],
                     model_config=model_config,
+                    layer_config=layer_config,
                     stride=1,
                     downsample=False,
                     groups=groups,
-                    shard_layout=shard_layout,
+                    device=self.device,
                 )
             )
 
