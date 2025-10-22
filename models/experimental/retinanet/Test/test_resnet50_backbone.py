@@ -41,6 +41,7 @@ class BackboneTestInfra:
         torch_model = IntermediateLayerGetter(
             resnet_backbone, return_layers={"layer2": "c3", "layer3": "c4", "layer4": "c5"}
         )
+        torch_model.eval()
 
         # Torch input + golden output
         # self.torch_input_tensor = torch.randn((self.batch_size, in_channels, height, width), dtype=torch.float)
@@ -62,8 +63,6 @@ class BackboneTestInfra:
             custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
             device=None,
         )
-
-        # print(parameters)
 
         # Convert input to TTNN host tensor
         def to_ttnn_host(tensor):
@@ -102,8 +101,6 @@ class BackboneTestInfra:
 
     def validate(self, output_tensor=None):
         tt_output = self.output_tensor if output_tensor is None else output_tensor
-
-        print(tt_output)
 
         valid_pcc = {"c3": 0.99, "c4": 0.99, "c5": 0.99}
         self.pcc_passed_all = []

@@ -37,6 +37,7 @@ bottleneck_layer_optimisations = {
     ),
     "layer1": BottleneckOptimizer(
         conv1={
+            "act_block_h": 32,
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "reshard_if_not_optimal": True,
             "memory_config": ttnn.DRAM_MEMORY_CONFIG,
@@ -54,14 +55,15 @@ bottleneck_layer_optimisations = {
             "slice_config": ttnn.Conv2dL1FullSliceConfig,
         },
         conv3={
+            "act_block_h": 32,
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             "deallocate_activation": True,
             "memory_config": ttnn.DRAM_MEMORY_CONFIG,
             "slice_config": ttnn.Conv2dL1FullSliceConfig,
         },
         downsample={
+            "act_block_h": 32,
             "shard_layout": ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            # "slice_config": ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dDRAMSliceHeight, num_slices=2),
             "deallocate_activation": True,
             "reallocate_halo_output": True,
             "reshard_if_not_optimal": True,
@@ -69,6 +71,7 @@ bottleneck_layer_optimisations = {
             "enable_weights_double_buffer": True,
             "memory_config": ttnn.DRAM_MEMORY_CONFIG,
             "slice_config": ttnn.Conv2dL1FullSliceConfig,
+            # "slice_config": ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dDRAMSliceHeight, num_slices=2),
         },
     ),
     "layer2": BottleneckOptimizer(
@@ -176,11 +179,8 @@ class TTBottleneck:
         name: Optional[str] = "bottleneck",
         layer_optimisations=bottleneck_layer_optimisations["default"],
     ) -> None:
-        print(parameters)
         self.name = name
         self.layer_optimisations = layer_optimisations
-
-        logger.debug(f"Conv_1 parameter : {parameters.conv1}")
 
         self.conv1 = TTConv2D(
             kernel_size=1,
@@ -194,8 +194,6 @@ class TTBottleneck:
             **layer_optimisations.conv1,
         )
 
-        logger.debug(f"Conv_2 parameter : {parameters.conv2}")
-
         self.conv2 = TTConv2D(
             kernel_size=3,
             stride=stride if downsample else 1,
@@ -207,8 +205,6 @@ class TTBottleneck:
             is_reshape=True,
             **layer_optimisations.conv2,
         )
-
-        logger.debug(f"Conv_3 parameter : {parameters.conv3}")
 
         self.conv3 = TTConv2D(
             kernel_size=1,
@@ -224,12 +220,12 @@ class TTBottleneck:
 
         self.downsample = downsample
         if downsample:
-            logger.debug(f"downsample parameter : {parameters.downsample}")
             self.downsample_conv = TTConv2D(
                 kernel_size=1,
                 stride=stride,
                 padding=0,
                 dilation=1,
+                # parameters=parameters.downsample,
                 parameters=getattr(parameters.downsample, "0", None),
                 kernel_fidelity=model_config,
                 activation=None,
@@ -247,20 +243,19 @@ class TTBottleneck:
         in_shape,
     ):
         # Convert to DRAM interleaved for DRAM sliced conv's
-        # if self.layer_optimisations.downsample.get("slice_config", False) or self.layer_optimisations.conv1.get(
-        #     "slice_config", False
-        # ):
-        x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+        if self.layer_optimisations.downsample.get("slice_config", False) or self.layer_optimisations.conv1.get(
+            "slice_config", False
+        ):
+            x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
 
         # conv1 is 1x1 conv
         logger.debug("Running Conv_1")
-        logger.debug(f"input shape:{x.shape}")
         out, shape = self.conv1(device, x, in_shape)
         logger.debug("✅ Conv_1 Complete")
 
         # FIXME: PCC drop when persistent L1 buffer is used
-        # if self.downsample:
-        #     out = ttnn.to_memory_config(out, ttnn.DRAM_MEMORY_CONFIG)
+        if self.downsample:
+            out = ttnn.to_memory_config(out, ttnn.DRAM_MEMORY_CONFIG)
 
         # conv2 is 3x3 conv
         logger.debug("Running Conv_2")
@@ -274,30 +269,31 @@ class TTBottleneck:
 
         # run downsample conv 1x1 if required
         if self.downsample:
-            logger.debug("here")
             logger.debug("Running Downsample")
             ds_out, _ = self.downsample_conv(device, x, in_shape)
             logger.debug("✅ Downsample Complete")
-
+            ttnn.deallocate(x)
+            ds_out = ttnn.reallocate(ds_out)
         else:
             ds_out = x
-            logger.debug("alse here")
 
         if ds_out.shape != out.shape:
             ds_out = ttnn.reshape(ds_out, (1, 1, ds_out.shape[0] * ds_out.shape[1] * ds_out.shape[2], ds_out.shape[3]))
+            logger.debug("here")
         if ds_out.layout != out.layout:
             ds_out = ttnn.to_layout(ds_out, out.layout)
+            logger.debug("here")
         if ds_out.memory_config() != out.memory_config():
             ds_out = ttnn.to_memory_config(ds_out, out.memory_config())
+            logger.debug("here")
 
         logger.debug("Running Add")
-        out = ttnn.add(
+        out = ttnn.add_(
             out,
             ds_out,
             activations=[ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)],
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
         logger.debug("✅ Add Complete")
-
+        out = ttnn.reallocate(out)
         ttnn.deallocate(ds_out)
         return out, shape

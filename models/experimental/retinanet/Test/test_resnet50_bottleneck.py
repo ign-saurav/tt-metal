@@ -15,9 +15,8 @@ from models.experimental.retinanet.TTNN.tt_bottleneck import TTBottleneck, get_b
 from torchvision.models.detection import retinanet_resnet50_fpn_v2, RetinaNet_ResNet50_FPN_V2_Weights
 from ttnn.model_preprocessing import fold_batch_norm2d_into_conv2d
 
-# from models.experimental.retinanet.TTNN.custom_preprocessing import create_custom_mesh_preprocessor
 
-pickle_map = {
+pickle_map_torch = {
     "backbone_layer1_0": "models/experimental/retinanet/resources/pickle/retinanet_stem_output_torch.pkl",
     "backbone_layer1_1": "models/experimental/retinanet/resources/pickle/backbone_layer1_0_torch.pkl",
     "backbone_layer1_2": "models/experimental/retinanet/resources/pickle/backbone_layer1_1_torch.pkl",
@@ -34,6 +33,25 @@ pickle_map = {
     "backbone_layer4_0": "models/experimental/retinanet/resources/pickle/backbone_layer3_5_torch.pkl",
     "backbone_layer4_1": "models/experimental/retinanet/resources/pickle/backbone_layer4_0_torch.pkl",
     "backbone_layer4_2": "models/experimental/retinanet/resources/pickle/backbone_layer4_1_torch.pkl",
+}
+
+pickle_map_tt = {
+    "backbone_layer1_0": "models/experimental/retinanet/resources/pickle/retinanet_stem_output_tt.pkl",
+    "backbone_layer1_1": "models/experimental/retinanet/resources/pickle/backbone_layer1_0_tt.pkl",
+    "backbone_layer1_2": "models/experimental/retinanet/resources/pickle/backbone_layer1_1_tt.pkl",
+    "backbone_layer2_0": "models/experimental/retinanet/resources/pickle/backbone_layer1_2_tt.pkl",
+    "backbone_layer2_1": "models/experimental/retinanet/resources/pickle/backbone_layer2_0_tt.pkl",
+    "backbone_layer2_2": "models/experimental/retinanet/resources/pickle/backbone_layer2_1_tt.pkl",
+    "backbone_layer2_3": "models/experimental/retinanet/resources/pickle/backbone_layer2_2_tt.pkl",
+    "backbone_layer3_0": "models/experimental/retinanet/resources/pickle/backbone_layer2_3_tt.pkl",
+    "backbone_layer3_1": "models/experimental/retinanet/resources/pickle/backbone_layer3_0_tt.pkl",
+    "backbone_layer3_2": "models/experimental/retinanet/resources/pickle/backbone_layer3_1_tt.pkl",
+    "backbone_layer3_3": "models/experimental/retinanet/resources/pickle/backbone_layer3_2_tt.pkl",
+    "backbone_layer3_4": "models/experimental/retinanet/resources/pickle/backbone_layer3_3_tt.pkl",
+    "backbone_layer3_5": "models/experimental/retinanet/resources/pickle/backbone_layer3_4_tt.pkl",
+    "backbone_layer4_0": "models/experimental/retinanet/resources/pickle/backbone_layer3_5_tt.pkl",
+    "backbone_layer4_1": "models/experimental/retinanet/resources/pickle/backbone_layer4_0_tt.pkl",
+    "backbone_layer4_2": "models/experimental/retinanet/resources/pickle/backbone_layer4_1_tt.pkl",
 }
 
 
@@ -101,18 +119,24 @@ class BottleneckTestInfra:
         # Torch model
         # Load RetinaNet model
         retinanet = retinanet_resnet50_fpn_v2(weights=RetinaNet_ResNet50_FPN_V2_Weights.DEFAULT)
-        # retinanet = retinanet_resnet50_fpn_v2(weights=None)
         backbone = retinanet.backbone.body
         layer = getattr(backbone, f"layer{int(name[-3])}")
         torch_model = layer[int(name[-1])]
-
-        print(torch_model)
+        torch_model.eval()
 
         # Torch input + golden output
         # input_shape = (batch_size * self.num_devices, channels, height, width)
         # self.torch_input_tensor = torch.randn(input_shape, dtype=torch.float)
-        with open(pickle_map[self.name], "rb") as f:
+
+        with open(pickle_map_torch[self.name], "rb") as f:
             self.torch_input_tensor = pickle.load(f)
+        with open(pickle_map_tt[self.name], "rb") as f:
+            tt_host_tensor = pickle.load(f)
+            tt_host_tensor = ttnn.from_torch(
+                tt_host_tensor,
+                dtype=ttnn.bfloat16,
+                mesh_mapper=self.inputs_mesh_mapper,
+            )
         self.torch_output_tensor = torch_model(self.torch_input_tensor)
 
         # Preprocess model params
@@ -145,7 +169,7 @@ class BottleneckTestInfra:
 
         # Move input to device
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
-
+        # self.input_tensor = ttnn.to_memory_config(self.input_tensor, ttnn.DRAM_MEMORY_CONFIG)
         # Run + validate
         self.run()
         self.validate()
@@ -189,7 +213,7 @@ class BottleneckTestInfra:
         )
         tt_output_tensor_torch = torch.permute(tt_output_tensor_torch, (0, 3, 1, 2))
 
-        valid_pcc = 0.9
+        valid_pcc = 0.99
         self.pcc_passed, self.pcc_message = check_with_pcc(
             self.torch_output_tensor, tt_output_tensor_torch, pcc=valid_pcc
         )
