@@ -17,6 +17,51 @@ from ttnn.model_preprocessing import (
     preprocess_model_parameters,
 )
 from tests.ttnn.utils_for_testing import check_with_pcc
+import numpy as np
+from PIL import Image
+import os
+
+
+def save_tensor_as_image(tensor, save_path):
+    """
+    Saves a PyTorch tensor as an image.
+
+    Args:
+        tensor (torch.Tensor): Tensor to save. Can be [C,H,W] or [1,C,H,W].
+        save_path (str): Path to save the image (including filename)
+    """
+    # Skip non-image tensors
+    if tensor.ndim == 1 or (tensor.ndim == 2 and tensor.numel() == 1):
+        print(f"Skipping scalar tensor, cannot save as image: {tensor}")
+        return
+
+    # Remove batch dimension if present
+    if tensor.ndim == 4:
+        tensor = tensor[0]
+
+    # Convert C,H,W → H,W,C if channels > 1
+    if tensor.shape[0] in [1, 3]:
+        img_np = tensor.permute(1, 2, 0).cpu().numpy()
+    else:  # assume single channel
+        img_np = tensor[0].cpu().numpy()
+
+    # Normalize to 0-255
+    img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min()) * 255
+    img_np = img_np.astype(np.uint8)
+
+    # Save image
+    if img_np.ndim == 2:
+        img = Image.fromarray(img_np)  # grayscale
+    else:
+        img = Image.fromarray(img_np)  # RGB
+
+    # Ensure directory exists (only if path has a folder)
+    dir_name = os.path.dirname(save_path)
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
+
+    img.save(save_path)
+    print(f"Saved tensor as image: {save_path}")
 
 
 class TransfuserBackboneInfra:
@@ -45,6 +90,22 @@ class TransfuserBackboneInfra:
         # self.batch_size = batch_size * self.num_devices
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
         # self.name = name
+
+        # Load the saved demo inputs
+        inputs = torch.load("models/experimental/transfuser/tests/transfuser_inputs_final.pt")
+
+        # Extract each component
+        self.rgb = inputs["image"]  # RGB camera image tensor
+        save_tensor_as_image(self.rgb, "rgb.png")
+        self.lidar_bev = inputs["lidar"]  # LiDAR BEV tensor
+        save_tensor_as_image(self.lidar_bev, "lidar_bev.png")
+        # pytest.skip()
+        self.ego_vel = inputs["velocity"]  # Ego velocity tensor
+        # save_tensor_as_image(ego_vel, 'ego_vel.png')
+        # Check shapes
+        print("RGB shape:", self.rgb.shape)
+        print("LiDAR BEV shape:", self.lidar_bev.shape)
+        print("Ego velocity shape:", self.ego_vel.shape)
 
         # setting machine to avoid loading files
         self.config = GlobalConfig(setting="eval")
@@ -92,32 +153,28 @@ class TransfuserBackboneInfra:
         )
         parameters["transformer4"] = gpt4_parameters
 
-        # Prepare golden inputs/outputs
-        self.torch_image_input = torch.randn(self.img_input_shape)
-        self.torch_lidar_input = torch.randn(self.lidar_input_shape)
-        self.torch_velocity_input = torch.randn(1, 1)
         with torch.no_grad():
             self.torch_features, self.torch_image_grid, self.torch_fused = torch_model(
-                self.torch_image_input,
-                self.torch_lidar_input,
-                self.torch_velocity_input,
+                self.rgb,
+                self.lidar_bev,
+                self.ego_vel,
             )
 
         # Convert input to TTNN format
         tt_image_input = ttnn.from_torch(
-            self.torch_image_input.permute(0, 2, 3, 1),
+            self.rgb.permute(0, 2, 3, 1),
             dtype=ttnn.bfloat16,
             mesh_mapper=self.inputs_mesh_mapper,
         )
         tt_lidar_input = ttnn.from_torch(
-            self.torch_lidar_input.permute(0, 2, 3, 1),
+            self.lidar_bev.permute(0, 2, 3, 1),
             dtype=ttnn.bfloat16,
             layout=ttnn.TILE_LAYOUT,
             device=device,
             mesh_mapper=self.inputs_mesh_mapper,
         )
         tt_velocity_input = ttnn.from_torch(
-            self.torch_velocity_input,
+            self.ego_vel,
             device=device,
             dtype=ttnn.bfloat16,
             layout=ttnn.ROW_MAJOR_LAYOUT,
