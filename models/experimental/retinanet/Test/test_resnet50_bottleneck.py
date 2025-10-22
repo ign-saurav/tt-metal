@@ -84,9 +84,10 @@ def bottleneck_to_params(block, mesh_mapper):
 
     # downsample (if present)
     if block.downsample is not None:
+        layers["downsample"] = {}
         ds_conv = block.downsample[0]
         ds_bn = block.downsample[1] if len(block.downsample) > 1 else None
-        layers["downsample"] = conv_bn_to_params(ds_conv, ds_bn, mesh_mapper)
+        layers["downsample"]["0"] = conv_bn_to_params(ds_conv, ds_bn, mesh_mapper)
 
     return layers
 
