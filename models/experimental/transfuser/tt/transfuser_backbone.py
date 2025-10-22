@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
+import torch
 from models.experimental.transfuser.tt.utils import TTConv2D
-from typing import List
 from loguru import logger
-from models.experimental.transfuser.tt.bottleneck import TTRegNetBottleneck
 from models.experimental.transfuser.tt.gpt import TTGpt
 from models.experimental.transfuser.tt.topdown import TtTopDown
+from models.experimental.transfuser.tt.stages import Ttstages
 
 
 class TtTransfuserBackbone:
@@ -30,16 +30,15 @@ class TtTransfuserBackbone:
             kernel_fidelity=model_config,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
             shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
             deallocate_activation=True,
             reallocate_halo_output=True,
             reshard_if_not_optimal=True,
             enable_act_double_buffer=True,
             enable_weights_double_buffer=True,
             dtype=ttnn.bfloat16,
-            fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
+            fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", False),
             packer_l1_acc=model_config.get("packer_l1_acc", True),
-            math_approx_mode=model_config.get("math_approx_mode", False),
+            math_approx_mode=model_config.get("math_approx_mode", True),
         )
         self.lidar_conv1 = TTConv2D(
             kernel_size=3,
@@ -49,19 +48,18 @@ class TtTransfuserBackbone:
             kernel_fidelity=model_config,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
             shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
             deallocate_activation=True,
             reallocate_halo_output=True,
             reshard_if_not_optimal=True,
             enable_act_double_buffer=True,
             enable_weights_double_buffer=True,
             dtype=ttnn.bfloat16,
-            fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
+            fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", False),
             packer_l1_acc=model_config.get("packer_l1_acc", True),
-            math_approx_mode=model_config.get("math_approx_mode", False),
+            math_approx_mode=model_config.get("math_approx_mode", True),
         )
         # Layer1 for both encoders
-        self.image_layer1 = self._make_layer(
+        self.image_layer1 = Ttstages._make_layer(
             parameters=parameters.image_encoder.features.layer1,
             planes=72,
             blocks=2,  # no of bottlenecks
@@ -71,7 +69,7 @@ class TtTransfuserBackbone:
             stage_name="layer1",
         )
 
-        self.lidar_layer1 = self._make_layer(
+        self.lidar_layer1 = Ttstages._make_layer(
             parameters=parameters.lidar_encoder._model.layer1,
             planes=72,
             blocks=2,
@@ -82,7 +80,7 @@ class TtTransfuserBackbone:
         )
 
         # Layer2 for both encoders
-        self.image_layer2 = self._make_layer(
+        self.image_layer2 = Ttstages._make_layer(
             parameters=parameters.image_encoder.features.layer2,
             planes=216,
             blocks=5,
@@ -92,7 +90,7 @@ class TtTransfuserBackbone:
             stage_name="layer2",
         )
 
-        self.lidar_layer2 = self._make_layer(
+        self.lidar_layer2 = Ttstages._make_layer(
             parameters=parameters.lidar_encoder._model.layer2,
             planes=216,
             blocks=5,
@@ -103,7 +101,7 @@ class TtTransfuserBackbone:
         )
 
         # Layer3 for both encoders
-        self.image_layer3 = self._make_layer(
+        self.image_layer3 = Ttstages._make_layer(
             parameters=parameters.image_encoder.features.layer3,
             planes=576,
             blocks=13,
@@ -113,7 +111,7 @@ class TtTransfuserBackbone:
             stage_name="layer3",
         )
 
-        self.lidar_layer3 = self._make_layer(
+        self.lidar_layer3 = Ttstages._make_layer(
             parameters=parameters.lidar_encoder._model.layer3,
             planes=576,
             blocks=13,
@@ -131,7 +129,7 @@ class TtTransfuserBackbone:
             packer_l1_acc=True,
         )
         # Layer4 for both encoders
-        self.image_layer4 = self._make_layer(
+        self.image_layer4 = Ttstages._make_layer(
             parameters=parameters.image_encoder.features.layer4,
             planes=1512,
             blocks=1,
@@ -141,7 +139,7 @@ class TtTransfuserBackbone:
             stage_name="layer4",
         )
 
-        self.lidar_layer4 = self._make_layer(
+        self.lidar_layer4 = Ttstages._make_layer(
             parameters=parameters.lidar_encoder._model.layer4,
             planes=1512,
             blocks=1,
@@ -245,125 +243,29 @@ class TtTransfuserBackbone:
             bev_upsample_factor=config.bev_upsample_factor,
         )
 
-    def _make_layer(
-        self,
-        parameters,
-        planes: int,
-        blocks: int,
-        stride: int,
-        groups: int = 1,
-        model_config=None,
-        stage_name=None,
-    ) -> List[TTRegNetBottleneck]:
-        """
-        parameters:
-        - Either a root dict that contains {layer1, layer2, ...} each with {b1,b2,...}
-        - Or a stage dict that directly contains {b1,b2,...}
-        stage_name:
-        - Required if 'parameters' is the root dict (so we can pick the stage).
-        - Ignored if 'parameters' already looks like a stage dict.
-        """
-
-        # ---- Resolve which stage dict to use ----
-        def _resolve_stage_dict(params, stage_key):
-            # If it already looks like a stage dict (has b1), just use it
-            if isinstance(params, dict) and any(k.startswith("b") for k in params.keys()):
-                return params
-            # Otherwise expect a root dict with the stage_name present
-            if not isinstance(params, dict) or stage_key not in params:
-                available = list(params.keys()) if isinstance(params, dict) else []
-                raise KeyError(
-                    f"Expected a stage dict for '{stage_key}' or a root dict containing it. " f"Got keys: {available}"
-                )
-            return params[stage_key]
-
-        stage_params = _resolve_stage_dict(parameters, stage_name)
-
-        # ---- Choose shard layout per stage ----
-        if stage_name in ("layer1", "layer2"):
-            shard_layout = ttnn.TensorMemoryLayout.HEIGHT_SHARDED
-        elif stage_name in ("layer3", "layer4"):
-            shard_layout = ttnn.TensorMemoryLayout.WIDTH_SHARDED
-        else:
-            # Default to HEIGHT_SHARDED
-            shard_layout = ttnn.TensorMemoryLayout.HEIGHT_SHARDED
-
-        # ---- Validate available blocks ----
-        # Expected names: b1, b2, ..., b{blocks}
-        available_block_names = sorted(
-            [k for k in stage_params.keys() if k.startswith("b")],
-            key=lambda s: int(s[1:]) if s[1:].isdigit() else 0,
-        )
-
-        # If fewer blocks than requested, raise a descriptive error
-        if len(available_block_names) < blocks:
-            raise KeyError(
-                f"Requested {blocks} blocks for {stage_name}, but only found blocks: "
-                f"{available_block_names}. "
-                f"Did you pass parameters for the wrong stage (e.g., layer1 for layer2)?"
-            )
-
-        layers = []
-
-        # ---- First block (may have downsample) ----
-        downsample = stride != 1 or self.inplanes != planes
-        layers.append(
-            TTRegNetBottleneck(
-                parameters=stage_params["b1"],
-                model_config=model_config,
-                stride=stride,
-                downsample=downsample,
-                groups=groups,
-                shard_layout=shard_layout,
-            )
-        )
-        self.inplanes = planes
-
-        # ---- Remaining blocks (stride=1, no downsample) ----
-        # Build exactly the number requested, in order b2..b{blocks}
-        for idx in range(2, blocks + 1):
-            bname = f"b{idx}"
-            if bname not in stage_params:
-                # Extra guard (should have been caught above)
-                raise KeyError(f"Missing block '{bname}' in {stage_name}. " f"Available: {available_block_names}")
-            layers.append(
-                TTRegNetBottleneck(
-                    parameters=stage_params[bname],
-                    model_config=model_config,
-                    stride=1,
-                    downsample=False,
-                    groups=groups,
-                    shard_layout=shard_layout,
-                )
-            )
-
-        return layers
-
     def normalize_imagenet_ttnn(self, x):
-        """Normalize input images according to ImageNet standards using TTNN operations.
-        Expects input in NHWC format
-        """
-        # First divide by 255.0 to convert from [0,255] to [0,1]
+        """Optimized normalization that avoids slice/concat overhead"""
+        # Convert from [0,255] to [0,1]
         x = ttnn.multiply(x, 1.0 / 255.0)
 
-        # For NHWC format: [batch, height, width, channels]
-        # Slice along the channel dimension (dim=3)
-        x_r = ttnn.slice(x, [0, 0, 0, 0], [x.shape[0], x.shape[1], x.shape[2], 1])  # Red channel
-        x_g = ttnn.slice(x, [0, 0, 0, 1], [x.shape[0], x.shape[1], x.shape[2], 2])  # Green channel
-        x_b = ttnn.slice(x, [0, 0, 0, 2], [x.shape[0], x.shape[1], x.shape[2], 3])  # Blue channel
+        # Create normalization constants as tensors
+        # Mean: [0.485, 0.456, 0.406], Std: [0.229, 0.224, 0.225]
+        mean = ttnn.from_torch(
+            torch.tensor([0.485, 0.456, 0.406]).reshape(1, 1, 1, 3),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device,
+        )
+        std_inv = ttnn.from_torch(
+            torch.tensor([1.0 / 0.229, 1.0 / 0.224, 1.0 / 0.225]).reshape(1, 1, 1, 3),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device,
+        )
 
-        # Normalize each channel: (x - mean) / std
-        x_r = ttnn.subtract(x_r, 0.485)
-        x_r = ttnn.multiply(x_r, 1.0 / 0.229)
-
-        x_g = ttnn.subtract(x_g, 0.456)
-        x_g = ttnn.multiply(x_g, 1.0 / 0.224)
-
-        x_b = ttnn.subtract(x_b, 0.406)
-        x_b = ttnn.multiply(x_b, 1.0 / 0.225)
-
-        # Concatenate along channel dimension (dim=3 for NHWC)
-        x = ttnn.concat([x_r, x_g, x_b], dim=3)
+        # Normalize all channels at once (no slice/concat needed)
+        x = ttnn.subtract(x, mean)
+        x = ttnn.multiply(x, std_inv)
 
         return x
 
@@ -378,21 +280,28 @@ class TtTransfuserBackbone:
         lidar_out, lidar_shape = self.lidar_conv1(device, lidar_x, lidar_x.shape)
 
         logger.info(f"image_encoder_layer1")
-        image_out = ttnn.reshape(image_out, image_shape)
+        # image_out = ttnn.reshape(image_out, image_shape)
         # Process layer1 blocks
         for block in self.image_layer1:
-            image_out = block(image_out, device)
+            image_out, image_shape = block(image_out, device, image_shape)
+        ttnn.ReadDeviceProfiler(device)
 
         logger.info(f"lidar_encoder_layer1")
-        lidar_out = ttnn.reshape(lidar_out, lidar_shape)
+        # lidar_out = ttnn.reshape(lidar_out, lidar_shape)
         for block in self.lidar_layer1:
-            lidar_out = block(lidar_out, device)
+            lidar_out, lidar_shape = block(lidar_out, device, lidar_shape)
+        ttnn.ReadDeviceProfiler(device)
 
         logger.info(f"img_avgpool")
-        image_h = image_out.shape[1]
-        image_w = image_out.shape[2]
-        image_c = image_out.shape[3]
-        image_features_flat = ttnn.reshape(image_out, (1, 1, image_out.shape[0] * image_h * image_w, image_c))
+        # image_h = image_out.shape[1]
+        # image_w = image_out.shape[2]
+        # image_c = image_out.shape[3]
+        image_h = image_shape[1]
+        image_w = image_shape[2]
+        image_c = image_shape[3]
+        print(f"{image_out.shape=}")
+        image_features_flat = ttnn.reshape(image_out, (1, 1, image_shape[0] * image_h * image_w, image_c))
+        print(f"{image_features_flat.shape=}")
         image_embd_layer1 = ttnn.adaptive_avg_pool2d(
             input_tensor=image_features_flat,
             batch_size=image_out.shape[0],
@@ -458,10 +367,12 @@ class TtTransfuserBackbone:
         logger.info(f"image_encoder_layer2")
         for block in self.image_layer2:
             image_features = block(image_features, device)
+        ttnn.ReadDeviceProfiler(device)
 
         logger.info(f"lidar_encoder_layer2")
         for block in self.lidar_layer2:
             lidar_features = block(lidar_features, device)
+        ttnn.ReadDeviceProfiler(device)
 
         logger.info(f"img2_avgpool")
         image_h = image_features.shape[1]
@@ -530,10 +441,12 @@ class TtTransfuserBackbone:
         logger.info(f"image_encoder_layer3")
         for block in self.image_layer3:
             image_features = block(image_features, device)
+        ttnn.ReadDeviceProfiler(device)
 
         logger.info(f"lidar_encoder_layer3")
         for block in self.lidar_layer3:
             lidar_features = block(lidar_features, device)
+        ttnn.ReadDeviceProfiler(device)
 
         logger.info(f"img3_avgpool")
         image_h = image_features.shape[1]
@@ -597,10 +510,12 @@ class TtTransfuserBackbone:
         logger.info(f"image_encoder_layer4")
         for block in self.image_layer4:
             image_features = block(image_features, device)
+        ttnn.ReadDeviceProfiler(device)
 
         logger.info(f"lidar_encoder_layer4")
         for block in self.lidar_layer4:
             lidar_features = block(lidar_features, device)
+        ttnn.ReadDeviceProfiler(device)
 
         logger.info(f"img4_avgpool")
         image_h = image_features.shape[1]

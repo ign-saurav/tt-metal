@@ -152,11 +152,15 @@ class TTRegNetBottleneck:
         else:
             self.downsample_layer = None
 
-    def __call__(self, x, device):
+    def __call__(self, x, device, input_shape=None):
+        if input_shape is None:
+            input_shape = x.shape
         identity = x
+        identity_shape = input_shape
         logger.info(f"conv1- 1x1 convolution")
         # conv1: 1x1 expansion
-        out, shape_ = self.conv1(device, x, x.shape)
+        out, shape_ = self.conv1(device, x, input_shape)
+        # out, shape_ = self.conv1(device, x, x.shape)
 
         logger.info(f"conv2- 3x3 grouped convolution")
         # conv2: 3x3 grouped convolution
@@ -182,12 +186,15 @@ class TTRegNetBottleneck:
 
         # conv3: 1x1 projection
         out, shape_ = self.conv3(device, out, shape_)
+        print(f"{out.shape=}")
         out = ttnn.reshape(out, shape_)
 
         # Handle downsample
         if self.downsample_layer is not None:
-            identity, _ = self.downsample_layer(device, identity, identity.shape)
+            identity, _ = self.downsample_layer(device, identity, identity_shape)
+            print(f"{identity.shape=}")
             identity = ttnn.reshape(identity, shape_)
+        print(f"{identity.shape,out.shape=}")
 
         logger.info(f"Add")
         out = ttnn.add(out, identity)
