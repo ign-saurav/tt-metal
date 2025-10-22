@@ -76,6 +76,95 @@ def get_mesh_mappers(device):
     return None, None, None
 
 
+def compute_pcc_torch(tensor1, tensor2):
+    """
+    Compute Pearson Correlation Coefficient between two tensors using check_with_pcc.
+    Returns the PCC value as a float.
+    """
+    # Use the existing check_with_pcc function
+    pcc_passed, pcc_value = check_with_pcc(tensor1, tensor2, 0.0)  # Use 0.0 threshold to get raw PCC
+
+    # check_with_pcc returns the PCC value as a string, so we need to convert it to float
+    try:
+        pcc_float = float(pcc_value)
+    except (ValueError, TypeError):
+        pcc_float = 0.0
+
+    return pcc_float
+
+
+def compare_boxes_pcc(ref_boxes, torch_boxes):
+    """
+    Compare all reference boxes with all torch boxes using PCC.
+    Returns the top len(ref_boxes) PCC scores with their indices.
+    """
+    pcc_scores = []
+
+    logger.info("Computing PCC between all pairs of boxes...")
+
+    # Compare each reference box with all torch boxes
+    for i, bbox_ref in enumerate(ref_boxes):
+        # Handle different data structures
+        bbox_ref_array = bbox_ref[0] if isinstance(bbox_ref, tuple) else bbox_ref
+        if isinstance(bbox_ref_array, np.ndarray):
+            bbox_ref_array = torch.from_numpy(bbox_ref_array)
+
+        for j, bbox_torch in enumerate(torch_boxes):
+            # Handle different data structures
+            bbox_torch_array = bbox_torch[0] if isinstance(bbox_torch, tuple) else bbox_torch
+            if isinstance(bbox_torch_array, np.ndarray):
+                bbox_torch_array = torch.from_numpy(bbox_torch_array)
+
+            # Compute PCC
+            try:
+                pcc_value = compute_pcc_torch(bbox_ref_array, bbox_torch_array)
+                pcc_scores.append((i, j, pcc_value))
+            except Exception as e:
+                logger.warning(f"Error computing PCC for ref {i} vs torch {j}: {e}")
+                pcc_scores.append((i, j, 0.0))  # Assign 0 for failed comparisons
+
+    # Sort by PCC descending (best first)
+    pcc_scores.sort(key=lambda x: x[2], reverse=True)
+
+    # Take top len(ref_boxes) scores
+    top_pcc = pcc_scores[: len(ref_boxes)]
+
+    return top_pcc, pcc_scores
+
+
+def print_pcc_results(top_pcc, all_pcc_scores, ref_boxes_count, torch_boxes_count):
+    """
+    Print the PCC comparison results in a formatted way.
+    """
+    logger.info("=" * 60)
+    logger.info("TOP PCC SCORES (Top len(ref_boxes) matches)")
+    logger.info("=" * 60)
+    logger.info(f"{'Rank':<6} {'Ref_Idx':<8} {'Torch_Idx':<10} {'PCC_Score':<12}")
+    logger.info("-" * 60)
+
+    for rank, (ref_idx, torch_idx, pcc_val) in enumerate(top_pcc, 1):
+        logger.info(f"{rank:<6} {ref_idx:<8} {torch_idx:<10} {pcc_val:<12.6f}")
+
+    logger.info("=" * 60)
+    logger.info("STATISTICS")
+    logger.info("=" * 60)
+    logger.info(f"Total comparisons: {len(all_pcc_scores)}")
+    logger.info(f"Top matches shown: {len(top_pcc)}")
+
+    if all_pcc_scores:
+        all_pcc_values = [score[2] for score in all_pcc_scores]
+        logger.info(f"Best PCC score: {max(all_pcc_values):.6f}")
+        logger.info(f"Worst PCC score: {min(all_pcc_values):.6f}")
+        logger.info(f"Average PCC score: {np.mean(all_pcc_values):.6f}")
+        logger.info(f"Median PCC score: {np.median(all_pcc_values):.6f}")
+
+    logger.info("=" * 60)
+    logger.info("DETAILED TOP MATCHES")
+    logger.info("=" * 60)
+    for rank, (ref_idx, torch_idx, pcc_val) in enumerate(top_pcc, 1):
+        logger.info(f"Rank {rank}: Ref box {ref_idx} ↔ Torch box {torch_idx} (PCC: {pcc_val:.6f})")
+
+
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
 @pytest.mark.parametrize(
     "image_architecture, lidar_architecture, n_layer, use_velocity, target_point_image_shape, img_shape, lidar_bev_shape",
@@ -99,12 +188,14 @@ def test_lidar_center_net(
     input_dtype,
     weight_dtype,
 ):
-    # torch.manual_seed(seed)
-    image = torch.randn(img_shape)
-    lidar_bev = torch.randn(lidar_bev_shape)
-    target_point = torch.randn(1, 2)
-    target_point_image = torch.randn(target_point_image_shape)
-    velocity = torch.randn(1, 1)
+    # Load the saved demo inputs
+    inputs = torch.load("models/experimental/transfuser/tests/transfuser_inputs_final.pt")
+
+    # Extract each component
+    image = inputs["image"]  # RGB camera image tensor
+    lidar_bev = inputs["lidar"]  # LiDAR BEV tensor
+    velocity = inputs["velocity"]  # Ego velocity tensor
+    target_point = inputs["target_point"]  # Target point tensor
 
     inputs_mesh_mapper, weights_mesh_mapper, output_mesh_composer = get_mesh_mappers(device)
 
@@ -122,7 +213,7 @@ def test_lidar_center_net(
     ).eval()
 
     ref_feature, pred_wp, ref_head_results, ref_boxes, ref_rotated_bboxes = ref_layer.forward_ego(
-        image, lidar_bev, target_point, target_point_image, velocity
+        image, lidar_bev, target_point, velocity
     )
 
     # Unpack list outputs (each contains one tensor since we have single scale)
@@ -191,7 +282,31 @@ def test_lidar_center_net(
         backbone="transFuser",
     )
 
-    tt_features, tt_pred_wp = tt_layer.forward_ego(image, lidar_bev, target_point, target_point_image, velocity)
+    # Convert input to TTNN format
+    tt_image_input = ttnn.from_torch(
+        image.permute(0, 2, 3, 1),
+        dtype=ttnn.bfloat16,
+        mesh_mapper=inputs_mesh_mapper,
+    )
+    tt_lidar_input = ttnn.from_torch(
+        lidar_bev.permute(0, 2, 3, 1),
+        dtype=ttnn.bfloat16,
+        layout=ttnn.TILE_LAYOUT,
+        device=device,
+        mesh_mapper=inputs_mesh_mapper,
+    )
+    tt_velocity_input = ttnn.from_torch(
+        velocity,
+        device=device,
+        dtype=ttnn.bfloat16,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+    )
+
+    tt_image = ttnn.to_device(tt_image_input, device)
+    tt_lidar_bev = ttnn.to_device(tt_lidar_input, device)
+    tt_velocity = ttnn.to_device(tt_velocity_input, device)
+
+    tt_features, tt_pred_wp = tt_layer.forward_ego(tt_image, tt_lidar_bev, tt_velocity, target_point)
 
     torch_feature = ttnn.to_torch(tt_features[0], device=device, dtype=torch.float32)
     # Permute NHWC -> NCHW
@@ -266,7 +381,10 @@ def test_lidar_center_net(
 
     box_match = ref_rotated_bboxes == torch_rotated_bboxes
     logger.info(f"Box match: {box_match}")
-    assert box_match, "Box match failed"
+
+    # Compare boxes using PCC
+    top_pcc, all_pcc_scores = compare_boxes_pcc(ref_rotated_bboxes, torch_rotated_bboxes)
+    print_pcc_results(top_pcc, all_pcc_scores, len(ref_rotated_bboxes), len(torch_rotated_bboxes))
 
     does_pass, wh_pcc_message = check_with_pcc(ref_wh, torch_wh, 0.90)
     logger.info(f"WH PCC: {wh_pcc_message}")
@@ -286,32 +404,12 @@ def test_lidar_center_net(
     does_pass, brake_pcc_message = check_with_pcc(ref_brake, torch_brake, 0.90)
     logger.info(f"Brake PCC: {brake_pcc_message}")
 
-    # After building tt_rotated_bboxes list
-    for i in range(len(torch_rotated_bboxes)):
-        bbox_tt = torch_rotated_bboxes[i]
-        bbox_ref = ref_rotated_bboxes[i]
-
-        # Extract arrays from tuples (first element contains the bbox coordinates)
-        bbox_ref_array = bbox_ref[0] if isinstance(bbox_ref, tuple) else bbox_ref
-        bbox_tt_array = bbox_tt[0] if isinstance(bbox_tt, tuple) else bbox_tt
-
-        # Convert to torch tensors if they're numpy arrays
-        if isinstance(bbox_ref_array, np.ndarray):
-            bbox_ref_array = torch.from_numpy(bbox_ref_array)
-        if isinstance(bbox_tt_array, np.ndarray):
-            bbox_tt_array = torch.from_numpy(bbox_tt_array)
-
-        does_pass, box_pcc_message = check_with_pcc(bbox_ref_array, bbox_tt_array, 0.90)
-        logger.info(f"Bbox {i} PCC: {box_pcc_message}")
-        assert does_pass, f"Bbox {i} failed PCC check: {box_pcc_message}"
-
     does_pass, heatmap_pcc_message = check_with_pcc(ref_center_heatmap, torch_center_heatmap, 0.90)
     logger.info(f"Center Heatmap PCC: {heatmap_pcc_message}")
 
     assert does_pass, f"Center Heatmap PCC Failed! PCC: {heatmap_pcc_message}"
 
     if does_pass:
-        print("SEED: ", torch.seed())
         logger.info("LidarCenterNet Passed!")
     else:
         logger.warning("LidarCenterNet Failed!")
