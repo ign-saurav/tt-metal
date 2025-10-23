@@ -49,13 +49,13 @@ class TTRegNetBottleneck:
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
             groups=groups,
             act_block_h=32,
-            shard_layout=shard_layout,
+            # shard_layout=shard_layout,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             deallocate_activation=True,
-            reallocate_halo_output=True,
-            reshard_if_not_optimal=True,
-            enable_act_double_buffer=True,
-            enable_weights_double_buffer=True,
+            reallocate_halo_output=False,
+            reshard_if_not_optimal=False,
+            enable_act_double_buffer=False,
+            enable_weights_double_buffer=False,
             dtype=ttnn.bfloat16,
             is_reshape=False,
         )
@@ -76,6 +76,7 @@ class TTRegNetBottleneck:
             enable_act_double_buffer=True,
             enable_weights_double_buffer=True,
             dtype=ttnn.bfloat16,
+            is_reshape=False,
         )
 
         self.se_fc2 = TTConv2D(
@@ -93,6 +94,7 @@ class TTRegNetBottleneck:
             enable_act_double_buffer=True,
             enable_weights_double_buffer=True,
             dtype=ttnn.bfloat16,
+            is_reshape=False,
         )
 
         # conv3: 1x1 convolution (no activation)
@@ -111,6 +113,7 @@ class TTRegNetBottleneck:
             enable_act_double_buffer=True,
             enable_weights_double_buffer=True,
             dtype=ttnn.bfloat16,
+            is_reshape=False,
         )
 
         # Downsample layer if needed
@@ -130,18 +133,22 @@ class TTRegNetBottleneck:
                 enable_act_double_buffer=True,
                 enable_weights_double_buffer=True,
                 dtype=ttnn.bfloat16,
+                is_reshape=False,
             )
         else:
             self.downsample_layer = None
 
-    def __call__(self, x, device):
+    def __call__(self, x, device, input_shape=None):
+        if input_shape is None:
+            input_shape = x.shape
         identity = x
+        identity_shape = input_shape
         logger.info(f"conv1- 1x1 convolution")
         logger.info(f"x.shape{x.shape =}")
         # conv1: 1x1 expansion
         # import pdb; pdb.set_trace()
-        out, shape_ = self.conv1(device, x, x.shape)
-
+        out, shape_ = self.conv1(device, x, input_shape)
+        # out = ttnn.reshape(out, shape_)
         logger.info(f"conv2- 3x3 grouped convolution")
         # conv2: 3x3 grouped convolution
         out, shape_ = self.conv2(device, out, shape_)
@@ -149,12 +156,21 @@ class TTRegNetBottleneck:
         # SE Module
         logger.info(f"SE module")
         logger.info(f"reduce mean")
+        print(out.shape)
+        print(shape_)
         # Global average pooling
         out = ttnn.reshape(out, shape_)
-        print("""""" """""" """""" "")
+        print(";;;;;;;;;;;;;;;;;;;;;;;;;")
         print(out.shape)
         se_out = ttnn.mean(out, dim=[1, 2], keepdim=True)
+        print(f"{se_out.shape=}")
+        # se_out = ttnn.reshape(se_out, (1, 1, se_out.shape[0] * se_out.shape[1] * se_out.shape[2], se_out.shape[3]))
+        # shape_ = (se_out.shape[0], 1, 1, se_out.shape[3])
         shape_ = se_out.shape
+
+        # shape_ = se_out.shape
+        print(se_out.shape)
+        print(shape_)
 
         logger.info(f"SE fc1")
         se_out, shape_ = self.se_fc1(device, se_out, shape_)
@@ -173,15 +189,18 @@ class TTRegNetBottleneck:
         # conv3: 1x1 projection
         out, shape_ = self.conv3(device, out, shape_)
         logger.info(f"after conv 1x1{out.shape =}")
-        out = ttnn.reshape(out, shape_)
+        logger.info(f"after conv 1x1{shape_ =}")
+        # out = ttnn.reshape(out, shape_)
         logger.info(f"reshape shape{out.shape =}")
         # Handle downsample
         if self.downsample_layer is not None:
             logger.info(f"downsample")
             logger.info(f"identity shape{identity.shape =}")
             logger.info(f" shape{shape_ =}")
-            identity, _ = self.downsample_layer(device, identity, identity.shape)
-            identity = ttnn.reshape(identity, shape_)
+            identity, shape_identity = self.downsample_layer(device, identity, identity_shape)
+            print(f"ffffffffffffffff{shape_identity=}")
+            print(f"ffffffffffffffff{identity.shape=}")
+            # identity = ttnn.reshape(identity, shape_)
 
         logger.info(f"Add")
         logger.info(f"Add in l shape{out.shape =}")
@@ -190,5 +209,6 @@ class TTRegNetBottleneck:
         logger.info(f"Add out shape{out.shape =}")
         # out = ttnn.reshape(out, shape_)
         out = ttnn.relu(out)  # Final ReLU activation
+        print(f"ffffffffffffffff{out.shape=}")
 
-        return out
+        return out, shape_

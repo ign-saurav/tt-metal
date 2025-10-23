@@ -2,11 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
+import torch
 from models.experimental.transfuser.tt.utils import TTConv2D
-from typing import List
 from loguru import logger
-from models.experimental.transfuser.tt.bottleneck import TTRegNetBottleneck
 from models.experimental.transfuser.tt.gpt import TTGpt
+from models.experimental.transfuser.tt.stages import Ttstages
 
 
 class TtTransfuserBackbone:
@@ -54,7 +54,7 @@ class TtTransfuserBackbone:
             dtype=ttnn.bfloat16,
         )
         # Layer1 for both encoders
-        self.image_layer1 = self._make_layer(
+        self.image_layer1 = Ttstages._make_layer(
             parameters=parameters.image_encoder.features.layer1,
             planes=72,
             blocks=2,  # b1 and b2
@@ -64,7 +64,7 @@ class TtTransfuserBackbone:
             stage_name="layer1",
         )
 
-        self.lidar_layer1 = self._make_layer(
+        self.lidar_layer1 = Ttstages._make_layer(
             parameters=parameters.lidar_encoder._model.layer1,
             planes=72,
             blocks=2,
@@ -90,86 +90,84 @@ class TtTransfuserBackbone:
             memory_config=ttnn.L1_MEMORY_CONFIG,
         )
 
-    def _make_layer(
-        self,
-        parameters,
-        planes: int,
-        blocks: int,
-        stride: int,
-        groups: int = 1,
-        model_config=None,
-        stage_name=None,
-    ) -> List[TTRegNetBottleneck]:
-        layers = []
+    # def _make_layer(
+    #     self,
+    #     parameters,
+    #     planes: int,
+    #     blocks: int,
+    #     stride: int,
+    #     groups: int = 1,
+    #     model_config=None,
+    #     stage_name=None,
+    # ) -> List[TTRegNetBottleneck]:
+    #     layers = []
 
-        # Determine shard layout based on stage name
-        if stage_name == "layer1":
-            shard_layout = ttnn.TensorMemoryLayout.HEIGHT_SHARDED
-        elif stage_name == "layer2":
-            shard_layout = ttnn.TensorMemoryLayout.HEIGHT_SHARDED
-        elif stage_name == "layer3":
-            shard_layout = ttnn.TensorMemoryLayout.WIDTH_SHARDED
-        elif stage_name == "layer4":
-            shard_layout = ttnn.TensorMemoryLayout.WIDTH_SHARDED
-        else:
-            # Default to HEIGHT_SHARDED for backward compatibility
-            shard_layout = ttnn.TensorMemoryLayout.HEIGHT_SHARDED
+    #     # Determine shard layout based on stage name
+    #     if stage_name == "layer1":
+    #         shard_layout = ttnn.TensorMemoryLayout.HEIGHT_SHARDED
+    #     elif stage_name == "layer2":
+    #         shard_layout = ttnn.TensorMemoryLayout.HEIGHT_SHARDED
+    #     elif stage_name == "layer3":
+    #         shard_layout = ttnn.TensorMemoryLayout.WIDTH_SHARDED
+    #     elif stage_name == "layer4":
+    #         shard_layout = ttnn.TensorMemoryLayout.WIDTH_SHARDED
+    #     else:
+    #         # Default to HEIGHT_SHARDED for backward compatibility
+    #         shard_layout = ttnn.TensorMemoryLayout.HEIGHT_SHARDED
 
-        # First block (may have downsample)
-        downsample = stride != 1 or self.inplanes != planes
-        layers.append(
-            TTRegNetBottleneck(
-                parameters=parameters["b1"],
-                model_config=model_config,
-                stride=stride,
-                downsample=downsample,
-                groups=groups,
-                shard_layout=shard_layout,
-            )
-        )
-        self.inplanes = planes
+    #     # First block (may have downsample)
+    #     downsample = stride != 1 or self.inplanes != planes
+    #     layers.append(
+    #         TTRegNetBottleneck(
+    #             parameters=parameters["b1"],
+    #             model_config=model_config,
+    #             stride=stride,
+    #             downsample=downsample,
+    #             groups=groups,
+    #             shard_layout=shard_layout,
+    #         )
+    #     )
+    #     self.inplanes = planes
 
-        # Remaining blocks
-        for block_num in range(1, blocks):
-            block_name = f"b{block_num + 1}"
-            layers.append(
-                TTRegNetBottleneck(
-                    parameters=parameters[block_name],
-                    model_config=model_config,
-                    stride=1,
-                    downsample=False,
-                    groups=groups,
-                    shard_layout=shard_layout,
-                )
-            )
+    #     # Remaining blocks
+    #     for block_num in range(1, blocks):
+    #         block_name = f"b{block_num + 1}"
+    #         layers.append(
+    #             TTRegNetBottleneck(
+    #                 parameters=parameters[block_name],
+    #                 model_config=model_config,
+    #                 stride=1,
+    #                 downsample=False,
+    #                 groups=groups,
+    #                 shard_layout=shard_layout,
+    #             )
+    #         )
 
-        return layers
+    #     return layers
 
     def normalize_imagenet_ttnn(self, x):
-        """Normalize input images according to ImageNet standards using TTNN operations.
-        Expects input in NHWC format
-        """
-        # First divide by 255.0 to convert from [0,255] to [0,1]
+        """Optimized normalization that avoids slice/concat overhead"""
+        # Convert from [0,255] to [0,1]
         x = ttnn.multiply(x, 1.0 / 255.0)
 
-        # For NHWC format: [batch, height, width, channels]
-        # Slice along the channel dimension (dim=3)
-        x_r = ttnn.slice(x, [0, 0, 0, 0], [x.shape[0], x.shape[1], x.shape[2], 1])  # Red channel
-        x_g = ttnn.slice(x, [0, 0, 0, 1], [x.shape[0], x.shape[1], x.shape[2], 2])  # Green channel
-        x_b = ttnn.slice(x, [0, 0, 0, 2], [x.shape[0], x.shape[1], x.shape[2], 3])  # Blue channel
+        # Create normalization constants as tensors
+        # Mean: [0.485, 0.456, 0.406], Std: [0.229, 0.224, 0.225]
+        mean = ttnn.from_torch(
+            torch.tensor([0.485, 0.456, 0.406]).reshape(1, 1, 1, 3),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device,
+        )
+        std_inv = ttnn.from_torch(
+            torch.tensor([1.0 / 0.229, 1.0 / 0.224, 1.0 / 0.225]).reshape(1, 1, 1, 3),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device,
+        )
 
-        # Normalize each channel: (x - mean) / std
-        x_r = ttnn.subtract(x_r, 0.485)
-        x_r = ttnn.multiply(x_r, 1.0 / 0.229)
-
-        x_g = ttnn.subtract(x_g, 0.456)
-        x_g = ttnn.multiply(x_g, 1.0 / 0.224)
-
-        x_b = ttnn.subtract(x_b, 0.406)
-        x_b = ttnn.multiply(x_b, 1.0 / 0.225)
-
-        # Concatenate along channel dimension (dim=3 for NHWC)
-        x = ttnn.concat([x_r, x_g, x_b], dim=3)
+        # Normalize all channels at once (no slice/concat needed)
+        x = ttnn.subtract(x, mean)
+        x = ttnn.multiply(x, std_inv)
 
         return x
 
@@ -185,47 +183,59 @@ class TtTransfuserBackbone:
         # Process lidar input
         lidar_out, lidar_shape = self.lidar_conv1(device, lidar_x, lidar_x.shape)
         print("..........................................")
-        print(lidar_shape)
+        print(f"{image_out.shape=}")
         print(image_shape)
+        # print(im
+        # age_shape)
+        print(f"{lidar_out.shape=}")
+        print(lidar_shape)
 
         logger.info(f"image_encoder_layer1")
         # image_out = ttnn.reshape(image_out, (1, 80, 352, 32))
-        image_out = ttnn.reshape(image_out, image_shape)
+        # image_out = ttnn.reshape(image_out, image_shape)
+        print(f"{image_out.shape=}")
         # Process layer1 blocks
         for block in self.image_layer1:
-            image_out = block(image_out, device)
+            image_out, image_shape = block(image_out, device, image_shape)
 
         logger.info(f"lidar_encoder_layer1")
-        lidar_out = ttnn.reshape(lidar_out, lidar_shape)
+        # lidar_out = ttnn.reshape(lidar_out, lidar_shape)
         # lidar_out = ttnn.reshape(lidar_out, (1, 128, 128, 32))
         for block in self.lidar_layer1:
-            lidar_out = block(lidar_out, device)
+            lidar_out, lidar_shape = block(lidar_out, device, lidar_shape)
 
         logger.info(f"img_avgpool")
 
-        image_h = image_out.shape[1]
-        image_w = image_out.shape[2]
-        image_c = image_out.shape[3]
+        # image_h = image_out.shape[1]
+        image_h = image_shape[1]
+        # image_w = image_out.shape[2]
+        image_w = image_shape[2]
+        # image_w = image_out.shape[2]
+        image_c = image_shape[3]
 
-        image_features_flat = ttnn.reshape(image_out, (1, 1, image_out.shape[0] * image_h * image_w, image_c))
+        image_features_flat = image_out
+        print(f"eeeeeeeeeeeeeee{image_features_flat.shape=}")
+        # image_features_flat = ttnn.reshape(image_out, (1, 1, image_shape[0] * image_h * image_w, image_c))
         image_embd_layer1 = ttnn.adaptive_avg_pool2d(
             input_tensor=image_features_flat,
-            batch_size=image_out.shape[0],
+            batch_size=image_shape[0],
             input_h=image_h,
             input_w=image_w,
             channels=image_c,
             output_size=[self.config.img_vert_anchors, self.config.img_horz_anchors],
         )
+        print(f"{image_embd_layer1.shape=}")
         logger.info(f"lidar_avgpool")
-        lidar_h = lidar_out.shape[1]
-        lidar_w = lidar_out.shape[2]
-        lidar_c = lidar_out.shape[3]
+        lidar_h = lidar_shape[1]
+        lidar_w = lidar_shape[2]
+        lidar_c = lidar_shape[3]
 
-        lidar_features_flat = ttnn.reshape(lidar_out, (1, 1, lidar_out.shape[0] * lidar_h * lidar_w, lidar_c))
-
+        # lidar_features_flat = ttnn.reshape(lidar_out, (1, 1, lidar_out.shape[0] * lidar_h * lidar_w, lidar_c))
+        lidar_features_flat = lidar_out
+        print(f"eeeeeeeeeeeeeee{lidar_features_flat.shape=}")
         lidar_embd_layer1 = ttnn.adaptive_avg_pool2d(
             input_tensor=lidar_features_flat,
-            batch_size=lidar_out.shape[0],
+            batch_size=lidar_shape[0],
             input_h=lidar_h,
             input_w=lidar_w,
             channels=lidar_c,
@@ -242,6 +252,7 @@ class TtTransfuserBackbone:
         image_features_layer1, lidar_features_layer1 = self.transformer1(
             image_embd_layer1, lidar_embd_layer1, velocity, 72
         )
+        print(f"{image_features_layer1.shape=}")
         image_features_layer1 = ttnn.permute(image_features_layer1, (0, 2, 3, 1))
         lidar_features_layer1 = ttnn.permute(lidar_features_layer1, (0, 2, 3, 1))
 
@@ -269,8 +280,13 @@ class TtTransfuserBackbone:
         # Slice back to original 72 channels
         lidar_features_layer1 = ttnn.slice(lidar_features_layer1, [0, 0, 0, 0], [1, 64, 64, 72])
         lidar_features_layer1 = ttnn.to_layout(lidar_features_layer1, ttnn.TILE_LAYOUT)
-
+        print(f"{image_out.shape=}")
+        print(f"{image_features_layer1.shape=}")
+        print(f"{lidar_out.shape=}")
+        print(f"{lidar_features_layer1.shape=}")
         logger.info("Image and lidar - add")
+        image_features_layer1 = ttnn.reshape(image_features_layer1, image_out.shape)
+        lidar_features_layer1 = ttnn.reshape(lidar_features_layer1, lidar_out.shape)
         image_features = ttnn.add(image_out, image_features_layer1)
         lidar_features = ttnn.add(lidar_out, lidar_features_layer1)
 
