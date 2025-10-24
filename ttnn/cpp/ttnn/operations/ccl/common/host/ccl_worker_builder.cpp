@@ -791,7 +791,7 @@ tt::tt_metal::KernelHandle generate_multi_command_stream_kernel_ct_args(
     CoreRangeSet const& worker_core_range,
     tt::tt_metal::DataMovementConfig datamovement_kernel_config,
     const size_t num_command_streams,
-    std::optional<chip_id_t> my_chip_id) {
+    std::optional<tt::ChipId> my_chip_id) {
     TT_FATAL(
         num_command_streams > 0 && num_command_streams <= 2,
         "Invalid number of command streams: {}. Must be 1 or 2",
@@ -802,7 +802,7 @@ tt::tt_metal::KernelHandle generate_multi_command_stream_kernel_ct_args(
     std::ranges::for_each(tensors, [](auto const& t) {
         TT_FATAL(t != nullptr, "Null tensor passed to generate_multi_command_stream_kernel_ct_args");
     });
-    if (tensors.size() > 0 && tensors[0]->is_sharded()) {
+    if (!tensors.empty() && tensors[0]->is_sharded()) {
         datamovement_kernel_config.defines["TENSOR0_SHARDED_MEM_LAYOUT"] = "1";
     }
     if (tensors.size() > 1 && tensors[1]->is_sharded()) {
@@ -819,13 +819,12 @@ tt::tt_metal::KernelHandle generate_multi_command_stream_kernel_ct_args(
     } else {
         datamovement_kernel_config.defines["NO_TENSOR_MODE"] = "1";
     }
-    if (datamovement_kernel_config.defines.size() > 0) {
+    if (!datamovement_kernel_config.defines.empty()) {
         log_trace(tt::LogOp, "Command Kernel Defines:");
         for ([[maybe_unused]] auto const& [k, v] : datamovement_kernel_config.defines) {
             log_trace(tt::LogOp, "\t{}: {}", k, v);
         }
     }
-
 
     // Set aside a buffer we can use for storing packet headers in (particularly for atomic incs)
     const auto reserved_packet_header_CB_index =

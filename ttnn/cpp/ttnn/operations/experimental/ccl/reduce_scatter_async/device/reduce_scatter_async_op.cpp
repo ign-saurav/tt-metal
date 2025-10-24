@@ -32,7 +32,7 @@ void ReduceScatterAsync::validate_with_output_tensors(
             "Reduce scatter input tensor shape on dim {} must be divisible by ring size",
             this->scatter_dim);
     }
-    if (output_tensors.size() > 0 && output_tensors[0].has_value()) {
+    if (!output_tensors.empty() && output_tensors[0].has_value()) {
         TT_FATAL(
             output_tensors.size() == 5,
             "Error, Number of output tensors should be 5 but has {}",
@@ -185,7 +185,7 @@ operation::ProgramWithCallbacks ReduceScatterAsync::create_program_at(
         "incorrect");
 
     auto find_device = [](const std::vector<IDevice*>& devices,
-                          std::optional<chip_id_t> id) -> std::optional<IDevice*> {
+                          std::optional<tt::ChipId> id) -> std::optional<IDevice*> {
         if (id == std::nullopt) {
             return std::nullopt;
         }

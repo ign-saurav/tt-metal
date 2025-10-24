@@ -208,7 +208,9 @@ class Transformer(LightweightModule):
         """
         B = tokens.shape[0]
         assert current_pos.shape[0] == B, "Batch size mismatch"
-        assert B == self.args.max_batch_size, "Batch size must be equal to max_batch_size"
+        assert (
+            B == self.args.max_batch_size
+        ), f"Batch size {B} must be equal to max_batch_size {self.args.max_batch_size}"
 
         # Necessary padding to be full tile sized when on device
         tokens = torch.nn.functional.pad(tokens.view(-1), (0, 32 - len(tokens)), "constant", 0)
@@ -223,11 +225,7 @@ class Transformer(LightweightModule):
         rot_current_pos = torch.maximum(
             current_pos, torch.tensor(0, dtype=torch.int64)
         )  # Ensure position indices are non-negative
-        rope_idxs_global = self.rope_setup.get_rot_idxs(rot_current_pos, on_host=True)
-        if hasattr(self, "rope_local_setup"):
-            rope_idxs_local = self.rope_local_setup.get_rot_idxs(rot_current_pos, on_host=True)
-        else:
-            rope_idxs_local = None
+        rope_idxs = self.rope_setup.get_rot_idxs(rot_current_pos, on_host=True)
 
         current_pos_tt = ttnn.from_torch(
             current_pos,
@@ -251,7 +249,7 @@ class Transformer(LightweightModule):
                     mesh_shape=self.args.cluster_shape,
                 ),
             )
-        return tokens, current_pos_tt, rope_idxs_global, rope_idxs_local, page_table
+        return tokens, current_pos_tt, rope_idxs, page_table
 
     def _transform_decode_inputs_device(self, tokens):
         """
@@ -336,28 +334,15 @@ class Transformer(LightweightModule):
             kv_cache=kv_cache,
         )
 
-    def _increment_decode_positions_device(self, current_pos, rot_mat_idxs_global, rot_mat_idxs_local):
-        # ttnn.ne currently requires the input to be in TILE_LAYOUT
-        current_pos_tiled = ttnn.to_layout(current_pos, layout=ttnn.TILE_LAYOUT)
-        # Update only active positions (current_pos != -1)
-        predicate = ttnn.ne(current_pos_tiled, -1)
-        result = ttnn.where(
-            predicate,
-            ttnn.add(current_pos_tiled, 1),
-            current_pos_tiled,
-        )
-        ttnn.copy(ttnn.to_layout(result, layout=ttnn.ROW_MAJOR_LAYOUT), current_pos)
-
-        ttnn.plus_one(rot_mat_idxs_global)
-        if rot_mat_idxs_local is not None:
-            ttnn.plus_one(rot_mat_idxs_local)
+    def _increment_decode_positions_device(self, current_pos, rot_mat_idxs):
+        ttnn.plus_one(current_pos, skip_negative_entries=True)
+        ttnn.plus_one(rot_mat_idxs)
 
     def ttnn_decode_forward(
         self,
         x,
         current_pos,
-        rot_mat_idxs_global=None,
-        rot_mat_idxs_local=None,
+        rot_mat_idxs=None,
         page_table=None,
         kv_cache=None,
         argmax_on_device=False,
@@ -366,12 +351,9 @@ class Transformer(LightweightModule):
         This method will take device tensors and any other args to run forward.
         It returns ttnn device tensors.
         """
-        rot_mats_global = self.rope_setup.get_rot_mats(rot_mat_idxs_global)
-        rot_mats_local = (
-            self.rope_local_setup.get_rot_mats(rot_mat_idxs_local) if rot_mat_idxs_local is not None else None
-        )
+        rot_mats_global = self.rope_setup.get_rot_mats(rot_mat_idxs)
+        rot_mats_local = self.rope_local_setup.get_rot_mats(rot_mat_idxs) if hasattr(self, "rope_local_setup") else None
         x_embed = self._transform_decode_inputs_device(x)
-
         tt_logits = self.forward(
             x_embed,
             current_pos,
@@ -407,7 +389,7 @@ class Transformer(LightweightModule):
             tt_logits = ttnn.argmax(tt_logits, dim=3, keepdim=True, use_multicore=True)
 
             # Update device tensors for the next iteration
-            self._increment_decode_positions_device(current_pos, rot_mat_idxs_global, rot_mat_idxs_local)
+            self._increment_decode_positions_device(current_pos, rot_mat_idxs)
 
             # Update input tokens with sampled tokens for the next iteration
             ttnn.copy(tt_logits.reshape(x.shape), x)

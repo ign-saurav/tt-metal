@@ -12,7 +12,6 @@
 #include <tt-metalium/buffer.hpp>
 #include <tt-metalium/constants.hpp>
 #include <tt-logger/tt-logger.hpp>
-#include <tt-metalium/util.hpp>
 #include <tt-metalium/host_api.hpp>
 #include "ttnn/operations/math.hpp"
 #include "ttnn/operation.hpp"
@@ -39,7 +38,8 @@ operation::ProgramWithCallbacks sdpa_multi_core(
     DeviceComputeKernelConfig compute_kernel_config,
     std::optional<SDPAProgramConfig> program_config,
     bool use_mla,
-    uint32_t head_dim_v) {
+    uint32_t head_dim_v,
+    std::optional<uint32_t> sliding_window_size) {
     /*
     Q: B x NQH x S x DH
     K: B x NKH x DH x S
@@ -112,6 +112,7 @@ operation::ProgramWithCallbacks sdpa_multi_core(
     log_debug(tt::LogOp, "q_num_chunks: {}", q_num_chunks);
     log_debug(tt::LogOp, "k_num_chunks: {}", k_num_chunks);
     log_debug(tt::LogOp, "NKH: {}", NKH);
+    log_debug(tt::LogOp, "sliding_window_size: {}", sliding_window_size.has_value() ? sliding_window_size.value() : 0);
 
     // In chunked prefill mode, the offset of Q in terms of Q chunks
     uint32_t chunked_q_chunk_offset = 0;
@@ -373,6 +374,7 @@ operation::ProgramWithCallbacks sdpa_multi_core(
         (std::uint32_t)use_provided_mask,
         (std::uint32_t)use_padded_mask,
         (uint32_t)is_chunked,
+        sliding_window_size.value_or(0),
     };
 
     TensorAccessorArgs(output_tensor.buffer()).append_to(writer_compile_time_args);
@@ -407,6 +409,7 @@ operation::ProgramWithCallbacks sdpa_multi_core(
         (std::uint32_t)use_padded_mask,
         (uint32_t)is_chunked,
         scale_union.u,
+        sliding_window_size.value_or(0),
     };
 
     TensorAccessorArgs(output_tensor.buffer()).append_to(compute_compile_time_args);
@@ -471,14 +474,14 @@ operation::ProgramWithCallbacks sdpa_multi_core(
                                                        // tt::DataFormat::Float32 : tt::DataFormat::Float16_b;
     tt::DataFormat stats_df = im_df;
 
-    uint32_t q_tile_size = tt::tt_metal::detail::TileSize(q_df);
-    uint32_t k_tile_size = tt::tt_metal::detail::TileSize(k_df);
-    uint32_t v_tile_size = tt::tt_metal::detail::TileSize(v_df);
-    uint32_t mask_tile_size = tt::tt_metal::detail::TileSize(mask_df);
-    uint32_t out_tile_size = tt::tt_metal::detail::TileSize(out_df);
-    uint32_t scalar_tile_size = tt::tt_metal::detail::TileSize(scalar_df);
-    uint32_t im_tile_size = tt::tt_metal::detail::TileSize(im_df);
-    uint32_t stats_tile_size = tt::tt_metal::detail::TileSize(stats_df);
+    uint32_t q_tile_size = tt::tile_size(q_df);
+    uint32_t k_tile_size = tt::tile_size(k_df);
+    uint32_t v_tile_size = tt::tile_size(v_df);
+    uint32_t mask_tile_size = tt::tile_size(mask_df);
+    uint32_t out_tile_size = tt::tile_size(out_df);
+    uint32_t scalar_tile_size = tt::tile_size(scalar_df);
+    uint32_t im_tile_size = tt::tile_size(im_df);
+    uint32_t stats_tile_size = tt::tile_size(stats_df);
 
     log_debug(tt::LogOp, "q_data_format: {}", q_df);
     log_debug(tt::LogOp, "k_data_format: {}", k_df);

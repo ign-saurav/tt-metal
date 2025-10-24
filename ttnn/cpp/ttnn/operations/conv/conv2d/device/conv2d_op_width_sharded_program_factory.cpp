@@ -12,7 +12,6 @@
 #include <tt-metalium/work_split.hpp>
 #include <tt-metalium/constants.hpp>
 #include <tt-metalium/tt_metal.hpp>
-#include <tt-metalium/util.hpp>
 #include <tt-metalium/host_api.hpp>
 #include <tt-metalium/tensor_accessor_args.hpp>
 #include "ttnn/operations/compute_throttle_utils.hpp"
@@ -41,7 +40,7 @@ std::pair<std::vector<uint32_t>, std::vector<uint32_t>> compute_opt_conv_activat
     return {{1, num_rows_padded, num_cols_padded}, {1, num_rows, num_cols}};
 }
 
-tt::tt_metal::operation::ProgramWithCallbacks multi_core_optimized_conv_width_sharded_v2_impl(
+tt::tt_metal::operation::ProgramWithCallbacks multi_core_conv2d_width_sharded(
     tt::tt_metal::Program& program,
     const Tensor& a,
     const Tensor& b,
@@ -56,8 +55,8 @@ tt::tt_metal::operation::ProgramWithCallbacks multi_core_optimized_conv_width_sh
     bool untilize_out,
     bool has_bias,
     const std::optional<unary::UnaryWithParam>& fused_activation,
-    const OptimizedConvParallelizationConfig& parallelization_config,
-    const OptimizedConvBlockConfig& block_config,
+    const Conv2dParallelizationConfig& parallelization_config,
+    const Conv2dBlockConfig& block_config,
     Tensor& output,
     DeviceComputeKernelConfig compute_kernel_config,
     bool enable_act_double_buffer,
@@ -306,8 +305,7 @@ tt::tt_metal::operation::ProgramWithCallbacks multi_core_optimized_conv_width_sh
 
     uint32_t conv_act_c_read_bytes = conv_act_size_c * a.element_size() / (input_num_cores * per_core_num_blocks_act_w);
 
-    std::string compute_kernel_path =
-        "ttnn/cpp/ttnn/operations/conv/conv2d/device/kernels/conv_bmm_tilize_col_major_out_blocks.cpp";
+    std::string compute_kernel_path = "ttnn/cpp/ttnn/operations/conv/conv2d/device/kernels/conv_bmm_tilize.cpp";
     std::string activation_kernel_path =
         "ttnn/cpp/ttnn/operations/conv/conv2d/device/kernels/activation_reader_width_sharded.cpp";
     std::string weights_kernel_path =
@@ -337,27 +335,13 @@ tt::tt_metal::operation::ProgramWithCallbacks multi_core_optimized_conv_width_sh
     if (skip_weights_mcast) {
         writer_mcast_sender_defines["SKIP_MCAST"] = "1";
     }
-    if (has_bias) {
-        writer_defines["FUSE_BIAS"] = "1";
-        writer_mcast_sender_defines["FUSE_BIAS"] = "1";
-        compute_defines["FUSE_BIAS"] = "1";
+
+    bool pack_relu = fused_activation.has_value() && fused_activation.value().op_type == unary::UnaryOpType::RELU;
+    if (fused_activation.has_value() && !pack_relu) {
+        compute_defines.merge(ttnn::operations::unary::utils::get_defines(
+            fused_activation.value().op_type, fused_activation.value().params, "ACTIVATION", "i"));
     }
 
-    if (fused_activation.has_value()) {
-        if (fused_activation.value().op_type == unary::UnaryOpType::RELU) {
-            compute_defines["PACK_RELU"] = "1";
-        } else {
-            compute_defines.merge(ttnn::operations::unary::utils::get_defines(
-                fused_activation.value().op_type, fused_activation.value().params, "ACTIVATION", "i"));
-        }
-    }
-
-    if (packer_l1_acc) {
-        compute_defines["PACKER_L1_ACC"] = "1";
-    }
-    if (weight_block_w_ntiles <= 8) {
-        compute_defines["PACKER_UNTILIZE"] = "1";
-    }
     ttnn::operations::compute_throttle_utils::throttle_mm_perf(
         device->arch(), all_cores.num_cores(), compute_defines, ttnn::get_throttle_level(compute_kernel_config));
 
@@ -459,7 +443,11 @@ tt::tt_metal::operation::ProgramWithCallbacks multi_core_optimized_conv_width_sh
         0,
         partials_cb_uses_output,
         input_num_cores,  // in0_nblocks_w_tilize. Repeat tilize after all cores have done one round of MCAST.
-        false};
+        false,            // check_skip_compute; not used in width sharded
+        pack_relu,
+        weight_block_w_ntiles <= 8,  // packer_untilize
+        packer_l1_acc,
+        has_bias};
 
     std::vector<uint32_t> activation_kernel_compile_args = {
         (uint32_t)stride_w,
@@ -480,7 +468,7 @@ tt::tt_metal::operation::ProgramWithCallbacks multi_core_optimized_conv_width_sh
         (uint32_t)act_mcast_start.y,
         (uint32_t)act_mcast_end.x,
         (uint32_t)act_mcast_end.y,
-        (uint32_t)act_block_num_tiles * tt::tt_metal::detail::TileSize(tilized_act_df),
+        (uint32_t)act_block_num_tiles * tt::tile_size(tilized_act_df),
         (uint32_t)output_num_cores,
         (uint32_t)all_reader_cores.size(),
         get_cb_info_by_name(cb_info, Conv2dCb::ACT).index,
@@ -504,7 +492,8 @@ tt::tt_metal::operation::ProgramWithCallbacks multi_core_optimized_conv_width_sh
         input_num_cores,            // other_core_weight_height_blocks
         per_core_num_blocks_act_w,  // this_core_weight_height_blocks
         num_blocks_act_h_per_core,
-        get_cb_info_by_name(cb_info, Conv2dCb::BIAS).index};
+        get_cb_info_by_name(cb_info, Conv2dCb::BIAS).index,
+        (uint32_t)has_bias};
 
     if (config_tensors_in_dram) {
         reader_defines["CONFIG_TENSOR_IN_DRAM"] = "1";

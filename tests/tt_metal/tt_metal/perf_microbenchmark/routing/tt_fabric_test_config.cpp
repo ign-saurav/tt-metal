@@ -55,13 +55,13 @@ ParsedYamlConfig YamlConfigParser::parse_file(const std::string& yaml_config_pat
 
 DeviceIdentifier YamlConfigParser::parse_device_identifier(const YAML::Node& node) {
     if (node.IsScalar()) {
-        chip_id_t chip_id = parse_scalar<chip_id_t>(node);
+        ChipId chip_id = parse_scalar<ChipId>(node);
         return chip_id;
     } else if (node.IsSequence() && node.size() == 2) {
         MeshId mesh_id = parse_mesh_id(node[0]);
         if (node[1].IsScalar()) {
             // Format: [mesh_id, chip_id]
-            chip_id_t chip_id = parse_scalar<chip_id_t>(node[1]);
+            ChipId chip_id = parse_scalar<ChipId>(node[1]);
             return std::make_pair(mesh_id, chip_id);
         } else if (node[1].IsSequence()) {
             // Format: [mesh_id, [row, col]]
@@ -132,6 +132,7 @@ ParsedTrafficPatternConfig YamlConfigParser::parse_traffic_pattern_config(const 
     if (pattern_yaml["mcast_start_hops"]) {
         config.mcast_start_hops = parse_scalar<uint32_t>(pattern_yaml["mcast_start_hops"]);
     }
+
     return config;
 }
 
@@ -144,6 +145,9 @@ ParsedSenderConfig YamlConfigParser::parse_sender_config(
     config.device = parse_device_identifier(sender_yaml["device"]);
     if (sender_yaml["core"]) {
         config.core = parse_core_coord(sender_yaml["core"]);
+    }
+    if (sender_yaml["link_id"]) {
+        config.link_id = parse_scalar<uint32_t>(sender_yaml["link_id"]);
     }
 
     const auto& patterns_yaml = sender_yaml["patterns"];
@@ -160,7 +164,7 @@ ParsedTestConfig YamlConfigParser::parse_test_config(const YAML::Node& test_yaml
     ParsedTestConfig test_config;
 
     test_config.name = parse_scalar<std::string>(test_yaml["name"]);
-    log_info(tt::LogTest, "name: {}", test_config.name);
+    log_info(tt::LogTest, "Parsing test: {}", test_config.name);
 
     TT_FATAL(test_yaml["fabric_setup"], "No fabric setup specified for test: {}", test_config.name);
     test_config.fabric_setup = parse_fabric_setup(test_yaml["fabric_setup"]);
@@ -195,6 +199,16 @@ ParsedTestConfig YamlConfigParser::parse_test_config(const YAML::Node& test_yaml
         test_config.patterns = high_level_patterns;
     }
 
+    if (test_yaml["skip"]) {
+        const auto& skip_yaml = test_yaml["skip"];
+        TT_FATAL(skip_yaml.IsSequence(), "Expected 'skip' to be a sequence of platform strings.");
+        std::vector<std::string> skips;
+        for (const auto& s : skip_yaml) {
+            skips.push_back(parse_scalar<std::string>(s));
+        }
+        test_config.skip = std::move(skips);
+    }
+
     if (test_yaml["senders"]) {
         const auto& senders_yaml = test_yaml["senders"];
         TT_FATAL(senders_yaml.IsSequence(), "Expected senders to be a sequence");
@@ -215,6 +229,10 @@ ParsedTestConfig YamlConfigParser::parse_test_config(const YAML::Node& test_yaml
 
     if (test_yaml["sync"]) {
         test_config.global_sync = parse_scalar<bool>(test_yaml["sync"]);
+    }
+
+    if (test_yaml["enable_flow_control"]) {
+        test_config.enable_flow_control = parse_scalar<bool>(test_yaml["enable_flow_control"]);
     }
 
     return test_config;
@@ -329,7 +347,7 @@ PhysicalMeshConfig YamlConfigParser::parse_physical_mesh_config(const YAML::Node
 
     PhysicalMeshConfig physical_mesh_config;
     physical_mesh_config.mesh_descriptor_path = parse_scalar<std::string>(physical_mesh_yaml["mesh_descriptor_path"]);
-    physical_mesh_config.eth_coord_mapping = parse_2d_array<eth_coord_t>(physical_mesh_yaml["eth_coord_mapping"]);
+    physical_mesh_config.eth_coord_mapping = parse_2d_array<EthCoord>(physical_mesh_yaml["eth_coord_mapping"]);
 
     return physical_mesh_config;
 }
@@ -708,8 +726,8 @@ std::vector<ParsedTestConfig> CmdlineParser::generate_default_configs() {
         std::string src_device_str = test_args::get_command_option(input_args_, "--src-device", "0");
         std::string dst_device_str = test_args::get_command_option(input_args_, "--dst-device", "1");
 
-        chip_id_t src_device_id = std::stoul(src_device_str);
-        chip_id_t dst_device_id = std::stoul(dst_device_str);
+        ChipId src_device_id = std::stoul(src_device_str);
+        ChipId dst_device_id = std::stoul(dst_device_str);
 
         ParsedTrafficPatternConfig pattern = {.destination = ParsedDestinationConfig{.device = dst_device_id}};
         ParsedSenderConfig sender = {.device = src_device_id, .patterns = {pattern}};
@@ -808,6 +826,22 @@ void CmdlineParser::print_help() {
         "  --built-tests-dump-file <filename>           Specify the filename for the dumped tests. Default: "
         "built_tests.yaml.");
     log_info(LogTest, "  --filter <testname>           Specify a filter for the test suite");
+    log_info(LogTest, "");
+    log_info(LogTest, "Progress Monitoring Options:");
+    log_info(LogTest, "  --show-progress                              Enable real-time progress monitoring.");
+    log_info(LogTest, "  --progress-interval <seconds>                Poll interval (default: 2).");
+    log_info(LogTest, "  --hung-threshold <seconds>                   Hung detection threshold (default: 30).");
+}
+
+// Progress monitoring methods
+bool CmdlineParser::show_progress() { return test_args::has_command_option(input_args_, "--show-progress"); }
+
+uint32_t CmdlineParser::get_progress_interval() {
+    return test_args::get_command_option_uint32(input_args_, "--progress-interval", 2);
+}
+
+uint32_t CmdlineParser::get_hung_threshold() {
+    return test_args::get_command_option_uint32(input_args_, "--hung-threshold", 30);
 }
 
 // YamlConfigParser private helpers

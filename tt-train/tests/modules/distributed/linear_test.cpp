@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: (c) 2025 Tenstorrent AI ULC
+// SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -15,11 +15,12 @@
 #include "core/random.hpp"
 #include "core/tt_tensor_utils.hpp"
 #include "modules/linear_module.hpp"
+#include "ttnn_fixed/distributed/tt_metal.hpp"
 
 namespace {
 
 auto check_board_is_n300() {
-    return tt::umd::Cluster::create_cluster_descriptor()->get_board_type(0) == BoardType::N300;
+    return tt::umd::Cluster::create_cluster_descriptor()->get_board_type(0) == tt::BoardType::N300;
 }
 
 ttml::autograd::TensorPtr get_parameter(auto& parameters, const std::string& name_substring) {
@@ -40,7 +41,7 @@ protected:
             GTEST_SKIP() << "Skipping N300 specific tests";
         }
 
-        tt::tt_fabric::SetFabricConfig(tt::tt_fabric::FabricConfig::FABRIC_2D_DYNAMIC);
+        ttml::ttnn_fixed::distributed::enable_fabric(2U);
         ttml::autograd::ctx().open_device(tt::tt_metal::distributed::MeshShape(1, 2));
         ttml::autograd::ctx().set_seed(42);
     }

@@ -8,8 +8,8 @@ from loguru import logger
 import ttnn
 from ttnn import ShardTensorToMesh, ConcatMeshToTensor
 from tests.tt_eager.python_api_testing.sweep_tests.comparison_funcs import comp_equal, comp_pcc
-from models.utility_functions import skip_for_grayskull, skip_for_wormhole_b0
-from tests.ttnn.unit_tests.operations.ccl.test_all_gather import is_unsupported_case
+from models.common.utility_functions import skip_for_wormhole_b0
+from tests.nightly.t3000.ccl.test_minimal_all_gather_async import is_unsupported_case
 from tests.tests_common.skip_reasons import LEGACY_CCL_SKIP
 
 USE_NON_FUSED = False
@@ -245,7 +245,6 @@ def run_all_gather_matmul_on_t3000_impl(
     assert eq
 
 
-@skip_for_grayskull("Requires eth connected devices to run")
 @pytest.mark.parametrize(
     "matmul_config",
     [
@@ -377,7 +376,6 @@ def test_all_gather_matmul_on_t3000_post_commit(
     )
 
 
-@skip_for_grayskull("Requires eth connected devices to run")
 @pytest.mark.parametrize(
     "matmul_config",
     [
@@ -471,7 +469,6 @@ def test_all_gather_matmul_1d_on_t3000_post_commit(
     )
 
 
-@skip_for_grayskull("Requires eth connected devices to run")
 @pytest.mark.parametrize(
     "matmul_config",
     [

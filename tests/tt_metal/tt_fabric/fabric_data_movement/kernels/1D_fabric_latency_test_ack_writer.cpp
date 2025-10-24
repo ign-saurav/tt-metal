@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+// SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
 //
 // SPDX-License-Identifier: Apache-2.0
 
@@ -6,6 +6,8 @@
 #include "fabric/fabric_edm_packet_header.hpp"
 #include "tt_metal/fabric/hw/inc/edm_fabric/fabric_connection_manager.hpp"
 #include "tt_metal/fabric/hw/inc/noc_addr.h"
+#include "tt_metal/fabric/hw/inc/tt_fabric_api.h"
+#include "tt_metal/fabric/hw/inc/fabric_routing_path_interface.h"
 #include "dataflow_api.h"
 
 #include <cstdint>
@@ -48,8 +50,8 @@ void kernel_main() {
 
     // PACKET HEADER SETUP
 
-    payload_packet_header->to_chip_unicast(static_cast<uint8_t>(num_hops_upstream));
-    sem_inc_packet_header->to_chip_unicast(static_cast<uint8_t>(num_hops_upstream));
+    fabric_set_unicast_route<false>(payload_packet_header, num_hops_upstream);
+    fabric_set_unicast_route<false>(sem_inc_packet_header, num_hops_upstream);
 
     auto dest_semaphore_noc_addr =
         safe_get_noc_addr(static_cast<uint8_t>(my_x[0]), static_cast<uint8_t>(my_y[0]), semaphore_address, 0);
