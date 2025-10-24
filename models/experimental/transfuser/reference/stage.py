@@ -35,26 +35,17 @@ class RegNet(nn.Module):
 
 
 class Stage(nn.Module):
-    """
-    RegNet stage
-    """
-
-    def __init__(self, config, stage_name, image_architecture="resnet34"):
+    def __init__(self, config, stage_name="layer1", image_architecture="regnety_032"):
         super().__init__()
         self.config = config
         self.stage_name = stage_name
-
         self.image_encoder = RegNet(
             architecture=image_architecture, normalize=True, out_features=self.config.perception_output_features
         )
-        self.s = getattr(self.image_encoder.features, stage_name)
+
+        # You don’t prune or delete features outside layer1
+        # just use layer1 in forward
 
     def forward(self, image):
-        """
-        Args:
-            image: Image Input
-        """
-
-        image_features = self.s(image)
-
-        return image_features
+        x = self.image_encoder.features.layer1(image)
+        return x
