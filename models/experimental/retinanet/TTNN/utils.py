@@ -4,7 +4,6 @@
 import ttnn
 from tests.ttnn.ttnn_utility_fuction import get_shard_grid_from_num_cores
 
-
 # ---------------------------
 # TTNN utility modules
 # ---------------------------
@@ -163,3 +162,75 @@ class TTConv2D:
             )
             # output_tensor = ttnn.permute(output_tensor, (0, 3, 1, 2))
         return output_tensor, (input_tensor.shape[0], _out_height, _out_width, output_tensor.shape[-1])
+
+
+class TTUpsample:
+    def __init__(
+        self,
+        scale_factor: int = 1,
+        mode: str = "nearest",
+        memory_config=ttnn.L1_MEMORY_CONFIG,
+        math_fidelity=ttnn.MathFidelity.LoFi,
+        math_approx_mode=True,
+        fp32_dest_acc_en=False,
+    ) -> None:
+        self.scale_factor = scale_factor
+        self.mode = mode
+        self.memory_config = memory_config
+
+        self.compute_kernel_config = ttnn.WormholeComputeKernelConfig(
+            math_fidelity=math_fidelity,
+            math_approx_mode=math_approx_mode,
+            fp32_dest_acc_en=fp32_dest_acc_en,
+        )
+
+    def __call__(
+        self,
+        device,
+        input_tensor,
+        input_shape=None,
+        reshape_output=False,
+        pad_ch_to_32=False,
+        sent_to_dram=False,
+        dtype=ttnn.bfloat8_b,
+    ):
+        # Convert a **sharded** tensor (distributed across cores) into a single **interleaved** tensor, choosing the backing memory
+        # - DRAM: use when tensors are large or when later ops expect DRAM residency.
+        # - L1  : fastest on-chip memory; use when the tensor fits and you’ll run
+        #         compute-heavy kernels immediately after.
+        if sent_to_dram:
+            input_tensor = ttnn.sharded_to_interleaved(input_tensor, ttnn.DRAM_MEMORY_CONFIG)
+        else:
+            input_tensor = ttnn.sharded_to_interleaved(input_tensor, ttnn.L1_MEMORY_CONFIG)
+
+        input_tensor = ttnn.to_layout(input_tensor, ttnn.ROW_MAJOR_LAYOUT)
+        input_tensor = ttnn.reshape(input_tensor, input_shape)
+
+        # Optionally pad channels to a multiple of 32 to match TT tile/channel alignment.
+        if pad_ch_to_32:
+            input_tensor = ttnn.pad(input_tensor, [(0, 0), (0, 0), (0, 0), (0, 32 - input_tensor.shape[-1] % 32)], 0)
+
+        output_tensor = ttnn.upsample(
+            input_tensor,
+            scale_factor=self.scale_factor,
+            mode=self.mode,
+            memory_config=self.memory_config,
+            compute_kernel_config=self.compute_kernel_config,
+        )
+
+        # Remove channel padding if added.
+        if pad_ch_to_32:
+            output_tensor = ttnn.slice(
+                output_tensor,
+                [0, 0, 0, 0],
+                [output_tensor.shape[0], output_tensor.shape[1], output_tensor.shape[2], input_shape[-1]],
+            )
+
+        if reshape_output:
+            host = ttnn.from_device(output_tensor)
+            host = ttnn.to_dtype(host, dtype)
+            B, H, W, C = host.shape
+            host = ttnn.reshape(host, [1, 1, B * H * W, C])
+            output_tensor = ttnn.to_device(host, device)
+
+        return output_tensor
