@@ -20,6 +20,74 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 import numpy as np
 from PIL import Image
 import os
+from collections import OrderedDict
+from typing import Dict, Any, List
+
+
+def fix_and_filter_checkpoint_keys(
+    checkpoint_path: str, target_prefix: str = "module._model.", state_dict_key: str = None
+) -> Dict[str, Any]:
+    """
+    Loads a PyTorch checkpoint, filters for keys starting with the target_prefix,
+    and then removes that prefix from the keys.
+
+    Args:
+        checkpoint_path: Path to the .pth or .pt checkpoint file.
+        target_prefix: The prefix that identifies the weights you want to keep
+                       AND remove from the key (Default is 'module._model.').
+        state_dict_key: The key in the loaded checkpoint dict that holds the
+                        actual model state_dict (e.g., 'state_dict').
+                        If None, it assumes the checkpoint itself is the state_dict.
+
+    Returns:
+        The modified state dictionary (OrderedDict) containing only the filtered
+        and renamed keys, ready for model loading.
+    """
+    print(f"Loading checkpoint from: {checkpoint_path}")
+    # 1. Load the checkpoint
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+    # 2. Extract the state dictionary
+    if state_dict_key and state_dict_key in checkpoint:
+        checkpoint_state_dict = checkpoint[state_dict_key]
+    else:
+        checkpoint_state_dict = checkpoint
+
+    # 3. Filter and Strip the keys
+    new_state_dict = OrderedDict()
+    removed_keys_count = 0
+
+    for k, v in checkpoint_state_dict.items():
+        if k.startswith(target_prefix):
+            # KEEP AND RENAME: Strip the prefix to match your model's keys
+            name = k[len(target_prefix) :]
+            new_state_dict[name] = v
+        else:
+            # DISCARD: These keys are outside of the module._model scope
+            removed_keys_count += 1
+
+    print(f"✅ Filtered and kept {len(new_state_dict)} keys starting with '{target_prefix}'.")
+    print(f"🗑️ Discarded {removed_keys_count} keys that did not match the prefix.")
+
+    return new_state_dict
+
+
+def delete_incompatible_keys(state_dict: Dict[str, Any], keys_to_delete: List[str]) -> Dict[str, Any]:
+    """
+    Removes specified keys from a state dictionary. This is used to delete
+    weights for layers that are being re-initialized (e.g., changing input channels).
+    """
+    deleted_count = 0
+    new_state_dict = OrderedDict(state_dict)  # Create a modifiable copy
+
+    for k_del in keys_to_delete:
+        if k_del in new_state_dict:
+            del new_state_dict[k_del]
+            deleted_count += 1
+            print(f"🗑️ Deleted incompatible key: {k_del}")
+
+    print(f"Successfully deleted {deleted_count} key(s) for strict=True loading.")
+    return new_state_dict
 
 
 def save_tensor_as_image(tensor, save_path):
@@ -62,6 +130,24 @@ def save_tensor_as_image(tensor, save_path):
 
     img.save(save_path)
     print(f"Saved tensor as image: {save_path}")
+
+
+def delete_incompatible_keys(state_dict: Dict[str, Any], keys_to_delete: List[str]) -> Dict[str, Any]:
+    """
+    Removes specified keys from a state dictionary. This is used to delete
+    weights for layers that are being re-initialized (e.g., changing input channels).
+    """
+    deleted_count = 0
+    new_state_dict = OrderedDict(state_dict)  # Create a modifiable copy
+
+    for k_del in keys_to_delete:
+        if k_del in new_state_dict:
+            del new_state_dict[k_del]
+            deleted_count += 1
+            print(f"🗑️ Deleted incompatible key: {k_del}")
+
+    print(f"Successfully deleted {deleted_count} key(s) for strict=True loading.")
+    return new_state_dict
 
 
 class TransfuserBackboneInfra:
@@ -122,6 +208,30 @@ class TransfuserBackboneInfra:
         )
         torch_model.eval()
 
+        checkpoint_path = "model_ckpt/models_2022/transfuser/model_seed1_39.pth"
+        modified_state_dict = fix_and_filter_checkpoint_keys(
+            checkpoint_path=checkpoint_path,
+            target_prefix="module._model.",  # This is the prefix to keep and remove
+            state_dict_key=None,  # Adjust this if needed
+        )
+        modified_state_dict = delete_incompatible_keys(modified_state_dict, ["lidar_encoder._model.stem.conv.weight"])
+        # print("checkpoint keys:")
+        # print(modified_state_dict.keys())
+        # print("torch_model state_dict keys:")
+        # print(torch_model.state_dict().keys())
+        # import pdb; pdb.set_trace()
+        torch_model.load_state_dict(modified_state_dict, strict=True)
+
+        # Reset BatchNorm statistics to default values for testing with random input
+        # This is necessary because the loaded checkpoint contains training statistics
+        # that don't match the random test input distribution
+        for module in torch_model.modules():
+            if hasattr(module, "running_mean") and hasattr(module, "running_var"):
+                module.running_mean.zero_()
+                module.running_var.fill_(1.0)
+
+        # pdb.set_trace()
+        # pytest.skip()
         # Preprocess parameters for TTNN
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
@@ -295,7 +405,20 @@ model_config = {
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
 @pytest.mark.parametrize(
     "image_architecture, lidar_architecture, n_layer, use_velocity, use_target_point_image, img_input_shape, lidar_input_shape",
-    [("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256))],
+    [
+        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
+        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
+        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
+        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
+        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
+        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
+        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
+        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
+        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
+        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
+        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
+        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
+    ],
 )
 def test_stem(
     device,
