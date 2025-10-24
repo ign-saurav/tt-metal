@@ -32,26 +32,38 @@ def conv_bn_to_params(conv, bn, mesh_mapper):
 def fpn_to_params(fpn, mesh_mapper):
     """
     Extracts and folds all Conv+BN (if any) layers from a torchvision FeaturePyramidNetwork.
-    Works for both Conv2d and Conv2dNormActivation structures.
+    Produces a nested dictionary structure like:
+    {
+      inner_blocks: {0: {0: {...}}, 1: {0: {...}}, 2: {0: {...}}},
+      layer_blocks: {0: {0: {...}}, ...},
+      extra_blocks: {p6: {...}, p7: {...}}
+    }
     """
-    layers = {}
 
     def extract_from_module(module):
-        """Helper to extract Conv2d (and optional BN) pairs from a given module."""
+        """Extract Conv2d layers (and optional BN) from a Sequential or ModuleList."""
         params = {}
         for name, child in module.named_children():
-            # Conv2dNormActivation wraps Conv2d in a sequential-style container
             if isinstance(child, torch.nn.Conv2d):
-                params[name] = conv_bn_to_params(child, None, mesh_mapper)
+                # Direct Conv2d
+                params[name] = {0: conv_bn_to_params(child, None, mesh_mapper)}
+
             elif isinstance(child, torch.nn.Sequential):
+                # Handle Sequential containing Conv2d (like Conv2dNormActivation)
+                subparams = {}
                 for subname, subchild in child.named_children():
                     if isinstance(subchild, torch.nn.Conv2d):
-                        params[f"{name}_{subname}"] = conv_bn_to_params(subchild, None, mesh_mapper)
+                        subparams[subname] = conv_bn_to_params(subchild, None, mesh_mapper)
+                params[name] = subparams
+
             elif isinstance(child, torch.nn.Module):
+                # Nested structure (rare for FPN)
                 subparams = extract_from_module(child)
                 if subparams:
                     params[name] = subparams
         return params
+
+    layers = {}
 
     # Process inner_blocks (1x1 convs)
     if hasattr(fpn, "inner_blocks"):
@@ -63,7 +75,15 @@ def fpn_to_params(fpn, mesh_mapper):
 
     # Process extra_blocks (e.g., LastLevelP6P7)
     if hasattr(fpn, "extra_blocks"):
-        layers["extra_blocks"] = extract_from_module(fpn.extra_blocks)
+        extra_params = {}
+        for name, child in fpn.extra_blocks.named_children():
+            if isinstance(child, torch.nn.Conv2d):
+                extra_params[name] = conv_bn_to_params(child, None, mesh_mapper)
+            elif isinstance(child, torch.nn.Sequential):
+                for subname, subchild in child.named_children():
+                    if isinstance(subchild, torch.nn.Conv2d):
+                        extra_params[name] = conv_bn_to_params(subchild, None, mesh_mapper)
+        layers["extra_blocks"] = extra_params
 
     return layers
 
@@ -132,7 +152,6 @@ class Resnet50FpnTestInfra:
         # Build TTNN model
         self.ttnn_model = resnet50Fpn(
             parameters=parameters,
-            stride=stride,
             model_config=model_config,
             layer_optimisations=fpn_optimisations,
         )

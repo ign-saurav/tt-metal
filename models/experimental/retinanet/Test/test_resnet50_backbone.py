@@ -12,7 +12,6 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from torchvision.models.detection import retinanet_resnet50_fpn_v2, RetinaNet_ResNet50_FPN_V2_Weights
 from PIL import Image
 from torchvision import transforms
-from torchvision.models._utils import IntermediateLayerGetter
 
 from models.experimental.retinanet.TTNN.tt_backbone import TTBackbone
 from models.experimental.retinanet.TTNN.custom_preprocessor import create_custom_mesh_preprocessor
@@ -37,10 +36,8 @@ class BackboneTestInfra:
 
         # Torch model + weights
         retinanet = retinanet_resnet50_fpn_v2(weights=RetinaNet_ResNet50_FPN_V2_Weights.DEFAULT)
-        resnet_backbone = retinanet.backbone.body
-        torch_model = IntermediateLayerGetter(
-            resnet_backbone, return_layers={"layer2": "c3", "layer3": "c4", "layer4": "c5"}
-        )
+        resnet_backbone = retinanet.backbone
+        torch_model = resnet_backbone
         torch_model.eval()
 
         # Torch input + golden output
@@ -55,7 +52,7 @@ class BackboneTestInfra:
 
         img = Image.open("models/experimental/retinanet/resources/dog.jpg").convert("RGB")
         self.torch_input_tensor = preprocess(img).unsqueeze(0)
-        self.torch_output = torch_model(self.torch_input_tensor)
+        self.torch_output_tensor = torch_model(self.torch_input_tensor)
 
         # Preprocess parameters
         parameters = preprocess_model_parameters(
@@ -63,6 +60,7 @@ class BackboneTestInfra:
             custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
             device=None,
         )
+        # print(parameters)
 
         # Convert input to TTNN host tensor
         def to_ttnn_host(tensor):
@@ -102,14 +100,14 @@ class BackboneTestInfra:
     def validate(self, output_tensor=None):
         tt_output = self.output_tensor if output_tensor is None else output_tensor
 
-        valid_pcc = {"c3": 0.99, "c4": 0.99, "c5": 0.99}
+        valid_pcc = {"0": 0.99, "1": 0.99, "2": 0.99, "p6": 0.99, "p7": 0.99}
         self.pcc_passed_all = []
         self.pcc_message_all = []
 
         for key in tt_output:
             tt_output_tensor_torch = ttnn.to_torch(
                 tt_output[key],
-                dtype=self.torch_output[key].dtype,
+                dtype=self.torch_output_tensor[key].dtype,
                 device=self.device,
                 mesh_composer=self.output_mesh_composer,
             )
@@ -117,13 +115,15 @@ class BackboneTestInfra:
             # Free device memory
             ttnn.deallocate(tt_output[key])
 
-            expected_shape = self.torch_output[key].shape
+            expected_shape = self.torch_output_tensor[key].shape
             tt_output_tensor_torch = torch.reshape(
                 tt_output_tensor_torch, (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1])
             )
             tt_output_tensor_torch = torch.permute(tt_output_tensor_torch, (0, 3, 1, 2))
 
-            pcc_passed, pcc_message = check_with_pcc(self.torch_output[key], tt_output_tensor_torch, pcc=valid_pcc[key])
+            pcc_passed, pcc_message = check_with_pcc(
+                self.torch_output_tensor[key], tt_output_tensor_torch, pcc=valid_pcc[key]
+            )
             self.pcc_passed_all.append(pcc_passed)
             self.pcc_message_all.append(pcc_message)
 

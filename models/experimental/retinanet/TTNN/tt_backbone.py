@@ -5,6 +5,8 @@ import ttnn
 from typing import List, Optional
 from models.experimental.retinanet.TTNN.tt_bottleneck import TTBottleneck, get_bottleneck_optimisation
 from models.experimental.retinanet.TTNN.tt_stem import resnet50Stem, neck_optimisations
+from models.experimental.retinanet.TTNN.tt_fpn import resnet50Fpn, fpn_optimisations
+
 from loguru import logger
 
 
@@ -12,6 +14,8 @@ class TTBackbone:
     def __init__(self, parameters, model_config, name="backbone"):
         layers = [3, 4, 6, 3]
         self.inplanes = 64
+        parameters_fpn = parameters.fpn
+        parameters_body = parameters.body
 
         # stem
         class StemParams:
@@ -20,10 +24,10 @@ class TTBackbone:
                     setattr(self, k, v)
 
         stem_layers = ["conv1", "bn1", "relu", "maxpool"]
-        parameters["stem"] = StemParams({k: parameters.pop(k) for k in stem_layers if k in parameters})
+        parameters_body["stem"] = StemParams({k: parameters_body.pop(k) for k in stem_layers if k in parameters_body})
 
         self.stem = resnet50Stem(
-            parameters.stem,
+            parameters_body.stem,
             stride=1,
             model_config=model_config,
             layer_optimisations=neck_optimisations,
@@ -32,7 +36,7 @@ class TTBackbone:
 
         self.layer1 = self._make_layer(
             name=f"{name}.layer1",
-            parameters=parameters.layer1,
+            parameters=parameters_body.layer1,
             planes=64,
             blocks=layers[0],
             stride=1,
@@ -42,7 +46,7 @@ class TTBackbone:
         )
         self.layer2 = self._make_layer(
             name=f"{name}.layer2",
-            parameters=parameters.layer2,
+            parameters=parameters_body.layer2,
             planes=128,
             blocks=layers[1],
             stride=2,
@@ -52,7 +56,7 @@ class TTBackbone:
         )
         self.layer3 = self._make_layer(
             name=f"{name}.layer3",
-            parameters=parameters.layer3,
+            parameters=parameters_body.layer3,
             planes=256,
             blocks=layers[2],
             stride=2,
@@ -62,13 +66,18 @@ class TTBackbone:
         )
         self.layer4 = self._make_layer(
             name=f"{name}.layer4",
-            parameters=parameters.layer4,
+            parameters=parameters_body.layer4,
             planes=512,
             blocks=layers[3],
             stride=2,
             dilate_config=None,
             model_config=model_config,
             layer_optimisations=get_bottleneck_optimisation("layer4"),
+        )
+        self.fpn = resnet50Fpn(
+            parameters=parameters_fpn,
+            model_config=model_config,
+            layer_optimisations=fpn_optimisations,
         )
 
     def _make_layer(
@@ -143,4 +152,9 @@ class TTBackbone:
         c5 = ttnn.to_memory_config(c5, ttnn.DRAM_MEMORY_CONFIG)
         logger.debug("✅✅✅ layer4 Complete ✅✅✅")
 
-        return {"c3": c3, "c4": c4, "c5": c5}
+        out = {"c3": c3, "c4": c4, "c5": c5}
+
+        out = self.fpn(out, device)
+        logger.debug("✅✅✅ FPN Complete ✅✅✅")
+
+        return out
