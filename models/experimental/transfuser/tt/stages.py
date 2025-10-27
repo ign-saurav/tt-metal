@@ -24,36 +24,19 @@ class Ttstages:
         stage_name,
         # layer_optimisations=neck_optimisations,
     ) -> None:
-        # Define inplanes (input channels) for each stage
-        inplanes_dict = {
-            "layer1": 32,
-            "layer2": 72,
-            "layer3": 216,
-            "layer4": 576,
+        stage_config = {
+            "layer1": {"planes": 72, "groups": 3},
+            "layer2": {"planes": 216, "groups": 9},
+            "layer3": {"planes": 576, "groups": 24},
+            "layer4": {"planes": 1512, "groups": 63},
         }
-        self.inplanes = inplanes_dict.get(stage_name, 32)
-
-        # Define planes (output channels) for each stage
-        planes_dict = {
-            "layer1": 72,
-            "layer2": 216,
-            "layer3": 576,
-            "layer4": 1512,
-        }
-        planes = planes_dict.get(stage_name, 72)
-
-        # Calculate groups (group_size = 24 for RegNet)
-        bottle_ratio = 1.0
-        group_size = 24
-        bottleneck_chs = int(round(planes * bottle_ratio))
-        groups = bottleneck_chs // group_size
-
+        config = stage_config[stage_name]
         self.layer = self._make_layer(
             parameters=parameters,
-            planes=planes,
+            planes=config["planes"],
             blocks=len(parameters.keys()),
             stride=stride,
-            groups=groups,
+            groups=config["groups"],
             model_config=model_config,
             stage_name=stage_name,
         )
@@ -69,7 +52,6 @@ class Ttstages:
         stage_name=None,
     ) -> List[TTRegNetBottleneck]:
         layers = []
-        # inplanes is already set in __init__
 
         shard_layout = shard_dict[stage_name]
 
