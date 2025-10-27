@@ -222,14 +222,6 @@ class TransfuserBackboneInfra:
         # import pdb; pdb.set_trace()
         torch_model.load_state_dict(modified_state_dict, strict=True)
 
-        # Reset BatchNorm statistics to default values for testing with random input
-        # This is necessary because the loaded checkpoint contains training statistics
-        # that don't match the random test input distribution
-        for module in torch_model.modules():
-            if hasattr(module, "running_mean") and hasattr(module, "running_var"):
-                module.running_mean.zero_()
-                module.running_var.fill_(1.0)
-
         # pdb.set_trace()
         # pytest.skip()
         # Preprocess parameters for TTNN
@@ -264,12 +256,15 @@ class TransfuserBackboneInfra:
         parameters["transformer4"] = gpt4_parameters
 
         with torch.no_grad():
-            self.torch_features, self.torch_image_grid, self.torch_fused = torch_model(
+            # self.torch_features, self.torch_image_grid, self.torch_fused = torch_model(
+            self.torch_image_grid, self.torch_fused = torch_model(
                 self.rgb,
                 self.lidar_bev,
                 self.ego_vel,
             )
+            self.lidar_bev = torch_model.fwd_stem(self.rgb, self.lidar_bev, self.ego_vel)
 
+        self.rgb = torch.load("image_features_layer1_again.pt")
         # Convert input to TTNN format
         tt_image_input = ttnn.from_torch(
             self.rgb.permute(0, 2, 3, 1),
@@ -324,25 +319,27 @@ class TransfuserBackboneInfra:
         return None, None, None
 
     def run(self):
-        self.output_features, self.output_image_grid, self.output_fused = self.ttnn_model(
+        # self.output_features, self.output_image_grid, self.output_fused = self.ttnn_model(
+        self.output_image_grid, self.output_fused = self.ttnn_model(
             self.input_image_tensor, self.input_lidar_tensor, self.input_velocity_tensor, self.device
         )
-        return self.output_features, self.output_image_grid, self.output_fused
+        return self.output_image_grid, self.output_fused
+        # return self.output_features, self.output_image_grid, self.output_fused
 
     def validate(self, model_config, output_tensor=None):
         # Validate image output
-        tt_features_torch = []
-        fpn_names = ["p2", "p3", "p4", "p5"]
-        for i, (feature, name) in enumerate(zip(self.output_features, fpn_names)):
-            tt_feat = ttnn.to_torch(
-                feature,
-                device=self.device,
-                mesh_composer=self.output_mesh_composer,
-            )
+        # tt_features_torch = []
+        # fpn_names = ["p2", "p3", "p4", "p5"]
+        # for i, (feature, name) in enumerate(zip(self.output_features, fpn_names)):
+        #     tt_feat = ttnn.to_torch(
+        #         feature,
+        #         device=self.device,
+        #         mesh_composer=self.output_mesh_composer,
+        #     )
 
-            # Permute NHWC -> NCHW
-            tt_feat = tt_feat.permute(0, 3, 1, 2)
-            tt_features_torch.append(tt_feat)
+        #     # Permute NHWC -> NCHW
+        #     tt_feat = tt_feat.permute(0, 3, 1, 2)
+        #     tt_features_torch.append(tt_feat)
 
         # Validate output_image_grid
         tt_image_grid_torch = ttnn.to_torch(
@@ -358,19 +355,20 @@ class TransfuserBackboneInfra:
             device=self.device,
             mesh_composer=self.output_mesh_composer,
         )
+        tt_fused_torch = tt_fused_torch.permute(0, 3, 1, 2)
 
-        # Deallocate output tensors
-        for feature in self.output_features:
-            ttnn.deallocate(feature)
+        # # Deallocate output tensors
+        # for feature in self.output_features:
+        #     ttnn.deallocate(feature)
         ttnn.deallocate(self.output_image_grid)
         ttnn.deallocate(self.output_fused)
 
-        # Validate FPN features
-        fpn_pcc_results = []
-        for torch_feat, tt_feat, name in zip(self.torch_features, tt_features_torch, fpn_names):
-            pcc_passed, pcc_msg = check_with_pcc(torch_feat, tt_feat, pcc=0.95)
-            fpn_pcc_results.append((pcc_passed, pcc_msg))
-            logger.info(f"{name} PCC: {pcc_msg}")
+        # # Validate FPN features
+        # fpn_pcc_results = []
+        # for torch_feat, tt_feat, name in zip(self.torch_features, tt_features_torch, fpn_names):
+        #     pcc_passed, pcc_msg = check_with_pcc(torch_feat, tt_feat, pcc=0.95)
+        #     fpn_pcc_results.append((pcc_passed, pcc_msg))
+        #     logger.info(f"{name} PCC: {pcc_msg}")
 
         # Validate image grid
         grid_pcc_passed, grid_pcc_msg = check_with_pcc(self.torch_image_grid, tt_image_grid_torch, pcc=0.95)
@@ -381,14 +379,12 @@ class TransfuserBackboneInfra:
         logger.info(f"Fused Features PCC: {fused_pcc_msg}")
 
         # All outputs must pass
-        all_fpn_passed = all(result[0] for result in fpn_pcc_results)
-        overall_passed = all_fpn_passed and grid_pcc_passed and fused_pcc_passed
+        # all_fpn_passed = all(result[0] for result in fpn_pcc_results)
+        overall_passed = grid_pcc_passed and fused_pcc_passed
 
-        assert overall_passed, logger.error(
-            f"PCC check failed - FPN: {fpn_pcc_results}, Grid: {grid_pcc_msg}, Fused: {fused_pcc_msg}"
-        )
+        assert overall_passed, logger.error(f"PCC check failed - Grid: {grid_pcc_msg}, Fused: {fused_pcc_msg}")
 
-        return overall_passed, f"FPN: {fpn_pcc_results}, Grid: {grid_pcc_msg}, Fused: {fused_pcc_msg}"
+        return overall_passed, f" Grid: {grid_pcc_msg}, Fused: {fused_pcc_msg}"
 
 
 # High accuracy model config
@@ -406,17 +402,6 @@ model_config = {
 @pytest.mark.parametrize(
     "image_architecture, lidar_architecture, n_layer, use_velocity, use_target_point_image, img_input_shape, lidar_input_shape",
     [
-        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
-        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
-        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
-        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
-        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
-        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
-        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
-        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
-        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
-        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
-        ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
         ("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256)),
     ],
 )

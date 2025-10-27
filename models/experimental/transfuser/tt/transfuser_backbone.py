@@ -367,26 +367,28 @@ class TtTransfuserBackbone:
 
         return x
 
-    def __call__(self, image_x, lidar_x, velocity, device):
+    def __call__(self, image_out, lidar_out, velocity, device):
         # Process image input
-        logger.info(f"image_encoder_conv1")
-        image_x = self.normalize_imagenet_ttnn(image_x)
-        image_out, image_shape = self.conv1(device, image_x, image_x.shape)
+        # logger.info(f"image_encoder_conv1")
+        # image_x = self.normalize_imagenet_ttnn(image_x)
+        # image_out, image_shape = self.conv1(device, image_x, image_x.shape)
 
-        logger.info(f"lidar_encoder_conv1")
-        # Process lidar input
-        lidar_out, lidar_shape = self.lidar_conv1(device, lidar_x, lidar_x.shape)
+        # logger.info(f"lidar_encoder_conv1")
+        # # Process lidar input
+        # lidar_out, lidar_shape = self.lidar_conv1(device, lidar_x, lidar_x.shape)
 
-        logger.info(f"image_encoder_layer1")
-        image_out = ttnn.reshape(image_out, image_shape)
+        # logger.info(f"image_encoder_layer1")
+        # image_out = ttnn.reshape(image_out, image_shape)
         # Process layer1 blocks
         for block in self.image_layer1:
             image_out = block(image_out, device)
 
-        logger.info(f"lidar_encoder_layer1")
-        lidar_out = ttnn.reshape(lidar_out, lidar_shape)
+        # logger.info(f"lidar_encoder_layer1")
+        # lidar_out = ttnn.reshape(lidar_out, lidar_shape)
         for block in self.lidar_layer1:
             lidar_out = block(lidar_out, device)
+
+        return image_out, lidar_out
 
         logger.info(f"img_avgpool")
         image_h = image_out.shape[1]
