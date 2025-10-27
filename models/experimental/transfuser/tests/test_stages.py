@@ -17,18 +17,28 @@ from ttnn.model_preprocessing import (
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
-def filter_checkpoint(ckpt_dict, model_prefix="image_encoder.features"):
+def filter_checkpoint(ckpt_dict, stage_name="layer1", model_prefix="image_encoder.features"):
     """
-    Filters the checkpoint to keep strictly only s1 of image_encoder,
-    renames it to layer1, and removes stem and any s.* keys.
+    Filters the checkpoint to keep strictly only the specified layer of image_encoder,
+    renames it appropriately, and removes stem and other layer keys.
 
     Args:
         ckpt_dict: dict, original checkpoint state_dict
+        stage_name: str, layer name (layer1, layer2, layer3, layer4)
         model_prefix: str, prefix of model to keep (default: image_encoder.features)
 
     Returns:
         filtered_ckpt: dict, ready to load into model
     """
+    # Map layer names to stage names in checkpoint
+    layer_to_stage = {
+        "layer1": "s1",
+        "layer2": "s2",
+        "layer3": "s3",
+        "layer4": "s4",
+    }
+    stage_key = layer_to_stage.get(stage_name, "s1")
+
     filtered_ckpt = {}
     for k, v in ckpt_dict.items():
         new_key = k
@@ -36,23 +46,27 @@ def filter_checkpoint(ckpt_dict, model_prefix="image_encoder.features"):
         if new_key.startswith("module._model."):
             new_key = new_key[len("module._model.") :]
 
-        # Keep only s1 keys and rename to layer1
-        if new_key.startswith(f"{model_prefix}.s1"):
-            new_key = new_key.replace(f"{model_prefix}.s1", f"{model_prefix}.layer1")
+        # Keep only the specified layer keys
+        if new_key.startswith(f"{model_prefix}.{stage_key}"):
+            new_key = new_key.replace(f"{model_prefix}.{stage_key}", f"{model_prefix}.{stage_name}")
             filtered_ckpt[new_key] = v
 
     return filtered_ckpt
 
 
-def keep_only_layer1_model(torch_model):
+def keep_only_stage_model(torch_model, stage_name="layer1"):
     """
-    Prunes torch model in-place to keep only layer1 in image_encoder.features.
-    Removes stem (optional), s, layer2, layer3, layer4, global_pool, head, etc.
+    Prunes torch model in-place to keep only the specified stage in image_encoder.features.
+    Removes other stages, stem, global_pool, head, etc.
+
+    Args:
+        torch_model: The PyTorch model to prune
+        stage_name: str, the stage name to keep (layer1, layer2, layer3, or layer4)
     """
     features = torch_model.image_encoder.features
 
-    # Keep only layer1
-    allowed_keys = ["layer1"]
+    # Keep only the specified stage
+    allowed_keys = [stage_name]
     for name in list(features._modules.keys()):
         if name not in allowed_keys:
             print(f"Removing {name} from model")
@@ -103,8 +117,8 @@ class StageInfra:
         checkpoint_path = "model_ckpt/models_2022/transfuser/model_seed1_39.pth"
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
-        checkpoint = filter_checkpoint(checkpoint)
-        torch_model = keep_only_layer1_model(torch_model)
+        checkpoint = filter_checkpoint(checkpoint, stage_name=stage_name)
+        torch_model = keep_only_stage_model(torch_model, stage_name=stage_name)
         # print("checkpoint keys:")
         # print(checkpoint.keys())
         # print("torch_model state_dict keys:")
@@ -113,16 +127,34 @@ class StageInfra:
 
         torch_model.load_state_dict(checkpoint, strict=True)
 
-        # Reset BatchNorm statistics to default values for testing with random input
-        # This is necessary because the loaded checkpoint contains training statistics
-        # that don't match the random test input distribution
-        for module in torch_model.modules():
-            if hasattr(module, "running_mean") and hasattr(module, "running_var"):
-                module.running_mean.zero_()
-                module.running_var.fill_(1.0)
+        # # Reset BatchNorm statistics to default values for testing with random input
+        # # This is necessary because the loaded checkpoint contains training statistics
+        # # that don't match the random test input distribution
+        # for module in torch_model.modules():
+        #     if hasattr(module, "running_mean") and hasattr(module, "running_var"):
+        #         module.running_mean.zero_()
+        #         module.running_var.fill_(1.0)
 
         # Prepare golden inputs/outputs
-        self.torch_input = torch.randn(self.input_shape)
+
+        # Load saved image_features from transfuser_backbone test
+        # Map stage names to PT file names
+        stage_to_pt_file = {
+            "layer1": "image_features_layer1.pt",
+            "layer2": "image_features_layer2.pt",
+            "layer3": "image_features_layer3.pt",
+            "layer4": "image_features_layer4.pt",
+        }
+
+        pt_filename = stage_to_pt_file.get(stage_name, f"image_features_{stage_name}.pt")
+
+        try:
+            self.torch_input = torch.load(pt_filename)
+            logger.info(f"Loaded saved {stage_name} features from {pt_filename} with shape: {self.torch_input.shape}")
+            print(f"{stage_name} input shape: {self.torch_input.shape}")
+        except FileNotFoundError:
+            logger.warning(f"{pt_filename} not found, using random input")
+            self.torch_input = torch.randn(self.input_shape)
         with torch.no_grad():
             self.torch_output = torch_model(
                 self.torch_input,
@@ -231,9 +263,9 @@ model_config = {
     [
         # ImageCNN Tests
         ("layer1", (1, 32, 80, 352)),
-        # ("layer2", (1, 72, 40, 176)),
-        # ("layer3", (1, 216, 20, 88)),
-        # ("layer4", (1, 576, 10, 44)),
+        ("layer2", (1, 72, 40, 176)),
+        ("layer3", (1, 216, 20, 88)),
+        ("layer4", (1, 576, 10, 44)),
         # # LidarEncoder Tests
         # ("layer1", (1, 32, 128, 128)),
         # ("layer2", (1, 72, 64, 64)),

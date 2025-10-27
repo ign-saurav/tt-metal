@@ -47,5 +47,7 @@ class Stage(nn.Module):
         # just use layer1 in forward
 
     def forward(self, image):
-        x = self.image_encoder.features.layer1(image)
+        # Dynamically access the stage layer based on stage_name
+        stage_layer = getattr(self.image_encoder.features, self.stage_name)
+        x = stage_layer(image)
         return x
