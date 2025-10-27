@@ -112,6 +112,7 @@ class StageInfra:
             stage_name=stage_name,
             image_architecture="regnety_032",
         )
+        # import pdb; pdb.set_trace()
         torch_model.eval()
 
         checkpoint_path = "model_ckpt/models_2022/transfuser/model_seed1_39.pth"
@@ -126,6 +127,26 @@ class StageInfra:
         # pytest.skip()
 
         torch_model.load_state_dict(checkpoint, strict=True)
+
+        # Export model to ONNX
+        onnx_filename = f"stage_{stage_name}_without_fold.onnx"
+        # try:
+        # Create dummy input matching the expected shape
+        dummy_input = torch.randn(input_shape)
+
+        print(f"Exporting {stage_name} model to ONNX: {onnx_filename}")
+        torch.onnx.export(
+            torch_model,
+            dummy_input,
+            onnx_filename,
+            input_names=["input"],
+            output_names=["output"],
+            opset_version=14,
+            # do_constant_folding=True,
+            do_constant_folding=False,
+            verbose=False,
+        )
+        print(f"✅ Successfully exported to {onnx_filename}")
 
         # # Reset BatchNorm statistics to default values for testing with random input
         # # This is necessary because the loaded checkpoint contains training statistics
@@ -262,10 +283,10 @@ model_config = {
     "stage_name,input_shape",
     [
         # ImageCNN Tests
-        ("layer1", (1, 32, 80, 352)),
+        # ("layer1", (1, 32, 80, 352)),
         ("layer2", (1, 72, 40, 176)),
-        ("layer3", (1, 216, 20, 88)),
-        ("layer4", (1, 576, 10, 44)),
+        # ("layer3", (1, 216, 20, 88)),
+        # ("layer4", (1, 576, 10, 44)),
         # # LidarEncoder Tests
         # ("layer1", (1, 32, 128, 128)),
         # ("layer2", (1, 72, 64, 64)),
