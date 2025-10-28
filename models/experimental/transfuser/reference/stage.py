@@ -52,7 +52,7 @@ class Stage(nn.Module):
         x = stage_layer.b1.conv1(image)
         x = stage_layer.b1.conv2(x)
         x = stage_layer.b1.se(x)
-        # x = stage_layer.b1.conv3(x)
+        x = stage_layer.b1.conv3(x)
         # import pdb; pdb.set_trace()
         # x = stage_layer(image)
         return x
