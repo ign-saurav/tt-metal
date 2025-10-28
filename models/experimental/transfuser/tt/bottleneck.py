@@ -79,7 +79,52 @@ class TTRegNetBottleneck:
             is_reshape=False,
         )
 
-        # SE Module
+        # # SE Module
+        # self.se_fc1 = TTConv2D(
+        #     kernel_size=1,
+        #     stride=1,
+        #     padding=0,
+        #     parameters=parameters["se"]["fc1"],
+        #     kernel_fidelity=model_config,
+        #     activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+        #     shard_layout=se_fc1_config.get("shard_layout", ttnn.TensorMemoryLayout.HEIGHT_SHARDED),
+        #     act_block_h=se_fc1_config.get("act_block_h", None),
+        #     enable_act_double_buffer=se_fc1_config.get("enable_act_double_buffer", False),
+        #     enable_weights_double_buffer=se_fc1_config.get("enable_weights_double_buffer", False),
+        #     memory_config=se_fc1_config.get("memory_config", None),
+        #     deallocate_activation=True,
+        #     reallocate_halo_output=True,
+        #     reshard_if_not_optimal=True,
+        #     dtype=ttnn.bfloat16,
+        #     fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
+        #     packer_l1_acc=model_config.get("packer_l1_acc", True),
+        #     math_approx_mode=model_config.get("math_approx_mode", False),
+        #     is_reshape=False,
+        # )
+
+        # self.se_fc2 = TTConv2D(
+        #     kernel_size=1,
+        #     stride=1,
+        #     padding=0,
+        #     parameters=parameters["se"]["fc2"],
+        #     kernel_fidelity=model_config,
+        #     activation=None,
+        #     shard_layout=se_fc2_config.get("shard_layout", ttnn.TensorMemoryLayout.HEIGHT_SHARDED),
+        #     act_block_h=se_fc2_config.get("act_block_h", None),
+        #     enable_act_double_buffer=se_fc2_config.get("enable_act_double_buffer", False),
+        #     enable_weights_double_buffer=se_fc2_config.get("enable_weights_double_buffer", False),
+        #     memory_config=se_fc2_config.get("memory_config", None),
+        #     deallocate_activation=True,
+        #     reallocate_halo_output=True,
+        #     reshard_if_not_optimal=True,
+        #     dtype=ttnn.bfloat16,
+        #     fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
+        #     packer_l1_acc=model_config.get("packer_l1_acc", True),
+        #     math_approx_mode=model_config.get("math_approx_mode", False),
+        #     is_reshape=False,
+        # )
+
+        # SE Module Clone
         self.se_fc1 = TTConv2D(
             kernel_size=1,
             stride=1,
@@ -87,19 +132,23 @@ class TTRegNetBottleneck:
             parameters=parameters["se"]["fc1"],
             kernel_fidelity=model_config,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            shard_layout=se_fc1_config.get("shard_layout", ttnn.TensorMemoryLayout.HEIGHT_SHARDED),
+            # shard_layout=se_fc1_config.get("shard_layout", ttnn.TensorMemoryLayout.WIDTH_SHARDED),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
             act_block_h=se_fc1_config.get("act_block_h", None),
-            enable_act_double_buffer=se_fc1_config.get("enable_act_double_buffer", False),
-            enable_weights_double_buffer=se_fc1_config.get("enable_weights_double_buffer", False),
-            memory_config=se_fc1_config.get("memory_config", None),
+            # enable_act_double_buffer=se_fc1_config.get("enable_act_double_buffer", False),
+            # enable_weights_double_buffer=se_fc1_config.get("enable_weights_double_buffer", False),
+            # memory_config=se_fc1_config.get("memory_config", None),
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
             deallocate_activation=True,
             reallocate_halo_output=True,
             reshard_if_not_optimal=True,
             dtype=ttnn.bfloat16,
-            fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
-            packer_l1_acc=model_config.get("packer_l1_acc", True),
-            math_approx_mode=model_config.get("math_approx_mode", False),
-            is_reshape=False,
+            # dtype=ttnn.bfloat8_b,
+            # dtype=ttnn.float32,
+            # fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
+            # packer_l1_acc=model_config.get("packer_l1_acc", True),
+            # math_approx_mode=model_config.get("math_approx_mode", False),
+            # is_reshape=False,
         )
 
         self.se_fc2 = TTConv2D(
@@ -109,21 +158,25 @@ class TTRegNetBottleneck:
             parameters=parameters["se"]["fc2"],
             kernel_fidelity=model_config,
             activation=None,
-            shard_layout=se_fc2_config.get("shard_layout", ttnn.TensorMemoryLayout.HEIGHT_SHARDED),
+            # shard_layout=se_fc2_config.get("shard_layout", ttnn.TensorMemoryLayout.WIDTH_SHARDED),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
             act_block_h=se_fc2_config.get("act_block_h", None),
-            enable_act_double_buffer=se_fc2_config.get("enable_act_double_buffer", False),
-            enable_weights_double_buffer=se_fc2_config.get("enable_weights_double_buffer", False),
-            memory_config=se_fc2_config.get("memory_config", None),
+            # enable_act_double_buffer=se_fc2_config.get("enable_act_double_buffer", False),
+            # enable_weights_double_buffer=se_fc2_config.get("enable_weights_double_buffer", False),
+            # memory_config=se_fc2_config.get("memory_config", None),
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
             deallocate_activation=True,
             reallocate_halo_output=True,
             reshard_if_not_optimal=True,
             dtype=ttnn.bfloat16,
-            fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
-            packer_l1_acc=model_config.get("packer_l1_acc", True),
-            math_approx_mode=model_config.get("math_approx_mode", False),
-            is_reshape=False,
+            # dtype=ttnn.bfloat8_b,
+            # dtype=ttnn.bfloat4_b,
+            # dtype=ttnn.float32,
+            # fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
+            # packer_l1_acc=model_config.get("packer_l1_acc", True),
+            # math_approx_mode=model_config.get("math_approx_mode", False),
+            # is_reshape=False,
         )
-
         # conv3: 1x1 convolution (no activation)
         self.conv3 = TTConv2D(
             kernel_size=1,
@@ -195,47 +248,40 @@ class TTRegNetBottleneck:
         out_4d = ttnn.reshape(out, shape_)
         se_out = ttnn.mean(out_4d, dim=[1, 2], keepdim=True)
         # return se_out, shape_
-        se_out_torch = ttnn.to_torch(
-            se_out,
-            device=device,
-        )
-        expected_shape = [1, 72, 1, 1]
-        import torch
+        if 0:
+            se_out_torch = ttnn.to_torch(
+                se_out,
+                device=device,
+            )
+            expected_shape = [1, 72, 1, 1]
+            import torch
 
-        se_out_torch = torch.reshape(
-            se_out_torch,
-            (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1]),
-        )
-        se_out_torch = torch.permute(se_out_torch, (0, 3, 1, 2))
+            se_out_torch = torch.reshape(
+                se_out_torch,
+                (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1]),
+            )
+            se_out_torch = torch.permute(se_out_torch, (0, 3, 1, 2))
 
-        se_out_torch = se_out_torch.to(torch.float32)
-        se_out_torch = self.torch_model.fallback(se_out_torch)
+            se_out_torch = se_out_torch.to(torch.float32)
+            se_out_torch = self.torch_model.fallback(se_out_torch)
 
-        se_out = ttnn.from_torch(
-            se_out_torch,
-            dtype=ttnn.bfloat16,
-        )
-        se_out = ttnn.to_device(se_out, device)
-        se_out = ttnn.permute(se_out, (0, 2, 3, 1))
+            se_out = ttnn.from_torch(
+                se_out_torch,
+                dtype=ttnn.bfloat16,
+            )
+            se_out = ttnn.to_device(se_out, device)
+            se_out = ttnn.permute(se_out, (0, 2, 3, 1))
 
-        out_4d = ttnn.multiply(out1, se_out)
+        else:
+            logger.info(f"SE fc1")
+            se_out, se_shape = self.se_fc1(device, se_out, se_out.shape)
 
-        # return out_4d, se_out_torch.shape
-
-        # # se_out = outshape_
-        # logger.info(f"SE fc1")
-        # # se_out, se_shape = self.se_fc1(device, se_out, se_out.shape)
-        # se_out, se_shape = self.se_fc1(device, out, shape_)
-        # # se_out, se_shape = self.se_fc1(device, out, shape_)
-
-        # logger.info(f"SE fc2")
-        # se_out, se_shape = self.se_fc2(device, se_out, se_shape)
-        # se_out = ttnn.sigmoid(se_out)
-
-        # # Apply SE scaling - multiply in 4D format
-        # print(f"inside tt.................{out1 =}")
+            logger.info(f"SE fc2")
+            se_out, se_shape = self.se_fc2(device, se_out, se_shape)
+            se_out = ttnn.sigmoid(se_out)
 
         # return out_4d, se_shape
+        out_4d = ttnn.multiply(out1, se_out)
         # Flatten back to match identity format
         batch, height, width, channels = shape_
         out = ttnn.reshape(out_4d, (1, 1, batch * height * width, channels))

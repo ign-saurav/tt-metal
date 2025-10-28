@@ -140,8 +140,8 @@ def _handle_bottleneck(dst: dict, block: Bottleneck, *, mesh_mapper):
     se = _get_or_create(dst, "se")
     fc1 = _get_or_create(se, "fc1")
     fc2 = _get_or_create(se, "fc2")
-    fc1["weight"] = _pack_weight_only(block.se.fc1.weight, mesh_mapper=mesh_mapper)
-    fc2["weight"] = _pack_weight_only(block.se.fc2.weight, mesh_mapper=mesh_mapper)
+    fc1["weight"] = _pack_weight_only(block.se.fc1.weight, mesh_mapper=mesh_mapper, dtype=ttnn.float32)
+    fc2["weight"] = _pack_weight_only(block.se.fc2.weight, mesh_mapper=mesh_mapper, dtype=ttnn.float32)
 
     # Downsample (if present and not Identity)
     if hasattr(block, "downsample") and block.downsample is not None:

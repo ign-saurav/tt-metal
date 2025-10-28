@@ -143,6 +143,10 @@ class StageInfra:
         # # Prepare golden inputs/outputs
         # self.torch_input = torch.randn(self.input_shape)
         self.torch_input = torch.load(pt_filename)
+        # self.torch_input = self.torch_input/self.torch_input.max()
+
+        # print(f"input min {self.torch_input.min()=}")
+        # print(f"input max {self.torch_input.max()=}")
 
         with torch.no_grad():
             self.torch_output = torch_model(
