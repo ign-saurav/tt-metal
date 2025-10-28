@@ -34,7 +34,8 @@ class Ttstages:
         self.layer = self._make_layer(
             parameters=parameters,
             planes=config["planes"],
-            blocks=len(parameters.keys()),
+            # blocks=len(parameters.keys()),
+            blocks=1,
             stride=stride,
             groups=config["groups"],
             model_config=model_config,

@@ -123,6 +123,7 @@ class TTRegNetBottleneck:
             enable_act_double_buffer=True,
             enable_weights_double_buffer=True,
             dtype=ttnn.bfloat16,
+            is_reshape=False,
             fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
             packer_l1_acc=model_config.get("packer_l1_acc", True),
             math_approx_mode=model_config.get("math_approx_mode", False),
@@ -161,6 +162,7 @@ class TTRegNetBottleneck:
         logger.info(f"conv2- 3x3 grouped convolution")
         # conv2: 3x3 grouped convolution
         out, shape_ = self.conv2(device, out, shape_)
+        print("conv2 out shape", out.shape)
 
         # SE Module
         logger.info(f"SE module")
@@ -181,16 +183,18 @@ class TTRegNetBottleneck:
         shape_ = out.shape
 
         # conv3: 1x1 projection
-        out, shape_ = self.conv3(device, out, shape_)
-        out = ttnn.reshape(out, shape_)
+        # print("conv3 out shape", out.shape)
+        # out, shape_ = self.conv3(device, out, shape_)
+        # out = ttnn.reshape(out, shape_)
+        # print("conv3 out shape after", out.shape)
 
-        # Handle downsample
-        if self.downsample_layer is not None:
-            identity, _ = self.downsample_layer(device, identity, identity.shape)
-            identity = ttnn.reshape(identity, shape_)
+        # # Handle downsample
+        # if self.downsample_layer is not None:
+        #     identity, _ = self.downsample_layer(device, identity, identity.shape)
+        #     identity = ttnn.reshape(identity, shape_)
 
-        logger.info(f"Add")
-        out = ttnn.add(out, identity)
-        out = ttnn.relu(out)
+        # logger.info(f"Add")
+        # out = ttnn.add(out, identity)
+        # out = ttnn.relu(out)
 
         return out

@@ -49,5 +49,16 @@ class Stage(nn.Module):
     def forward(self, image):
         # Dynamically access the stage layer based on stage_name
         stage_layer = getattr(self.image_encoder.features, self.stage_name)
-        x = stage_layer(image)
+        x = stage_layer.b1.conv1(image)
+        x = stage_layer.b1.conv2(x)
+        x = stage_layer.b1.se(x)
+        # x = stage_layer.b1.conv3(x)
+        # import pdb; pdb.set_trace()
+        # x = stage_layer(image)
+        return x
+
+    def forward_c3(self, x):
+        # Dynamically access the stage layer based on stage_name
+        stage_layer = getattr(self.image_encoder.features, self.stage_name)
+        x = stage_layer.b1.conv3(x)
         return x
