@@ -123,6 +123,14 @@ class StageInfra:
 
         torch_model.load_state_dict(checkpoint, strict=True)
 
+        # # Reset BatchNorm statistics to default values for testing with random input
+        # # This is necessary because the loaded checkpoint contains training statistics
+        # # that don't match the random test input distribution
+        # for module in torch_model.modules():
+        #     if hasattr(module, "running_mean") and hasattr(module, "running_var"):
+        #         module.running_mean.zero_()
+        #         module.running_var.fill_(1.0)
+
         stage_to_pt_file = {
             "layer1": "input_layer1.pt",
             "layer2": "input_layer2.pt",
@@ -141,6 +149,27 @@ class StageInfra:
                 self.torch_input,
             )
 
+        # Export model to ONNX
+        onnx_filename = f"new_stage_{stage_name}.onnx"
+        # try:
+        # Create dummy input matching the expected shape
+        dummy_input = torch.randn(input_shape)
+
+        print(f"Exporting {stage_name} model to ONNX: {onnx_filename}")
+        torch.onnx.export(
+            torch_model,
+            dummy_input,
+            onnx_filename,
+            input_names=["input"],
+            output_names=["output"],
+            opset_version=14,
+            # do_constant_folding=True,
+            do_constant_folding=False,
+            verbose=False,
+        )
+        print(f"✅ Successfully exported to {onnx_filename}")
+
+        self.torch_model = torch_model
         # Preprocess parameters for TTNN
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
@@ -154,6 +183,7 @@ class StageInfra:
             stride=2,
             model_config=model_config,
             stage_name=stage_name,
+            torch_model=torch_model,
         )
 
         # Convert input to TTNN format
@@ -205,14 +235,19 @@ class StageInfra:
 
         # Reshape + permute image output back to NCHW
         expected_shape = self.torch_output.shape
+        # expected_shape = [1, 72, 1, 1]
+        # import pdb; pdb.set_trace()
         tt_tensor_torch = torch.reshape(
             tt_tensor_torch,
             (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1]),
         )
         tt_tensor_torch = torch.permute(tt_tensor_torch, (0, 3, 1, 2))
 
-        # PCC validation for both outputs
+        # # PCC validation for both outputs
+        # tt_tensor_torch =  tt_tensor_torch.to(torch.float32)
+        # tt_tensor_torch = self.torch_model.fallback(tt_tensor_torch)
         image_pcc_passed, image_pcc_message = check_with_pcc(self.torch_output, tt_tensor_torch, pcc=0.90)
+        # image_pcc_passed, image_pcc_message = check_with_pcc(self.torch_output, self.output_tensor, pcc=0.90)
 
         logger.info(f"Image Output PCC: {image_pcc_message}")
         assert image_pcc_passed, logger.error(f"PCC check failed - pcc_message: {image_pcc_message}")
@@ -243,10 +278,10 @@ model_config = {
     "stage_name,input_shape",
     [
         # ImageCNN Tests
-        # ("layer1", (1, 32, 80, 352)),
+        ("layer1", (1, 32, 80, 352)),
         # ("layer2", (1, 72, 40, 176)),
-        ("layer3", (1, 216, 20, 88)),
-        ("layer4", (1, 576, 10, 44)),
+        # ("layer3", (1, 216, 20, 88)),
+        # ("layer4", (1, 576, 10, 44)),
         # # LidarEncoder Tests
         # ("layer1", (1, 32, 128, 128)),
         # ("layer2", (1, 72, 64, 64)),

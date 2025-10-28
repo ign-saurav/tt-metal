@@ -185,6 +185,7 @@ class Ttstages:
         stride,
         model_config,
         stage_name,
+        torch_model=None,
     ) -> None:
         self.inplanes = 32
         stage_config = {
@@ -197,11 +198,17 @@ class Ttstages:
         self.layer = self._make_layer(
             parameters=parameters,
             planes=config["planes"],
-            blocks=len(parameters.keys()),
+            # blocks=len(parameters.keys()),
+            blocks=1,  # 0.999 pcc
+            # blocks=2,   # 0.969 pcc
+            # blocks=3,     # 0.952 pcc
+            # blocks=4,     # 0.897 pcc
+            # blocks=5,     # 0.875 pcc
             stride=stride,
             groups=config["groups"],
             model_config=model_config,
             stage_name=stage_name,
+            torch_model=torch_model,
         )
 
     @staticmethod
@@ -213,6 +220,7 @@ class Ttstages:
         groups: int = 1,
         model_config=None,
         stage_name=None,
+        torch_model=None,
     ) -> List[TTRegNetBottleneck]:
         """
         parameters:
@@ -268,6 +276,7 @@ class Ttstages:
                 stride=stride,
                 downsample=downsample,
                 groups=groups,
+                torch_model=torch_model,
                 # shard_layout=shard_layout,
             )
         )

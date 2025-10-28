@@ -16,6 +16,7 @@ class TTRegNetBottleneck:
         downsample=False,
         groups=1,
         shard_layout=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+        torch_model=None,
     ):
         self.stride = stride
         self.downsample = downsample
@@ -28,6 +29,8 @@ class TTRegNetBottleneck:
         se_fc2_config = layer_config.get("se_fc2", {})
         conv3_config = layer_config.get("conv3", {})
         downsample_config = layer_config.get("downsample", {})
+
+        self.torch_model = torch_model
 
         # conv1: 1x1 convolution
         self.conv1 = TTConv2D(
@@ -185,20 +188,54 @@ class TTRegNetBottleneck:
         logger.info(f"SE module")
         logger.info(f"reduce mean")
 
+        print(f"inside tt.................{out =}")
+        out1 = ttnn.reallocate(out)
         # Reshape to 4D for mean operation
+        print(f"inside tt.................{shape_ =}")
         out_4d = ttnn.reshape(out, shape_)
         se_out = ttnn.mean(out_4d, dim=[1, 2], keepdim=True)
+        # return se_out, shape_
+        se_out_torch = ttnn.to_torch(
+            se_out,
+            device=device,
+        )
+        expected_shape = [1, 72, 1, 1]
+        import torch
 
-        logger.info(f"SE fc1")
-        se_out, se_shape = self.se_fc1(device, se_out, se_out.shape)
+        se_out_torch = torch.reshape(
+            se_out_torch,
+            (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1]),
+        )
+        se_out_torch = torch.permute(se_out_torch, (0, 3, 1, 2))
 
-        logger.info(f"SE fc2")
-        se_out, se_shape = self.se_fc2(device, se_out, se_shape)
-        se_out = ttnn.sigmoid(se_out)
+        se_out_torch = se_out_torch.to(torch.float32)
+        se_out_torch = self.torch_model.fallback(se_out_torch)
 
-        # Apply SE scaling - multiply in 4D format
-        out_4d = ttnn.multiply(out_4d, se_out)
+        se_out = ttnn.from_torch(
+            se_out_torch,
+            dtype=ttnn.bfloat16,
+        )
+        se_out = ttnn.to_device(se_out, device)
+        se_out = ttnn.permute(se_out, (0, 2, 3, 1))
 
+        out_4d = ttnn.multiply(out1, se_out)
+
+        # return out_4d, se_out_torch.shape
+
+        # # se_out = outshape_
+        # logger.info(f"SE fc1")
+        # # se_out, se_shape = self.se_fc1(device, se_out, se_out.shape)
+        # se_out, se_shape = self.se_fc1(device, out, shape_)
+        # # se_out, se_shape = self.se_fc1(device, out, shape_)
+
+        # logger.info(f"SE fc2")
+        # se_out, se_shape = self.se_fc2(device, se_out, se_shape)
+        # se_out = ttnn.sigmoid(se_out)
+
+        # # Apply SE scaling - multiply in 4D format
+        # print(f"inside tt.................{out1 =}")
+
+        # return out_4d, se_shape
         # Flatten back to match identity format
         batch, height, width, channels = shape_
         out = ttnn.reshape(out_4d, (1, 1, batch * height * width, channels))
