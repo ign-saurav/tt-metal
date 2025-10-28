@@ -128,8 +128,9 @@ class TransfuserBackboneInfra:
             use_velocity=self.use_velocity,
         )
         torch_model.eval()
-        checkpoint_path = "model_seed1_39.pth"
-        checkpoint = torch.load(checkpoint_path, map_location="cpu")
+        # checkpoint_path = "model_seed1_39.pth"
+        checkpoint_path = "model_ckpt/models_2022/transfuser/model_seed1_39.pth"
+
         modified_state_dict = fix_and_filter_checkpoint_keys(
             checkpoint_path=checkpoint_path,
             target_prefix="module._model.",  # This is the prefix to keep and remove
@@ -174,7 +175,7 @@ class TransfuserBackboneInfra:
         # self.torch_lidar_input = torch.randn(self.lidar_input_shape)
         # self.torch_velocity_input = torch.randn(1, 1)
         # Extract each component
-        inputs = torch.load("transfuser_inputs_final.pt")
+        inputs = torch.load("models/experimental/transfuser/tests/transfuser_inputs_final.pt")
         self.torch_image_input = inputs["image"]  # RGB camera image tensor
         # save_tensor_as_image(self.rgb, "rgb.png")
         self.torch_lidar_input = inputs["lidar"]  # LiDAR BEV tensor

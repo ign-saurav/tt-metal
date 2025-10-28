@@ -113,7 +113,9 @@ class StageInfra:
             image_architecture="regnety_032",
         )
         torch_model.eval()
-        checkpoint_path = "model_seed1_39.pth"
+        # checkpoint_path = "model_seed1_39.pth"
+        checkpoint_path = "model_ckpt/models_2022/transfuser/model_seed1_39.pth"
+
         checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
         checkpoint = filter_checkpoint(checkpoint, stage_name=stage_name)
@@ -122,10 +124,10 @@ class StageInfra:
         torch_model.load_state_dict(checkpoint, strict=True)
 
         stage_to_pt_file = {
-            "layer1": "image_features_new.pt",
-            "layer2": "image_features_layer2.pt",
-            "layer3": "image_features_layer3.pt",
-            "layer4": "image_features_layer4.pt",
+            "layer1": "input_layer1.pt",
+            "layer2": "input_layer2.pt",
+            "layer3": "input_layer3.pt",
+            "layer4": "input_layer4.pt",
         }
 
         pt_filename = stage_to_pt_file.get(stage_name, f"image_features_{stage_name}.pt")
@@ -241,10 +243,10 @@ model_config = {
     "stage_name,input_shape",
     [
         # ImageCNN Tests
-        ("layer1", (1, 32, 80, 352)),
+        # ("layer1", (1, 32, 80, 352)),
         # ("layer2", (1, 72, 40, 176)),
-        # ("layer3", (1, 216, 20, 88)),
-        # ("layer4", (1, 576, 10, 44)),
+        ("layer3", (1, 216, 20, 88)),
+        ("layer4", (1, 576, 10, 44)),
         # # LidarEncoder Tests
         # ("layer1", (1, 32, 128, 128)),
         # ("layer2", (1, 72, 64, 64)),

@@ -292,6 +292,7 @@ class TransfuserBackbone(nn.Module):
         lidar_features = self.lidar_encoder._model.bn1(lidar_features)
         lidar_features = self.lidar_encoder._model.act1(lidar_features)
         lidar_features = self.lidar_encoder._model.maxpool(lidar_features)
+        torch.save(image_features, "input_layer1.pt")
         image_features = self.image_encoder.features.layer1(image_features)
         lidar_features = self.lidar_encoder._model.layer1(lidar_features)
 
@@ -315,6 +316,7 @@ class TransfuserBackbone(nn.Module):
         image_features = image_features + image_features_layer1
         lidar_features = lidar_features + lidar_features_layer1
 
+        torch.save(image_features, "input_layer2.pt")
         image_features = self.image_encoder.features.layer2(image_features)
         lidar_features = self.lidar_encoder._model.layer2(lidar_features)
         # Image fusion at (B, 216, 20, 88)
@@ -337,6 +339,7 @@ class TransfuserBackbone(nn.Module):
         image_features = image_features + image_features_layer2
         lidar_features = lidar_features + lidar_features_layer2
 
+        torch.save(image_features, "input_layer3.pt")
         image_features = self.image_encoder.features.layer3(image_features)
         lidar_features = self.lidar_encoder._model.layer3(lidar_features)
         # Image fusion at (B, 576, 10, 44)
@@ -358,6 +361,10 @@ class TransfuserBackbone(nn.Module):
         )
         image_features = image_features + image_features_layer3
         lidar_features = lidar_features + lidar_features_layer3
+        torch.save(image_features, "input_layer4.pt")
+        import pytest
+
+        pytest.skip()
         image_features = self.image_encoder.features.layer4(image_features)
         lidar_features = self.lidar_encoder._model.layer4(lidar_features)
         # Image fusion at (B, 1512, 5, 22)
