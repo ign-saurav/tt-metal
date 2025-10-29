@@ -186,6 +186,7 @@ class Ttstages:
         model_config,
         stage_name,
         torch_model=None,
+        use_fallback=False,
     ) -> None:
         self.inplanes = 32
         stage_config = {
@@ -198,8 +199,8 @@ class Ttstages:
         self.layer = self._make_layer(
             parameters=parameters,
             planes=config["planes"],
-            # blocks=len(parameters.keys()),
-            blocks=1,  # 0.999 pcc
+            blocks=len(parameters.keys()),
+            # blocks=1,  # 0.999 pcc
             # blocks=2,   # 0.969 pcc
             # blocks=3,     # 0.952 pcc
             # blocks=4,     # 0.897 pcc
@@ -209,6 +210,7 @@ class Ttstages:
             model_config=model_config,
             stage_name=stage_name,
             torch_model=torch_model,
+            use_fallback=use_fallback,
         )
 
     @staticmethod
@@ -221,6 +223,7 @@ class Ttstages:
         model_config=None,
         stage_name=None,
         torch_model=None,
+        use_fallback=False,
     ) -> List[TTRegNetBottleneck]:
         """
         parameters:
@@ -265,6 +268,7 @@ class Ttstages:
             )
 
         layers = []
+        inplanes = 32  # Initial inplanes value
 
         # ---- First block (may have downsample) ----
         downsample = stride != 1 or inplanes != planes
@@ -277,6 +281,9 @@ class Ttstages:
                 downsample=downsample,
                 groups=groups,
                 torch_model=torch_model,
+                use_fallback=use_fallback,
+                block_name="b1",
+                stage_name=stage_name,
                 # shard_layout=shard_layout,
             )
         )
@@ -297,6 +304,10 @@ class Ttstages:
                     stride=1,
                     downsample=False,
                     groups=groups,
+                    torch_model=torch_model,
+                    use_fallback=use_fallback,
+                    block_name=bname,
+                    stage_name=stage_name,
                     # shard_layout=shard_layout,
                 )
             )

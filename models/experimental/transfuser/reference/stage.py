@@ -46,30 +46,20 @@ class Stage(nn.Module):
     def forward(self, image):
         # Dynamically access the stage layer based on stage_name
         stage_layer = getattr(self.image_encoder.features, self.stage_name)
-        # x = stage_layer(image)
-        x = stage_layer.b1(image)  # downsample
-        # x = stage_layer.b1.conv1(image)   #downsample
-        # x = stage_layer.b1.conv2(x)   #downsample
-        # x = stage_layer.b1.se(x)   #downsample
-        # x = x.mean((2, 3), keepdim=True)
-        # print("req shape", x.shape)
-        # x = stage_layer.b1.se.fc1(x)   #downsample
-        # x = x.relu()
-        # # return x
-        # x = stage_layer.b1.se.fc2(x)   #downsample
-        # x = x.sigmoid()
-        # x = stage_layer.b2(x)       #stride=1, no downsample
-        # x = stage_layer.b3(x)
-        # x = stage_layer.b4(x)
-        # x = stage_layer.b5(x)
+        x = stage_layer(image)
         return x
 
-    def fallback(self, image):
+    def fallback(self, image, block_name=None):
         # Dynamically access the stage layer based on stage_name
         stage_layer = getattr(self.image_encoder.features, self.stage_name)
-        x = stage_layer.b1.se.fc1(image)  # downsample
+        # Use block_name if provided, otherwise default to b1 for backwards compatibility
+        if block_name is None:
+            block_name = "b1"
+        # Dynamically access the block based on block_name
+        block = getattr(stage_layer, block_name)
+        x = block.se.fc1(image)
         x = x.relu()
-        x = stage_layer.b1.se.fc2(x)
+        x = block.se.fc2(x)
         x = x.sigmoid()
 
         return x

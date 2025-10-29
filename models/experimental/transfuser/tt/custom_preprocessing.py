@@ -70,7 +70,6 @@ def _pack_conv_module(module, *, mesh_mapper):
 
 def _handle_conv2d(parameters: dict, conv: Conv2d, *, mesh_mapper):
     """Generic handler for Conv2d with optional BN fused in."""
-    print(f"inside reference.................{conv.norm =}")
     if conv.norm is not None:
         w_t, b_t = _fold_and_pack_conv(conv, conv.norm, mesh_mapper=mesh_mapper)
     else:
@@ -110,24 +109,12 @@ def _handle_bottleneck(dst: dict, block: Bottleneck, *, mesh_mapper):
     """Fill parameters for a ResNet-style Bottleneck block:
     conv1/conv2/conv3, SE(fc1/fc2 weights), optional downsample."""
     # conv1
-    print(f"inside reference.................{block.conv1.conv.weight =}")
-    print(f"inside reference.................{block.conv1.conv.bias =}")
-    print(f"inside reference.................{block.conv1.bn.running_mean =}")
-    print(f"inside reference.................{block.conv1.bn.running_var =}")
     w, b = _fold_and_pack_conv(block.conv1.conv, block.conv1.bn, mesh_mapper=mesh_mapper)
-    print(f"inside reference.................{w =}")
-    print(f"inside reference.................{b =}")
     c1 = _get_or_create(dst, "conv1")
     c1["weight"], c1["bias"] = w, b
 
     # conv2 (grouped 3x3)
-    print(f"inside reference.................{block.conv2.conv.weight =}")
-    print(f"inside reference.................{block.conv2.conv.bias =}")
-    print(f"inside reference.................{block.conv2.bn.running_mean =}")
-    print(f"inside reference.................{block.conv2.bn.running_var =}")
     w, b = _fold_and_pack_conv(block.conv2.conv, block.conv2.bn, mesh_mapper=mesh_mapper)
-    print(f"inside referencec2.................{w =}")
-    print(f"inside referencec2.................{b =}")
     c2 = _get_or_create(dst, "conv2")
     c2["weight"], c2["bias"] = w, b
 
@@ -140,8 +127,8 @@ def _handle_bottleneck(dst: dict, block: Bottleneck, *, mesh_mapper):
     se = _get_or_create(dst, "se")
     fc1 = _get_or_create(se, "fc1")
     fc2 = _get_or_create(se, "fc2")
-    fc1["weight"] = _pack_weight_only(block.se.fc1.weight, mesh_mapper=mesh_mapper, dtype=ttnn.float32)
-    fc2["weight"] = _pack_weight_only(block.se.fc2.weight, mesh_mapper=mesh_mapper, dtype=ttnn.float32)
+    fc1["weight"] = _pack_weight_only(block.se.fc1.weight, mesh_mapper=mesh_mapper)
+    fc2["weight"] = _pack_weight_only(block.se.fc2.weight, mesh_mapper=mesh_mapper)
 
     # Downsample (if present and not Identity)
     if hasattr(block, "downsample") and block.downsample is not None:

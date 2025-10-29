@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
+import torch
 from loguru import logger
 from models.experimental.transfuser.tt.utils import TTConv2D
 
@@ -17,6 +18,9 @@ class TTRegNetBottleneck:
         groups=1,
         shard_layout=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
         torch_model=None,
+        use_fallback=False,
+        block_name=None,
+        stage_name=None,
     ):
         self.stride = stride
         self.downsample = downsample
@@ -31,6 +35,9 @@ class TTRegNetBottleneck:
         downsample_config = layer_config.get("downsample", {})
 
         self.torch_model = torch_model
+        self.use_fallback = use_fallback
+        self.block_name = block_name
+        self.stage_name = stage_name
 
         # conv1: 1x1 convolution
         self.conv1 = TTConv2D(
@@ -241,30 +248,19 @@ class TTRegNetBottleneck:
         logger.info(f"SE module")
         logger.info(f"reduce mean")
 
-        print(f"inside tt.................{out =}")
         out1 = ttnn.reallocate(out)
         # Reshape to 4D for mean operation
-        print(f"inside tt.................{shape_ =}")
         out_4d = ttnn.reshape(out, shape_)
         se_out = ttnn.mean(out_4d, dim=[1, 2], keepdim=True)
         # return se_out, shape_
-        if 0:
+        if self.use_fallback and self.torch_model is not None:
             se_out_torch = ttnn.to_torch(
                 se_out,
                 device=device,
             )
-            expected_shape = [1, 72, 1, 1]
-            import torch
-
-            se_out_torch = torch.reshape(
-                se_out_torch,
-                (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1]),
-            )
             se_out_torch = torch.permute(se_out_torch, (0, 3, 1, 2))
-
             se_out_torch = se_out_torch.to(torch.float32)
-            se_out_torch = self.torch_model.fallback(se_out_torch)
-
+            se_out_torch = self.torch_model.fallback(se_out_torch, block_name=self.block_name)
             se_out = ttnn.from_torch(
                 se_out_torch,
                 dtype=ttnn.bfloat16,
