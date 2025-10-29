@@ -254,13 +254,16 @@ class TTRegNetBottleneck:
         se_out = ttnn.mean(out_4d, dim=[1, 2], keepdim=True)
         # return se_out, shape_
         if self.use_fallback and self.torch_model is not None:
+            logger.info(f"Falling Back SE module for {self.stage_name} {self.block_name}")
             se_out_torch = ttnn.to_torch(
                 se_out,
                 device=device,
             )
             se_out_torch = torch.permute(se_out_torch, (0, 3, 1, 2))
             se_out_torch = se_out_torch.to(torch.float32)
-            se_out_torch = self.torch_model.fallback(se_out_torch, block_name=self.block_name)
+            se_out_torch = self.torch_model.fallback(
+                se_out_torch, block_name=self.block_name, stage_name=self.stage_name
+            )
             se_out = ttnn.from_torch(
                 se_out_torch,
                 dtype=ttnn.bfloat16,

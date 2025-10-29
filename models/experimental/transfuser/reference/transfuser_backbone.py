@@ -268,6 +268,38 @@ class TransfuserBackbone(nn.Module):
 
         return p2, p3, p4, p5
 
+    def fallback(self, image, block_name=None, stage_name=None):
+        """
+        Fallback method for SE module that dynamically accesses the correct stage and block.
+
+        Args:
+            image: Input tensor for SE module
+            block_name: Name of the block (e.g., "b1", "b2", etc.). Defaults to "b1" if None.
+            stage_name: Name of the stage (e.g., "layer1", "layer2", etc.). Must be provided.
+
+        Returns:
+            Output tensor after SE fc1, relu, fc2, and sigmoid operations
+        """
+        if stage_name is None:
+            raise ValueError("stage_name must be provided for fallback method")
+
+        # Use block_name if provided, otherwise default to b1 for backwards compatibility
+        if block_name is None:
+            block_name = "b1"
+
+        # Dynamically access the stage layer based on stage_name
+        stage_layer = getattr(self.image_encoder.features, stage_name)
+        # Dynamically access the block based on block_name
+        block = getattr(stage_layer, block_name)
+
+        # Run SE operations: fc1 -> relu -> fc2 -> sigmoid
+        x = block.se.fc1(image)
+        x = x.relu()
+        x = block.se.fc2(x)
+        x = x.sigmoid()
+
+        return x
+
     def forward(self, image, lidar, velocity, return_intermediates=False):
         """
         Image + LiDAR feature fusion using transformers
@@ -292,7 +324,6 @@ class TransfuserBackbone(nn.Module):
         lidar_features = self.lidar_encoder._model.bn1(lidar_features)
         lidar_features = self.lidar_encoder._model.act1(lidar_features)
         lidar_features = self.lidar_encoder._model.maxpool(lidar_features)
-        torch.save(image_features, "input_layer1.pt")
         image_features = self.image_encoder.features.layer1(image_features)
         lidar_features = self.lidar_encoder._model.layer1(lidar_features)
 
@@ -316,7 +347,6 @@ class TransfuserBackbone(nn.Module):
         image_features = image_features + image_features_layer1
         lidar_features = lidar_features + lidar_features_layer1
 
-        torch.save(image_features, "input_layer2.pt")
         image_features = self.image_encoder.features.layer2(image_features)
         lidar_features = self.lidar_encoder._model.layer2(lidar_features)
         # Image fusion at (B, 216, 20, 88)
@@ -339,7 +369,6 @@ class TransfuserBackbone(nn.Module):
         image_features = image_features + image_features_layer2
         lidar_features = lidar_features + lidar_features_layer2
 
-        torch.save(image_features, "input_layer3.pt")
         image_features = self.image_encoder.features.layer3(image_features)
         lidar_features = self.lidar_encoder._model.layer3(lidar_features)
         # Image fusion at (B, 576, 10, 44)
@@ -361,10 +390,6 @@ class TransfuserBackbone(nn.Module):
         )
         image_features = image_features + image_features_layer3
         lidar_features = lidar_features + lidar_features_layer3
-        torch.save(image_features, "input_layer4.pt")
-        import pytest
-
-        pytest.skip()
         image_features = self.image_encoder.features.layer4(image_features)
         lidar_features = self.lidar_encoder._model.layer4(lidar_features)
         # Image fusion at (B, 1512, 5, 22)
