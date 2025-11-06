@@ -100,22 +100,22 @@ def create_efficientnetb0_model_parameters(model, input_tensor, device):
 
     parameters["blocks"] = blocks_params
 
-    parameters["_conv_head"] = fold_batch_norm2d_into_conv2d(
-        model.__getattr__("_conv_head"), model.__getattr__("_bn1"), mesh_mapper=weights_mesh_mapper
-    )
+    # parameters["_conv_head"] = fold_batch_norm2d_into_conv2d(
+    #     model.__getattr__("_conv_head"), model.__getattr__("_bn1"), mesh_mapper=weights_mesh_mapper
+    # )
 
-    parameters["l1"] = {}
-    parameters["l1"]["weight"] = model._fc.weight
-    parameters["l1"]["bias"] = model._fc.bias
+    # parameters["l1"] = {}
+    # parameters["l1"]["weight"] = model._fc.weight
+    # parameters["l1"]["bias"] = model._fc.bias
 
-    parameters["l1"]["weight"] = preprocess_linear_weight(
-        parameters["l1"]["weight"], dtype=ttnn.bfloat16, mesh_mapper=weights_mesh_mapper
-    )
-    parameters["l1"]["bias"] = preprocess_linear_bias(
-        parameters["l1"]["bias"], dtype=ttnn.bfloat16, mesh_mapper=weights_mesh_mapper
-    )
+    # parameters["l1"]["weight"] = preprocess_linear_weight(
+    #     parameters["l1"]["weight"], dtype=ttnn.bfloat16, mesh_mapper=weights_mesh_mapper
+    # )
+    # parameters["l1"]["bias"] = preprocess_linear_bias(
+    #     parameters["l1"]["bias"], dtype=ttnn.bfloat16, mesh_mapper=weights_mesh_mapper
+    # )
 
-    parameters["l1"]["weight"] = ttnn.to_device(parameters["l1"]["weight"], device)
-    parameters["l1"]["bias"] = ttnn.to_device(parameters["l1"]["bias"], device)
+    # parameters["l1"]["weight"] = ttnn.to_device(parameters["l1"]["weight"], device)
+    # parameters["l1"]["bias"] = ttnn.to_device(parameters["l1"]["bias"], device)
 
     return conv_params, parameters

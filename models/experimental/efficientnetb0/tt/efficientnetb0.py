@@ -384,16 +384,16 @@ class Efficientnetb0:
             shard_layout_depthwise_conv=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
             deallocate_activation=True,
         )
-        self._conv_head = Conv2dDynamicSamePadding(
-            device=device,
-            parameters=parameters["_conv_head"],
-            conv_params=conv_params._conv_head,
-            shard_layout=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
-            deallocate_activation=True,
-        )
+        # self._conv_head = Conv2dDynamicSamePadding(
+        #     device=device,
+        #     parameters=parameters["_conv_head"],
+        #     conv_params=conv_params._conv_head,
+        #     shard_layout=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+        #     deallocate_activation=True,
+        # )
 
-        self.l1_weight = parameters["l1"]["weight"]
-        self.l1_bias = parameters["l1"]["bias"]
+        # self.l1_weight = parameters["l1"]["weight"]
+        # self.l1_bias = parameters["l1"]["bias"]
 
     def __call__(self, x):
         N, C, H, W = x.shape
@@ -404,84 +404,102 @@ class Efficientnetb0:
         else:
             nchw = x
         nhwc = ttnn.permute(nchw, (0, 2, 3, 1))
+        # nhwc = ttnn.permute(nchw, (0, 2, 3, 1), memory_config=ttnn.DRAM_MEMORY_CONFIG)
         ttnn.deallocate(nchw)
         ttnn.deallocate(x)
         nhwc = ttnn.reallocate(nhwc)
         x = ttnn.reshape(nhwc, [1, 1, nhwc.shape[0] * nhwc.shape[1] * nhwc.shape[2], nhwc.shape[-1]])
 
+        print("stem")
         x = self._conv_stem(x)
 
         x = ttnn.swish(x)
 
+        print("blocks0")
         x = self._blocks0(x)
 
+        print("blocks1")
         x_1 = self._blocks1(x)
 
+        print("blocks2")
         x = self._blocks2(x_1)
 
         x = ttnn.add(x, x_1)
         ttnn.deallocate(x_1)
 
+        print("blocks3")
         x_3 = self._blocks3(x)
 
+        print("blocks4")
         x = self._blocks4(x_3)
 
         x = x + x_3
         ttnn.deallocate(x_3)
 
+        print("blocks5")
         x_5 = self._blocks5(x)
 
+        print("blocks6")
         x = self._blocks6(x_5)
 
         x_7_in = x + x_5
         ttnn.deallocate(x_5)
 
+        print("blocks7")
         x = self._blocks7(x_7_in)
 
         x = x_7_in + x
         ttnn.deallocate(x_7_in)
 
+        print("blocks8")
         x_8 = self._blocks8(x)
 
+        print("blocks9")
         x = self._blocks9(x_8)
 
         x_10_in = x + x_8
         ttnn.deallocate(x_8)
 
+        print("blocks10")
         x = self._blocks10(x_10_in)
 
         x = x + x_10_in
         ttnn.deallocate(x_10_in)
 
+        print("blocks11")
         x_11 = self._blocks11(x)
 
+        print("blocks12")
         x = self._blocks12(x_11)
 
         x_13_in = x + x_11
         ttnn.deallocate(x_11)
 
+        print("blocks13")
         x = self._blocks13(x_13_in)
 
         x_14_in = x + x_13_in
         ttnn.deallocate(x_13_in)
         ttnn.deallocate(x)
 
+        print("blocks14")
         x = self._blocks14(x_14_in)
 
         x = x_14_in + x
         ttnn.deallocate(x_14_in)
 
+        print("blocks15")
         x = self._blocks15(x)
 
-        x = self._conv_head(x)
+        # x = self._conv_head(x)
 
-        x = x * ttnn.sigmoid_accurate(x, True)
+        # x = x * ttnn.sigmoid_accurate(x, True)
 
-        x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT)
-        x = ttnn.global_avg_pool2d(x)
+        # x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT)
+        # x = ttnn.global_avg_pool2d(x)
 
-        x = ttnn.reshape(x, (1, -1))
+        # x = ttnn.reshape(x, (1, -1))
 
-        x = ttnn.linear(x, self.l1_weight, bias=self.l1_bias)
+        # x = ttnn.linear(x, self.l1_weight, bias=self.l1_bias)
 
         return x

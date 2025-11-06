@@ -30,12 +30,12 @@ class Efficientnetb0(nn.Module):
         self._blocks14 = MBConvBlock([192, 1152, 1152, 48, 1152], [1152, 1152, 48, 1152, 192], [5, 1])
         self._blocks15 = MBConvBlock([192, 1152, 1152, 48, 1152], [1152, 1152, 48, 1152, 320], [3, 1])
 
-        self._conv_head = Conv2dDynamicSamePadding(320, 1280, kernel_size=(1, 1), stride=(1, 1), bias=False)
-        self._avg_pooling = nn.AdaptiveAvgPool2d(output_size=1)
-        self._bn1 = nn.BatchNorm2d(
-            1280, eps=0.001, momentum=0.010000000000000009, affine=True, track_running_stats=True
-        )
-        self._fc = nn.Linear(in_features=1280, out_features=1000, bias=True)
+        # self._conv_head = Conv2dDynamicSamePadding(320, 1280, kernel_size=(1, 1), stride=(1, 1), bias=False)
+        # self._avg_pooling = nn.AdaptiveAvgPool2d(output_size=1)
+        # self._bn1 = nn.BatchNorm2d(
+        #     1280, eps=0.001, momentum=0.010000000000000009, affine=True, track_running_stats=True
+        # )
+        # self._fc = nn.Linear(in_features=1280, out_features=1000, bias=True)
 
     def forward(self, x):
         x = self._conv_stem(x)
@@ -66,12 +66,12 @@ class Efficientnetb0(nn.Module):
         x = self._blocks14(x_14_in)
         x = x_14_in + x
         x = self._blocks15(x)
-        x = self._conv_head(x)
-        x = self._bn1(x)
-        x = x * torch.sigmoid(x)
-        x = self._avg_pooling(x)
-        x = x.flatten(start_dim=1)
-        x = self._fc(x)
+        # x = self._conv_head(x)
+        # x = self._bn1(x)
+        # x = x * torch.sigmoid(x)
+        # x = self._avg_pooling(x)
+        # x = x.flatten(start_dim=1)
+        # x = self._fc(x)
 
         return x
 
