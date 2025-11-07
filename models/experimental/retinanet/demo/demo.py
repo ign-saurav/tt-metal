@@ -20,11 +20,11 @@ from torchvision.ops import boxes as box_ops
 from torchvision.models.detection.image_list import ImageList
 from typing import Any, Dict, List, Optional
 from torch import Tensor
-from models.experimental.retinanet.TTNN.regression_head import ttnn_retinanet_regression_head
-from models.experimental.retinanet.TTNN.classification_head import ttnn_retinanet_classification_head
-from models.experimental.retinanet.TTNN.tt_backbone import TTBackbone
+from models.experimental.retinanet.tt.tt_regression_head import ttnn_retinanet_regression_head
+from models.experimental.retinanet.tt.tt_classification_head import ttnn_retinanet_classification_head
+from models.experimental.retinanet.tt.tt_backbone import TTBackbone
 from ttnn.model_preprocessing import preprocess_model_parameters
-from models.experimental.retinanet.TTNN.custom_preprocessor import (
+from models.experimental.retinanet.tt.custom_preprocessor import (
     create_custom_mesh_preprocessor,
     preprocess_regression_head_parameters,
     preprocess_classification_head_parameters,
