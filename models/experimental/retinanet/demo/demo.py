@@ -17,10 +17,104 @@ from torchvision.models.detection import retinanet_resnet50_fpn_v2, RetinaNet_Re
 from torchvision.models.detection.anchor_utils import AnchorGenerator
 from torchvision.models.detection import _utils as det_utils
 from torchvision.ops import boxes as box_ops
-import torchvision
 from torchvision.models.detection.image_list import ImageList
 from typing import Any, Dict, List, Optional
 from torch import Tensor
+from models.experimental.retinanet.TTNN.regression_head import ttnn_retinanet_regression_head
+from models.experimental.retinanet.TTNN.classification_head import ttnn_retinanet_classification_head
+from models.experimental.retinanet.TTNN.tt_backbone import TTBackbone
+from ttnn.model_preprocessing import preprocess_model_parameters
+from models.experimental.retinanet.TTNN.custom_preprocessor import (
+    create_custom_mesh_preprocessor,
+    preprocess_regression_head_parameters,
+    preprocess_classification_head_parameters,
+)
+
+# LUT
+COCO_INSTANCE_CATEGORY_NAMES = [
+    "person",
+    "bicycle",
+    "car",
+    "motorcycle",
+    "airplane",
+    "bus",
+    "train",
+    "truck",
+    "boat",
+    "traffic light",
+    "fire hydrant",
+    "stop sign",
+    "parking meter",
+    "bench",
+    "bird",
+    "cat",
+    "sheep",
+    "horse",
+    "dog",
+    "cow",
+    "elephant",
+    "bear",
+    "zebra",
+    "giraffe",
+    "backpack",
+    "umbrella",
+    "handbag",
+    "tie",
+    "suitcase",
+    "frisbee",
+    "skis",
+    "snowboard",
+    "sport ball",
+    "kite",
+    "baseball bat",
+    "baseball glove",
+    "skateboard",
+    "surfboard",
+    "tennis racket",
+    "bottle",
+    "wineglass",
+    "cup",
+    "fork",
+    "knife",
+    "spoon",
+    "bowl",
+    "banana",
+    "apple",
+    "sandwich",
+    "orange",
+    "broccoli",
+    "carrot",
+    "hotdog",
+    "pizza",
+    "donut",
+    "cake",
+    "chair",
+    "couch",
+    "potted plant",
+    "bed",
+    "dining table",
+    "toilet",
+    "tv",
+    "laptop",
+    "mouse",
+    "remote",
+    "keyboard",
+    "cell phone",
+    "microwave",
+    "oven",
+    "toaster",
+    "sink",
+    "refrigerator",
+    "book",
+    "clock",
+    "vase",
+    "scissors",
+    "teddy bear",
+    "hair drier",
+    "toothbrush",
+]
+
+device = ttnn.open_device(device_id=0, l1_small_size=24576)
 
 
 class Demo:
@@ -40,13 +134,34 @@ class Demo:
     # Inference
     # ---------------------------------------------------------------------
 
-    def run_torch_inference(self, input_tensor: torch.Tensor):
+    def run_torch_inference(self, input_tensor, model_config):
         """Run PyTorch inference."""
         retinanet = retinanet_resnet50_fpn_v2(weights=RetinaNet_ResNet50_FPN_V2_Weights.DEFAULT)
         retinanet.eval()
         self.torch_backbone = retinanet.backbone
         self.torch_regression_head = retinanet.head.regression_head
         self.torch_classification_head = retinanet.head.classification_head
+
+        self.parameters = preprocess_model_parameters(
+            initialize_model=lambda: retinanet,
+            custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
+            device=None,
+        )
+        self.backbone_parameters = self.parameters.get("backbone", self.parameters)
+
+        self.regression_parameters = preprocess_regression_head_parameters(
+            torch_head=retinanet.head.regression_head,
+            device=device,
+            mesh_mapper=self.weights_mesh_mapper,
+            model_config=model_config,
+        )
+
+        self.classification_parameters = preprocess_classification_head_parameters(
+            torch_head=retinanet.head.classification_head,
+            device=device,
+            mesh_mapper=self.weights_mesh_mapper,
+            model_config=model_config,
+        )
 
         backbone_features = self.torch_backbone(input_tensor)
         torch_regression_output = self.torch_regression_head(list(backbone_features.values()))
@@ -60,8 +175,58 @@ class Demo:
 
         return output
 
-    # def run_ttnn_inference(self, input_tensor: ttnn.Tensor):
-    #     """Run TTNN inference."""
+    def run_ttnn_inference(self, input_tensor, model_config, device):
+        """Run TTNN inference."""
+        self.ttnn_model = TTBackbone(parameters=self.backbone_parameters, model_config=model_config)
+
+        backbone_output = self.ttnn_model(input_tensor, device)
+        fpn_features = [backbone_output[key] for key in ["0", "1", "2", "p6", "p7"]]
+        input_shapes = [
+            (backbone_output["0"].shape[1], backbone_output["0"].shape[2]),
+            (backbone_output["1"].shape[1], backbone_output["1"].shape[2]),
+            (backbone_output["2"].shape[1], backbone_output["2"].shape[2]),
+            (backbone_output["p6"].shape[1], backbone_output["p6"].shape[2]),
+            (backbone_output["p7"].shape[1], backbone_output["p7"].shape[2]),
+        ]
+        # Run regression head
+        regression_output = ttnn_retinanet_regression_head(
+            feature_maps=fpn_features,
+            parameters=self.regression_parameters,
+            device=device,
+            in_channels=256,
+            num_anchors=9,
+            batch_size=1,
+            input_shapes=input_shapes,
+            model_config=model_config,
+            optimization_profile="optimized",
+        )
+        logger.debug("✅✅✅ REGRESSION HEAD Complete ✅✅✅")
+        # Run classification head
+        classification_output = ttnn_retinanet_classification_head(
+            feature_maps=fpn_features,
+            parameters=self.classification_parameters,
+            device=device,
+            in_channels=256,
+            num_anchors=9,
+            batch_size=1,
+            input_shapes=input_shapes,
+            model_config=model_config,
+            optimization_profile="optimized",
+        )
+
+        for key in backbone_output:
+            backbone_output[key] = ttnn.to_torch(backbone_output[key], dtype=torch.float32).permute((0, 3, 1, 2))
+
+        regression_output = ttnn.to_torch(regression_output, dtype=torch.float32)
+        classification_output = ttnn.to_torch(classification_output, dtype=torch.float32)
+
+        output = {
+            "backbone_features": backbone_output,  # FPN levels: "0", "1", "2", "p6", "p7"
+            "regression": regression_output,
+            "classification": classification_output,
+        }
+
+        return output
 
     def preprocess_image(self, image_path: str, device, target_size=(800, 800)):
         """PREPROCESS IMAGE"""
@@ -196,89 +361,6 @@ class Demo:
         from PIL import Image, ImageDraw, ImageFont
         import os
 
-        COCO_INSTANCE_CATEGORY_NAMES = [
-            "person",
-            "bicycle",
-            "car",
-            "motorcycle",
-            "airplane",
-            "bus",
-            "train",
-            "truck",
-            "boat",
-            "traffic light",
-            "fire hydrant",
-            "stop sign",
-            "parking meter",
-            "bench",
-            "bird",
-            "cat",
-            "dog",
-            "horse",
-            "sheep",
-            "cow",
-            "elephant",
-            "bear",
-            "zebra",
-            "giraffe",
-            "backpack",
-            "umbrella",
-            "handbag",
-            "tie",
-            "suitcase",
-            "frisbee",
-            "skis",
-            "snowboard",
-            "sport ball",
-            "kite",
-            "baseball bat",
-            "baseball glove",
-            "skateboard",
-            "surfboard",
-            "tennis racket",
-            "bottle",
-            "wineglass",
-            "cup",
-            "fork",
-            "knife",
-            "spoon",
-            "bowl",
-            "banana",
-            "apple",
-            "sandwich",
-            "orange",
-            "broccoli",
-            "carrot",
-            "hotdog",
-            "pizza",
-            "donut",
-            "cake",
-            "chair",
-            "couch",
-            "potted plant",
-            "bed",
-            "dining table",
-            "toilet",
-            "tv",
-            "laptop",
-            "mouse",
-            "remote",
-            "keyboard",
-            "cell phone",
-            "microwave",
-            "oven",
-            "toaster",
-            "sink",
-            "refrigerator",
-            "book",
-            "clock",
-            "vase",
-            "scissors",
-            "teddy bear",
-            "hair drier",
-            "toothbrush",
-        ]
-
         label_map = {i: name for i, name in enumerate(COCO_INSTANCE_CATEGORY_NAMES)}
 
         image = Image.open(image_path).convert("RGB")
@@ -316,12 +398,21 @@ class Demo:
 
         # Preprocess image
         self.torch_input, original_image_sizes = self.preprocess_image(
-            image_path, self.ttnn_device, target_size=(900, 900)
+            image_path, self.ttnn_device, target_size=(512, 512)
         )
 
-        # Run inference
-        torch_output = self.run_torch_inference(self.torch_input)
+        self.ttnn_input = ttnn.from_torch(self.torch_input.permute(0, 2, 3, 1), dtype=ttnn.bfloat16)
+        self.ttnn_input = ttnn.to_device(self.ttnn_input, device)
 
+        # Run inference
+        model_config = {
+            "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
+            "WEIGHTS_DTYPE": ttnn.bfloat16,
+            "ACTIVATIONS_DTYPE": ttnn.bfloat16,
+        }
+
+        torch_output = self.run_torch_inference(self.torch_input, model_config)
+        torch_output = self.run_ttnn_inference(self.ttnn_input, model_config, device)
         # Posstprocess detections
         anchor_sizes = tuple((x, int(x * 2 ** (1.0 / 3)), int(x * 2 ** (2.0 / 3))) for x in [32, 64, 128, 256, 512])
         aspect_ratios = ((0.5, 1.0, 2.0),) * len(anchor_sizes)
@@ -371,53 +462,11 @@ class Demo:
             boxes = pred["boxes"]
             boxes = Demo.resize_boxes(boxes, im_s, o_im_s)
             detections[i]["boxes"] = boxes
-            if "masks" in pred:
-                masks = pred["masks"]
-                masks = Demo.paste_masks_in_image(masks, boxes, o_im_s)
-                detections[i]["masks"] = masks
-            if "keypoints" in pred:
-                keypoints = pred["keypoints"]
-                keypoints = Demo.resize_keypoints(keypoints, im_s, o_im_s)
-                detections[i]["keypoints"] = keypoints
 
         print(detections)
         self.visualize_detections(image_path, detections, output_dir)
 
         logger.info("Demo completed. Output dir: {}", output_dir)
-
-    def resize_keypoints(keypoints: Tensor, original_size: List[int], new_size: List[int]) -> Tensor:
-        ratios = [
-            torch.tensor(s, dtype=torch.float32, device=keypoints.device)
-            / torch.tensor(s_orig, dtype=torch.float32, device=keypoints.device)
-            for s, s_orig in zip(new_size, original_size)
-        ]
-        ratio_h, ratio_w = ratios
-        resized_data = keypoints.clone()
-        if torch._C._get_tracing_state():
-            resized_data_0 = resized_data[:, :, 0] * ratio_w
-            resized_data_1 = resized_data[:, :, 1] * ratio_h
-            resized_data = torch.stack((resized_data_0, resized_data_1, resized_data[:, :, 2]), dim=2)
-        else:
-            resized_data[..., 0] *= ratio_w
-            resized_data[..., 1] *= ratio_h
-        return resized_data
-
-    def paste_masks_in_image(masks, boxes, img_shape, padding=1):
-        # type: (Tensor, Tensor, Tuple[int, int], int) -> Tensor
-        masks, scale = expand_masks(masks, padding=padding)
-        boxes = expand_boxes(boxes, scale).to(dtype=torch.int64)
-        im_h, im_w = img_shape
-
-        if torchvision._is_tracing():
-            return _onnx_paste_masks_in_image_loop(
-                masks, boxes, torch.scalar_tensor(im_h, dtype=torch.int64), torch.scalar_tensor(im_w, dtype=torch.int64)
-            )[:, None]
-        res = [paste_mask_in_image(m[0], b, im_h, im_w) for m, b in zip(masks, boxes)]
-        if len(res) > 0:
-            ret = torch.stack(res, dim=0)[:, None]
-        else:
-            ret = masks.new_empty((0, 1, im_h, im_w))
-        return ret
 
     def resize_boxes(boxes: Tensor, original_size: List[int], new_size: List[int]) -> Tensor:
         ratios = [
