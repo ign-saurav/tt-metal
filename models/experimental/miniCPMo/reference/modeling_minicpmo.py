@@ -38,9 +38,10 @@ from huggingface_hub import hf_hub_download
 from PIL import Image
 from torch.nn.utils.parametrizations import weight_norm
 from tqdm import tqdm
-from transformers import AutoImageProcessor
 
-# from transformers import AutoProcessor
+# from transformers import AutoImageProcessor
+
+from transformers import AutoProcessor
 from transformers import BertTokenizerFast
 from transformers import LlamaConfig
 from transformers import LlamaModel
@@ -100,8 +101,9 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
         # gets killed without meta
-        with torch.device("meta"):
-            self.llm = Qwen2ForCausalLM(config)
+        # with torch.device("meta"):
+        self.llm = Qwen2ForCausalLM(config)
+        print("QWEN INITIALIZED")
         self.llm.prepare_inputs_for_generation = types.MethodType(prepare_inputs_for_generation, self.llm)  # patch llm
 
         self.embed_dim = self.llm.config.hidden_size
@@ -125,7 +127,9 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
             assert _tts_deps, "please make sure vector_quantize_pytorch and vocos are installed."
             self.tts = self.init_tts_module()
 
-        self.processor = AutoImageProcessor.from_pretrained(self.config._name_or_path, trust_remote_code=True)
+        self.processor = AutoProcessor.from_pretrained(
+            self.config._name_or_path, trust_remote_code=True, local_files_only=True
+        )
 
         self.terminators = ["<|im_end|>", "<|endoftext|>"]
 
@@ -898,23 +902,25 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
 
         if processor is None:
             if self.processor is None:
-                self.processor = AutoImageProcessor.from_pretrained(self.config._name_or_path, trust_remote_code=True)
+                self.processor = AutoProcessor.from_pretrained(self.config._name_or_path, trust_remote_code=True)
             processor = self.processor
 
         assert (
-            self.config.query_num == processor.image_processor.image_feature_size
+            # self.config.query_num == processor.image_processor.image_feature_size
+            self.config.query_num
+            == processor.image_feature_size
         ), "These two values should be the same. Check `config.json` and `preprocessor_config.json`."
         assert (
-            self.config.patch_size == processor.image_processor.patch_size
+            self.config.patch_size == processor.patch_size
         ), "These two values should be the same. Check `config.json` and `preprocessor_config.json`."
         assert (
-            self.config.use_image_id == processor.image_processor.use_image_id
+            self.config.use_image_id == processor.use_image_id
         ), "These two values should be the same. Check `config.json` and `preprocessor_config.json`."
         assert (
-            self.config.slice_config.max_slice_nums == processor.image_processor.max_slice_nums
+            self.config.slice_config.max_slice_nums == processor.max_slice_nums
         ), "These two values should be the same. Check `config.json` and `preprocessor_config.json`."
         assert (
-            self.config.slice_mode == processor.image_processor.slice_mode
+            self.config.slice_mode == processor.slice_mode
         ), "These two values should be the same. Check `config.json` and `preprocessor_config.json`."
 
         prompts_lists = []
