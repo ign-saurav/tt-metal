@@ -906,21 +906,19 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
             processor = self.processor
 
         assert (
-            # self.config.query_num == processor.image_processor.image_feature_size
-            self.config.query_num
-            == processor.image_feature_size
+            self.config.query_num == processor.image_processor.image_feature_size
         ), "These two values should be the same. Check `config.json` and `preprocessor_config.json`."
         assert (
-            self.config.patch_size == processor.patch_size
+            self.config.patch_size == processor.image_processor.patch_size
         ), "These two values should be the same. Check `config.json` and `preprocessor_config.json`."
         assert (
-            self.config.use_image_id == processor.use_image_id
+            self.config.use_image_id == processor.image_processor.use_image_id
         ), "These two values should be the same. Check `config.json` and `preprocessor_config.json`."
         assert (
-            self.config.slice_config.max_slice_nums == processor.max_slice_nums
+            self.config.slice_config.max_slice_nums == processor.image_processor.max_slice_nums
         ), "These two values should be the same. Check `config.json` and `preprocessor_config.json`."
         assert (
-            self.config.slice_mode == processor.slice_mode
+            self.config.slice_mode == processor.image_processor.slice_mode
         ), "These two values should be the same. Check `config.json` and `preprocessor_config.json`."
 
         prompts_lists = []
