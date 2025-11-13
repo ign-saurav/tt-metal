@@ -41,7 +41,8 @@ from tqdm import tqdm
 
 # from transformers import AutoImageProcessor
 
-from transformers import AutoProcessor
+from .processing_minicpmo import MiniCPMOProcessor
+from .image_processing_minicpmv import MiniCPMVImageProcessor
 from transformers import BertTokenizerFast
 from transformers import LlamaConfig
 from transformers import LlamaModel
@@ -127,8 +128,51 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
             assert _tts_deps, "please make sure vector_quantize_pytorch and vocos are installed."
             self.tts = self.init_tts_module()
 
-        self.processor = AutoProcessor.from_pretrained(
-            self.config._name_or_path, trust_remote_code=True, local_files_only=True
+        # Load processor directly from local files to avoid cache resolution
+        # Get the local path from config or use a default
+        local_path = getattr(self.config, "_name_or_path", None)
+        if local_path is None or not os.path.isdir(local_path):
+            # Fallback: try to construct path relative to this file
+            current_dir = os.path.dirname(os.path.abspath(__file__))
+            local_path = current_dir
+
+        # Load image processor config directly from JSON file
+        preprocessor_config_path = os.path.join(local_path, "preprocessor_config.json")
+        with open(preprocessor_config_path, "r") as f:
+            image_processor_config = json.load(f)
+        # Filter out non-constructor parameters (auto_map, processor_class, image_processor_type)
+        constructor_params = {
+            k: v
+            for k, v in image_processor_config.items()
+            if k not in ["auto_map", "processor_class", "image_processor_type"]
+        }
+        # Instantiate image processor directly with config parameters
+        image_processor = MiniCPMVImageProcessor(**constructor_params)
+
+        # Load tokenizer from local files using from_pretrained to get config (chat_template, etc.)
+        # Using local path with local_files_only=True won't trigger cache resolution
+        from .tokenization_minicpmo_fast import MiniCPMOTokenizerFast
+
+        tokenizer = MiniCPMOTokenizerFast.from_pretrained(local_path, local_files_only=True)
+
+        # Load feature extractor (WhisperFeatureExtractor) for audio processing
+        # Even if audio is not initialized, the processor still requires it
+        # Load directly from local whisper_preprocessor_config.json file
+        from transformers import WhisperFeatureExtractor
+
+        whisper_config_path = os.path.join(local_path, "whisper_preprocessor_config.json")
+        with open(whisper_config_path, "r") as f:
+            whisper_config = json.load(f)
+        # Filter out non-constructor parameters
+        whisper_constructor_params = {
+            k: v for k, v in whisper_config.items() if k not in ["processor_class", "feature_extractor_type"]
+        }
+        # Instantiate feature extractor directly with config parameters
+        feature_extractor = WhisperFeatureExtractor(**whisper_constructor_params)
+
+        # Instantiate processor directly
+        self.processor = MiniCPMOProcessor(
+            image_processor=image_processor, feature_extractor=feature_extractor, tokenizer=tokenizer
         )
 
         self.terminators = ["<|im_end|>", "<|endoftext|>"]
@@ -902,7 +946,41 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
 
         if processor is None:
             if self.processor is None:
-                self.processor = AutoProcessor.from_pretrained(self.config._name_or_path, trust_remote_code=True)
+                # Processor should already be initialized in __init__, but if not, create it here
+                # Use the same logic as in __init__ to avoid cache resolution
+                local_path = getattr(self.config, "_name_or_path", None)
+                if local_path is None or not os.path.isdir(local_path):
+                    current_dir = os.path.dirname(os.path.abspath(__file__))
+                    local_path = current_dir
+
+                preprocessor_config_path = os.path.join(local_path, "preprocessor_config.json")
+                with open(preprocessor_config_path, "r") as f:
+                    image_processor_config = json.load(f)
+                constructor_params = {
+                    k: v
+                    for k, v in image_processor_config.items()
+                    if k not in ["auto_map", "processor_class", "image_processor_type"]
+                }
+                image_processor = MiniCPMVImageProcessor(**constructor_params)
+
+                from .tokenization_minicpmo_fast import MiniCPMOTokenizerFast
+
+                tokenizer = MiniCPMOTokenizerFast.from_pretrained(local_path, local_files_only=True)
+
+                # Load feature extractor directly from local file
+                from transformers import WhisperFeatureExtractor
+
+                whisper_config_path = os.path.join(local_path, "whisper_preprocessor_config.json")
+                with open(whisper_config_path, "r") as f:
+                    whisper_config = json.load(f)
+                whisper_constructor_params = {
+                    k: v for k, v in whisper_config.items() if k not in ["processor_class", "feature_extractor_type"]
+                }
+                feature_extractor = WhisperFeatureExtractor(**whisper_constructor_params)
+
+                self.processor = MiniCPMOProcessor(
+                    image_processor=image_processor, feature_extractor=feature_extractor, tokenizer=tokenizer
+                )
             processor = self.processor
 
         assert (
