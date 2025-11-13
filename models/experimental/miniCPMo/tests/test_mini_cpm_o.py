@@ -41,11 +41,9 @@ def test_mini_cpm_o():
     # Set model to eval mode
     model = model.eval()
 
-    # tokenizer = AutoTokenizer.from_pretrained("openbmb/MiniCPM-o-2_6", trust_remote_code=True)
-
-    # Load tokenizer from local reference folder
+    # Load tokenizer directly from local reference folder files
     tokenizer_path = "models/experimental/miniCPMo/reference"
-    tokenizer = MiniCPMOTokenizerFast.from_pretrained(tokenizer_path)
+    tokenizer = MiniCPMOTokenizerFast(tokenizer_file=f"{tokenizer_path}/tokenizer.json")
 
     # input Image and question
     image = Image.open("cat_img.jpg").convert("RGB")

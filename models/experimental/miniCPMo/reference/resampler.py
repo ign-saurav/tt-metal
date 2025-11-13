@@ -99,6 +99,7 @@ class Resampler(nn.Module):
         max_size=(70, 70),
     ):
         super().__init__()
+        print("Initializing Resampler...")
         self.num_queries = num_queries
         self.embed_dim = embed_dim
         self.num_heads = num_heads
