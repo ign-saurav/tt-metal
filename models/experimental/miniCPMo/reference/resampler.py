@@ -113,6 +113,7 @@ class Resampler(nn.Module):
         else:
             self.kv_proj = nn.Identity()
 
+        print("embed_dim, num_heads in Resampler", embed_dim, num_heads)
         self.attn = MultiheadAttention(embed_dim, num_heads)
         self.ln_q = norm_layer(embed_dim)
         self.ln_kv = norm_layer(embed_dim)
@@ -318,6 +319,7 @@ class MultiheadAttention(nn.MultiheadAttention):
                 merged_mask, mask_type = self.merge_masks(attn_mask, key_padding_mask, query)
 
                 if self.in_proj_bias is not None and self.in_proj_weight is not None:
+                    print("1")
                     return torch._native_multi_head_attention(
                         query,
                         key,
