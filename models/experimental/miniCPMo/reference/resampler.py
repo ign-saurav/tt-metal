@@ -524,7 +524,6 @@ class MultiheadAttention(nn.MultiheadAttention):
                 b_q, b_k, b_v = in_proj_bias.chunk(3)
             q, k, v = _in_projection(query, key, value, q_proj_weight, k_proj_weight, v_proj_weight, b_q, b_k, b_v)
 
-        return q, k, v
         # prep attention mask
 
         if attn_mask is not None:

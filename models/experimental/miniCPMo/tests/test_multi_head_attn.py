@@ -158,16 +158,13 @@ def test_self_attn(device, input_dtype, weight_dtype):
         out_proj_bias=parameters["out_proj_bias"],
         training=training,
         key_padding_mask=key_padding_mask,
-        need_weights=True,
+        need_weights=False,
         attn_mask=None,
         average_attn_weights=True,
         is_causal=False,
     )
 
-    tt_torch_output_q = tt2torch_tensor(tt_attn_output[0])
-    tt_torch_output_k = tt2torch_tensor(tt_attn_output[1])
-    tt_torch_output_v = tt2torch_tensor(tt_attn_output[2])
-    does_pass, pcc_message = check_with_pcc(mha_output[0], tt_torch_output_q, 0.99)
-    does_pass, pcc_message = check_with_pcc(mha_output[1], tt_torch_output_k, 0.99)
-    does_pass, pcc_message = check_with_pcc(mha_output[2], tt_torch_output_v, 0.99)
+    tt_torch_output = tt2torch_tensor(tt_attn_output[0])
+    tt_torch_output = tt_torch_output.reshape(mha_output[0].shape)
+    does_pass, pcc_message = check_with_pcc(mha_output[0], tt_torch_output, 0.99)
     assert does_pass, f"PCC check failed: {pcc_message}"
