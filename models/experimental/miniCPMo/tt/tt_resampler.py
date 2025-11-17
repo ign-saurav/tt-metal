@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import ttnn
+
 import warnings
 from functools import partial
 from typing import Optional
@@ -80,7 +82,7 @@ def get_1d_sincos_pos_embed_from_grid_new(embed_dim, pos):
     return emb
 
 
-class Resampler(nn.Module):
+class TTResampler(nn.Module):
     """
     A 2D perceiver-resampler network with one cross attention layers by
        given learnable queries and 2d sincos pos_emb
@@ -113,7 +115,7 @@ class Resampler(nn.Module):
         else:
             self.kv_proj = nn.Identity()
 
-        print("embed_dim, num_heads in Resampler", embed_dim, num_heads)
+        print(embed_dim, num_heads)
         self.attn = MultiheadAttention(embed_dim, num_heads)
         self.ln_q = norm_layer(embed_dim)
         self.ln_kv = norm_layer(embed_dim)
@@ -191,7 +193,7 @@ class Resampler(nn.Module):
         return query.unsqueeze(1).repeat(1, N, 1)
 
 
-class MultiheadAttention(nn.MultiheadAttention):
+class TTMultiheadAttention(nn.MultiheadAttention):
     def __init__(
         self,
         embed_dim,
@@ -380,8 +382,7 @@ class MultiheadAttention(nn.MultiheadAttention):
                 is_causal=is_causal,
             )
         else:
-            # attn_output, attn_output_weights = self.multi_head_attention_forward(
-            attn_output = self.multi_head_attention_forward(
+            attn_output, attn_output_weights = self.multi_head_attention_forward(
                 query,
                 key,
                 value,
@@ -403,13 +404,14 @@ class MultiheadAttention(nn.MultiheadAttention):
                 is_causal=is_causal,
             )
         if self.batch_first and is_batched:
-            # return attn_output.transpose(1, 0), attn_output_weights
-            return attn_output.transpose(1, 0)
+            return attn_output.transpose(1, 0), attn_output_weights
         else:
-            return attn_output
+            return attn_output, attn_output_weights
 
     def multi_head_attention_forward(
         self,
+        device,
+        input_dtype,
         query: Tensor,
         key: Tensor,
         value: Tensor,
@@ -445,11 +447,11 @@ class MultiheadAttention(nn.MultiheadAttention):
         # batch dimension so that the output doesn't carry this temporary batch dimension.
         if not is_batched:
             # unsqueeze if the input is unbatched
-            query = query.unsqueeze(1)
-            key = key.unsqueeze(1)
-            value = value.unsqueeze(1)
+            query = ttnn.unsqueeze(query, dim=1)
+            key = ttnn.unsqueeze(key, dim=1)
+            value = ttnn.unsqueeze(value, dim=1)
             if key_padding_mask is not None:
-                key_padding_mask = key_padding_mask.unsqueeze(0)
+                key_padding_mask = ttnn.unsqueeze(key_padding_mask, dim=0)
 
         # set up shape vars
         tgt_len, bsz, embed_dim = query.shape
@@ -460,7 +462,15 @@ class MultiheadAttention(nn.MultiheadAttention):
             mask_name="key_padding_mask",
             other_type=F._none_or_dtype(attn_mask),
             other_name="attn_mask",
-            target_type=query.dtype,
+            target_type=torch.bfloat16
+            # target_type=query.dtype
+        )
+        key_padding_mask = ttnn.from_torch(
+            key_padding_mask,
+            device=device,
+            layout=ttnn.TILE_LAYOUT,
+            dtype=input_dtype,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
         if is_causal and attn_mask is None:
@@ -687,50 +697,50 @@ def _mha_shape_check(
     # Raises an error if `query` is not 2-D (unbatched) or 3-D (batched) tensor.
 
     # Shape check.
-    if query.dim() == 3:
+    if len(query.shape) == 3:
         # Batched Inputs
         is_batched = True
-        assert key.dim() == 3 and value.dim() == 3, (
+        assert len(key.shape) == 3 and len(value.shape) == 3, (
             "For batched (3-D) `query`, expected `key` and `value` to be 3-D"
             f" but found {key.dim()}-D and {value.dim()}-D tensors respectively"
         )
         if key_padding_mask is not None:
-            assert key_padding_mask.dim() == 2, (
+            assert len(key_padding_mask.shape) == 2, (
                 "For batched (3-D) `query`, expected `key_padding_mask` to be `None` or 2-D"
-                f" but found {key_padding_mask.dim()}-D tensor instead"
+                f" but found {len(key_padding_mask.shape)}-D tensor instead"
             )
         if attn_mask is not None:
-            assert attn_mask.dim() in (2, 3), (
+            assert len(attn_mask.shape) in (2, 3), (
                 "For batched (3-D) `query`, expected `attn_mask` to be `None`, 2-D or 3-D"
-                f" but found {attn_mask.dim()}-D tensor instead"
+                f" but found {len(attn_mask.shape)}-D tensor instead"
             )
-    elif query.dim() == 2:
+    elif len(query.shape) == 2:
         # Unbatched Inputs
         is_batched = False
-        assert key.dim() == 2 and value.dim() == 2, (
+        assert len(key.shape) == 2 and len(value.shape) == 2, (
             "For unbatched (2-D) `query`, expected `key` and `value` to be 2-D"
-            f" but found {key.dim()}-D and {value.dim()}-D tensors respectively"
+            f" but found {len(key.shape)}-D and {len(value.shape)}-D tensors respectively"
         )
 
         if key_padding_mask is not None:
-            assert key_padding_mask.dim() == 1, (
+            assert len(key_padding_mask.shape) == 1, (
                 "For unbatched (2-D) `query`, expected `key_padding_mask` to be `None` or 1-D"
-                f" but found {key_padding_mask.dim()}-D tensor instead"
+                f" but found {len(key_padding_mask.shape)}-D tensor instead"
             )
 
         if attn_mask is not None:
-            assert attn_mask.dim() in (2, 3), (
+            assert len(attn_mask.shape) in (2, 3), (
                 "For unbatched (2-D) `query`, expected `attn_mask` to be `None`, 2-D or 3-D"
-                f" but found {attn_mask.dim()}-D tensor instead"
+                f" but found {len(attn_mask.shape)}-D tensor instead"
             )
-            if attn_mask.dim() == 3:
+            if len(attn_mask.shape) == 3:
                 expected_shape = (num_heads, query.shape[0], key.shape[0])
                 assert (
                     attn_mask.shape == expected_shape
-                ), f"Expected `attn_mask` shape to be {expected_shape} but got {attn_mask.shape}"
+                ), f"Expected `attn_mask` shape to be {expected_shape} but got {len(attn_mask.shape)}"
     else:
         raise AssertionError(
-            f"query should be unbatched 2D or batched 3D tensor but received {query.dim()}-D query tensor"
+            f"query should be unbatched 2D or batched 3D tensor but received {len(query.shape)}-D query tensor"
         )
 
     return is_batched
@@ -791,59 +801,88 @@ def _in_projection_packed(
         - in output list :math:`[q', k', v']`, each output tensor will have the
             same shape as the corresponding input tensor.
     """
-    E = q.size(-1)
-    print(q.shape)
-    print(E)
+    E = q.shape[-1]
     if k is v:
-        print("k: ", k.shape)
-        print("v: ", v.shape)
         if q is k:
-            print("q: ", q.shape)
             # self-attention
-            proj = linear(q, w, b)
-            print(proj.shape)
+            # proj = linear(q, w, b)
+            proj = ttnn.linear(
+                q,
+                w,
+                b,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                dtype=ttnn.bfloat16,
+                core_grid=ttnn.CoreGrid(y=q.shape[0], x=8),
+            )
             # reshape to 3, E and not E, 3 is deliberate for better memory coalescing and keeping same order as chunk()
             proj = proj.unflatten(-1, (3, E)).unsqueeze(0).transpose(0, -2).squeeze(-2).contiguous()
             return proj[0], proj[1], proj[2]
         else:
             # encoder-decoder attention
-            print("q not k: ")
-            print("q: ", q.shape)
-            print("k: ", k.shape)
-            print("v: ", v.shape)
             w_q, w_kv = w.split([E, E * 2])
             if b is None:
                 b_q = b_kv = None
             else:
                 b_q, b_kv = b.split([E, E * 2])
-            q_proj = linear(q, w_q, b_q)
-            print(q_proj.shape)
-            kv_proj = linear(k, w_kv, b_kv)
-            print(kv_proj.shape)
+            # q_proj = linear(q, w_q, b_q)
+            q_proj = ttnn.linear(
+                q,
+                w_q,
+                b_q,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                dtype=ttnn.bfloat16,
+                core_grid=ttnn.CoreGrid(y=q.shape[0], x=8),
+            )
+            # kv_proj = linear(k, w_kv, b_kv)
+            kv_proj = ttnn.linear(
+                k,
+                w_kv,
+                b_kv,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                dtype=ttnn.bfloat16,
+                core_grid=ttnn.CoreGrid(y=k.shape[0], x=8),
+            )
             # reshape to 2, E and not E, 2 is deliberate for better memory coalescing and keeping same order as chunk()
             kv_proj = kv_proj.unflatten(-1, (2, E)).unsqueeze(0).transpose(0, -2).squeeze(-2).contiguous()
             return (q_proj, kv_proj[0], kv_proj[1])
     else:
-        print("q not k not v: ")
-        print("q: ", q.shape)
-        print("k: ", k.shape)
-        print("v: ", v.shape)
-        w_q, w_k, w_v = w.chunk(3)
+        # w_q, w_k, w_v = w.chunk(3)
+        w_q, w_k, w_v = ttnn.chunk(w, 3, dim=1)
         if b is None:
             b_q = b_k = b_v = None
         else:
-            b_q, b_k, b_v = b.chunk(3)
-        print(b_q.shape)
-        print(b_k.shape)
-        print(b_v.shape)
-        print(w_q.shape)
-        print(w_k.shape)
-        print(w_v.shape)
-        print("seperate linear: ")
-        print(linear(q, w_q, b_q).shape)
-        print(linear(k, w_k, b_k).shape)
-        print(linear(v, w_v, b_v).shape)
-        return linear(q, w_q, b_q), linear(k, w_k, b_k), linear(v, w_v, b_v)
+            # b_q, b_k, b_v = b.chunk(3)
+            b_q, b_k, b_v = ttnn.chunk(b, 3, dim=1)
+
+        # q_proj, k_proj, v_proj = linear(q, w_q, b_q), linear(k, w_k, b_k), linear(v, w_v, b_v)
+
+        # q = ttnn.permute(q, (0, 2, 1))
+
+        q_proj = ttnn.linear(
+            q,
+            w_q,
+            bias=b_q,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            dtype=ttnn.bfloat16,
+            core_grid=ttnn.CoreGrid(y=q.shape[0], x=8),
+        )
+        k_proj = ttnn.linear(
+            k,
+            w_k,
+            bias=b_k,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            dtype=ttnn.bfloat16,
+            core_grid=ttnn.CoreGrid(y=k.shape[0], x=8),
+        )
+        v_proj = ttnn.linear(
+            v,
+            w_v,
+            bias=b_v,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            dtype=ttnn.bfloat16,
+            core_grid=ttnn.CoreGrid(y=v.shape[0], x=8),
+        )
+        return q_proj, k_proj, v_proj
 
 
 def _in_projection(
