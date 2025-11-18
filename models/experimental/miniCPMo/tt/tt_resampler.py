@@ -20,6 +20,10 @@ from functools import partial
 from typing import Optional
 from typing import Tuple, List
 
+from models.common.utility_functions import (
+    tt2torch_tensor,
+)
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -97,6 +101,7 @@ class TTResampler(nn.Module):
         num_heads,
         parameters,
         device,
+        input_dtype,
         kv_dim=None,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
         adaptive=False,
@@ -118,7 +123,9 @@ class TTResampler(nn.Module):
             self.kv_proj = nn.Identity()
 
         print(embed_dim, num_heads)
-        self.attn = TTMultiheadAttention(embed_dim, num_heads)
+        self.attn = TTMultiheadAttention(
+            embed_dim, num_heads, self.parameters["attn"], input_dtype=input_dtype, tt_device=device
+        )
         self.ln_q = norm_layer(embed_dim)
         self.ln_kv = norm_layer(embed_dim)
 
@@ -198,8 +205,9 @@ class TTResampler(nn.Module):
             bias=self.parameters["ln_q"]["bias"],
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
-        return q
 
+        x = tt2torch_tensor(x)
+        q = tt2torch_tensor(q)
         out = self.attn(
             self._repeat(q, bs),  # Q * B * D
             x + pos_embed,  # L * B * D +  L * B * D
@@ -207,7 +215,9 @@ class TTResampler(nn.Module):
             key_padding_mask=key_padding_mask,
         )[0]
         #  out: Q * B * D
-        x = out.permute(1, 0, 2)  # B * Q * D
+        x = ttnn.permute(out, (1, 0, 2))  # B * Q * D
+
+        return x
 
         x = self.ln_post(x)
         x = x @ self.proj
@@ -216,12 +226,23 @@ class TTResampler(nn.Module):
     def _repeat(self, query, N: int):
         return query.unsqueeze(1).repeat(1, N, 1)
 
+    # def _tt_repeat(self, query, N: int):
+    #     # query shape: (Q, D)
+    #     # Add dimension at position 1: (Q, 1, D)
+    #     query_unsqueezed = ttnn.unsqueeze(query, dim=1)
+
+    #     # Repeat N times along dimension 1: (Q, N, D)
+    #     query_repeated = ttnn.repeat(query_unsqueezed, ttnn.Shape([1, N, 1]))
+
+    #     return query_repeated
+
 
 class TTMultiheadAttention(nn.MultiheadAttention):
     def __init__(
         self,
         embed_dim,
         num_heads,
+        parameters,
         dropout=0.0,
         bias=True,
         add_bias_kv=False,
@@ -230,14 +251,19 @@ class TTMultiheadAttention(nn.MultiheadAttention):
         vdim=None,
         batch_first=False,
         device=None,
+        tt_device=None,
         dtype=None,
+        input_dtype=None,
     ):
         super().__init__(
             embed_dim, num_heads, dropout, bias, add_bias_kv, add_zero_attn, kdim, vdim, batch_first, device, dtype
         )
+        self.tt_device = tt_device
+        self.input_dtype = input_dtype
 
         # rewrite out_proj layer，with nn.Linear
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=bias, device=device, dtype=dtype)
+        self.parameters = parameters
 
     def forward(
         self,
@@ -406,31 +432,54 @@ class TTMultiheadAttention(nn.MultiheadAttention):
                 is_causal=is_causal,
             )
         else:
-            attn_output, attn_output_weights = self.multi_head_attention_forward(
+            tt_query = ttnn.from_torch(
                 query,
+                device=self.tt_device,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=self.input_dtype,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
+            tt_key = ttnn.from_torch(
                 key,
+                device=self.tt_device,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=self.input_dtype,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
+            tt_value = ttnn.from_torch(
                 value,
+                device=self.tt_device,
+                layout=ttnn.TILE_LAYOUT,
+                dtype=self.input_dtype,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
+            attn_output = self.multi_head_attention_forward(
+                self.tt_device,
+                self.input_dtype,
+                tt_query,
+                tt_key,
+                tt_value,
                 self.embed_dim,
                 self.num_heads,
-                self.in_proj_weight,
-                self.in_proj_bias,
-                self.bias_k,
-                self.bias_v,
+                self.parameters["in_proj_weight"],
+                self.parameters["in_proj_bias"],
+                self.parameters["bias_k"],
+                self.parameters["bias_v"],
                 self.add_zero_attn,
                 self.dropout,
-                self.out_proj.weight,
-                self.out_proj.bias,
+                self.parameters["out_proj_weight"],
+                self.parameters["out_proj_bias"],
                 training=self.training,
                 key_padding_mask=key_padding_mask,
-                need_weights=need_weights,
+                need_weights=False,
                 attn_mask=attn_mask,
                 average_attn_weights=average_attn_weights,
                 is_causal=is_causal,
             )
         if self.batch_first and is_batched:
-            return attn_output.transpose(1, 0), attn_output_weights
+            return attn_output.transpose(1, 0)
         else:
-            return attn_output, attn_output_weights
+            return attn_output
 
     def multi_head_attention_forward(
         self,

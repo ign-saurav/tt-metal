@@ -120,7 +120,13 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
         device=device,
     )
     tt_model = TTResampler(
-        num_queries=64, embed_dim=3584, num_heads=28, kv_dim=1152, parameters=parameters, device=device
+        num_queries=64,
+        embed_dim=3584,
+        num_heads=28,
+        kv_dim=1152,
+        parameters=parameters,
+        device=device,
+        input_dtype=input_dtype,
     )
     tt_vision_embedding = ttnn.from_torch(
         vision_embedding,
@@ -132,9 +138,7 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
     tt_resampler_out = tt_model(tt_vision_embedding, tgt_sizes)
 
     tt_torch_output = tt2torch_tensor(tt_resampler_out)
-    import pdb
 
-    pdb.set_trace()
     tt_torch_output = tt_torch_output.reshape(resampler_out.shape)
     does_pass, pcc_message = check_with_pcc(resampler_out, tt_torch_output, 0.99)
     logger.info(f"PCC: {pcc_message}")

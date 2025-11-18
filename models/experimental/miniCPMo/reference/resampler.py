@@ -173,8 +173,8 @@ class Resampler(nn.Module):
         x = self.ln_kv(x).permute(1, 0, 2)  # L * B * D
 
         q = self.ln_q(self.query)  # Q * D
-        return q
 
+        # import pdb; pdb.set_trace()
         out = self.attn(
             self._repeat(q, bs),  # Q * B * D
             x + pos_embed,  # L * B * D +  L * B * D
@@ -183,6 +183,8 @@ class Resampler(nn.Module):
         )[0]
         #  out: Q * B * D
         x = out.permute(1, 0, 2)  # B * Q * D
+
+        return x
 
         x = self.ln_post(x)
         x = x @ self.proj
