@@ -37,12 +37,15 @@ def create_resampler_preprocessor(device, weight_dtype=ttnn.bfloat16):
             and hasattr(torch_model, "query")
             and hasattr(torch_model, "ln_kv")
             and hasattr(torch_model, "ln_post")
+            and hasattr(torch_model, "proj")
         ):
             parameters["kv_proj"] = {}
             parameters["ln_q"] = {}
             parameters["ln_kv"] = {}
             parameters["ln_post"] = {}
-            # parameters["query"] =
+            parameters["proj"] = ttnn.from_torch(
+                torch_model.proj, dtype=weight_dtype, device=device, layout=ttnn.TILE_LAYOUT
+            )
             parameters["query"] = ttnn.from_torch(
                 torch_model.query, dtype=weight_dtype, device=device, layout=ttnn.TILE_LAYOUT
             )

@@ -113,7 +113,6 @@ class Resampler(nn.Module):
         else:
             self.kv_proj = nn.Identity()
 
-        print("embed_dim, num_heads in Resampler", embed_dim, num_heads)
         self.attn = MultiheadAttention(embed_dim, num_heads)
         self.ln_q = norm_layer(embed_dim)
         self.ln_kv = norm_layer(embed_dim)
@@ -183,8 +182,6 @@ class Resampler(nn.Module):
         )[0]
         #  out: Q * B * D
         x = out.permute(1, 0, 2)  # B * Q * D
-
-        return x
 
         x = self.ln_post(x)
         x = x @ self.proj

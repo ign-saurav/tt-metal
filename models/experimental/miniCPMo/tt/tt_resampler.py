@@ -217,10 +217,13 @@ class TTResampler(nn.Module):
         #  out: Q * B * D
         x = ttnn.permute(out, (1, 0, 2))  # B * Q * D
 
-        return x
-
-        x = self.ln_post(x)
-        x = x @ self.proj
+        x = ttnn.layer_norm(
+            x,
+            weight=self.parameters["ln_post"]["weight"],
+            bias=self.parameters["ln_post"]["bias"],
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        x = ttnn.matmul(x, self.parameters["proj"], memory_config=ttnn.DRAM_MEMORY_CONFIG)
         return x
 
     def _repeat(self, query, N: int):
