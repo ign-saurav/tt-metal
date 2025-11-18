@@ -170,10 +170,10 @@ class Resampler(nn.Module):
         )  # BLD => L * B * D
 
         x = self.kv_proj(x)  # B * L * D
-        return x
         x = self.ln_kv(x).permute(1, 0, 2)  # L * B * D
 
         q = self.ln_q(self.query)  # Q * D
+        return q
 
         out = self.attn(
             self._repeat(q, bs),  # Q * B * D

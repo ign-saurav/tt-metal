@@ -96,6 +96,7 @@ class TTResampler(nn.Module):
         embed_dim,
         num_heads,
         parameters,
+        device,
         kv_dim=None,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
         adaptive=False,
@@ -110,8 +111,6 @@ class TTResampler(nn.Module):
         self.max_size = max_size
         self.kv_dim = kv_dim
         self.parameters = parameters
-
-        self.query = nn.Parameter(torch.zeros(self.num_queries, embed_dim))
 
         if kv_dim is not None and kv_dim != embed_dim:
             self.kv_proj = nn.Linear(kv_dim, embed_dim, bias=False)
@@ -174,10 +173,8 @@ class TTResampler(nn.Module):
             1, 0, 2
         )  # BLD => L * B * D
 
-        # import pdb; pdb.set_trace()
         # x = self.kv_proj(x)  # B * L * D
         if self.kv_dim is not None and self.kv_dim != self.embed_dim:
-            # x = nn.Linear(self.kv_dim, self.embed_dim, bias=False)
             x = ttnn.linear(
                 x,
                 self.parameters["kv_proj"]["weight"],
@@ -188,10 +185,20 @@ class TTResampler(nn.Module):
         else:
             x = ttnn.identity(x, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-        return x
-        x = self.ln_kv(x).permute(1, 0, 2)  # L * B * D
-
-        q = self.ln_q(self.query)  # Q * D
+        x = ttnn.layer_norm(
+            x,
+            weight=self.parameters["ln_kv"]["weight"],
+            bias=self.parameters["ln_kv"]["bias"],
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        x = ttnn.permute(x, (1, 0, 2))  # L * B * D
+        q = ttnn.layer_norm(
+            self.parameters["query"],
+            weight=self.parameters["ln_q"]["weight"],
+            bias=self.parameters["ln_q"]["bias"],
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        return q
 
         out = self.attn(
             self._repeat(q, bs),  # Q * B * D

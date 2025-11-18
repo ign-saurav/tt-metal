@@ -16,7 +16,7 @@ from models.experimental.miniCPMo.reference.tokenization_minicpmo_fast import Mi
 
 from models.experimental.miniCPMo.tt.tt_resampler import TTResampler
 
-from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_bias, preprocess_linear_weight
+from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_weight
 from models.experimental.miniCPMo.tests.test_multi_head_attn import create_self_attn_preprocessor
 
 
@@ -34,6 +34,7 @@ def create_resampler_preprocessor(device, weight_dtype=ttnn.bfloat16):
         if (
             hasattr(torch_model, "kv_proj")
             and hasattr(torch_model, "ln_q")
+            and hasattr(torch_model, "query")
             and hasattr(torch_model, "ln_kv")
             and hasattr(torch_model, "ln_post")
         ):
@@ -41,17 +42,28 @@ def create_resampler_preprocessor(device, weight_dtype=ttnn.bfloat16):
             parameters["ln_q"] = {}
             parameters["ln_kv"] = {}
             parameters["ln_post"] = {}
-
+            # parameters["query"] =
+            parameters["query"] = ttnn.from_torch(
+                torch_model.query, dtype=weight_dtype, device=device, layout=ttnn.TILE_LAYOUT
+            )
+            # Linear projection for kv_proj
             parameters["kv_proj"]["weight"] = preprocess_linear_weight(torch_model.kv_proj.weight, dtype=weight_dtype)
 
-            parameters["ln_q"]["weight"] = preprocess_linear_weight(torch_model.ln_q.weight, dtype=weight_dtype)
-            parameters["ln_q"]["bias"] = preprocess_linear_bias(torch_model.ln_q.bias, dtype=weight_dtype)
-
-            parameters["ln_kv"]["weight"] = preprocess_linear_weight(torch_model.ln_kv.weight, dtype=weight_dtype)
-            parameters["ln_kv"]["bias"] = preprocess_linear_bias(torch_model.ln_kv.bias, dtype=weight_dtype)
-
-            parameters["ln_post"]["weight"] = preprocess_linear_weight(torch_model.ln_post.weight, dtype=weight_dtype)
-            parameters["ln_post"]["bias"] = preprocess_linear_bias(torch_model.ln_post.bias, dtype=weight_dtype)
+            # Layer norm parameters - use ttnn.from_torch directly
+            for ln_name in ["ln_q", "ln_kv", "ln_post"]:
+                ln_module = getattr(torch_model, ln_name)
+                parameters[ln_name]["weight"] = ttnn.from_torch(
+                    ln_module.weight.reshape(1, -1),  # Reshape to (1, D)
+                    dtype=weight_dtype,
+                    device=device,
+                    layout=ttnn.TILE_LAYOUT,
+                )
+                parameters[ln_name]["bias"] = ttnn.from_torch(
+                    ln_module.bias.reshape(1, -1),  # Reshape to (1, D)
+                    dtype=weight_dtype,
+                    device=device,
+                    layout=ttnn.TILE_LAYOUT,
+                )
 
         return parameters
 
@@ -107,7 +119,9 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
         custom_preprocessor=create_resampler_preprocessor(device, weight_dtype),
         device=device,
     )
-    tt_model = TTResampler(num_queries=64, embed_dim=3584, num_heads=28, kv_dim=1152, parameters=parameters)
+    tt_model = TTResampler(
+        num_queries=64, embed_dim=3584, num_heads=28, kv_dim=1152, parameters=parameters, device=device
+    )
     tt_vision_embedding = ttnn.from_torch(
         vision_embedding,
         device=device,
@@ -118,6 +132,9 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
     tt_resampler_out = tt_model(tt_vision_embedding, tgt_sizes)
 
     tt_torch_output = tt2torch_tensor(tt_resampler_out)
+    import pdb
+
+    pdb.set_trace()
     tt_torch_output = tt_torch_output.reshape(resampler_out.shape)
     does_pass, pcc_message = check_with_pcc(resampler_out, tt_torch_output, 0.99)
     logger.info(f"PCC: {pcc_message}")
