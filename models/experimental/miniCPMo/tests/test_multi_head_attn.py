@@ -1,8 +1,11 @@
-# import ttnn
+import ttnn
 import json
 import warnings
 import torch
 import pytest
+
+
+from loguru import logger
 
 # Suppress accelerate warnings about unused weights
 warnings.filterwarnings("ignore", message="Some weights of the model checkpoint", category=UserWarning)
@@ -13,9 +16,6 @@ from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from models.experimental.miniCPMo.reference.tokenization_minicpmo_fast import MiniCPMOTokenizerFast
 from models.experimental.miniCPMo.tt.tt_resampler import TTMultiheadAttention
 
-# from transformers import AutoTokenizer
-
-import ttnn
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_bias, preprocess_linear_weight
 
 from models.experimental.miniCPMo.tt.tt_resampler import TTMultiheadAttention
@@ -167,4 +167,5 @@ def test_self_attn(device, input_dtype, weight_dtype):
     tt_torch_output = tt2torch_tensor(tt_attn_output[0])
     tt_torch_output = tt_torch_output.reshape(mha_output[0].shape)
     does_pass, pcc_message = check_with_pcc(mha_output[0], tt_torch_output, 0.99)
-    assert does_pass, f"PCC check failed: {pcc_message}"
+    logger.info(f"PCC: {pcc_message}")
+    assert does_pass, f"PCC check failed"

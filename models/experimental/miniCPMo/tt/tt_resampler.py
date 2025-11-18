@@ -95,6 +95,7 @@ class TTResampler(nn.Module):
         num_queries,
         embed_dim,
         num_heads,
+        parameters,
         kv_dim=None,
         norm_layer=partial(nn.LayerNorm, eps=1e-6),
         adaptive=False,
@@ -107,6 +108,8 @@ class TTResampler(nn.Module):
         self.num_heads = num_heads
         self.adaptive = adaptive
         self.max_size = max_size
+        self.kv_dim = kv_dim
+        self.parameters = parameters
 
         self.query = nn.Parameter(torch.zeros(self.num_queries, embed_dim))
 
@@ -116,7 +119,7 @@ class TTResampler(nn.Module):
             self.kv_proj = nn.Identity()
 
         print(embed_dim, num_heads)
-        self.attn = MultiheadAttention(embed_dim, num_heads)
+        self.attn = TTMultiheadAttention(embed_dim, num_heads)
         self.ln_q = norm_layer(embed_dim)
         self.ln_kv = norm_layer(embed_dim)
 
@@ -151,8 +154,8 @@ class TTResampler(nn.Module):
         assert x.shape[0] == tgt_sizes.shape[0]
         bs = x.shape[0]
 
-        device = x.device
-        dtype = x.dtype
+        device = torch.device("cpu")
+        dtype = torch.bfloat16
 
         patch_len = tgt_sizes[:, 0] * tgt_sizes[:, 1]
 
@@ -171,7 +174,21 @@ class TTResampler(nn.Module):
             1, 0, 2
         )  # BLD => L * B * D
 
-        x = self.kv_proj(x)  # B * L * D
+        # import pdb; pdb.set_trace()
+        # x = self.kv_proj(x)  # B * L * D
+        if self.kv_dim is not None and self.kv_dim != self.embed_dim:
+            # x = nn.Linear(self.kv_dim, self.embed_dim, bias=False)
+            x = ttnn.linear(
+                x,
+                self.parameters["kv_proj"]["weight"],
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                dtype=ttnn.bfloat16,
+                core_grid=ttnn.CoreGrid(y=8, x=8),
+            )
+        else:
+            x = ttnn.identity(x, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+        return x
         x = self.ln_kv(x).permute(1, 0, 2)  # L * B * D
 
         q = self.ln_q(self.query)  # Q * D
@@ -524,46 +541,46 @@ class TTMultiheadAttention(nn.MultiheadAttention):
         if not use_separate_proj_weight:
             assert in_proj_weight is not None, "use_separate_proj_weight is False but in_proj_weight is None"
             q, k, v = _in_projection_packed(query, key, value, in_proj_weight, in_proj_bias)
-        else:
-            assert q_proj_weight is not None, "use_separate_proj_weight is True but q_proj_weight is None"
-            assert k_proj_weight is not None, "use_separate_proj_weight is True but k_proj_weight is None"
-            assert v_proj_weight is not None, "use_separate_proj_weight is True but v_proj_weight is None"
-            if in_proj_bias is None:
-                b_q = b_k = b_v = None
-            else:
-                b_q, b_k, b_v = in_proj_bias.chunk(3)
-            q, k, v = _in_projection(query, key, value, q_proj_weight, k_proj_weight, v_proj_weight, b_q, b_k, b_v)
+        # else:
+        #     assert q_proj_weight is not None, "use_separate_proj_weight is True but q_proj_weight is None"
+        #     assert k_proj_weight is not None, "use_separate_proj_weight is True but k_proj_weight is None"
+        #     assert v_proj_weight is not None, "use_separate_proj_weight is True but v_proj_weight is None"
+        #     if in_proj_bias is None:
+        #         b_q = b_k = b_v = None
+        #     else:
+        #         b_q, b_k, b_v = ttnn.chunk(in_proj_bias, 3, dim=1)
+        #     q, k, v = _in_projection(query, key, value, q_proj_weight, k_proj_weight, v_proj_weight, b_q, b_k, b_v)
 
         # prep attention mask
 
         if attn_mask is not None:
             # ensure attn_mask's dim is 3
-            if attn_mask.dim() == 2:
+            if len(attn_mask.shape) == 2:
                 correct_2d_size = (tgt_len, src_len)
                 if attn_mask.shape != correct_2d_size:
                     raise RuntimeError(
                         f"The shape of the 2D attn_mask is {attn_mask.shape}, but should be {correct_2d_size}."
                     )
-                attn_mask = attn_mask.unsqueeze(0)
-            elif attn_mask.dim() == 3:
+                attn_mask = ttnn.unsqueeze(attn_mask, 0)
+            elif len(attn_mask.shape) == 3:
                 correct_3d_size = (bsz * num_heads, tgt_len, src_len)
                 if attn_mask.shape != correct_3d_size:
                     raise RuntimeError(
                         f"The shape of the 3D attn_mask is {attn_mask.shape}, but should be {correct_3d_size}."
                     )
             else:
-                raise RuntimeError(f"attn_mask's dimension {attn_mask.dim()} is not supported")
+                raise RuntimeError(f"attn_mask's dimension {len(attn_mask.shape)} is not supported")
 
         # add bias along batch dimension (currently second)
         if bias_k is not None and bias_v is not None:
             assert static_k is None, "bias cannot be added to static key."
             assert static_v is None, "bias cannot be added to static value."
-            k = torch.cat([k, bias_k.repeat(1, bsz, 1)])
-            v = torch.cat([v, bias_v.repeat(1, bsz, 1)])
+            k = ttnn.cat([k, ttnn.repeat(bias_k, (1, bsz, 1))], dim=0, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            v = ttnn.cat([v, ttnn.repeat(bias_v, (1, bsz, 1))], dim=0, memory_config=ttnn.DRAM_MEMORY_CONFIG)
             if attn_mask is not None:
-                attn_mask = pad(attn_mask, (0, 1))
+                attn_mask = ttnn.pad(attn_mask, (0, 1), mode="constant", value=0)
             if key_padding_mask is not None:
-                key_padding_mask = pad(key_padding_mask, (0, 1))
+                key_padding_mask = ttnn.pad(key_padding_mask, (0, 1), mode="constant", value=0)
         else:
             assert bias_k is None
             assert bias_v is None
@@ -579,9 +596,11 @@ class TTMultiheadAttention(nn.MultiheadAttention):
         else:
             # TODO finish disentangling control flow so we don't do in-projections when statics are passed
             assert (
-                static_k.size(0) == bsz * num_heads
-            ), f"expecting static_k.size(0) of {bsz * num_heads}, but got {static_k.size(0)}"
-            assert static_k.size(2) == head_dim, f"expecting static_k.size(2) of {head_dim}, but got {static_k.size(2)}"
+                static_k.shape[0] == bsz * num_heads
+            ), f"expecting static_k.shape[0] of {bsz * num_heads}, but got {static_k.shape[0]}"
+            assert (
+                static_k.shape[2] == head_dim
+            ), f"expecting static_k.shape[2] of {head_dim}, but got {static_k.shape[2]}"
             k = static_k
         if static_v is None:
             v = ttnn.reshape(v, (v.shape[0], bsz * num_heads, head_dim))
@@ -589,9 +608,11 @@ class TTMultiheadAttention(nn.MultiheadAttention):
         else:
             # TODO finish disentangling control flow so we don't do in-projections when statics are passed
             assert (
-                static_v.size(0) == bsz * num_heads
-            ), f"expecting static_v.size(0) of {bsz * num_heads}, but got {static_v.size(0)}"
-            assert static_v.size(2) == head_dim, f"expecting static_v.size(2) of {head_dim}, but got {static_v.size(2)}"
+                static_v.shape[0] == bsz * num_heads
+            ), f"expecting static_v.shape[0] of {bsz * num_heads}, but got {static_v.shape[0]}"
+            assert (
+                static_v.shape[2] == head_dim
+            ), f"expecting static_v.shape[2] of {head_dim}, but got {static_v.shape[2]}"
             v = static_v
 
         # add zero attention along batch dimension (now first)
@@ -613,18 +634,11 @@ class TTMultiheadAttention(nn.MultiheadAttention):
                 bsz,
                 src_len,
             ), f"expecting key_padding_mask shape of {(bsz, src_len)}, but got {key_padding_mask.shape}"
-            # key_padding_mask = (
-            #     key_padding_mask.view(bsz, 1, 1, src_len)
-            #     .expand(-1, num_heads, -1, -1)
-            #     .reshape(bsz * num_heads, 1, src_len)
-            # )
-            # Step 1: Reshape to [bsz, 1, 1, src_len]
+
             key_padding_mask = ttnn.reshape(key_padding_mask, (bsz, 1, 1, src_len))
 
-            # Step 2: Expand to [bsz, num_heads, 1, src_len]
             key_padding_mask = ttnn.expand(key_padding_mask, [-1, num_heads, -1, -1])
 
-            # Step 3: Reshape to [bsz * num_heads, 1, src_len]
             key_padding_mask = ttnn.reshape(key_padding_mask, (bsz * num_heads, 1, src_len))
             if attn_mask is None:
                 attn_mask = key_padding_mask
@@ -635,83 +649,39 @@ class TTMultiheadAttention(nn.MultiheadAttention):
         if not training:
             dropout_p = 0.0
 
-        #
-        # (deep breath) calculate attention and out projection
-        #
-
-        if need_weights:
-            B, Nt, E = q.shape
-            q_scaled = q / math.sqrt(E)
-
-            assert not (is_causal and attn_mask is None), "FIXME: is_causal not implemented for need_weights"
-
-            if attn_mask is not None:
-                attn_output_weights = torch.baddbmm(attn_mask, q_scaled, k.transpose(-2, -1))
+        # attn_mask can be either (L,S) or (N*num_heads, L, S)
+        # if attn_mask's shape is (1, L, S) we need to unsqueeze to (1, 1, L, S)
+        # in order to match the input for SDPA of (N, num_heads, L, S)
+        if attn_mask is not None:
+            if attn_mask.shape[0] == 1 and len(attn_mask.shape) == 3:
+                attn_mask = ttnn.unsqueeze(attn_mask, 0)
             else:
-                attn_output_weights = torch.bmm(q_scaled, k.transpose(-2, -1))
-            attn_output_weights = softmax(attn_output_weights, dim=-1)
-            if dropout_p > 0.0:
-                attn_output_weights = dropout(attn_output_weights, p=dropout_p)
+                attn_mask = ttnn.reshape(attn_mask, (bsz, num_heads, -1, src_len))
 
-            attn_output = torch.bmm(attn_output_weights, v)
+        # Scaled dot product attention - single fused operation
+        q = ttnn.unsqueeze(q, 0)
+        k = ttnn.unsqueeze(k, 0)
+        v = ttnn.unsqueeze(v, 0)
+        attn_output = ttnn.transformer.scaled_dot_product_attention(
+            q,
+            k,
+            v,
+            is_causal=is_causal,
+            scale=None,
+            program_config=None,
+            compute_kernel_config=None,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        attn_output = ttnn.permute(attn_output, (2, 0, 1, 3))
+        attn_output = ttnn.reshape(attn_output, (bsz * tgt_len, embed_dim))
 
-            attn_output = attn_output.transpose(0, 1).contiguous().view(tgt_len * bsz, embed_dim)
-            attn_output = self.out_proj(attn_output)
-            attn_output = attn_output.view(tgt_len, bsz, attn_output.size(1))
+        attn_output = ttnn.linear(attn_output, out_proj_weight, bias=out_proj_bias)
 
-            # optionally average attention weights over heads
-            attn_output_weights = attn_output_weights.view(bsz, num_heads, tgt_len, src_len)
-            if average_attn_weights:
-                attn_output_weights = attn_output_weights.mean(dim=1)
+        attn_output = ttnn.reshape(attn_output, (tgt_len, bsz, -1))
 
-            if not is_batched:
-                # squeeze the output if input was unbatched
-                attn_output = attn_output.squeeze(1)
-                attn_output_weights = attn_output_weights.squeeze(0)
-            return attn_output, attn_output_weights
-        else:
-            # attn_mask can be either (L,S) or (N*num_heads, L, S)
-            # if attn_mask's shape is (1, L, S) we need to unsqueeze to (1, 1, L, S)
-            # in order to match the input for SDPA of (N, num_heads, L, S)
-            if attn_mask is not None:
-                if attn_mask.shape[0] == 1 and len(attn_mask.shape) == 3:
-                    attn_mask = ttnn.unsqueeze(attn_mask, 0)
-                else:
-                    attn_mask = ttnn.reshape(attn_mask, (bsz, num_heads, -1, src_len))
-
-            # q = ttnn.reshape(q, (bsz, num_heads, tgt_len, head_dim))
-            # k = ttnn.reshape(k, (bsz, num_heads, src_len, head_dim))
-            # v = ttnn.reshape(v, (bsz, num_heads, src_len, head_dim))
-
-            # attn_output = F.scaled_dot_product_attention(q, k, v, attn_mask, dropout_p, is_causal)
-            # Scaled dot product attention - single fused operation
-            q = ttnn.unsqueeze(q, 0)
-            k = ttnn.unsqueeze(k, 0)
-            v = ttnn.unsqueeze(v, 0)
-            attn_output = ttnn.transformer.scaled_dot_product_attention(
-                q,
-                k,
-                v,
-                is_causal=is_causal,
-                scale=None,
-                program_config=None,
-                compute_kernel_config=None,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            )
-            # Step 1: Merge heads - permute then reshape
-            attn_output = ttnn.permute(attn_output, (2, 0, 1, 3))  # [tgt_len, bsz, num_heads, head_dim]
-            attn_output = ttnn.reshape(attn_output, (bsz * tgt_len, embed_dim))
-
-            # Step 2: Output projection
-            attn_output = ttnn.linear(attn_output, out_proj_weight, bias=out_proj_bias)
-
-            # Step 3: Reshape back to sequence format
-            attn_output = ttnn.reshape(attn_output, (tgt_len, bsz, -1))
-
-            # Step 4: Handle unbatched case
-            if not is_batched:
-                attn_output = ttnn.squeeze(attn_output, 1)
-            return attn_output, None
+        if not is_batched:
+            attn_output = ttnn.squeeze(attn_output, 1)
+        return attn_output, None
 
 
 def _mha_shape_check(
