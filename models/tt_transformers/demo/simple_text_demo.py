@@ -18,6 +18,7 @@ from loguru import logger
 import ttnn
 from models.common.utility_functions import is_wormhole_b0
 from models.demos.utils.llm_demo_utils import create_benchmark_data, verify_perf
+from models.experimental.minicpm_o_2_6.tt.minicpm_weight_bridge import MiniCPMWeightBridge
 from models.perf.benchmarking_utils import BenchmarkProfiler
 from models.tt_transformers.tt.common import (
     PagedAttentionConfig,
@@ -26,7 +27,12 @@ from models.tt_transformers.tt.common import (
     sample_host,
 )
 from models.tt_transformers.tt.generator import Generator, SamplingParams, create_submeshes
-from models.tt_transformers.tt.model_config import DecodersPrecision, determine_device_name, parse_decoder_json
+from models.tt_transformers.tt.model_config import (
+    DecodersPrecision,
+    ModelArgs,
+    determine_device_name,
+    parse_decoder_json,
+)
 
 
 class TokenAccuracy:
@@ -208,7 +214,6 @@ def prepare_generator_args(
     num_layers,
 ):
     submesh_devices = create_submeshes(mesh_device, data_parallel)
-    state_dict = None
 
     # Hybrid requires a model per submesh
     model_args = []
@@ -225,6 +230,20 @@ def prepare_generator_args(
     )
 
     for submesh in submesh_devices:
+        # If a custom state_dict was provided without the ModelArgs prefix, add it
+        state_dict_to_use = state_dict
+        if state_dict is not None:
+            temp_args = ModelArgs(
+                submesh,
+                instruct=instruct,
+                max_batch_size=global_batch_size // data_parallel,
+                optimizations=optimizations,
+                max_seq_len=max_seq_len,
+            )
+            prefix = temp_args.get_state_dict_prefix("", None)
+            if not any(k.startswith(prefix) for k in state_dict.keys()):
+                state_dict_to_use = {f"{prefix}{k}": v for k, v in state_dict.items()}
+
         model_args_i, model_i, tt_kv_cache_i, state_dict = create_tt_model(
             submesh,
             instruct=instruct,
@@ -862,6 +881,13 @@ def test_demo_text(
     # To simulate a deployment environment, the demo supports repeating batched prompts.
     # This loop will rotate the prompts between the users for each batch, to simulate users sending different requests
     # If batch_size=1, the same prompt is repeated for each batch
+
+    # Force-init models from converted MiniCPM->Qwen weights to ensure embedding keys present
+    try:
+        weight_bridge = MiniCPMWeightBridge()
+        converted_state_dict = weight_bridge.get_qwen_weights()
+    except Exception:
+        converted_state_dict = None
 
     model_args, model, page_table, tt_kv_cache, tokenizer, processor = prepare_generator_args(
         num_devices=num_devices,
