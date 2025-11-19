@@ -440,6 +440,8 @@ class ModelArgs:
         "Qwen2.5-VL-3B-Instruct": "models/tt_transformers/model_params/Qwen2.5-VL-3B-Instruct",
         "Qwen2.5-VL-32B-Instruct": "models/tt_transformers/model_params/Qwen2.5-VL-32B-Instruct",
         "Qwen2.5-VL-72B-Instruct": "models/tt_transformers/model_params/Qwen2.5-VL-72B-Instruct",
+        "minicpm-o-2-6-ttnn": "/home/ttuser/ssinghal/PR-fix/speecht5_tts/tt-metal/models/tt_transformers/model_params/MiniCPM-o-2_6",
+        "MiniCPM-o-2_6": "/home/ttuser/ssinghal/PR-fix/speecht5_tts/tt-metal/models/tt_transformers/model_params/MiniCPM-o-2_6",
     }
 
     MAX_QKV_MM_SEQ_LEN = 2048
@@ -528,10 +530,22 @@ class ModelArgs:
             raise ValueError(f"Batch size {self.max_batch_size} not supported")
 
         # Load model params
-        if self.base_model_name in ["Phi-3-mini-128k-instruct"]:
-            self.trust_remote_code_hf = True
-        self._set_hf_params(self.CKPT_DIR)
-
+        if HF_MODEL:
+            self.checkpoint_type = CheckpointType.HuggingFace
+            if self.base_model_name in ["Phi-3-mini-128k-instruct", "MiniCPM-o-2_6"]:
+                self.trust_remote_code_hf = True
+            self._set_hf_params(self.CKPT_DIR)
+        elif not dummy_weights:
+            self.checkpoint_type = self.detect_checkpoint_type()
+            self._set_model_params(self.CKPT_DIR)
+        else:  # With Dummy weights, set the params from the local copy inside the model folder. This is required for CI pipeline that doesn't mount the external folders.
+            self.checkpoint_type = CheckpointType.Meta
+            local_params = self.__get_llama_local_params_name(self.CKPT_DIR)
+            if local_params is None:
+                raise ValueError(
+                    f"No local params found for {self.CKPT_DIR}, dummy weights are not supported for this model"
+                )
+            self._set_model_params(self.LOCAL_LLAMA_PARAMS[local_params])
         # Set the max number of tokens for each prefill chunk based on the model and device
         max_prefill_chunk_size_div1024 = os.getenv("MAX_PREFILL_CHUNK_SIZE")
         if max_prefill_chunk_size_div1024 is None:
@@ -1787,7 +1801,16 @@ class ModelArgs:
         return self.model_config
 
     def get_hf_model_cls(self):
+        import logging
+
         from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoModelForVision2Seq
+
+        logger = logging.getLogger(__name__)
+
+        # Handle MiniCPMOConfig specially - treat as standard Qwen (no multimodal class)
+        if type(self.hf_config).__name__ == "MiniCPMOConfig":
+            logger.info("Detected MiniCPMOConfig - using AutoModelForCausalLM (base Qwen)")
+            return AutoModelForCausalLM
 
         if not self.is_multimodal:
             return AutoModelForCausalLM
@@ -1799,7 +1822,23 @@ class ModelArgs:
         raise ValueError(f"Unknown model for config {type(self.hf_config)}")
 
     # TODO Update function for large models: For 1 layer tests we only want to load 1 checkpoint file, instead of all.
-    def load_state_dict(self):
+    def load_state_dict(self, custom_state_dict=None):
+        """
+        Load model weights from checkpoint or custom state dict.
+
+        Args:
+            custom_state_dict: Optional dict of pre-loaded weights (for MiniCPM integration)
+        """
+        # If custom state dict provided, use it directly
+        if custom_state_dict is not None:
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.info(f"Using custom state dict with {len(custom_state_dict)} weights")
+            state_dict = custom_state_dict
+            self.is_mixture_of_experts = any(["experts" in k for k in state_dict.keys()])
+            return state_dict
+
         # by default, the model is not a mixture-of-expert. This will be set to True if we find any `.experts.` in the keys
         if self.dummy_weights:
             from transformers import AutoConfig
@@ -2260,13 +2299,17 @@ class ModelArgs:
         logger.info(f"Model name: {self.model_name}")
         logger.info(f"Base model name: {self.base_model_name}")
 
-        try:
-            # Try to load tokenizer from the original model path
-            # If there is no Processor, it will return Tokenizer (useful for multimodal models)
-            tokenizer = AutoTokenizer.from_pretrained(self.TOKENIZER_PATH, local_files_only=os.getenv("CI") == "true")
-            logger.info(f"Successfully loaded tokenizer from {self.TOKENIZER_PATH}")
-        except Exception as e:
-            logger.warning(f"Failed to load tokenizer from {self.TOKENIZER_PATH}: {e}")
+            try:
+                # Try to load tokenizer from the original model path
+                # If there is no Processor, it will return Tokenizer (useful for multimodal models)
+                tokenizer = AutoTokenizer.from_pretrained(
+                    self.TOKENIZER_PATH,
+                    local_files_only=os.getenv("CI") == "true",
+                    trust_remote_code=self.trust_remote_code_hf,
+                )
+                logger.info(f"Successfully loaded tokenizer from {self.TOKENIZER_PATH}")
+            except Exception as e:
+                logger.warning(f"Failed to load tokenizer from {self.TOKENIZER_PATH}: {e}")
 
             # Try to use base model tokenizer as fallback
             fallback_tokenizer_path = base_model_tokenizer_mapping.get(self.base_model_name)
