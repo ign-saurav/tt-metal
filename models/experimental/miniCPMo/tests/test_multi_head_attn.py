@@ -3,7 +3,7 @@ import json
 import warnings
 import torch
 import pytest
-
+import os
 
 from loguru import logger
 
@@ -13,7 +13,6 @@ from models.experimental.miniCPMo.reference.modeling_minicpmo import MiniCPMO
 from models.experimental.miniCPMo.reference.configuration_minicpm import MiniCPMOConfig
 
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-from models.experimental.miniCPMo.reference.tokenization_minicpmo_fast import MiniCPMOTokenizerFast
 from models.experimental.miniCPMo.tt.tt_resampler import TTMultiheadAttention
 
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_bias, preprocess_linear_weight
@@ -23,6 +22,16 @@ from models.common.utility_functions import (
     tt2torch_tensor,
 )
 from tests.ttnn.utils_for_testing import check_with_pcc
+
+
+def load_or_randn(path, shape):
+    if os.path.exists(path):
+        print(f"Loading real input from : {path}")
+        return torch.load(path)
+    else:
+        print(f"File not found, creating random tensor for: {path}")
+        print("Expect Drop in PCC")
+        return torch.randn(shape, dtype=torch.bfloat16)
 
 
 def create_self_attn_preprocessor(device, weight_dtype=ttnn.bfloat16):
@@ -95,17 +104,13 @@ def test_self_attn(device, input_dtype, weight_dtype):
     # Set model to eval mode
     model = model.eval()
 
-    # Load tokenizer directly from local reference folder files
-    tokenizer_path = "models/experimental/miniCPMo/reference"
-    tokenizer = MiniCPMOTokenizerFast(tokenizer_file=f"{tokenizer_path}/tokenizer.json")
-
-    query = torch.load("attn_input_1.pt")
-    key = torch.load("attn_input_2.pt")
-    value = torch.load("attn_input_3.pt")
-    key_padding_mask = torch.load("attn_input_mask.pt")
+    query = load_or_randn("attn_input_1.pt", (64, 1, 3584))
+    key = load_or_randn("attn_input_2.pt", (999, 1, 3584))
+    value = load_or_randn("attn_input_3.pt", (999, 1, 3584))
+    key_padding_mask = load_or_randn("attn_input_mask.pt", (1, 999))
 
     print(query.shape, key.shape, value.shape, key_padding_mask.shape)
-
+    print(query.dtype, key.dtype, value.dtype, key_padding_mask.dtype)
     # Access the attention module and its parameters
     attn_module = model.resampler.attn  # This is a MultiheadAttention instance
 
