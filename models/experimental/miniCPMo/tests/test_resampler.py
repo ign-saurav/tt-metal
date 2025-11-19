@@ -114,7 +114,6 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
     vision_embedding = torch.load("vision_embedding.pt")
     tgt_sizes = torch.load("tgt_sizes.pt")
 
-    print(vision_embedding.shape)
     resampler = model.resampler
     resampler_out = resampler(vision_embedding, tgt_sizes)
     parameters = preprocess_model_parameters(

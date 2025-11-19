@@ -108,7 +108,6 @@ class TTResampler(nn.Module):
         max_size=(70, 70),
     ):
         super().__init__()
-        print("Initializing Resampler...")
         self.num_queries = num_queries
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -122,7 +121,6 @@ class TTResampler(nn.Module):
         else:
             self.kv_proj = nn.Identity()
 
-        print(embed_dim, num_heads)
         self.attn = TTMultiheadAttention(
             embed_dim, num_heads, self.parameters["attn"], input_dtype=input_dtype, tt_device=device
         )
@@ -206,6 +204,7 @@ class TTResampler(nn.Module):
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
+        # TODO: OPT avoid converting to torch tensor
         x = tt2torch_tensor(x)
         q = tt2torch_tensor(q)
         out = self.attn(
@@ -228,16 +227,6 @@ class TTResampler(nn.Module):
 
     def _repeat(self, query, N: int):
         return query.unsqueeze(1).repeat(1, N, 1)
-
-    # def _tt_repeat(self, query, N: int):
-    #     # query shape: (Q, D)
-    #     # Add dimension at position 1: (Q, 1, D)
-    #     query_unsqueezed = ttnn.unsqueeze(query, dim=1)
-
-    #     # Repeat N times along dimension 1: (Q, N, D)
-    #     query_repeated = ttnn.repeat(query_unsqueezed, ttnn.Shape([1, N, 1]))
-
-    #     return query_repeated
 
 
 class TTMultiheadAttention(nn.MultiheadAttention):
@@ -374,7 +363,6 @@ class TTMultiheadAttention(nn.MultiheadAttention):
                 merged_mask, mask_type = self.merge_masks(attn_mask, key_padding_mask, query)
 
                 if self.in_proj_bias is not None and self.in_proj_weight is not None:
-                    print("1")
                     return torch._native_multi_head_attention(
                         query,
                         key,
@@ -538,8 +526,7 @@ class TTMultiheadAttention(nn.MultiheadAttention):
             mask_name="key_padding_mask",
             other_type=F._none_or_dtype(attn_mask),
             other_name="attn_mask",
-            target_type=torch.bfloat16
-            # target_type=query.dtype
+            target_type=torch.bfloat16,
         )
         key_padding_mask = ttnn.from_torch(
             key_padding_mask,
@@ -600,15 +587,6 @@ class TTMultiheadAttention(nn.MultiheadAttention):
         if not use_separate_proj_weight:
             assert in_proj_weight is not None, "use_separate_proj_weight is False but in_proj_weight is None"
             q, k, v = _in_projection_packed(query, key, value, in_proj_weight, in_proj_bias)
-        # else:
-        #     assert q_proj_weight is not None, "use_separate_proj_weight is True but q_proj_weight is None"
-        #     assert k_proj_weight is not None, "use_separate_proj_weight is True but k_proj_weight is None"
-        #     assert v_proj_weight is not None, "use_separate_proj_weight is True but v_proj_weight is None"
-        #     if in_proj_bias is None:
-        #         b_q = b_k = b_v = None
-        #     else:
-        #         b_q, b_k, b_v = ttnn.chunk(in_proj_bias, 3, dim=1)
-        #     q, k, v = _in_projection(query, key, value, q_proj_weight, k_proj_weight, v_proj_weight, b_q, b_k, b_v)
 
         # prep attention mask
 
@@ -680,9 +658,9 @@ class TTMultiheadAttention(nn.MultiheadAttention):
             k = torch.cat([k, torch.zeros(zero_attn_shape, dtype=k.dtype, device=k.device)], dim=1)
             v = torch.cat([v, torch.zeros(zero_attn_shape, dtype=v.dtype, device=v.device)], dim=1)
             if attn_mask is not None:
-                attn_mask = pad(attn_mask, (0, 1))
+                attn_mask = ttnn.pad(attn_mask, (0, 1), mode="constant", value=0)
             if key_padding_mask is not None:
-                key_padding_mask = pad(key_padding_mask, (0, 1))
+                key_padding_mask = ttnn.pad(key_padding_mask, (0, 1), mode="constant", value=0)
 
         # update source sequence length after adjustments
         src_len = k.shape[1]
@@ -761,7 +739,7 @@ def _mha_shape_check(
         is_batched = True
         assert len(key.shape) == 3 and len(value.shape) == 3, (
             "For batched (3-D) `query`, expected `key` and `value` to be 3-D"
-            f" but found {key.dim()}-D and {value.dim()}-D tensors respectively"
+            f" but found {len(key.shape)}-D and {len(value.shape)}-D tensors respectively"
         )
         if key_padding_mask is not None:
             assert len(key_padding_mask.shape) == 2, (

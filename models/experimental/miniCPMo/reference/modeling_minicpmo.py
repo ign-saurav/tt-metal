@@ -113,8 +113,6 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
         if self.config.init_vision:
             self.vpm = self.init_vision_module()
             self.vision_dim = self.vpm.embed_dim
-            print(f"Embed dim: {self.embed_dim}")
-            print(f"Vision dim: {self.vision_dim}")
             self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
 
         # init audio module

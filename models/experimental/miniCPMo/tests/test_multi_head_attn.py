@@ -139,7 +139,9 @@ def test_self_attn(device, input_dtype, weight_dtype):
     )
 
     # Create TTMultiheadAttention instance and call multi_head_attention_forward
-    tt_mha = TTMultiheadAttention(embed_dim=embed_dim, num_heads=num_heads)
+    tt_mha = TTMultiheadAttention(
+        embed_dim=embed_dim, num_heads=num_heads, parameters=parameters, tt_device=device, input_dtype=input_dtype
+    )
     tt_attn_output = tt_mha.multi_head_attention_forward(
         device,
         input_dtype,

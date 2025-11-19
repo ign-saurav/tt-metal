@@ -99,7 +99,6 @@ class Resampler(nn.Module):
         max_size=(70, 70),
     ):
         super().__init__()
-        print("Initializing Resampler...")
         self.num_queries = num_queries
         self.embed_dim = embed_dim
         self.num_heads = num_heads
@@ -319,7 +318,6 @@ class MultiheadAttention(nn.MultiheadAttention):
                 merged_mask, mask_type = self.merge_masks(attn_mask, key_padding_mask, query)
 
                 if self.in_proj_bias is not None and self.in_proj_weight is not None:
-                    print("1")
                     return torch._native_multi_head_attention(
                         query,
                         key,
@@ -791,57 +789,31 @@ def _in_projection_packed(
             same shape as the corresponding input tensor.
     """
     E = q.size(-1)
-    print(q.shape)
-    print(E)
     if k is v:
-        print("k: ", k.shape)
-        print("v: ", v.shape)
         if q is k:
-            print("q: ", q.shape)
             # self-attention
             proj = linear(q, w, b)
-            print(proj.shape)
             # reshape to 3, E and not E, 3 is deliberate for better memory coalescing and keeping same order as chunk()
             proj = proj.unflatten(-1, (3, E)).unsqueeze(0).transpose(0, -2).squeeze(-2).contiguous()
             return proj[0], proj[1], proj[2]
         else:
             # encoder-decoder attention
-            print("q not k: ")
-            print("q: ", q.shape)
-            print("k: ", k.shape)
-            print("v: ", v.shape)
             w_q, w_kv = w.split([E, E * 2])
             if b is None:
                 b_q = b_kv = None
             else:
                 b_q, b_kv = b.split([E, E * 2])
             q_proj = linear(q, w_q, b_q)
-            print(q_proj.shape)
             kv_proj = linear(k, w_kv, b_kv)
-            print(kv_proj.shape)
             # reshape to 2, E and not E, 2 is deliberate for better memory coalescing and keeping same order as chunk()
             kv_proj = kv_proj.unflatten(-1, (2, E)).unsqueeze(0).transpose(0, -2).squeeze(-2).contiguous()
             return (q_proj, kv_proj[0], kv_proj[1])
     else:
-        print("q not k not v: ")
-        print("q: ", q.shape)
-        print("k: ", k.shape)
-        print("v: ", v.shape)
         w_q, w_k, w_v = w.chunk(3)
         if b is None:
             b_q = b_k = b_v = None
         else:
             b_q, b_k, b_v = b.chunk(3)
-        print(b_q.shape)
-        print(b_k.shape)
-        print(b_v.shape)
-        print(w_q.shape)
-        print(w_k.shape)
-        print(w_v.shape)
-        print("seperate linear: ")
-        print(linear(q, w_q, b_q).shape)
-        print(linear(k, w_k, b_k).shape)
-        print(linear(v, w_v, b_v).shape)
         return linear(q, w_q, b_q), linear(k, w_k, b_k), linear(v, w_v, b_v)
 
 
