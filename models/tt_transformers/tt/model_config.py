@@ -450,6 +450,8 @@ class ModelArgs:
         "Qwen2.5-VL-3B-Instruct": "models/tt_transformers/model_params/Qwen2.5-VL-3B-Instruct",
         "Qwen2.5-VL-32B-Instruct": "models/tt_transformers/model_params/Qwen2.5-VL-32B-Instruct",
         "Qwen2.5-VL-72B-Instruct": "models/tt_transformers/model_params/Qwen2.5-VL-72B-Instruct",
+        "minicpm-o-2-6-ttnn": "/home/ttuser/ssinghal/PR-fix/speecht5_tts/tt-metal/models/tt_transformers/model_params/MiniCPM-o-2_6",
+        "MiniCPM-o-2_6": "/home/ttuser/ssinghal/PR-fix/speecht5_tts/tt-metal/models/tt_transformers/model_params/MiniCPM-o-2_6",
     }
 
     MAX_QKV_MM_SEQ_LEN = 2048
@@ -1944,7 +1946,16 @@ class ModelArgs:
         return self.model_config
 
     def get_hf_model_cls(self):
+        import logging
+
         from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoModelForVision2Seq
+
+        logger = logging.getLogger(__name__)
+
+        # Handle MiniCPMOConfig specially - treat as standard Qwen (no multimodal class)
+        if type(self.hf_config).__name__ == "MiniCPMOConfig":
+            logger.info("Detected MiniCPMOConfig - using AutoModelForCausalLM (base Qwen)")
+            return AutoModelForCausalLM
 
         if not self.is_multimodal:
             return AutoModelForCausalLM
@@ -1956,7 +1967,23 @@ class ModelArgs:
         raise ValueError(f"Unknown model for config {type(self.hf_config)}")
 
     # TODO Update function for large models: For 1 layer tests we only want to load 1 checkpoint file, instead of all.
-    def load_state_dict(self):
+    def load_state_dict(self, custom_state_dict=None):
+        """
+        Load model weights from checkpoint or custom state dict.
+
+        Args:
+            custom_state_dict: Optional dict of pre-loaded weights (for MiniCPM integration)
+        """
+        # If custom state dict provided, use it directly
+        if custom_state_dict is not None:
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.info(f"Using custom state dict with {len(custom_state_dict)} weights")
+            state_dict = custom_state_dict
+            self.is_mixture_of_experts = any(["experts" in k for k in state_dict.keys()])
+            return state_dict
+
         # by default, the model is not a mixture-of-expert. This will be set to True if we find any `.experts.` in the keys
         if self.dummy_weights:
             from transformers import AutoConfig
