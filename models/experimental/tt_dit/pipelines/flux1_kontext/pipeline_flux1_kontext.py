@@ -417,9 +417,10 @@ class Flux1KontextPipeline:
                     encoded_image = ttnn.to_torch(ttnn.get_device_tensors(encoded_image)[0]).permute(0, 3, 1, 2)
                     encoded_images.append(encoded_image)
 
-            image_latents = [
-                retrieve_latents(image, generator=generator[i], sample_mode="argmax") for image in range(encoded_images)
-            ]
+            image_latents = list()
+            for image in range(encoded_images):
+                encoded_image, _ = torch.chunk(image, 2, dim=1)
+                image_latents.append(encoded_image)
             # image_latents = [
             #     retrieve_latents(self._torch_vae.encode(image[i : i + 1]), generator=generator[i], sample_mode="argmax")
             #     for i in range(image.shape[0])
@@ -427,7 +428,7 @@ class Flux1KontextPipeline:
             image_latents = torch.cat(image_latents, dim=0)
         else:
             if self.use_torch_vae_encoder:
-                encoded_image = self._vae_encoder.encode(image)
+                encoded_image = self._vae_encoder(image)
             else:
                 tt_image = ttnn.from_torch(
                     image.permute(0, 2, 3, 1),
@@ -436,9 +437,9 @@ class Flux1KontextPipeline:
                     device=self.vae_device,
                     mesh_mapper=ttnn.ReplicateTensorToMesh(self.vae_device),
                 )
-                encoded_image = self._vae_encoder.encode(tt_image)
+                encoded_image = self._vae_encoder(tt_image)
                 encoded_image = ttnn.to_torch(ttnn.get_device_tensors(encoded_image)[0]).permute(0, 3, 1, 2)
-            image_latents = retrieve_latents(encoded_image, generator=generator, sample_mode="argmax")
+            image_latents, _ = torch.chunk(encoded_image, 2, dim=1)
             # image_latents = retrieve_latents(self._torch_vae.encode(image), generator=generator, sample_mode="argmax")
 
         image_latents = (image_latents - self._torch_vae.config.shift_factor) * self._torch_vae.config.scaling_factor
