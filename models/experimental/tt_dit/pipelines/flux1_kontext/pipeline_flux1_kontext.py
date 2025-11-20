@@ -19,7 +19,9 @@ from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5Tokeniz
 from ...encoders.clip.model_clip import CLIPConfig, CLIPEncoder
 from ...encoders.t5.model_t5 import T5Config, T5Encoder
 from ...models.transformers.transformer_flux1 import Flux1Transformer
-from ...models.vae.vae_sd35 import VAEDecoder
+
+# from ...models.vae.vae_sd35 import VAEDecoder
+from ...models.vae.vae_flux1 import VAEEncoder, VAEDecoder
 from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, ParallelFactor, VAEParallelConfig
 from ...parallel.manager import CCLManager
 from ...utils.padding import PaddingConfig
@@ -90,6 +92,7 @@ class Flux1KontextPipeline:
         enable_t5_text_encoder: bool = True,
         use_torch_t5_text_encoder: bool = False,
         use_torch_clip_text_encoder: bool = False,
+        use_torch_vae_encoder: bool = True,
         parallel_config: DiTParallelConfig,
         encoder_parallel_config: EncoderParallelConfig = None,
         vae_parallel_config: VAEParallelConfig = None,
@@ -301,6 +304,17 @@ class Flux1KontextPipeline:
             ccl_manager=self._ccl_managers[self.vae_submesh_idx],
         )
 
+        self.use_torch_vae_encoder = use_torch_vae_encoder
+        if use_torch_vae_encoder:
+            self._vae_encoder = self._torch_vae.encoder
+        else:
+            self._vae_encoder = VAEEncoder.from_torch(
+                torch_ref=self._torch_vae.encoder,
+                mesh_device=self.vae_device,
+                parallel_config=self._vae_parallel_config,
+                ccl_manager=self._ccl_managers[self.vae_submesh_idx],
+            )
+
         # warmup for safe tracing.
         logger.info("warming up for tracing...")
         self.run_single_prompt(prompt="", num_inference_steps=1, seed=0, traced=False)
@@ -386,13 +400,46 @@ class Flux1KontextPipeline:
 
     def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
         if isinstance(generator, list):
+            encoded_images = list()
+            if self.use_torch_vae_encoder:
+                for i in range(image.shape[0]):
+                    encoded_images.append(self._vae_encoder(image[i : i + 1]))
+            else:
+                tt_images = ttnn.from_torch(
+                    image.permute(0, 2, 3, 1),
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.bfloat16,
+                    device=self.vae_device,
+                    mesh_mapper=ttnn.ReplicateTensorToMesh(self.vae_device),
+                )
+                for i in range(tt_images.shape[0]):
+                    encoded_image = self._vae_encoder(image[i : i + 1])
+                    encoded_image = ttnn.to_torch(ttnn.get_device_tensors(encoded_image)[0]).permute(0, 3, 1, 2)
+                    encoded_images.append(encoded_image)
+
             image_latents = [
-                retrieve_latents(self._torch_vae.encode(image[i : i + 1]), generator=generator[i], sample_mode="argmax")
-                for i in range(image.shape[0])
+                retrieve_latents(image, generator=generator[i], sample_mode="argmax") for image in range(encoded_images)
             ]
+            # image_latents = [
+            #     retrieve_latents(self._torch_vae.encode(image[i : i + 1]), generator=generator[i], sample_mode="argmax")
+            #     for i in range(image.shape[0])
+            # ]
             image_latents = torch.cat(image_latents, dim=0)
         else:
-            image_latents = retrieve_latents(self._torch_vae.encode(image), generator=generator, sample_mode="argmax")
+            if self.use_torch_vae_encoder:
+                encoded_image = self._vae_encoder.encode(image)
+            else:
+                tt_image = ttnn.from_torch(
+                    image.permute(0, 2, 3, 1),
+                    layout=ttnn.TILE_LAYOUT,
+                    dtype=ttnn.bfloat16,
+                    device=self.vae_device,
+                    mesh_mapper=ttnn.ReplicateTensorToMesh(self.vae_device),
+                )
+                encoded_image = self._vae_encoder.encode(tt_image)
+                encoded_image = ttnn.to_torch(ttnn.get_device_tensors(encoded_image)[0]).permute(0, 3, 1, 2)
+            image_latents = retrieve_latents(encoded_image, generator=generator, sample_mode="argmax")
+            # image_latents = retrieve_latents(self._torch_vae.encode(image), generator=generator, sample_mode="argmax")
 
         image_latents = (image_latents - self._torch_vae.config.shift_factor) * self._torch_vae.config.scaling_factor
 
