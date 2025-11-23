@@ -7,12 +7,13 @@ import torch
 from loguru import logger
 
 from ttnn.model_preprocessing import preprocess_model_parameters
-from models.common.utility_functions import comp_pcc
+from models.common.utility_functions import comp_pcc, tt2torch_tensor
 from models.experimental.pointpillars.tt.pillar_encoder import TtPillarEncoder
 from models.experimental.pointpillars.reference.model.pointpillars import PillarEncoder
 from models.experimental.pointpillars.tt.custom_preprocessor import create_custom_mesh_preprocessor
 
 
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
 @pytest.mark.parametrize(
     "voxel_size,point_cloud_range,in_channel,out_channel",
     [
@@ -58,8 +59,10 @@ def test_pillar_encoder(device, voxel_size, point_cloud_range, in_channel, out_c
     # Get TTNN output
     tt_output = tt_model.forward(pillars, coors_batch, npoints_per_pillar)
 
+    tt_output = tt2torch_tensor(tt_output)
+    tt_output.permute(0, 3, 2, 1)
     # Compare outputs
-    passing, pcc = comp_pcc(torch_output, tt_output, 0.98)
+    passing, pcc = comp_pcc(torch_output, tt_output, 0.99)
     logger.info(f"PCC: {pcc}")
     assert passing, f"PCC check failed: {pcc}"
 
