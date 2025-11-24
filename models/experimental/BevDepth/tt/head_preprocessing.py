@@ -27,19 +27,3 @@ def load_task_head_weights(ttnn_model, task_head_tensors, key_prefix):
     conv2_b = task_head_tensors[key_prefix + "1.bias"]
     ttnn_model.conv2_weight = ttnn.from_torch(conv2_w)
     ttnn_model.conv2_bias = ttnn.from_torch(conv2_b.reshape(1, 1, 1, -1))
-
-
-def torch_load_weights(torch_model, weight_path):
-    ckpt = torch.load(weight_path, map_location="cpu")
-    state = ckpt.get("state_dict", ckpt)
-    key = "model.head.task_heads.0.reg."
-    task_heads_0 = {k: v for k, v in state.items() if key in k}
-    with torch.no_grad():
-        torch_model.net[0].conv.weight = torch.nn.Parameter(task_heads_0[key + "0.conv.weight"])
-        torch_model.net[0].bn.weight = torch.nn.Parameter(task_heads_0[key + "0.bn.weight"])
-        torch_model.net[0].bn.bias = torch.nn.Parameter(task_heads_0[key + "0.bn.bias"])
-        torch_model.net[0].bn.running_mean = torch.nn.Parameter(task_heads_0[key + "0.bn.running_mean"])
-        torch_model.net[0].bn.running_var = torch.nn.Parameter(task_heads_0[key + "0.bn.running_var"])
-
-        torch_model.net[1].weight = torch.nn.Parameter(task_heads_0[key + "1.weight"])
-        torch_model.net[1].bias = torch.nn.Parameter(task_heads_0[key + "1.bias"])

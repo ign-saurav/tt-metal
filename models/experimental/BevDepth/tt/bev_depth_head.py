@@ -1,6 +1,6 @@
 import ttnn
 import torch
-from models.experimental.bevdepth.tt.head_preprocessing import load_task_head_weights, fold_batch_norm2d_into_conv2d
+from models.experimental.BevDepth.tt.head_preprocessing import load_task_head_weights, fold_batch_norm2d_into_conv2d
 
 
 class TtTaskHead:

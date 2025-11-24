@@ -2,14 +2,16 @@ import torch
 import ttnn
 
 
-from models.experimental.bevdepth.reference.bev_depth_head import BEVDepthHead
-from models.experimental.bevdepth.tt.bev_depth_head import TtBEVDepthHead
+from models.experimental.BevDepth.bevdepth.exps.nuscenes.mv.bev_depth_lss_r50_256x704_128x128_24e_2key import (
+    BEVDepthLightningModel,
+)
+from models.experimental.BevDepth.tt.bev_depth_head import TtBEVDepthHead
 
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 device = ttnn.open_device(device_id=0, l1_small_size=32768)
 
-ref_head = BEVDepthHead()
+ref_head = BEVDepthLightningModel()
 ref_head.load_weights("../resources/bev_depth_lss_r50_256x704_128x128_24e_2key.pth")
 ref_head.eval()
 
