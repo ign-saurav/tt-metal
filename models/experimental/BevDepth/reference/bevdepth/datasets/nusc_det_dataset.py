@@ -5,7 +5,7 @@ import numpy as np
 import torch
 
 # from mmdet3d.core.bbox.structures.lidar_box3d import LiDARInstance3DBoxes
-from models.experimental.BevDepth.mmdet3d.bbox_3d import LiDARInstance3DBoxes
+from models.experimental.BevDepth.reference.mmdet3d.bbox_3d import LiDARInstance3DBoxes
 from nuscenes.utils.data_classes import Box, LidarPointCloud
 from nuscenes.utils.geometry_utils import view_points
 from PIL import Image

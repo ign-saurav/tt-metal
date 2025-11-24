@@ -6,18 +6,21 @@ import torch
 # from mmdet3d.core import draw_heatmap_gaussian, gaussian_radius
 # from mmdet3d.models import build_neck
 # from mmdet3d.models.dense_heads.centerpoint_head import CenterHead, circle_nms
-from models.experimental.BevDepth.bevdepth.layers.heads.centerpoint_head import CenterHead, circle_nms
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.centerpoint_head import CenterHead, circle_nms
 
 # from mmdet3d.models.utils import clip_sigmoid
-from models.experimental.BevDepth.bevdepth.layers.heads.centerpoint_head import clip_sigmoid
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.centerpoint_head import clip_sigmoid
 
 # from mmdet.core import reduce_mean
 import torch.distributed as dist
 
 # from mmdet.models import build_backbone
-from models.experimental.BevDepth.bevdepth.layers.heads.builder import build_backbone, build_neck
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.builder import build_backbone, build_neck
 
 # from torch.cuda.amp import autocast
+
+# Import necks to ensure they are registered
+from models.experimental.BevDepth.reference.bevdepth.layers.necks import SECONDFPN  # noqa: F401
 
 __all__ = ["BEVDepthHead"]
 
@@ -37,7 +40,7 @@ bev_neck_conf = dict(
     type="SECONDFPN", in_channels=[160, 320, 640], upsample_strides=[2, 4, 8], out_channels=[64, 64, 128]
 )
 
-from models.experimental.BevDepth.bevdepth.layers.heads.builder import HEADS, MODELS
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.builder import HEADS, MODELS
 
 
 # Register

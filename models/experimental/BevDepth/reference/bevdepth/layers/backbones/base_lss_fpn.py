@@ -3,28 +3,127 @@ import torch
 import torch.nn.functional as F
 
 # from mmcv.cnn import build_conv_layer
-from models.experimental.BevDepth.bevdepth.layers.heads.conv import build_conv_layer
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.conv import build_conv_layer
 
 # from mmdet3d.models import build_neck
 # from mmdet.models import build_backbone
 # from mmdet.models.backbones.resnet import BasicBlock
-from models.experimental.BevDepth.bevdepth.layers.heads.resnet import BasicBlock
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.resnet import BasicBlock
 from torch import nn
 
 # from torch.cuda.amp.autocast_mode import autocast
 
-from models.experimental.BevDepth.bevdepth.layers.heads.builder import build_backbone, build_neck
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.builder import build_backbone, build_neck
 
 try:
-    from models.experimental.BevDepth.bevdepth.ops.voxel_pooling_inference import voxel_pooling_inference
-    from models.experimental.BevDepth.bevdepth.ops.voxel_pooling_train import voxel_pooling_train
+    from models.experimental.BevDepth.reference.bevdepth.ops.voxel_pooling_inference import voxel_pooling_inference
+    from models.experimental.BevDepth.reference.bevdepth.ops.voxel_pooling_train import voxel_pooling_train
+
+    _VOXEL_POOLING_AVAILABLE = True
 except ImportError:
-    print("Import VoxelPooling fail.")
+    print("Import VoxelPooling fail. Using PyTorch fallback.")
+    _VOXEL_POOLING_AVAILABLE = False
+    voxel_pooling_inference = None
+    voxel_pooling_train = None
+
+
+def _voxel_pooling_inference_fallback(
+    geom_xyz: torch.Tensor,
+    depth: torch.Tensor,
+    context_features: torch.Tensor,
+    voxel_num: torch.Tensor,
+) -> torch.Tensor:
+    """Pure PyTorch replacement for the CUDA voxel pooling op."""
+    device = context_features.device
+    if isinstance(voxel_num, torch.Tensor):
+        voxel_sizes = voxel_num.detach().cpu().tolist()
+    else:
+        voxel_sizes = voxel_num if isinstance(voxel_num, (list, tuple)) else [voxel_num]
+    num_voxel_x, num_voxel_y, num_voxel_z = [int(v) for v in voxel_sizes]
+
+    B, num_cams, num_depth, num_height, num_width, _ = geom_xyz.shape
+    channels = context_features.shape[1]
+
+    # Reshape depth and context_features from (B*num_cams, ...) to (B, num_cams, ...)
+    depth = depth.view(B, num_cams, num_depth, num_height, num_width)
+    context = context_features.view(B, num_cams, channels, num_height, num_width)
+    context = context.permute(0, 1, 3, 4, 2).contiguous().unsqueeze(2).expand(-1, -1, num_depth, -1, -1, -1)
+
+    geom = geom_xyz.long()
+    x = geom[..., 0]
+    y = geom[..., 1]
+    z = geom[..., 2]
+
+    valid_mask = (x >= 0) & (x < num_voxel_x) & (y >= 0) & (y < num_voxel_y) & (z >= 0) & (z < num_voxel_z)
+    valid = valid_mask.to(depth.dtype)
+
+    depth = depth.unsqueeze(-1)
+    contributions = depth * context * valid.unsqueeze(-1)
+
+    batch_indices = torch.arange(B, device=device).view(B, 1, 1, 1, 1)
+    batch_indices = batch_indices.expand_as(depth[..., 0])
+
+    x = x.clamp(0, num_voxel_x - 1)
+    y = y.clamp(0, num_voxel_y - 1)
+
+    flat_index = batch_indices * (num_voxel_y * num_voxel_x) + y * num_voxel_x + x
+
+    bev = torch.zeros(B * num_voxel_y * num_voxel_x, channels, device=device, dtype=context_features.dtype)
+    bev.index_add_(0, flat_index.view(-1).long(), contributions.view(-1, channels))
+    bev = bev.view(B, num_voxel_y, num_voxel_x, channels).permute(0, 3, 1, 2).contiguous()
+    return bev
+
+
+def _voxel_pooling_train_fallback(
+    geom_xyz: torch.Tensor,
+    img_feat_with_depth: torch.Tensor,
+    voxel_num: torch.Tensor,
+) -> torch.Tensor:
+    """Pure PyTorch replacement for the CUDA voxel pooling train op."""
+    device = img_feat_with_depth.device
+    if isinstance(voxel_num, torch.Tensor):
+        voxel_sizes = voxel_num.detach().cpu().tolist()
+    else:
+        voxel_sizes = voxel_num if isinstance(voxel_num, (list, tuple)) else [voxel_num]
+    num_voxel_x, num_voxel_y, num_voxel_z = [int(v) for v in voxel_sizes]
+
+    # img_feat_with_depth shape: (B, num_cams, num_depth, H, W, channels)
+    B, num_cams, num_depth, num_height, num_width, channels = img_feat_with_depth.shape
+
+    # Reshape to match expected format: (B, N, C) where N = num_cams * num_depth * H * W
+    img_feat_flat = img_feat_with_depth.reshape(B, -1, channels)
+    geom_flat = geom_xyz.reshape(B, -1, 3)
+
+    geom = geom_flat.long()
+    x = geom[..., 0]
+    y = geom[..., 1]
+    z = geom[..., 2]
+
+    valid_mask = (x >= 0) & (x < num_voxel_x) & (y >= 0) & (y < num_voxel_y) & (z >= 0) & (z < num_voxel_z)
+    valid = valid_mask.to(img_feat_with_depth.dtype).unsqueeze(-1)
+
+    contributions = img_feat_flat * valid
+
+    batch_indices = torch.arange(B, device=device).view(B, -1)
+
+    x = x.clamp(0, num_voxel_x - 1)
+    y = y.clamp(0, num_voxel_y - 1)
+
+    flat_index = batch_indices * (num_voxel_y * num_voxel_x) + y * num_voxel_x + x
+
+    bev = torch.zeros(B * num_voxel_y * num_voxel_x, channels, device=device, dtype=img_feat_with_depth.dtype)
+    bev.index_add_(0, flat_index.view(-1).long(), contributions.view(-1, channels))
+    bev = bev.view(B, num_voxel_y, num_voxel_x, channels).permute(0, 3, 1, 2).contiguous()
+    return bev
+
 
 __all__ = ["BaseLSSFPN"]
 
 # At the top, after imports
-from models.experimental.BevDepth.bevdepth.layers.heads.builder import BACKBONES, MODELS, NECKS
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.builder import BACKBONES, MODELS, NECKS
+
+# Import necks to ensure they are registered
+from models.experimental.BevDepth.reference.bevdepth.layers.necks import SECONDFPN  # noqa: F401
 
 
 # Register the class
@@ -464,14 +563,32 @@ class BaseLSSFPN(nn.Module):
 
             img_feat_with_depth = img_feat_with_depth.permute(0, 1, 3, 4, 5, 2)
 
-            feature_map = voxel_pooling_train(geom_xyz, img_feat_with_depth.contiguous(), self.voxel_num.cuda())
+            # Use fallback if CUDA ops not available
+            if _VOXEL_POOLING_AVAILABLE:
+                voxel_num_device = self.voxel_num.to(img_feat_with_depth.device)
+                feature_map = voxel_pooling_train(geom_xyz, img_feat_with_depth.contiguous(), voxel_num_device)
+            else:
+                feature_map = _voxel_pooling_train_fallback(geom_xyz, img_feat_with_depth.contiguous(), self.voxel_num)
         else:
-            feature_map = voxel_pooling_inference(
-                geom_xyz,
-                depth,
-                depth_feature[:, self.depth_channels : (self.depth_channels + self.output_channels)].contiguous(),
-                self.voxel_num.cuda(),
-            )
+            context_features = depth_feature[
+                :, self.depth_channels : (self.depth_channels + self.output_channels)
+            ].contiguous()
+            # Use fallback if CUDA ops not available
+            if _VOXEL_POOLING_AVAILABLE:
+                voxel_num_device = self.voxel_num.to(context_features.device)
+                feature_map = voxel_pooling_inference(
+                    geom_xyz,
+                    depth,
+                    context_features,
+                    voxel_num_device,
+                )
+            else:
+                feature_map = _voxel_pooling_inference_fallback(
+                    geom_xyz,
+                    depth,
+                    context_features,
+                    self.voxel_num,
+                )
         if is_return_depth:
             # final_depth has to be fp32, otherwise the depth
             # loss will colapse during the traing process.
