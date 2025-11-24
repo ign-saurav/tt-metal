@@ -5,6 +5,7 @@
 import ttnn
 
 from models.experimental.bevformerv2.tt.common import TtConv2D
+from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
 
 
 class TtBottleneck:
@@ -17,12 +18,20 @@ class TtBottleneck:
         blk_sharded=False,
         activation_dtype=ttnn.bfloat16,
         conv3_blk_sharded=False,
+        *,
+        model_configs: BevFormerV2ModelConfig | None = None,
+        block_path: str | None = None,
     ):
         self.is_downsample = is_downsample
         self.activation_dtype = activation_dtype
 
         self.conv1 = TtConv2D(
-            conv_args.conv1, conv_pth.conv1, device=device, activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)
+            conv_args.conv1,
+            conv_pth.conv1,
+            device=device,
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+            model_configs=model_configs,
+            layer_path=f"{block_path}.conv1" if block_path else None,
         )
         self.conv2 = TtConv2D(
             conv_args.conv2,
@@ -30,8 +39,18 @@ class TtBottleneck:
             device=device,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
             act_block_h=32,
+            model_configs=model_configs,
+            layer_path=f"{block_path}.conv2" if block_path else None,
         )
-        self.conv3 = TtConv2D(conv_args.conv3, conv_pth.conv3, device=device, activation=None, is_blk=conv3_blk_sharded)
+        self.conv3 = TtConv2D(
+            conv_args.conv3,
+            conv_pth.conv3,
+            device=device,
+            activation=None,
+            is_blk=conv3_blk_sharded,
+            model_configs=model_configs,
+            layer_path=f"{block_path}.conv3" if block_path else None,
+        )
 
         if is_downsample:
             self.downsample = TtConv2D(
@@ -41,6 +60,8 @@ class TtBottleneck:
                 activation=None,
                 is_blk=blk_sharded,
                 activation_dtype=activation_dtype,
+                model_configs=model_configs,
+                layer_path=f"{block_path}.downsample" if block_path else None,
             )
 
     def __call__(self, x_identity):

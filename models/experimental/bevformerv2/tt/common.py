@@ -4,6 +4,8 @@
 
 import ttnn
 
+from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
+
 
 class TtConv2D:
     def __init__(
@@ -18,7 +20,26 @@ class TtConv2D:
         is_blk=False,
         dealloc_act=False,
         act_block_h=None,
+        *,
+        # Optional configuration object and logical path for this conv layer.
+        model_configs: BevFormerV2ModelConfig | None = None,
+        layer_path: str | None = None,
     ):
+        # Apply high‑level configuration (if provided) before constructing TTNN configs.
+        if model_configs is not None:
+            settings = model_configs.get_effective_conv_settings(layer_path)
+            # Config object supplies defaults; explicit arguments still win.
+            if activation_dtype is ttnn.bfloat16:
+                activation_dtype = settings.activation_dtype
+            if weights_dtype is ttnn.bfloat8_b:
+                weights_dtype = settings.weights_dtype
+            if shard_layout is ttnn.TensorMemoryLayout.HEIGHT_SHARDED:
+                shard_layout = settings.shard_layout
+            if act_block_h is None:
+                act_block_h = settings.act_block_h
+            if dealloc_act is False:
+                dealloc_act = settings.deallocate_activation
+
         if is_blk:
             shard_layout = ttnn.TensorMemoryLayout.BLOCK_SHARDED
         self.conv = conv
@@ -30,19 +51,38 @@ class TtConv2D:
         self.stride = conv.stride
         self.groups = conv.groups
         self.activation_dtype = activation_dtype
+
+        # If we have a config object, reuse its settings for low-level kernel config;
+        # otherwise fall back to the original hard-coded values.
+        if model_configs is not None:
+            settings = model_configs.get_effective_conv_settings(layer_path)
+            math_fidelity = settings.math_fidelity
+            fp32_dest_acc_en = settings.fp32_dest_acc_en
+            packer_l1_acc = settings.packer_l1_acc
+            math_approx_mode = settings.math_approx_mode
+            enable_act_double_buffer = settings.enable_act_double_buffer
+            reshard_if_not_optimal = settings.reshard_if_not_optimal
+        else:
+            math_fidelity = ttnn.MathFidelity.HiFi4
+            fp32_dest_acc_en = True
+            packer_l1_acc = True
+            math_approx_mode = False
+            enable_act_double_buffer = False
+            reshard_if_not_optimal = True
+
         self.compute_config = ttnn.init_device_compute_kernel_config(
             device.arch(),
-            math_fidelity=ttnn.MathFidelity.HiFi4,
-            fp32_dest_acc_en=True,
-            packer_l1_acc=True,
-            math_approx_mode=False,
+            math_fidelity=math_fidelity,
+            fp32_dest_acc_en=fp32_dest_acc_en,
+            packer_l1_acc=packer_l1_acc,
+            math_approx_mode=math_approx_mode,
         )
         self.conv_config = ttnn.Conv2dConfig(
             weights_dtype=weights_dtype,
             shard_layout=shard_layout,
             deallocate_activation=dealloc_act,
-            enable_act_double_buffer=False,
-            reshard_if_not_optimal=True,
+            enable_act_double_buffer=enable_act_double_buffer,
+            reshard_if_not_optimal=reshard_if_not_optimal,
             activation=activation,
         )
         if act_block_h is not None:

@@ -6,6 +6,7 @@ from ttnn import UnaryWithParam, UnaryOpType
 
 from models.experimental.bevformerv2.tt.common import TtConv2D
 from models.experimental.bevformerv2.tt.tt_bottleneck import TtBottleneck
+from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
 
 
 class TtResNet50_MMD_C345:
@@ -16,7 +17,14 @@ class TtResNet50_MMD_C345:
       - C5: output after layer4 (1/32)
     """
 
-    def __init__(self, conv_args, conv_pth, device):
+    def __init__(
+        self,
+        conv_args,
+        conv_pth,
+        device,
+        *,
+        model_configs: BevFormerV2ModelConfig | None = None,
+    ):
         self.device = device
         self.maxpool_args = conv_args.maxpool
 
@@ -29,6 +37,8 @@ class TtResNet50_MMD_C345:
             device=device,
             activation=UnaryWithParam(UnaryOpType.RELU),
             act_block_h=32,
+            model_configs=model_configs,
+            layer_path="stem.conv1",
         )
 
         # ------------------------
@@ -39,9 +49,23 @@ class TtResNet50_MMD_C345:
             conv_pth.layer1_0,
             device,
             is_downsample=True,
+            model_configs=model_configs,
+            block_path="layer1.0",
         )
-        self.layer1_1 = TtBottleneck(conv_args.layer1[1], conv_pth.layer1_1, device)
-        self.layer1_2 = TtBottleneck(conv_args.layer1[2], conv_pth.layer1_2, device)
+        self.layer1_1 = TtBottleneck(
+            conv_args.layer1[1],
+            conv_pth.layer1_1,
+            device,
+            model_configs=model_configs,
+            block_path="layer1.1",
+        )
+        self.layer1_2 = TtBottleneck(
+            conv_args.layer1[2],
+            conv_pth.layer1_2,
+            device,
+            model_configs=model_configs,
+            block_path="layer1.2",
+        )
 
         # ------------------------
         # Layer 2 (4 blocks)
@@ -53,10 +77,30 @@ class TtResNet50_MMD_C345:
             is_downsample=True,
             blk_sharded=True,
             activation_dtype=ttnn.bfloat8_b,
+            model_configs=model_configs,
+            block_path="layer2.0",
         )
-        self.layer2_1 = TtBottleneck(conv_args.layer2[1], conv_pth.layer2_1, device)
-        self.layer2_2 = TtBottleneck(conv_args.layer2[2], conv_pth.layer2_2, device)
-        self.layer2_3 = TtBottleneck(conv_args.layer2[3], conv_pth.layer2_3, device)
+        self.layer2_1 = TtBottleneck(
+            conv_args.layer2[1],
+            conv_pth.layer2_1,
+            device,
+            model_configs=model_configs,
+            block_path="layer2.1",
+        )
+        self.layer2_2 = TtBottleneck(
+            conv_args.layer2[2],
+            conv_pth.layer2_2,
+            device,
+            model_configs=model_configs,
+            block_path="layer2.2",
+        )
+        self.layer2_3 = TtBottleneck(
+            conv_args.layer2[3],
+            conv_pth.layer2_3,
+            device,
+            model_configs=model_configs,
+            block_path="layer2.3",
+        )
 
         # ------------------------
         # Layer 3 (6 blocks)
@@ -68,12 +112,44 @@ class TtResNet50_MMD_C345:
             is_downsample=True,
             blk_sharded=True,
             activation_dtype=ttnn.bfloat8_b,
+            model_configs=model_configs,
+            block_path="layer3.0",
         )
-        self.layer3_1 = TtBottleneck(conv_args.layer3[1], conv_pth.layer3_1, device)
-        self.layer3_2 = TtBottleneck(conv_args.layer3[2], conv_pth.layer3_2, device)
-        self.layer3_3 = TtBottleneck(conv_args.layer3[3], conv_pth.layer3_3, device)
-        self.layer3_4 = TtBottleneck(conv_args.layer3[4], conv_pth.layer3_4, device)
-        self.layer3_5 = TtBottleneck(conv_args.layer3[5], conv_pth.layer3_5, device)
+        self.layer3_1 = TtBottleneck(
+            conv_args.layer3[1],
+            conv_pth.layer3_1,
+            device,
+            model_configs=model_configs,
+            block_path="layer3.1",
+        )
+        self.layer3_2 = TtBottleneck(
+            conv_args.layer3[2],
+            conv_pth.layer3_2,
+            device,
+            model_configs=model_configs,
+            block_path="layer3.2",
+        )
+        self.layer3_3 = TtBottleneck(
+            conv_args.layer3[3],
+            conv_pth.layer3_3,
+            device,
+            model_configs=model_configs,
+            block_path="layer3.3",
+        )
+        self.layer3_4 = TtBottleneck(
+            conv_args.layer3[4],
+            conv_pth.layer3_4,
+            device,
+            model_configs=model_configs,
+            block_path="layer3.4",
+        )
+        self.layer3_5 = TtBottleneck(
+            conv_args.layer3[5],
+            conv_pth.layer3_5,
+            device,
+            model_configs=model_configs,
+            block_path="layer3.5",
+        )
 
         # ------------------------
         # Layer 4 (3 blocks)
@@ -86,9 +162,25 @@ class TtResNet50_MMD_C345:
             blk_sharded=True,
             activation_dtype=ttnn.bfloat8_b,
             conv3_blk_sharded=True,
+            model_configs=model_configs,
+            block_path="layer4.0",
         )
-        self.layer4_1 = TtBottleneck(conv_args.layer4[1], conv_pth.layer4_1, device, conv3_blk_sharded=True)
-        self.layer4_2 = TtBottleneck(conv_args.layer4[2], conv_pth.layer4_2, device, conv3_blk_sharded=True)
+        self.layer4_1 = TtBottleneck(
+            conv_args.layer4[1],
+            conv_pth.layer4_1,
+            device,
+            conv3_blk_sharded=True,
+            model_configs=model_configs,
+            block_path="layer4.1",
+        )
+        self.layer4_2 = TtBottleneck(
+            conv_args.layer4[2],
+            conv_pth.layer4_2,
+            device,
+            conv3_blk_sharded=True,
+            model_configs=model_configs,
+            block_path="layer4.2",
+        )
 
     # ------------------------------
     # Forward Pass returning [C3, C4, C5]
