@@ -1,4 +1,5 @@
 import ttnn
+import torch
 
 
 class TtPillarEncoder:
@@ -22,24 +23,41 @@ class TtPillarEncoder:
         coors_batch: torch tensor (p1+p2+...+pb, 4)
         npoints_per_pillar: torch tensor (p1+p2+...+pb,)
         """
-        # Convert inputs to TTNN
-        pillars_x_tt = ttnn.from_torch(
-            pillars[:, :, :1],
+        # 1. calculate offset to the points center (in each pillar)
+        offset_pt_center_tt = ttnn.from_torch(
+            pillars[:, :, :3] - torch.sum(pillars[:, :, :3], dim=1, keepdim=True) / npoints_per_pillar[:, None, None],
             dtype=ttnn.bfloat16,
             device=self.device,
             layout=ttnn.TILE_LAYOUT,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
-        pillars_y_tt = ttnn.from_torch(
-            pillars[:, :, 1:2],
+        # 2. calculate offset to the pillar center
+        x_offset_pi_center_tt = ttnn.from_torch(
+            (pillars[:, :, :1] - (coors_batch[:, None, 1:2] * self.vx + self.x_offset)),
             dtype=ttnn.bfloat16,
             device=self.device,
             layout=ttnn.TILE_LAYOUT,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
-        pillars_features_tt = ttnn.from_torch(
+        y_offset_pi_center_tt = ttnn.from_torch(
+            (pillars[:, :, 1:2] - (coors_batch[:, None, 2:3] * self.vy + self.y_offset)),
+            dtype=ttnn.bfloat16,
+            device=self.device,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+        y_offset_pi_center_tt = ttnn.from_torch(
+            (pillars[:, :, 1:2] - (coors_batch[:, None, 2:3] * self.vy + self.y_offset)),
+            dtype=ttnn.bfloat16,
+            device=self.device,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+        pillars_feature_tt = ttnn.from_torch(
             pillars[:, :, 2:],
             dtype=ttnn.bfloat16,
             device=self.device,
@@ -47,69 +65,33 @@ class TtPillarEncoder:
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
-        pillars_xyz = ttnn.from_torch(
-            pillars[:, :, :3],
-            dtype=ttnn.bfloat16,
-            device=self.device,
-            layout=ttnn.TILE_LAYOUT,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
-
-        # Convert inputs to TTNN
-        npoints_per_pillar_tt = ttnn.from_torch(
-            npoints_per_pillar,
-            dtype=ttnn.bfloat16,
-            device=self.device,
-            layout=ttnn.TILE_LAYOUT,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
-
-        coors_x_indices_tt = ttnn.from_torch(
-            coors_batch[:, 1:2].unsqueeze(1),
-            dtype=ttnn.bfloat16,
-            device=self.device,
-            layout=ttnn.TILE_LAYOUT,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
-
-        coors_y_indices_tt = ttnn.from_torch(
-            coors_batch[:, 2:3].unsqueeze(1),
-            dtype=ttnn.bfloat16,
-            device=self.device,
-            layout=ttnn.TILE_LAYOUT,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
-
-        # 1. Calculate offset to points center
-        points_sum = ttnn.sum(pillars_xyz, dim=1, keepdim=True)
-        npoints_per_pillar_tt_unsqueezed = ttnn.unsqueeze(npoints_per_pillar_tt, dim=1)
-        npoints_per_pillar_tt_unsqueezed = ttnn.unsqueeze(npoints_per_pillar_tt_unsqueezed, dim=2)
-        points_mean = ttnn.div(points_sum, npoints_per_pillar_tt_unsqueezed)
-        offset_pt_center = pillars_xyz - points_mean
-
-        # 2. Calculate offset to pillar center
-        x_offset_pi_center = pillars_x_tt - (coors_x_indices_tt * self.vx + self.x_offset)
-        y_offset_pi_center = pillars_y_tt - (coors_y_indices_tt * self.vy + self.y_offset)
-
-        # 3. Concatenate features
+        # 3. encoder
         features_tt = ttnn.concat(
             [
-                x_offset_pi_center,
-                y_offset_pi_center,
-                pillars_features_tt,
-                offset_pt_center,
-                x_offset_pi_center,
-                y_offset_pi_center,
+                x_offset_pi_center_tt,
+                y_offset_pi_center_tt,
+                pillars_feature_tt,
+                offset_pt_center_tt,
+                x_offset_pi_center_tt,
+                y_offset_pi_center_tt,
             ],
             dim=-1,
+        )  # (p1 + p2 + ... + pb, num_points, 9)
+
+        npoints_per_pillar_tt = ttnn.from_torch(
+            npoints_per_pillar[None, :],
+            dtype=ttnn.bfloat16,
+            device=self.device,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
-
         # 4. Apply mask
-        voxel_ids = ttnn.arange(0, pillars.size(1), 1, device=self.device, dtype=ttnn.bfloat16)
-        mask = ttnn.unsqueeze(voxel_ids, dim=1) < ttnn.unsqueeze(npoints_per_pillar_tt, dim=0)
-        mask = ttnn.unsqueeze(ttnn.permute(mask, (1, 0)), dim=2)
-        features_tt *= mask
+        voxel_ids = ttnn.arange(0, pillars.size(1), dtype=ttnn.bfloat16, device=self.device)  # (num_points, )
+        mask = ttnn.unsqueeze(voxel_ids, dim=1) < npoints_per_pillar_tt  # (num_points, p1 + p2 + ... + pb)
+        mask = ttnn.permute(mask, (1, 0))  # (p1 + p2 + ... + pb, num_points)
+        mask = ttnn.unsqueeze(mask, dim=2)
 
+        features_tt = features_tt * mask
         # Convert to TTNN for conv operation
         features_tt = ttnn.permute(features_tt, (0, 2, 1))
 
