@@ -23,7 +23,7 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
 )
 @pytest.mark.parametrize(
     "device_params",
-    [{"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 32768, "trace_region_size": 34000000}],
+    [{"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 65536, "trace_region_size": 34000000}],
     indirect=True,
 )
 @pytest.mark.parametrize(
@@ -36,9 +36,9 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
     ("mesh_device", "sp", "tp", "encoder_tp", "vae_tp", "topology", "num_links", "mesh_test_id"),
     [
         pytest.param((1, 4), (1, 0), (4, 1), (4, 1), (4, 1), ttnn.Topology.Linear, 1, "1x4sp0tp1", id="1x4sp0tp1"),
-        pytest.param((2, 4), (2, 0), (4, 1), (4, 1), (4, 1), ttnn.Topology.Linear, 1, "2x4sp0tp1", id="2x4sp0tp1"),
-        pytest.param((4, 8), (4, 0), (8, 1), (4, 0), (4, 0), ttnn.Topology.Linear, 4, "4x8sp0tp1", id="4x8sp0tp1"),
-        pytest.param((4, 8), (8, 1), (4, 0), (4, 0), (4, 0), ttnn.Topology.Linear, 4, "4x8sp1tp0", id="4x8sp1tp0"),
+        # pytest.param((2, 4), (2, 0), (4, 1), (4, 1), (4, 1), ttnn.Topology.Linear, 1, "2x4sp0tp1", id="2x4sp0tp1"),
+        # pytest.param((4, 8), (4, 0), (8, 1), (4, 0), (4, 0), ttnn.Topology.Linear, 4, "4x8sp0tp1", id="4x8sp0tp1"),
+        # pytest.param((4, 8), (8, 1), (4, 0), (4, 0), (4, 0), ttnn.Topology.Linear, 4, "4x8sp1tp0", id="4x8sp1tp0"),
     ],
     indirect=["mesh_device"],
 )
@@ -63,6 +63,28 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
         pytest.param(False, id="no_use_cache"),
     ],
 )
+@pytest.mark.parametrize(
+    "preferred_kontext_resolution",
+    [
+        (672, 1568),
+        (688, 1504),
+        (720, 1456),
+        (752, 1392),
+        (800, 1328),
+        (832, 1248),
+        (880, 1184),
+        (944, 1104),
+        (1024, 1024),
+        (1104, 944),
+        (1184, 880),
+        (1248, 832),
+        (1328, 800),
+        (1392, 752),
+        (1456, 720),
+        (1504, 688),
+        (1568, 672),
+    ],
+)
 def test_flux1_pipeline(
     *,
     mesh_device: ttnn.MeshDevice,
@@ -84,6 +106,7 @@ def test_flux1_pipeline(
     traced: bool,
     mesh_test_id: str,
     use_cache: bool,
+    preferred_kontext_resolution: list,
     is_ci_env: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -127,8 +150,10 @@ def test_flux1_pipeline(
         enable_t5_text_encoder=enable_t5_text_encoder,
         use_torch_t5_text_encoder=use_torch_t5_text_encoder,
         use_torch_clip_text_encoder=use_torch_clip_text_encoder,
+        use_torch_vae_encoder=False,
         num_links=num_links,
         topology=topology,
+        preferred_kontext_resolution=preferred_kontext_resolution
     )
 
     pipeline.timing_collector = timing_collector

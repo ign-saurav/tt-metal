@@ -30,25 +30,25 @@ import os
 from typing import Optional, Union, List
 
 
-PREFERRED_KONTEXT_RESOLUTIONS = [
-    (672, 1568),
-    (688, 1504),
-    (720, 1456),
-    (752, 1392),
-    (800, 1328),
-    (832, 1248),
-    (880, 1184),
-    (944, 1104),
-    (1024, 1024),
-    (1104, 944),
-    (1184, 880),
-    (1248, 832),
-    (1328, 800),
-    (1392, 752),
-    (1456, 720),
-    (1504, 688),
-    (1568, 672),
-]
+# PREFERRED_KONTEXT_RESOLUTIONS = [
+#     (672, 1568),
+#     (688, 1504),
+#     (720, 1456),
+#     (752, 1392),
+#     (800, 1328),
+#     (832, 1248),
+#     (880, 1184),
+#     (944, 1104),
+#     (1024, 1024),
+#     (1104, 944),
+#     (1184, 880),
+#     (1248, 832),
+#     (1328, 800),
+#     (1392, 752),
+#     (1456, 720),
+#     (1504, 688),
+#     (1568, 672),
+# ]
 
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
@@ -98,11 +98,13 @@ class Flux1KontextPipeline:
         vae_parallel_config: VAEParallelConfig = None,
         topology: ttnn.Topology,
         num_links: int,
+        preferred_kontext_resolution: list
     ) -> None:
         self.timing_collector = None
 
         self._mesh_device = mesh_device
         self._parallel_config = parallel_config
+        self.preferred_kontext_resolution = preferred_kontext_resolution
 
         # setup encoder and vae parallel configs.
         self._encoder_parallel_config = encoder_parallel_config
@@ -172,7 +174,8 @@ class Flux1KontextPipeline:
             )
         else:
             padding_config = None
-
+        # import pdb
+        # pdb.set_trace()
         self.transformers = []
         for i, submesh_device in enumerate(self._submesh_devices):
             tt_transformer = Flux1Transformer(
@@ -308,10 +311,13 @@ class Flux1KontextPipeline:
         if use_torch_vae_encoder:
             self._vae_encoder = self._torch_vae.encoder
         else:
+
             self._vae_encoder = VAEEncoder.from_torch(
                 torch_ref=self._torch_vae.encoder,
                 mesh_device=self.vae_device,
-                parallel_config=self._vae_parallel_config,
+                parallel_config = VAEParallelConfig(
+                    tensor_parallel=ParallelFactor(factor=4, mesh_axis=1)
+                ),
                 ccl_manager=self._ccl_managers[self.vae_submesh_idx],
             )
 
@@ -331,8 +337,10 @@ class Flux1KontextPipeline:
         enable_t5_text_encoder=True,
         use_torch_t5_text_encoder=False,
         use_torch_clip_text_encoder=False,
+        use_torch_vae_encoder=True,
         num_links=None,
         topology=ttnn.Topology.Linear,
+        preferred_kontext_resolution=[(1024, 1024)]
     ):
         default_config = {
             (1, 4): {"sp": (1, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 1},
@@ -364,11 +372,13 @@ class Flux1KontextPipeline:
             enable_t5_text_encoder=enable_t5_text_encoder,
             use_torch_t5_text_encoder=use_torch_t5_text_encoder,
             use_torch_clip_text_encoder=use_torch_clip_text_encoder,
+            use_torch_vae_encoder=use_torch_vae_encoder,
             parallel_config=dit_parallel_config,
             encoder_parallel_config=encoder_parallel_config,
             vae_parallel_config=vae_parallel_config,
             topology=topology,
             num_links=num_links,
+            preferred_kontext_resolution=preferred_kontext_resolution
         )
 
         return pipeline
@@ -413,7 +423,7 @@ class Flux1KontextPipeline:
                     mesh_mapper=ttnn.ReplicateTensorToMesh(self.vae_device),
                 )
                 for i in range(tt_images.shape[0]):
-                    encoded_image = self._vae_encoder(image[i : i + 1])
+                    encoded_image = self._vae_encoder(tt_images[i : i + 1])
                     encoded_image = ttnn.to_torch(ttnn.get_device_tensors(encoded_image)[0]).permute(0, 3, 1, 2)
                     encoded_images.append(encoded_image)
 
@@ -582,9 +592,10 @@ class Flux1KontextPipeline:
                     aspect_ratio = image_width / image_height
                     if _auto_resize:
                         # Kontext is trained on specific resolutions, using one of them is recommended
-                        _, image_width, image_height = min(
-                            (abs(aspect_ratio - w / h), w, h) for w, h in PREFERRED_KONTEXT_RESOLUTIONS
-                        )
+                        # _, image_width, image_height = min(
+                        #     (abs(aspect_ratio - w / h), w, h) for w, h in PREFERRED_KONTEXT_RESOLUTIONS
+                        # )
+                        image_width, image_height = self.preferred_kontext_resolution[0], self.preferred_kontext_resolution[1]
                     image_width = image_width // multiple_of * multiple_of
                     image_height = image_height // multiple_of * multiple_of
                     image = self._image_processor.resize(image, image_height, image_width)

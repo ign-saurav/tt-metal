@@ -206,6 +206,7 @@ class Downsample2D:
     def __call__(self, x):
         # x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)  # Upsample requires row major.
         # x = ttnn.upsample(x, scale_factor=2)
+        x = ttnn.pad(x, padding=((0, 0), (0, 1), (0, 1), (0, 0)), value=0)
         x = self.conv(x)
         return x
 
@@ -760,9 +761,11 @@ class VAEEncoder:
 
     def __call__(self, x):
         x = self.conv_in(x)
-        x = self.mid_block(x)
+        # x = self.mid_block(x)
         for down_block in self.down_blocks:
+            x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
             x = down_block(x)
+        x = self.mid_block(x)
         x = self.conv_norm_out(x)
         x = ttnn.silu(x)
         x = vae_all_gather(self._ccl_manager, x, cluster_axis=self._tp_axis)
