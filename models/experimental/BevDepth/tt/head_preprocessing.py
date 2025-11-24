@@ -12,29 +12,21 @@ def fold_batch_norm2d_into_conv2d(conv_weight, bn_weight, bn_bias, bn_running_me
     return weight, bias
 
 
-def load_weights(ttnn_model, weight_path):
-    ckpt = torch.load(weight_path, map_location="cpu")
-    state = ckpt.get("state_dict", ckpt)
-    key = "model.head.task_heads.0.reg."
-    task_heads_0 = {k: v for k, v in state.items() if key in k}
-    conv1_weight, conv1_bias = fold_batch_norm2d_into_conv2d(
-        task_heads_0[key + "0.conv.weight"],
-        task_heads_0[key + "0.bn.weight"],
-        task_heads_0[key + "0.bn.bias"],
-        task_heads_0[key + "0.bn.running_mean"],
-        task_heads_0[key + "0.bn.running_var"],
-    )
+def load_task_head_weights(ttnn_model, task_head_tensors, key_prefix):
+    conv_w = task_head_tensors[key_prefix + "0.conv.weight"]
+    bn_w = task_head_tensors[key_prefix + "0.bn.weight"]
+    bn_b = task_head_tensors[key_prefix + "0.bn.bias"]
+    bn_rm = task_head_tensors[key_prefix + "0.bn.running_mean"]
+    bn_rv = task_head_tensors[key_prefix + "0.bn.running_var"]
+
+    conv1_weight, conv1_bias = fold_batch_norm2d_into_conv2d(conv_w, bn_w, bn_b, bn_rm, bn_rv)
     ttnn_model.conv1_weight = ttnn.from_torch(conv1_weight)
     ttnn_model.conv1_bias = ttnn.from_torch(conv1_bias.reshape(1, 1, 1, -1))
-    ttnn_model.conv2_weight = ttnn.from_torch(task_heads_0[key + "1.weight"])
-    ttnn_model.conv2_bias = ttnn.from_torch(task_heads_0[key + "1.bias"].reshape(1, 1, 1, -1))
-    print(task_heads_0.keys())
 
-    # for name, tensor in state.items():
-    #     # print(name, tensor.shape)
-    #     if "model.head.task_heads.0.reg." in name:
-    #         # ttnn_model.conv1_weight = ttnn.from_torch(tensor)
-    #         print(name, tensor.shape)
+    conv2_w = task_head_tensors[key_prefix + "1.weight"]
+    conv2_b = task_head_tensors[key_prefix + "1.bias"]
+    ttnn_model.conv2_weight = ttnn.from_torch(conv2_w)
+    ttnn_model.conv2_bias = ttnn.from_torch(conv2_b.reshape(1, 1, 1, -1))
 
 
 def torch_load_weights(torch_model, weight_path):
