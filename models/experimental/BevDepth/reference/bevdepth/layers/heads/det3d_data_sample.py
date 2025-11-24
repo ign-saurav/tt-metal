@@ -7,7 +7,7 @@ import torch
 from mmengine.structures import InstanceData
 
 # from .point_data import PointData
-from models.experimental.BevDepth.bevdepth.layers.heads.point_data import PointData
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.point_data import PointData
 
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import List, Optional

@@ -179,3 +179,10 @@ def build_head(cfg):
         )
 
     return obj_cls(**cfg)
+
+
+# Import necks to ensure they are registered when builder is imported
+try:
+    from models.experimental.BevDepth.reference.bevdepth.layers.necks import SECONDFPN  # noqa: F401
+except ImportError:
+    pass  # Necks may not be available in all contexts

@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch import Tensor
 
-from models.experimental.BevDepth.mmdet3d.bbox_3d import rotation_3d_in_axis
+from models.experimental.BevDepth.reference.mmdet3d.bbox_3d import rotation_3d_in_axis
 
 
 class BasePoints:

@@ -6,7 +6,7 @@ from mmengine.model import BaseModule
 from torch import nn as nn
 
 # from mmdet3d.registry import MODELS
-from models.experimental.BevDepth.bevdepth.layers.heads.builder import NECKS, MODELS
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.builder import NECKS, MODELS
 
 
 @NECKS.register_module()
