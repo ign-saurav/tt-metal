@@ -8,13 +8,13 @@ from mmengine.model import BaseModule
 from torch.nn.modules.batchnorm import _BatchNorm
 
 # from mmdet.registry import MODELS
-from models.experimental.BevDepth.bevdepth.layers.heads.registry import MODELS
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.registry import MODELS
 
 # from ..layers import ResLayer
-from models.experimental.BevDepth.bevdepth.layers.heads.res_layer import ResLayer
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.res_layer import ResLayer
 
 
-from models.experimental.BevDepth.bevdepth.layers.heads.builder import BACKBONES, MODELS
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.builder import BACKBONES, MODELS
 
 
 @BACKBONES.register_module()
