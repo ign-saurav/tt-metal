@@ -3,74 +3,69 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
+from models.common.lightweightmodule import LightweightModule
 
 
-class TtPointPillarsConv2D:
+class TtPointPillarsConv1D(LightweightModule):
     def __init__(
         self,
-        parameters,
         conv,
+        parameters,
         device,
-        cache={},
-        activation=None,
+        activation_dtype=ttnn.bfloat16,
         weights_dtype=ttnn.bfloat16,
-        shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-        groups=1,
-        output_layout=ttnn.TILE_LAYOUT,
-        dilation=1,
-        output_dtype=ttnn.bfloat16,
+        shard_layout=None,
+        fp32_accum=False,
+        packer_l1_acc=False,
+        activation=None,
         deallocate_activation=False,
+        math_fidelity=ttnn.MathFidelity.LoFi,
+        return_dims=False,
+        reshape_output=False,
+        memory_config=None,
     ):
+        super().__init__()
+        self.conv = conv
         self.device = device
-        self.batch_size = 1
-        self.conv_params = conv
-        self.batch_size = conv.batch_size
-        self.input_height = conv.input_height
-        self.input_width = conv.input_width
         self.in_channels = conv.in_channels
         self.out_channels = conv.out_channels
-        self.kernel_size = conv.kernel_size
-        self.padding = conv.padding
-        self.stride = conv.stride
+        self.kernel_size = conv.kernel_size[0]
+        self.padding = conv.padding[0]
+        self.stride = conv.stride[0]
         self.groups = conv.groups
-        self.deallocate_activation = deallocate_activation
-        self.output_dtype = output_dtype
-        self.cache = cache
-        self.parameters = parameters
-        self.shard_layout = shard_layout
-        self.output_layout = output_layout
-        self.dilation = dilation
-        self.weights_dtype = weights_dtype
-        self.conv_config = self._initialize_conv_config()
-        self.compute_config = self._initialize_compute_config()
-        self.weights, self.bias = self.parameters["weight"], self.parameters["bias"]
-        self.output_shape = conv.output_shape
-
-    def _initialize_conv_config(self):
-        conv_config = ttnn.Conv2dConfig(
-            weights_dtype=self.weights_dtype,
-            shard_layout=self.shard_layout,
-            deallocate_activation=self.deallocate_activation,
-            enable_act_double_buffer=False,
-            enable_weights_double_buffer=False,
-            reshard_if_not_optimal=True,
+        self.conv_config = ttnn.Conv1dConfig(
+            weights_dtype=weights_dtype,
+            shard_layout=shard_layout,
+            deallocate_activation=deallocate_activation,
+            activation=activation,
         )
-
-        return conv_config
-
-    def _initialize_compute_config(self):
-        return ttnn.init_device_compute_kernel_config(
-            self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.HiFi2,
-            math_approx_mode=False,
-            fp32_dest_acc_en=True,
-            packer_l1_acc=True,
+        self.compute_config = ttnn.init_device_compute_kernel_config(
+            device.arch(),
+            math_fidelity=math_fidelity,
+            fp32_dest_acc_en=fp32_accum,
+            packer_l1_acc=packer_l1_acc,
         )
+        self.weight = ttnn.from_device(parameters.weight)
+        self.bias = None
+        if "bias" in parameters and parameters["bias"] is not None:
+            bias = ttnn.from_device(parameters.bias)
+            self.bias = bias
+        self.activation_dtype = activation_dtype
+        self.return_dims = return_dims
+        self.reshape_output = reshape_output
+        self.memory_config = memory_config
 
-    def __call__(self, x):
-        [x, [out_h, out_w], [self.weights, self.bias]] = ttnn.conv2d(
+    def forward(self, x, shape=None):
+        if shape is not None:
+            batch_size = shape[0]
+            input_length = shape[1]
+        else:
+            batch_size = x.shape[0]
+            input_length = x.shape[1]
+
+        [tt_output_tensor_on_device, out_length, [weights_device, bias_device]] = ttnn.conv1d(
             input_tensor=x,
-            weight_tensor=self.weights,
+            weight_tensor=self.weight,
             in_channels=self.in_channels,
             out_channels=self.out_channels,
             device=self.device,
@@ -78,18 +73,19 @@ class TtPointPillarsConv2D:
             kernel_size=self.kernel_size,
             stride=self.stride,
             padding=self.padding,
-            dilation=(self.dilation, self.dilation),
-            batch_size=self.batch_size,
-            input_height=self.input_height,
-            input_width=self.input_width,
+            batch_size=batch_size,
+            input_length=input_length,
             conv_config=self.conv_config,
             compute_config=self.compute_config,
             groups=self.groups,
-            return_weights_and_bias=True,
             return_output_dim=True,
-            memory_config=None,
-            dtype=self.output_dtype,
-            slice_config=ttnn.Conv2dL1FullSliceConfig,
+            return_weights_and_bias=True,
+            memory_config=self.memory_config,
+            dtype=self.activation_dtype,
         )
-
-        return x
+        shape = (batch_size, out_length, tt_output_tensor_on_device.shape[-1])
+        if self.reshape_output:
+            tt_output_tensor_on_device = ttnn.reshape(tt_output_tensor_on_device, shape)
+        if self.return_dims:
+            return tt_output_tensor_on_device, shape
+        return tt_output_tensor_on_device
