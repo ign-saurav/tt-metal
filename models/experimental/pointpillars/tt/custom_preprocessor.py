@@ -5,12 +5,10 @@
 import ttnn
 import torch
 
-from ttnn.model_preprocessing import (
-    ModuleArgs,
-)
+from ttnn.model_preprocessing import ModuleArgs, fold_batch_norm2d_into_conv2d
 import torch
 import ttnn
-from models.experimental.pointpillars.reference.model.pointpillars import PillarEncoder
+from models.experimental.pointpillars.reference.model.pointpillars import PillarEncoder, Backbone
 from ttnn.dot_access import make_dot_access_dict
 
 
@@ -74,16 +72,47 @@ def fold_batch_norm1d_into_conv1d(conv, bn):
     return weight, bias
 
 
+def _extract_backbone(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
+    """Extract and preprocess Backbone parameters with fused BatchNorm."""
+    assert isinstance(model, Backbone)  # Your Backbone class
+
+    for i in range(len(model.multi_blocks)):
+        block = model.multi_blocks[i]
+        parameters[f"block_{i}"] = {}
+
+        # Process each conv-bn-relu triplet in the block
+        conv_idx = 0
+        for j in range(0, len(block), 3):  # Step by 3 (conv, bn, relu)
+            conv_layer = block[j]
+            bn_layer = block[j + 1]
+
+            weight, bias = fold_batch_norm2d_into_conv2d(conv_layer, bn_layer)
+
+            parameters[f"block_{i}"][f"conv_{conv_idx}"] = {}
+            parameters[f"block_{i}"][f"conv_{conv_idx}"]["weight"] = ttnn.from_torch(
+                weight, dtype=dtype, mesh_mapper=mesh_mapper
+            )
+            bias = bias.reshape((1, 1, 1, -1))
+            parameters[f"block_{i}"][f"conv_{conv_idx}"]["bias"] = ttnn.from_torch(
+                bias, dtype=dtype, mesh_mapper=mesh_mapper
+            )
+            parameters[f"block_{i}"][f"conv_{conv_idx}"]["conv_args"] = infer_module_args(conv_layer)
+
+            conv_idx += 1
+
+    return parameters
+
+
 def _extract_pillar_encoder(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
     """Extract and preprocess PillarEncoder parameters with fused BatchNorm."""
     assert isinstance(model, PillarEncoder)
-    parameters["pillar_encoder"]["conv"] = {}
+    parameters["conv"] = {}
 
     # Use the helper function
     weight, bias = fold_batch_norm1d_into_conv1d(model.conv, model.bn)
-    parameters["pillar_encoder"]["conv"]["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
-    parameters["pillar_encoder"]["conv"]["bias"] = ttnn.from_torch(bias, mesh_mapper=mesh_mapper)
-    parameters["pillar_encoder"]["conv_args"] = infer_module_args(model)
+    parameters["conv"]["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
+    parameters["conv"]["bias"] = ttnn.from_torch(bias, mesh_mapper=mesh_mapper)
+    parameters["conv_args"] = infer_module_args(model)
 
     return parameters
 
@@ -96,7 +125,15 @@ def custom_preprocessor(
     weight_dtype = ttnn.bfloat16
     if isinstance(model, PillarEncoder):
         parameters["pillar_encoder"] = {}
-        parameters = _extract_pillar_encoder(model, parameters, dtype=weight_dtype, mesh_mapper=mesh_mapper)
+        parameters["pillar_encoder"] = _extract_pillar_encoder(
+            model, parameters["pillar_encoder"], dtype=weight_dtype, mesh_mapper=mesh_mapper
+        )
+
+    elif isinstance(model, Backbone):
+        parameters["backbone"] = {}
+        parameters["backbone"] = _extract_backbone(
+            model, parameters["backbone"], dtype=weight_dtype, mesh_mapper=mesh_mapper
+        )
 
     return parameters
 

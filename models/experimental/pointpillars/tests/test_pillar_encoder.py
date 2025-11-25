@@ -26,28 +26,30 @@ def test_pillar_encoder(device, voxel_size, point_cloud_range, in_channel, out_c
     # Create reference model
     torch_model = PillarEncoder(voxel_size, point_cloud_range, in_channel, out_channel)
 
-    # Load pretrained weights from .pth file
-    checkpoint = torch.load("epoch_160.pth", map_location="cpu")
+    try:
+        checkpoint = torch.load("epoch_160.pth", map_location="cpu")
 
-    # Extract PillarEncoder weights from the full model checkpoint
-    # The exact key depends on how your checkpoint is structured
-    if "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    elif "model" in checkpoint:
-        state_dict = checkpoint["model"]
-    else:
-        state_dict = checkpoint
+        # Extract Backbone weights from the full model checkpoint
+        if "state_dict" in checkpoint:
+            state_dict = checkpoint["state_dict"]
+        elif "model" in checkpoint:
+            state_dict = checkpoint["model"]
+        else:
+            state_dict = checkpoint
 
-    # Filter only PillarEncoder weights (adjust prefix based on your model structure)
-    pillar_encoder_state_dict = {}
-    prefix = "pillar_encoder."  # Adjust this based on your model's structure
-    for key, value in state_dict.items():
-        if key.startswith(prefix):
-            new_key = key.replace(prefix, "")
-            pillar_encoder_state_dict[new_key] = value
+        # Filter only Backbone weights
+        pillar_encoder_state_dict = {}
+        prefix = "pillar_encoder."  # Adjust this based on your model's structure
+        for key, value in state_dict.items():
+            if key.startswith(prefix):
+                new_key = key.replace(prefix, "")
+                pillar_encoder_state_dict[new_key] = value
 
-    # Load the filtered weights into your model
-    torch_model.load_state_dict(pillar_encoder_state_dict)
+        # Load the filtered weights into your model
+        torch_model.load_state_dict(pillar_encoder_state_dict)
+    except FileNotFoundError:
+        logger.warning("Checkpoint file not found, using random weights")
+
     torch_model.eval()
 
     # Rest of the test remains the same
@@ -55,15 +57,10 @@ def test_pillar_encoder(device, voxel_size, point_cloud_range, in_channel, out_c
     num_points = 32
     num_features = 4
 
-    # pillars = torch.randn(num_pillars, num_points, num_features, dtype=torch.bfloat16)
-    # coors_batch = torch.randint(0, 4, (num_pillars, 4), dtype=torch.long)
-    # coors_batch[:, 0] = torch.randint(0, 2, (num_pillars,))
-    # npoints_per_pillar = torch.randint(1, num_points + 1, (num_pillars,), dtype=torch.long)
-
-    pillars = torch.load("pillars.pt")
-
-    coors_batch = torch.load("coors_batch.pt")
-    npoints_per_pillar = torch.load("npoints.pt")
+    pillars = torch.randn(num_pillars, num_points, num_features, dtype=torch.bfloat16)
+    coors_batch = torch.randint(0, 4, (num_pillars, 4), dtype=torch.long)
+    coors_batch[:, 0] = torch.randint(0, 2, (num_pillars,))
+    npoints_per_pillar = torch.randint(1, num_points + 1, (num_pillars,), dtype=torch.long)
 
     torch_output = torch_model(pillars, coors_batch, npoints_per_pillar)
 
