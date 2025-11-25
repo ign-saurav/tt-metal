@@ -8,7 +8,13 @@ import torch
 from ttnn.model_preprocessing import ModuleArgs, fold_batch_norm2d_into_conv2d
 import torch
 import ttnn
-from models.experimental.pointpillars.reference.model.pointpillars import PillarEncoder, Backbone, Neck, Head
+from models.experimental.pointpillars.reference.model.pointpillars import (
+    PillarEncoder,
+    Backbone,
+    Neck,
+    Head,
+    PointPillars,
+)
 from ttnn.dot_access import make_dot_access_dict
 
 
@@ -213,6 +219,25 @@ def custom_preprocessor(
     """Custom preprocessor for PointPillars models."""
     parameters = {}
     weight_dtype = ttnn.bfloat16
+
+    if isinstance(model, PointPillars):
+        # Extract all sub-modules
+        parameters["pillar_encoder"] = {}
+        parameters["pillar_encoder"] = _extract_pillar_encoder(
+            model.pillar_encoder, parameters["pillar_encoder"], dtype=weight_dtype, mesh_mapper=mesh_mapper
+        )
+
+        parameters["backbone"] = {}
+        parameters["backbone"] = _extract_backbone(
+            model.backbone, parameters["backbone"], dtype=weight_dtype, mesh_mapper=mesh_mapper
+        )
+
+        parameters["neck"] = {}
+        parameters["neck"] = _extract_neck(model.neck, parameters["neck"], dtype=weight_dtype, mesh_mapper=mesh_mapper)
+
+        parameters["head"] = {}
+        parameters["head"] = _extract_head(model.head, parameters["head"], dtype=weight_dtype, mesh_mapper=mesh_mapper)
+
     if isinstance(model, PillarEncoder):
         parameters["pillar_encoder"] = {}
         parameters["pillar_encoder"] = _extract_pillar_encoder(

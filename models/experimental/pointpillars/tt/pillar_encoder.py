@@ -25,12 +25,13 @@ class TtPillarEncoder:
         self.y_l = int((point_cloud_range[4] - point_cloud_range[1]) / voxel_size[1])
         self.shard_layout = shard_layout
         self.conv1d = TtPointPillarsConv1D(
-            parameters["pillar_encoder"]["conv_args"]["conv"],
-            parameters["pillar_encoder"]["conv"],
+            parameters["conv_args"]["conv"],
+            parameters["conv"],
             device=device,
             activation=None,
             shard_layout=self.shard_layout,
             deallocate_activation=True,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
     def forward(self, pillars, coors_batch, npoints_per_pillar):
@@ -51,14 +52,6 @@ class TtPillarEncoder:
         # 2. calculate offset to the pillar center
         x_offset_pi_center_tt = ttnn.from_torch(
             (pillars[:, :, :1] - (coors_batch[:, None, 1:2] * self.vx + self.x_offset)),
-            dtype=ttnn.bfloat16,
-            device=self.device,
-            layout=ttnn.TILE_LAYOUT,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
-
-        y_offset_pi_center_tt = ttnn.from_torch(
-            (pillars[:, :, 1:2] - (coors_batch[:, None, 2:3] * self.vy + self.y_offset)),
             dtype=ttnn.bfloat16,
             device=self.device,
             layout=ttnn.TILE_LAYOUT,
@@ -167,11 +160,20 @@ class TtPillarEncoder:
             # Perform scatter (returns new tensor, not in-place)
             canvas_flat_tt = ttnn.scatter(canvas_flat_tt, 0, flat_indices_tt, cur_features_tt)
 
-            # ttnn.deallocate(canvas_flat_tt)
             # Reshape back to 2D
             canvas = ttnn.view(canvas_flat_tt, (self.x_l, self.y_l, self.out_channel))
+            ttnn.deallocate(canvas_flat_tt)
             canvas = ttnn.permute(canvas, (2, 1, 0))
             batched_canvas.append(canvas)
 
         batched_canvas = ttnn.stack(batched_canvas, dim=0)
+        batched_canvas = ttnn.to_memory_config(batched_canvas, ttnn.DRAM_MEMORY_CONFIG)
+        # ttnn.deallocate(canvas)
+        ttnn.deallocate(flat_indices_tt)
+        ttnn.deallocate(cur_features_tt)
+        ttnn.deallocate(offset_pt_center_tt)
+        ttnn.deallocate(x_offset_pi_center_tt)
+        ttnn.deallocate(y_offset_pi_center_tt)
+        ttnn.deallocate(pillars_feature_tt)
+        ttnn.deallocate(npoints_per_pillar_tt)
         return batched_canvas

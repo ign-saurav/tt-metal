@@ -28,17 +28,18 @@ class TtBackbone:
             # First conv in each block (with stride)
             block_convs.append(
                 TtPointPillarsConv2D(
-                    conv=parameters["backbone"][f"block_{i}"]["conv_0"]["conv_args"],
-                    conv_pth=parameters["backbone"][f"block_{i}"]["conv_0"],
+                    conv=parameters[f"block_{i}"]["conv_0"]["conv_args"],
+                    conv_pth=parameters[f"block_{i}"]["conv_0"],
                     device=device,
                     activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
                     activation_dtype=dtype,
                     weights_dtype=dtype,
                     shard_layout=shard_layout,
                     # is_dealloc_act=deallocate_activation,
-                    is_dealloc_act=False,
+                    is_dealloc_act=True,
                     reshape_output=True,
-                    math_fidelity=ttnn.MathFidelity.HiFi4,
+                    math_fidelity=ttnn.MathFidelity.HiFi4 if i == 2 else ttnn.MathFidelity.HiFi2,
+                    # memory_config=ttnn.DRAM_MEMORY_CONFIG
                 )
             )
 
@@ -46,17 +47,18 @@ class TtBackbone:
             for j in range(layer_nums[i]):
                 block_convs.append(
                     TtPointPillarsConv2D(
-                        conv=parameters["backbone"][f"block_{i}"][f"conv_{j+1}"]["conv_args"],
-                        conv_pth=parameters["backbone"][f"block_{i}"][f"conv_{j+1}"],
+                        conv=parameters[f"block_{i}"][f"conv_{j+1}"]["conv_args"],
+                        conv_pth=parameters[f"block_{i}"][f"conv_{j+1}"],
                         device=device,
                         activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
                         activation_dtype=dtype,
                         weights_dtype=dtype,
                         shard_layout=shard_layout,
                         # is_dealloc_act=deallocate_activation,
-                        is_dealloc_act=False,
+                        is_dealloc_act=False if (j == layer_nums[i] - 1) else True,
                         reshape_output=True,
-                        math_fidelity=ttnn.MathFidelity.HiFi4,
+                        math_fidelity=ttnn.MathFidelity.HiFi4 if i == 2 else ttnn.MathFidelity.HiFi2,
+                        # memory_config=ttnn.DRAM_MEMORY_CONFIG
                     )
                 )
 
@@ -71,5 +73,6 @@ class TtBackbone:
         for block_convs in self.multi_blocks:
             for conv in block_convs:
                 x = conv(x)
+                x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
             outs.append(x)
         return outs

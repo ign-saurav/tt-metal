@@ -24,8 +24,8 @@ class TtNeck:
 
         for i in range(len(in_channels)):
             decoder_block = TtPointPillarsConvTranspose2D(
-                conv_transpose=parameters["neck"][f"decoder_{i}"]["conv_args"],
-                conv_transpose_pth=parameters["neck"][f"decoder_{i}"],
+                conv_transpose=parameters[f"decoder_{i}"]["conv_args"],
+                conv_transpose_pth=parameters[f"decoder_{i}"],
                 device=device,
                 activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
                 activation_dtype=dtype,

@@ -50,6 +50,7 @@ def test_pillar_encoder(device, voxel_size, point_cloud_range, in_channel, out_c
     except FileNotFoundError:
         logger.warning("Checkpoint file not found, using random weights")
 
+    torch_model = torch_model.to(dtype=torch.bfloat16)
     torch_model.eval()
 
     # Rest of the test remains the same
@@ -76,7 +77,7 @@ def test_pillar_encoder(device, voxel_size, point_cloud_range, in_channel, out_c
         point_cloud_range=point_cloud_range,
         in_channel=in_channel,
         out_channel=out_channel,
-        parameters=parameters,
+        parameters=parameters["pillar_encoder"],
     )
 
     tt_output = tt_model.forward(pillars, coors_batch, npoints_per_pillar)
