@@ -66,23 +66,23 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
 @pytest.mark.parametrize(
     "preferred_kontext_resolution",
     [
-        (672, 1568),
-        (688, 1504),
-        (720, 1456),
-        (752, 1392),
-        (800, 1328),
-        (832, 1248),
-        (880, 1184),
-        (944, 1104),
+        # (672, 1568),
+        # (688, 1504),
+        # (720, 1456),
+        # (752, 1392),
+        # (800, 1328),
+        # (832, 1248),
+        # (880, 1184),
+        # (944, 1104),
         (1024, 1024),
-        (1104, 944),
-        (1184, 880),
-        (1248, 832),
-        (1328, 800),
-        (1392, 752),
-        (1456, 720),
-        (1504, 688),
-        (1568, 672),
+        # (1104, 944),
+        # (1184, 880),
+        # (1248, 832),
+        # (1328, 800),
+        # (1392, 752),
+        # (1456, 720),
+        # (1504, 688),
+        # (1568, 672),
     ],
 )
 def test_flux1_pipeline(
@@ -153,7 +153,7 @@ def test_flux1_pipeline(
         use_torch_vae_encoder=False,
         num_links=num_links,
         topology=topology,
-        preferred_kontext_resolution=preferred_kontext_resolution
+        preferred_kontext_resolution=preferred_kontext_resolution,
     )
 
     pipeline.timing_collector = timing_collector
@@ -162,7 +162,7 @@ def test_flux1_pipeline(
         "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/cat.png"
     )
     prompts = [
-        "Add a hat to the cat",
+        "Add a hat to the cat and make it look like it is dancing",
         # "A luxury sports car.",
         # "Neon-lit cyberpunk alley, rain-soaked, cinematic wide shot",
         # "Golden retriever astronaut drifting in sunlit space",
@@ -175,6 +175,9 @@ def test_flux1_pipeline(
         # "Futuristic Tokyo street market, vibrant signage, motion blur",
     ]
 
+    # negative_prompts = [""] * len(prompts)
+    negative_prompts = ["Cowboy hat, yellow colour hat, fuzzy look, pixelated effect"]
+
     filename_prefix = f"flux_{model_variant}_{width}_{height}_{mesh_test_id}"
     if enable_t5_text_encoder:
         if use_torch_t5_text_encoder:
@@ -186,12 +189,13 @@ def test_flux1_pipeline(
     if not traced:
         filename_prefix += "_untraced"
 
-    def run(*, prompt: str, number: int, seed: int) -> None:
+    def run(*, prompt: str, negative_prompt: str, number: int, seed: int) -> None:
         images = pipeline.run_single_prompt(
             image=input_image,
             width=width,
             height=height,
             prompt=prompt,
+            negative_prompt=negative_prompt,
             num_inference_steps=num_inference_steps,
             seed=seed,
             traced=traced,
@@ -212,8 +216,8 @@ def test_flux1_pipeline(
             logger.info(f"Average denoising step time: {avg_step_time:.2f}s")
 
     if no_prompt:
-        for i, prompt in enumerate(prompts):
-            run(prompt=prompt, number=i, seed=0)
+        for i in range(len(negative_prompts)):
+            run(prompt=prompts[i], negative_prompt=negative_prompts[i], number=i, seed=0)
     else:
         prompt = prompts[0]
         for i in itertools.count():

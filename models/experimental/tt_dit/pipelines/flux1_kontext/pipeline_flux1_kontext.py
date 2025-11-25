@@ -30,25 +30,25 @@ import os
 from typing import Optional, Union, List
 
 
-# PREFERRED_KONTEXT_RESOLUTIONS = [
-#     (672, 1568),
-#     (688, 1504),
-#     (720, 1456),
-#     (752, 1392),
-#     (800, 1328),
-#     (832, 1248),
-#     (880, 1184),
-#     (944, 1104),
-#     (1024, 1024),
-#     (1104, 944),
-#     (1184, 880),
-#     (1248, 832),
-#     (1328, 800),
-#     (1392, 752),
-#     (1456, 720),
-#     (1504, 688),
-#     (1568, 672),
-# ]
+PREFERRED_KONTEXT_RESOLUTIONS = [
+    # (672, 1568),
+    # (688, 1504),
+    # (720, 1456),
+    # (752, 1392),
+    # (800, 1328),
+    # (832, 1248),
+    # (880, 1184),
+    # (944, 1104),
+    (1024, 1024),
+    # (1104, 944),
+    # (1184, 880),
+    # (1248, 832),
+    # (1328, 800),
+    # (1392, 752),
+    # (1456, 720),
+    # (1504, 688),
+    # (1568, 672),
+]
 
 
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
@@ -98,7 +98,7 @@ class Flux1KontextPipeline:
         vae_parallel_config: VAEParallelConfig = None,
         topology: ttnn.Topology,
         num_links: int,
-        preferred_kontext_resolution: list
+        preferred_kontext_resolution: list,
     ) -> None:
         self.timing_collector = None
 
@@ -174,8 +174,6 @@ class Flux1KontextPipeline:
             )
         else:
             padding_config = None
-        # import pdb
-        # pdb.set_trace()
         self.transformers = []
         for i, submesh_device in enumerate(self._submesh_devices):
             tt_transformer = Flux1Transformer(
@@ -311,19 +309,16 @@ class Flux1KontextPipeline:
         if use_torch_vae_encoder:
             self._vae_encoder = self._torch_vae.encoder
         else:
-
             self._vae_encoder = VAEEncoder.from_torch(
                 torch_ref=self._torch_vae.encoder,
                 mesh_device=self.vae_device,
-                parallel_config = VAEParallelConfig(
-                    tensor_parallel=ParallelFactor(factor=4, mesh_axis=1)
-                ),
+                parallel_config=VAEParallelConfig(tensor_parallel=ParallelFactor(factor=4, mesh_axis=1)),
                 ccl_manager=self._ccl_managers[self.vae_submesh_idx],
             )
 
         # warmup for safe tracing.
         logger.info("warming up for tracing...")
-        self.run_single_prompt(prompt="", num_inference_steps=1, seed=0, traced=False)
+        self.run_single_prompt(prompt="", negative_prompt="", num_inference_steps=1, seed=0, traced=False)
         self.synchronize_devices()
 
     @staticmethod
@@ -340,7 +335,7 @@ class Flux1KontextPipeline:
         use_torch_vae_encoder=True,
         num_links=None,
         topology=ttnn.Topology.Linear,
-        preferred_kontext_resolution=[(1024, 1024)]
+        preferred_kontext_resolution=[(1024, 1024)],
     ):
         default_config = {
             (1, 4): {"sp": (1, 0), "tp": (4, 1), "encoder_tp": (4, 1), "vae_tp": (4, 1), "num_links": 1},
@@ -378,7 +373,7 @@ class Flux1KontextPipeline:
             vae_parallel_config=vae_parallel_config,
             topology=topology,
             num_links=num_links,
-            preferred_kontext_resolution=preferred_kontext_resolution
+            preferred_kontext_resolution=preferred_kontext_resolution,
         )
 
         return pipeline
@@ -522,7 +517,7 @@ class Flux1KontextPipeline:
         num_images_per_prompt: int = 1,
         width: int = 1024,
         height: int = 1024,
-        cfg_scale: float = 1,  # Flux.1 is not indented to be used with CFG
+        cfg_scale: float = 1.6,
         guidance_scale: float = 3.5,
         prompt_1: list[str],
         prompt_2: list[str],
@@ -531,7 +526,6 @@ class Flux1KontextPipeline:
         num_inference_steps: int,
         seed: int | None = None,
         traced: bool = False,
-        clip_skip: int = 0,
         max_area: int = 1024**2,
         _auto_resize: bool = True,
     ):
@@ -561,11 +555,7 @@ class Flux1KontextPipeline:
                     f"Generation `height` and `width` have been adjusted to {height} and {width} to fit the model requirements."
                 )
 
-            # TODO: Checkout implementation
-            do_true_cfg = cfg_scale > 1 and negative_prompt_1
-            cfg_enabled = cfg_scale > 1
-            assert not cfg_enabled, "CFG is not supported"
-
+            cfg_enabled = cfg_scale > 1 and negative_prompt_1
             logger.info("encoding prompts...")
 
             with timer.time_section("total_encoding") if timer else nullcontext():
@@ -576,7 +566,6 @@ class Flux1KontextPipeline:
                     negative_prompt_2=negative_prompt_2,
                     num_images_per_prompt=num_images_per_prompt,
                     cfg_enabled=cfg_enabled,
-                    clip_skip=clip_skip,
                 )
                 _, prompt_sequence_length, _ = prompt_embeds.shape
                 text_ids = torch.zeros([prompt_sequence_length, 3])
@@ -595,7 +584,10 @@ class Flux1KontextPipeline:
                         # _, image_width, image_height = min(
                         #     (abs(aspect_ratio - w / h), w, h) for w, h in PREFERRED_KONTEXT_RESOLUTIONS
                         # )
-                        image_width, image_height = self.preferred_kontext_resolution[0], self.preferred_kontext_resolution[1]
+                        image_width, image_height = (
+                            self.preferred_kontext_resolution[0],
+                            self.preferred_kontext_resolution[1],
+                        )
                     image_width = image_width // multiple_of * multiple_of
                     image_height = image_height // multiple_of * multiple_of
                     image = self._image_processor.resize(image, image_height, image_width)
@@ -639,6 +631,9 @@ class Flux1KontextPipeline:
                 if self._with_guidance_embeds
                 else None
             )
+            # Add guidance value for negative promts as well
+            if cfg_enabled:
+                guidance = torch.concat([guidance, guidance])
 
             ids = torch.cat((text_ids, latent_ids), dim=0)
             rope_cos, rope_sin = self._pos_embed.forward(ids)
@@ -816,8 +811,12 @@ class Flux1KontextPipeline:
                     tt_timestep_list = []
                     tt_sigma_difference_list = []
                     for submesh_device in self._submesh_devices:
+                        timestep_shape = [prompt_count * num_images_per_prompt, 1]
+                        # Adjusting shape to account for negative prompts
+                        if cfg_enabled:
+                            timestep_shape[0] *= 2
                         tt_timestep = ttnn.full(
-                            [1, 1],
+                            timestep_shape,
                             fill_value=t,
                             layout=ttnn.TILE_LAYOUT,
                             dtype=ttnn.float32,
@@ -912,10 +911,11 @@ class Flux1KontextPipeline:
         submesh_index: int,
     ) -> ttnn.Tensor:
         if cfg_enabled and not self._parallel_config.cfg_parallel.factor > 1:
-            latent = ttnn.concat([latent, latent])
-
+            latents_model_input = ttnn.concat([latent, latent])
+        else:
+            latents_model_input = latent
         noise_pred = self.transformers[submesh_index].forward(
-            spatial=latent,
+            spatial=latents_model_input,
             prompt=prompt,
             pooled=pooled,
             timestep=timestep,
@@ -1088,25 +1088,24 @@ class Flux1KontextPipeline:
         prompt_1: list[str],
         prompt_2: list[str],
         num_images_per_prompt: int,
-        clip_skip: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         timer = self.timing_collector
+        prompt_2 = prompt_2 or prompt_1
 
         tokenizer_max_length = self._tokenizer_1.model_max_length
-
         with timer.time_section("clip_encoding") if timer else nullcontext():
-            prompt_1_embeds, pooled_prompt_1_embeds = _get_clip_prompt_embeds(
+            # We only use the pooled prompt output from the CLIPTextModel
+            _, pooled_prompt_embeds = _get_clip_prompt_embeds(
                 prompts=prompt_1,
                 num_images_per_prompt=num_images_per_prompt,
                 tokenizer=self._tokenizer_1,
                 text_encoder=self._text_encoder_1,
                 sequence_length=tokenizer_max_length,
                 mesh_device=self.encoder_device,
-                clip_skip=clip_skip,
             )
 
         with timer.time_section("t5_encoding") if timer else nullcontext():
-            t5_prompt_embeds = _get_t5_prompt_embeds(
+            prompt_embeds = _get_t5_prompt_embeds(
                 prompts=prompt_2,
                 text_encoder=self._t5_text_encoder,
                 tokenizer=self._t5_tokenizer,
@@ -1116,9 +1115,6 @@ class Flux1KontextPipeline:
                 mesh_device=self.encoder_device,
                 embedding_dim=self._joint_attention_dim,
             )
-
-        prompt_embeds = t5_prompt_embeds
-        pooled_prompt_embeds = pooled_prompt_1_embeds
 
         return prompt_embeds, pooled_prompt_embeds
 
@@ -1131,13 +1127,11 @@ class Flux1KontextPipeline:
         negative_prompt_2: list[str] | None,
         num_images_per_prompt: int,
         cfg_enabled: bool,
-        clip_skip: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         prompt_embeds, pooled_prompt_embeds = self._encode_prompts_partial(
             prompt_1=prompt_1,
             prompt_2=prompt_2,
             num_images_per_prompt=num_images_per_prompt,
-            clip_skip=clip_skip,
         )
 
         if not cfg_enabled:
@@ -1147,7 +1141,6 @@ class Flux1KontextPipeline:
             prompt_1=negative_prompt_1,
             prompt_2=negative_prompt_2,
             num_images_per_prompt=num_images_per_prompt,
-            clip_skip=clip_skip,
         )
 
         prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
