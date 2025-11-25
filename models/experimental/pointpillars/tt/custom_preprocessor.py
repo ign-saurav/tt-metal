@@ -8,7 +8,7 @@ import torch
 from ttnn.model_preprocessing import ModuleArgs, fold_batch_norm2d_into_conv2d
 import torch
 import ttnn
-from models.experimental.pointpillars.reference.model.pointpillars import PillarEncoder, Backbone
+from models.experimental.pointpillars.reference.model.pointpillars import PillarEncoder, Backbone, Neck
 from ttnn.dot_access import make_dot_access_dict
 
 
@@ -26,8 +26,21 @@ def infer_module_args(model):
         (
             torch.nn.Conv1d,
             torch.nn.Conv2d,
+            torch.nn.ConvTranspose2d,
         ),
     ):
+        if (model, torch.nn.ConvTranspose2d):
+            return ConvArgs(
+                in_channels=model.in_channels,
+                out_channels=model.out_channels,
+                kernel_size=model.kernel_size,
+                stride=model.stride,
+                padding=model.padding,
+                dilation=model.dilation,
+                groups=model.groups,
+                padding_mode=model.padding_mode,
+                output_padding=model.output_padding,
+            )
         return ConvArgs(
             in_channels=model.in_channels,
             out_channels=model.out_channels,
@@ -68,6 +81,30 @@ def fold_batch_norm1d_into_conv1d(conv, bn):
 
     # For 1D convolutions, bias shape should be [1, 1, -1] instead of [1, 1, 1, -1]
     bias = bias.reshape(1, 1, 1, -1)
+
+    return weight, bias
+
+
+def fold_batch_norm2d_into_conv_transpose2d(conv_transpose, bn):
+    """Fold BatchNorm2d into ConvTranspose2d weights."""
+    if not bn.track_running_stats:
+        raise RuntimeError("BatchNorm2d must have track_running_stats=True to be folded into ConvTranspose2d")
+
+    weight = conv_transpose.weight  # Shape: [in_channels, out_channels, kernel_h, kernel_w]
+    bias = conv_transpose.bias
+    running_mean = bn.running_mean
+    running_var = bn.running_var
+    eps = bn.eps
+    scale = bn.weight
+    shift = bn.bias
+
+    # For ConvTranspose2d, scale along dimension 1 (out_channels), not dimension 0
+    weight = weight * (scale / torch.sqrt(running_var + eps))[None, :, None, None]
+
+    if bias is not None:
+        bias = (bias - running_mean) * (scale / torch.sqrt(running_var + eps)) + shift
+    else:
+        bias = shift - running_mean * (scale / torch.sqrt(running_var + eps))
 
     return weight, bias
 
@@ -117,6 +154,29 @@ def _extract_pillar_encoder(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=
     return parameters
 
 
+def _extract_neck(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
+    """Extract and preprocess Neck parameters with fused BatchNorm."""
+    assert isinstance(model, Neck)
+
+    for i in range(len(model.decoder_blocks)):
+        block = model.decoder_blocks[i]
+        parameters[f"decoder_{i}"] = {}
+
+        # Extract ConvTranspose2d and BatchNorm2d
+        conv_transpose_layer = block[0]
+        bn_layer = block[1]
+
+        # Use the ConvTranspose2d-specific folding function
+        weight, bias = fold_batch_norm2d_into_conv_transpose2d(conv_transpose_layer, bn_layer)
+
+        parameters[f"decoder_{i}"]["weight"] = ttnn.from_torch(weight, dtype=dtype, mesh_mapper=mesh_mapper)
+        bias = bias.reshape((1, 1, 1, -1))
+        parameters[f"decoder_{i}"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
+        parameters[f"decoder_{i}"]["conv_args"] = infer_module_args(conv_transpose_layer)
+
+    return parameters
+
+
 def custom_preprocessor(
     model, name, ttnn_module_args, convert_to_ttnn, custom_preprocessor_func=None, mesh_mapper=None
 ):
@@ -134,6 +194,10 @@ def custom_preprocessor(
         parameters["backbone"] = _extract_backbone(
             model, parameters["backbone"], dtype=weight_dtype, mesh_mapper=mesh_mapper
         )
+
+    elif isinstance(model, Neck):
+        parameters["neck"] = {}
+        parameters["neck"] = _extract_neck(model, parameters["neck"], dtype=weight_dtype, mesh_mapper=mesh_mapper)
 
     return parameters
 
