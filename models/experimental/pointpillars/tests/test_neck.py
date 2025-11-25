@@ -90,7 +90,7 @@ def test_neck(device, in_channels, upsample_strides, out_channels, reset_seeds):
         in_channels=in_channels,
         upsample_strides=upsample_strides,
         out_channels=out_channels,
-        parameters=parameters,
+        parameters=parameters["neck"],
         device=device,
     )
 

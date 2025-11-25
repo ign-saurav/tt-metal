@@ -86,7 +86,7 @@ def test_head(device, in_channel, n_anchors, n_classes, reset_seeds):
         in_channel=in_channel,
         n_anchors=n_anchors,
         n_classes=n_classes,
-        parameters=parameters,
+        parameters=parameters["head"],
         device=device,
     )
 
