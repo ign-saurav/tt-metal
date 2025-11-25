@@ -46,10 +46,12 @@ def create_siglip_vision_embedding_preprocessor(device, weight_dtype=ttnn.bfloat
 
             out_channels, in_channels, kh, kw = weight.shape  # 1152, 3, 14, 14
 
-            # Reshape to [kh * kw * in_channels, out_channels] for linear
-            # This matches the unfolded input format: 14*14*3 = 588
-            weight_2d = weight.permute(2, 3, 1, 0)  # [14, 14, 3, 1152]
-            weight_2d = weight_2d.reshape(kh * kw * in_channels, out_channels)  # [588, 1152]
+            # CRITICAL FIX: torch.nn.Unfold orders elements as [C, kh, kw] when flattened
+            # The correct transformation is permute(1, 2, 3, 0) to match Unfold's order
+            # This gives: [in_channels, kh, kw, out_channels] -> reshape to [in_channels * kh * kw, out_channels]
+            # This matches the unfolded input format where channels vary fastest, then height, then width
+            weight_2d = weight.permute(1, 2, 3, 0)  # [3, 14, 14, 1152]
+            weight_2d = weight_2d.reshape(in_channels * kh * kw, out_channels)  # [588, 1152]
 
             # Pad to nearest 32 for TILE_LAYOUT: 588 -> 608
             from models.common.utility_functions import nearest_32
@@ -190,6 +192,8 @@ def test_siglip_vision_embedding(device, input_dtype, weight_dtype):
     tt_siglip_vision_embedding_out = tt_siglip_vision_embedding(all_pixel_values, position_embeddings)
 
     tt_torch_output = tt2torch_tensor(tt_siglip_vision_embedding_out)
-    does_pass, pcc_message = check_with_pcc(torch_output, tt_torch_output, 0.90)
+    tt_torch_output = tt_torch_output.reshape(torch_output.shape)
+
+    does_pass, pcc_message = check_with_pcc(torch_output, tt_torch_output, 0.99)
     logger.info(f"PCC: {pcc_message}")
-    assert does_pass, f"PCC check failed"
+    assert does_pass, f"PCC check failed: {pcc_message}"
