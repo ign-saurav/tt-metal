@@ -97,6 +97,7 @@ class PillarEncoder(nn.Module):
 
         # 5. embedding
         features = features.permute(0, 2, 1).contiguous()  # (p1 + p2 + ... + pb, 9, num_points)
+        features = features.to(dtype=torch.bfloat16)
         features = F.relu(self.bn(self.conv(features)))  # (p1 + p2 + ... + pb, out_channels, num_points)
         pooling_features = torch.max(features, dim=-1)[0]  # (p1 + p2 + ... + pb, out_channels)
 
@@ -108,7 +109,7 @@ class PillarEncoder(nn.Module):
             cur_coors = coors_batch[cur_coors_idx, :]
             cur_features = pooling_features[cur_coors_idx]
 
-            canvas = torch.zeros((self.x_l, self.y_l, self.out_channel), dtype=torch.float32, device=device)
+            canvas = torch.zeros((self.x_l, self.y_l, self.out_channel), dtype=torch.bfloat16, device=device)
             canvas[cur_coors[:, 1], cur_coors[:, 2]] = cur_features
             canvas = canvas.permute(2, 1, 0).contiguous()
             batched_canvas.append(canvas)
@@ -391,7 +392,7 @@ class PointPillars(nn.Module):
         #                              coors_batch: (p1 + p2 + ... + pb, 1 + 3),
         #                              num_points_per_pillar: (p1 + p2 + ... + pb, ), (b: batch size)
         pillars, coors_batch, npoints_per_pillar = self.pillar_layer(batched_pts)
-
+        pillars = pillars.to(dtype=torch.bfloat16)
         # pillars: (p1 + p2 + ... + pb, num_points, c), c = 4
         # coors_batch: (p1 + p2 + ... + pb, 1 + 3)
         # npoints_per_pillar: (p1 + p2 + ... + pb, )
@@ -408,6 +409,8 @@ class PointPillars(nn.Module):
         # bbox_pred: (bs, n_anchors*7, 248, 216)
         # bbox_dir_cls_pred: (bs, n_anchors*2, 248, 216)
         bbox_cls_pred, bbox_pred, bbox_dir_cls_pred = self.head(x)
+
+        return bbox_cls_pred, bbox_pred, bbox_dir_cls_pred
 
         # anchors
         device = bbox_cls_pred.device

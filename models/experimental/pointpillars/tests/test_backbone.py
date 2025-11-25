@@ -85,7 +85,7 @@ def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, r
         out_channels=out_channels,
         layer_nums=layer_nums,
         layer_strides=layer_strides,
-        parameters=parameters,
+        parameters=parameters["backbone"],
         device=device,
     )
 

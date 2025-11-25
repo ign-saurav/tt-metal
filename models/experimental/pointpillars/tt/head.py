@@ -20,8 +20,8 @@ class TtHead:
         self.n_classes = n_classes
         # Initialize three parallel 1x1 convolution branches
         self.conv_cls = TtPointPillarsConv2D(
-            conv=parameters["head"]["conv_cls"]["conv_args"],
-            conv_pth=parameters["head"]["conv_cls"],
+            conv=parameters["conv_cls"]["conv_args"],
+            conv_pth=parameters["conv_cls"],
             device=device,
             activation=None,  # No activation for detection heads
             activation_dtype=dtype,
@@ -32,8 +32,8 @@ class TtHead:
         )
 
         self.conv_reg = TtPointPillarsConv2D(
-            conv=parameters["head"]["conv_reg"]["conv_args"],
-            conv_pth=parameters["head"]["conv_reg"],
+            conv=parameters["conv_reg"]["conv_args"],
+            conv_pth=parameters["conv_reg"],
             device=device,
             activation=None,
             activation_dtype=dtype,
@@ -44,8 +44,8 @@ class TtHead:
         )
 
         self.conv_dir_cls = TtPointPillarsConv2D(
-            conv=parameters["head"]["conv_dir_cls"]["conv_args"],
-            conv_pth=parameters["head"]["conv_dir_cls"],
+            conv=parameters["conv_dir_cls"]["conv_args"],
+            conv_pth=parameters["conv_dir_cls"],
             device=device,
             activation=None,
             activation_dtype=dtype,
