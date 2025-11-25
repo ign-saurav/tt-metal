@@ -8,7 +8,7 @@ import torch
 from ttnn.model_preprocessing import ModuleArgs, fold_batch_norm2d_into_conv2d
 import torch
 import ttnn
-from models.experimental.pointpillars.reference.model.pointpillars import PillarEncoder, Backbone, Neck
+from models.experimental.pointpillars.reference.model.pointpillars import PillarEncoder, Backbone, Neck, Head
 from ttnn.dot_access import make_dot_access_dict
 
 
@@ -177,6 +177,36 @@ def _extract_neck(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
     return parameters
 
 
+def _extract_head(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
+    """Extract and preprocess Head parameters."""
+    assert isinstance(model, Head)
+
+    # Process conv_cls
+    parameters["conv_cls"] = {}
+    parameters["conv_cls"]["weight"] = ttnn.from_torch(model.conv_cls.weight, dtype=dtype, mesh_mapper=mesh_mapper)
+    bias = model.conv_cls.bias.reshape((1, 1, 1, -1))
+    parameters["conv_cls"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
+    parameters["conv_cls"]["conv_args"] = infer_module_args(model.conv_cls)
+
+    # Process conv_reg
+    parameters["conv_reg"] = {}
+    parameters["conv_reg"]["weight"] = ttnn.from_torch(model.conv_reg.weight, dtype=dtype, mesh_mapper=mesh_mapper)
+    bias = model.conv_reg.bias.reshape((1, 1, 1, -1))
+    parameters["conv_reg"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
+    parameters["conv_reg"]["conv_args"] = infer_module_args(model.conv_reg)
+
+    # Process conv_dir_cls
+    parameters["conv_dir_cls"] = {}
+    parameters["conv_dir_cls"]["weight"] = ttnn.from_torch(
+        model.conv_dir_cls.weight, dtype=dtype, mesh_mapper=mesh_mapper
+    )
+    bias = model.conv_dir_cls.bias.reshape((1, 1, 1, -1))
+    parameters["conv_dir_cls"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
+    parameters["conv_dir_cls"]["conv_args"] = infer_module_args(model.conv_dir_cls)
+
+    return parameters
+
+
 def custom_preprocessor(
     model, name, ttnn_module_args, convert_to_ttnn, custom_preprocessor_func=None, mesh_mapper=None
 ):
@@ -198,6 +228,10 @@ def custom_preprocessor(
     elif isinstance(model, Neck):
         parameters["neck"] = {}
         parameters["neck"] = _extract_neck(model, parameters["neck"], dtype=weight_dtype, mesh_mapper=mesh_mapper)
+
+    elif isinstance(model, Head):
+        parameters["head"] = {}
+        parameters["head"] = _extract_head(model, parameters["head"], dtype=weight_dtype, mesh_mapper=mesh_mapper)
 
     return parameters
 
