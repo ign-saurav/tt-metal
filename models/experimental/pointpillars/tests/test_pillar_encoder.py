@@ -24,29 +24,55 @@ def test_pillar_encoder(device, voxel_size, point_cloud_range, in_channel, out_c
     torch.manual_seed(0)
 
     # Create reference model
-    torch_model = PillarEncoder(voxel_size, point_cloud_range, in_channel, out_channel).eval()
+    torch_model = PillarEncoder(voxel_size, point_cloud_range, in_channel, out_channel)
 
-    # Generate test inputs
+    # Load pretrained weights from .pth file
+    checkpoint = torch.load("epoch_160.pth", map_location="cpu")
+
+    # Extract PillarEncoder weights from the full model checkpoint
+    # The exact key depends on how your checkpoint is structured
+    if "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    elif "model" in checkpoint:
+        state_dict = checkpoint["model"]
+    else:
+        state_dict = checkpoint
+
+    # Filter only PillarEncoder weights (adjust prefix based on your model structure)
+    pillar_encoder_state_dict = {}
+    prefix = "pillar_encoder."  # Adjust this based on your model's structure
+    for key, value in state_dict.items():
+        if key.startswith(prefix):
+            new_key = key.replace(prefix, "")
+            pillar_encoder_state_dict[new_key] = value
+
+    # Load the filtered weights into your model
+    torch_model.load_state_dict(pillar_encoder_state_dict)
+    torch_model.eval()
+
+    # Rest of the test remains the same
     num_pillars = 6169
     num_points = 32
     num_features = 4
 
-    pillars = torch.randn(num_pillars, num_points, num_features, dtype=torch.bfloat16)
-    coors_batch = torch.randint(0, 4, (num_pillars, 4), dtype=torch.long)
-    coors_batch[:, 0] = torch.randint(0, 2, (num_pillars,))
-    npoints_per_pillar = torch.randint(1, num_points + 1, (num_pillars,), dtype=torch.long)
+    # pillars = torch.randn(num_pillars, num_points, num_features, dtype=torch.bfloat16)
+    # coors_batch = torch.randint(0, 4, (num_pillars, 4), dtype=torch.long)
+    # coors_batch[:, 0] = torch.randint(0, 2, (num_pillars,))
+    # npoints_per_pillar = torch.randint(1, num_points + 1, (num_pillars,), dtype=torch.long)
 
-    # Get reference output
+    pillars = torch.load("pillars.pt")
+
+    coors_batch = torch.load("coors_batch.pt")
+    npoints_per_pillar = torch.load("npoints.pt")
+
     torch_output = torch_model(pillars, coors_batch, npoints_per_pillar)
 
-    # Preprocess model parameters using the custom preprocessor
     parameters = preprocess_model_parameters(
         initialize_model=lambda: torch_model,
         custom_preprocessor=create_custom_mesh_preprocessor(mesh_mapper=None),
         device=device,
     )
 
-    # Create TTNN model with preprocessed parameters
     tt_model = TtPillarEncoder(
         device=device,
         voxel_size=voxel_size,
@@ -56,12 +82,8 @@ def test_pillar_encoder(device, voxel_size, point_cloud_range, in_channel, out_c
         parameters=parameters,
     )
 
-    # Get TTNN output
     tt_output = tt_model.forward(pillars, coors_batch, npoints_per_pillar)
-
     tt_output = tt2torch_tensor(tt_output)
-    tt_output.permute(0, 3, 2, 1)
-    # Compare outputs
     passing, pcc = comp_pcc(torch_output, tt_output, 0.99)
     logger.info(f"PCC: {pcc}")
     assert passing, f"PCC check failed: {pcc}"

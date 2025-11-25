@@ -1,9 +1,21 @@
 import ttnn
 import torch
+from models.experimental.pointpillars.tt.utils import TtPointPillarsConv1D
 
 
 class TtPillarEncoder:
-    def __init__(self, device, voxel_size, point_cloud_range, in_channel, out_channel, parameters):
+    def __init__(
+        self,
+        device,
+        voxel_size,
+        point_cloud_range,
+        in_channel,
+        out_channel,
+        parameters,
+        shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+        deallocate_activation=True,
+        dtype=ttnn.bfloat16,
+    ):
         self.device = device
         self.out_channel = out_channel
         self.vx, self.vy = voxel_size[0], voxel_size[1]
@@ -11,11 +23,15 @@ class TtPillarEncoder:
         self.y_offset = voxel_size[1] / 2 + point_cloud_range[1]
         self.x_l = int((point_cloud_range[3] - point_cloud_range[0]) / voxel_size[0])
         self.y_l = int((point_cloud_range[4] - point_cloud_range[1]) / voxel_size[1])
-
-        # Access nested parameters from the helper function
-        self.conv_weight = parameters["conv"]["weight"]
-        self.bn_scale = parameters["conv"]["bn_scale"]
-        self.bn_shift = parameters["conv"]["bn_shift"]
+        self.shard_layout = shard_layout
+        self.conv1d = TtPointPillarsConv1D(
+            parameters["pillar_encoder"]["conv_args"]["conv"],
+            parameters["pillar_encoder"]["conv"],
+            device=device,
+            activation=None,
+            shard_layout=self.shard_layout,
+            deallocate_activation=True,
+        )
 
     def forward(self, pillars, coors_batch, npoints_per_pillar):
         """
@@ -92,41 +108,20 @@ class TtPillarEncoder:
         mask = ttnn.unsqueeze(mask, dim=2)
 
         features_tt = features_tt * mask
-        # Convert to TTNN for conv operation
-        features_tt = ttnn.permute(features_tt, (0, 2, 1))
+        ttnn.deallocate(mask)
 
         # 5. Apply conv1d as linear (treating each pillar independently)
-        # Reshape: (num_pillars, 9, num_points) -> (num_pillars * num_points, 9)
-        num_pillars, in_ch, num_points = features_tt.shape
-        features_reshaped = ttnn.reshape(ttnn.permute(features_tt, (0, 2, 1)), (num_pillars * num_points, in_ch))
+        num_pillars, num_points, in_ch = features_tt.shape
 
-        # Linear operation
-        features_tt = ttnn.linear(
-            features_reshaped,
-            self.conv_weight,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            dtype=ttnn.bfloat16,
-        )
-
-        # Apply batch norm (fused as scale + shift)
-        features_tt = ttnn.multiply(features_tt, self.bn_scale, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        features_tt = ttnn.add(features_tt, self.bn_shift, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        features_tt = self.conv1d(features_tt)
 
         # Apply ReLU
+        features_tt = ttnn.to_memory_config(features_tt, ttnn.DRAM_MEMORY_CONFIG)
         features_tt = ttnn.relu(features_tt, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        # 6. Max pooling
-        features_tt = ttnn.max_pool2d(  # Shape([1, 1, 6169, 64])
-            input_tensor=features_tt,
-            batch_size=int(coors_batch[-1, 0].item()) + 1,
-            input_h=num_pillars,
-            input_w=num_points,
-            channels=self.out_channel,
-            kernel_size=[1, 32],
-            stride=[1, 1],
-            padding=[0, 0],
-            dilation=[1, 1],
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
+
+        features_tt = ttnn.reshape(features_tt, (num_pillars, num_points, features_tt.shape[-1]))
+        features_tt = ttnn.permute(features_tt, (0, 2, 1))
+        features_tt = ttnn.max(features_tt, dim=-1)
 
         pooling_features = ttnn.to_torch(features_tt)
         ttnn.deallocate(features_tt)
