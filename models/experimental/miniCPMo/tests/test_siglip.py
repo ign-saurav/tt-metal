@@ -7,14 +7,21 @@ import os
 from models.experimental.miniCPMo.reference.modeling_minicpmo import MiniCPMO
 from models.experimental.miniCPMo.reference.configuration_minicpm import MiniCPMOConfig
 
+from loguru import logger
+from models.common.utility_functions import (
+    tt2torch_tensor,
+)
+from tests.ttnn.utils_for_testing import check_with_pcc
+
 
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from models.experimental.miniCPMo.reference.tokenization_minicpmo_fast import MiniCPMOTokenizerFast
 
-from models.experimental.minicpm_o_2_6.tt.ttnn_siglip_vision import TtSiglipVisionTransformer
+from models.experimental.miniCPMo.tt.ttnn_siglip_vision import TtSiglipVisionTransformer
 
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_weight
 from models.experimental.miniCPMo.tests.test_multi_head_attn import create_self_attn_preprocessor
+from models.experimental.miniCPMo.tests.test_siglip_vision_emb import create_siglip_vision_embedding_preprocessor
 
 
 def load_or_create(path, shape, dtype):
@@ -123,18 +130,21 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
     tgt_sizes = load_or_create("tgt_sizes.pt", (1, 2), torch.int32)
 
     vpm = model.vpm
-    # torch_output = vpm.forward(all_pixel_values, patch_attn_mask, tgt_sizes)
-    print(vpm)
+    torch_output = vpm.forward(all_pixel_values, patch_attn_mask, tgt_sizes)
 
     # Get the state dict of vpm
     vpm_state_dict = vpm.state_dict()
-    import pdb
 
-    pdb.set_trace()
-    print(f"VPM state dict has {len(vpm_state_dict)} parameters")
-
+    embeddings_model = model.vpm.embeddings
+    parameters = preprocess_model_parameters(
+        initialize_model=lambda: embeddings_model,
+        custom_preprocessor=create_siglip_vision_embedding_preprocessor(device, weight_dtype),
+        device=device,
+    )
     tt_model = TtSiglipVisionTransformer(
         mesh_device=device,
+        config=config,
+        parameters=parameters,
         hidden_size=config.vision_config.hidden_size,  # 1152
         num_attention_heads=config.vision_config.num_attention_heads,  # 16
         num_hidden_layers=config.vision_config.num_hidden_layers,  # 28
@@ -143,43 +153,63 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
         num_channels=config.vision_config.num_channels,  # 3
     )
     tt_model.load_weights(vpm_state_dict)
-    embeddings_model = model.vpm.embeddings
-    embeddings = embeddings_model.forward(all_pixel_values, patch_attn_mask, tgt_sizes)
 
-    tt_embeddings = ttnn.from_torch(
-        embeddings, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype, memory_config=ttnn.DRAM_MEMORY_CONFIG
+    # After getting position_embedding_weight from parameters
+    position_embedding_weight = parameters["position_embedding"]["weight"]
+
+    # Compute position IDs on CPU (bucketing logic)
+    batch_size = all_pixel_values.size(0)
+    max_im_h, max_im_w = all_pixel_values.size(2), all_pixel_values.size(3)
+    patch_size = embeddings_model.patch_size
+    max_nb_patches_h = max_im_h // patch_size
+    max_nb_patches_w = max_im_w // patch_size
+
+    num_patches_per_side = embeddings_model.num_patches_per_side
+    boundaries = torch.arange(1 / num_patches_per_side, 1.0, 1 / num_patches_per_side)
+
+    position_ids = torch.full(
+        size=(batch_size, max_nb_patches_h * max_nb_patches_w),
+        fill_value=0,
     )
-    tt_model_output = tt_model.forward(tt_embeddings)
 
-    # You can also access specific keys, e.g.:
-    # print(list(vpm_state_dict.keys())[:5])  # Print first 5 keys
-    # resampler_out = resampler(vision_embedding, tgt_sizes)
-    # parameters = preprocess_model_parameters(
-    #     initialize_model=lambda: resampler,
-    #     custom_preprocessor=create_resampler_preprocessor(device, weight_dtype),
-    #     device=device,
-    # )
-    # tt_model = TTResampler(
-    #     num_queries=64,
-    #     embed_dim=3584,
-    #     num_heads=28,
-    #     kv_dim=1152,
-    #     parameters=parameters,
-    #     device=device,
-    #     input_dtype=input_dtype,
-    # )
-    # tt_vision_embedding = ttnn.from_torch(
-    #     vision_embedding,
-    #     device=device,
-    #     layout=ttnn.TILE_LAYOUT,
-    #     dtype=input_dtype,
-    #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
-    # )
-    # tt_resampler_out = tt_model(tt_vision_embedding, tgt_sizes)
+    # Compute position IDs for each batch
+    for batch_idx, p_attn_mask in enumerate(patch_attn_mask):
+        if tgt_sizes is not None:
+            nb_patches_h = tgt_sizes[batch_idx][0]
+            nb_patches_w = tgt_sizes[batch_idx][1]
+        else:
+            nb_patches_h = p_attn_mask[:, 0].sum()
+            nb_patches_w = p_attn_mask[0].sum()
 
-    # tt_torch_output = tt2torch_tensor(tt_resampler_out)
+        fractional_coords_h = torch.arange(0, 1 - 1e-6, 1 / nb_patches_h)
+        fractional_coords_w = torch.arange(0, 1 - 1e-6, 1 / nb_patches_w)
 
-    # tt_torch_output = tt_torch_output.reshape(resampler_out.shape)
-    # does_pass, pcc_message = check_with_pcc(resampler_out, tt_torch_output, 0.99)
-    # logger.info(f"PCC: {pcc_message}")
-    # assert does_pass, f"PCC check failed"
+        bucket_coords_h = torch.bucketize(fractional_coords_h, boundaries, right=True)
+        bucket_coords_w = torch.bucketize(fractional_coords_w, boundaries, right=True)
+
+        pos_ids = (bucket_coords_h[:, None] * num_patches_per_side + bucket_coords_w).flatten()
+        position_ids[batch_idx][p_attn_mask.view(-1).cpu()] = pos_ids
+
+    # Convert position_ids to TTNN tensor (must be uint32 for embedding operation)
+    position_ids_ttnn = ttnn.from_torch(
+        position_ids,
+        dtype=ttnn.uint32,  # Important: embedding requires uint32 indices
+        device=device,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+    )
+
+    # Use ttnn.embedding to index into the position embedding weight table
+    position_embeddings = ttnn.embedding(
+        position_ids_ttnn,
+        position_embedding_weight,
+        layout=ttnn.TILE_LAYOUT,
+    )
+
+    tt_model_output = tt_model.forward(all_pixel_values, position_embeddings)
+
+    tt_model_output = tt2torch_tensor(tt_model_output)
+
+    tt_model_output = tt_model_output.reshape(torch_output.last_hidden_state.shape)
+    does_pass, pcc_message = check_with_pcc(tt_model_output, torch_output.last_hidden_state, 0.99)
+    logger.info(f"PCC: {pcc_message}")
+    assert does_pass, f"PCC check failed"
