@@ -141,13 +141,16 @@ def _prepare_fpn_parameters(model: RefFPN, example_feats, example_outputs, devic
             weight_laterals.append(SimpleNamespace(conv=SimpleNamespace(**conv_blob)))
 
     # Build FPN conv args using the reference outputs to derive input shapes.
-    prev_shape = None
+    if not example_outputs:
+        raise ValueError("example_outputs must contain at least one tensor to infer FPN shapes.")
+
+    num_lateral = len(example_feats)
     for idx, fpn_conv in enumerate(model.fpn_convs):
-        if idx < len(example_feats):
+        if idx < num_lateral:
             shape = example_outputs[idx].shape
-            prev_shape = shape
         else:
-            shape = prev_shape
+            prev_idx = max(idx - 1, 0)
+            shape = example_outputs[prev_idx].shape
         conv_args.fpn_convs.append(_make_conv_arg(fpn_conv, shape))
         if str(idx) in parameters.fpn["fpn_convs"]:
             conv_blob = parameters.fpn["fpn_convs"][str(idx)]["conv"]
@@ -203,6 +206,10 @@ def test_bevformerv2_fpn_matches_reference(device, reset_seeds):
     ttnn_outputs = tt_fpn(list(tt_c_feats))
 
     # Compare each FPN level with PCC.
+    assert len(torch_outputs) == len(
+        ttnn_outputs
+    ), f"Mismatch between reference ({len(torch_outputs)}) and TTNN ({len(ttnn_outputs)}) FPN levels"
+
     for level_idx, (torch_level, tt_level) in enumerate(zip(torch_outputs, ttnn_outputs)):
         n, c, h, w = torch_level.shape
         converted = ttnn.to_torch(tt_level)
