@@ -2,22 +2,20 @@ import torch
 import ttnn
 
 
-from models.experimental.BevDepth.bevdepth.exps.nuscenes.mv.bev_depth_lss_r50_256x704_128x128_24e_2key import (
-    BEVDepthLightningModel,
-)
-from models.experimental.BevDepth.tt.bev_depth_head import TtBEVDepthHead
+from ref_bev_depth_task_head import BEVDepthHead
+from models.experimental.BevDepth.tt.bev_depth_task_head import TtBEVDepthHead
 
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 device = ttnn.open_device(device_id=0, l1_small_size=32768)
 
-ref_head = BEVDepthLightningModel()
-ref_head.load_weights("../resources/bev_depth_lss_r50_256x704_128x128_24e_2key.pth")
+ref_head = BEVDepthHead()
+ref_head.load_checkpoint("../reference/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth")
 ref_head.eval()
 
 # Instantiate the model
 ttnn_head = TtBEVDepthHead(device)
-ttnn_head.load_weights("../resources/bev_depth_lss_r50_256x704_128x128_24e_2key.pth")
+ttnn_head.load_checkpoint("../reference/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth")
 
 # Generate random input with shape (2, 64, 128, 128)
 torch.manual_seed(0)

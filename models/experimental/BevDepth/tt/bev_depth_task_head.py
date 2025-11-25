@@ -111,7 +111,7 @@ class TtBEVDepthHead:
         x = x.reshape(batch_size, out_h, out_w, 64)
         return [head(x) for head in self.task_heads]
 
-    def load_weights(self, weight_path):
+    def load_checkpoint(self, weight_path):
         ckpt = torch.load(weight_path, map_location="cpu")
         state = ckpt.get("state_dict", ckpt)
 
