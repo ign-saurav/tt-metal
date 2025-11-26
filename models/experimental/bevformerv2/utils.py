@@ -18,6 +18,7 @@ from torch.nn import Module
 _BEVFORMERV2_ROOT = Path(__file__).resolve().parent
 _DEMO_DIR = _BEVFORMERV2_ROOT / "demo"
 _DEFAULT_RESNET50_BACKBONE = _DEMO_DIR / "resnet50_backbone.pth"
+_DEFAULT_FPN_WEIGHTS = _DEMO_DIR / "fpn_weights.pth"
 
 
 def _ensure_checkpoint_path(path: Optional[Path], default_path: Path) -> Path:
@@ -110,6 +111,30 @@ def load_resnet50_backbone_weights(
         model,
         checkpoint_path=checkpoint_path,
         default_checkpoint_path=_DEFAULT_RESNET50_BACKBONE,
+        map_location=map_location,
+        state_dict_key=state_dict_key,
+        strip_prefixes=strip_prefixes,
+        strict=strict,
+    )
+
+
+def load_fpn_weights(
+    model: Module,
+    *,
+    checkpoint_path: Optional[Path] = None,
+    map_location: str | torch.device = "cpu",
+    state_dict_key: Optional[str] = None,
+    strip_prefixes: Optional[Iterable[str]] = None,
+    strict: bool = True,
+) -> Tuple[Tuple[str, ...], Tuple[str, ...]]:
+    """
+    Convenience helper to load the demo FPN weights.
+    """
+
+    return load_module_weights(
+        model,
+        checkpoint_path=checkpoint_path,
+        default_checkpoint_path=_DEFAULT_FPN_WEIGHTS,
         map_location=map_location,
         state_dict_key=state_dict_key,
         strip_prefixes=strip_prefixes,

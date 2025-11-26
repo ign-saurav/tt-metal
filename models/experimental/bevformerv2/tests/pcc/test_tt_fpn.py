@@ -13,7 +13,7 @@ from models.experimental.bevformerv2.reference.fpn import FPN as RefFPN
 from models.experimental.bevformerv2.reference.resnet import resnet50_mmdet, ResNet
 from models.experimental.bevformerv2.tt.tt_fpn import TtFPN
 from models.experimental.bevformerv2.tt.tt_resnet import TtResNet50_MMD_C345
-from models.experimental.bevformerv2.utils import load_resnet50_backbone_weights
+from models.experimental.bevformerv2.utils import load_resnet50_backbone_weights, load_fpn_weights
 from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (
@@ -179,9 +179,13 @@ def test_bevformerv2_fpn_matches_reference(device, reset_seeds):
     fpn = RefFPN(
         in_channels=[512, 1024, 2048],
         out_channels=256,
-        num_outs=4,
+        num_outs=5,
         add_extra_convs="on_output",
     )
+    # Load pretrained weights from demo directory
+    # Use strict=False to handle potential extra keys in the weights file
+    load_fpn_weights(fpn)
+    fpn.eval()
 
     torch_input = torch.randn(2, 3, 256, 256)
     with torch.no_grad():
