@@ -48,6 +48,10 @@ class Conv2d(Module):
             (1024, 1024, 256, 128): 16,
             (1024, 1024, 128, 128): 16,
             (1024, 1024, 128, 3): 8,
+            (1024, 1024, 3, 128): 8,
+            (512, 512, 128, 256): 4,
+            (256, 256, 256, 512): 8,
+            (128, 128, 512, 32): 8,
         },
         (4, 4): {
             (512, 512, 512, 64): 16,
@@ -61,6 +65,10 @@ class Conv2d(Module):
             (1024, 1024, 256, 128): 16,
             (1024, 1024, 128, 128): 16,
             (1024, 1024, 128, 3): 8,
+            (1024, 1024, 3, 128): 8,
+            (512, 512, 128, 256): 4,
+            (256, 256, 256, 512): 8,
+            (128, 128, 512, 32): 8,
         },
         (2, 4): {
             (128, 128, 16, 512): 8,
@@ -73,6 +81,10 @@ class Conv2d(Module):
             (1024, 1024, 256, 128): 16,
             (1024, 1024, 128, 128): 16,
             (1024, 1024, 128, 3): 8,
+            (1024, 1024, 3, 128): 8,
+            (512, 512, 128, 256): 4,
+            (256, 256, 256, 512): 8,
+            (128, 128, 512, 32): 8,
         },
     }
     slice_default = {
@@ -87,6 +99,11 @@ class Conv2d(Module):
         (1024, 1024, 256, 128): 16,
         (1024, 1024, 128, 128): 16,
         (1024, 1024, 128, 3): 8,
+        (1024, 1024, 3, 128): 8,
+        (512, 512, 128, 256): 4,
+        (256, 256, 256, 512): 8,
+        (128, 128, 512, 32): 8,
+
     }
 
     # TODO: Allow weight initilization?
@@ -268,15 +285,12 @@ class Conv2d(Module):
                 msg = f"expected input channel dimension to be {expected_c}, but got {c}"
                 raise ValueError(msg)
 
-        try:
-            slice_config = ttnn.Conv2dSliceConfig(
-                num_slices=self.slice_params.get(tuple(self.mesh_device.shape), self.slice_default)[
-                    (h, w, self.in_channels, self.out_channels)
-                ],
-                slice_type=ttnn.Conv2dDRAMSliceWidth,
-            )
-        except:
-            slice_config = None
+        slice_config = ttnn.Conv2dSliceConfig(
+            num_slices=self.slice_params.get(tuple(self.mesh_device.shape), self.slice_default)[
+                (h, w, self.in_channels, self.out_channels)
+            ],
+            slice_type=ttnn.Conv2dDRAMSliceWidth,
+        )
 
         try:
             x, [out_height, out_width] = ttnn.conv2d(

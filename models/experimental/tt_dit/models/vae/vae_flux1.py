@@ -178,16 +178,29 @@ class Downsample2D:
         ccl_manager=None,
         torch_ref=None,
     ):
+        if torch_ref is not None:
+            in_channels = torch_ref.conv.in_channels
+            out_channels = torch_ref.conv.out_channels
+            kernel_size = torch_ref.conv.kernel_size
+            stride = torch_ref.conv.stride
+            padding = (0, 1, 0, 1) if not torch_ref.padding else 0
+        else:
+            kernel_size=(3, 3)
+            stride=(2, 2)
+            padding=(1, 1)
         self.conv = Conv2d(
             in_channels,
             out_channels,
-            kernel_size=(3, 3),
-            stride=(2, 2),
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
             mesh_device=mesh_device,
             out_mesh_axis=parallel_config.tensor_parallel.mesh_axis,
             ccl_manager=ccl_manager,
-            torch_ref=torch_ref.conv if torch_ref is not None else None,
+            # torch_ref=torch_ref.conv if torch_ref is not None else None,
         )
+        if torch_ref is not None:
+            self.conv.load_torch_state_dict(torch_ref.conv.state_dict())
 
     # Fix to align with constructor
     @classmethod
@@ -204,10 +217,8 @@ class Downsample2D:
         self.conv.load_torch_state_dict(state_dict["conv"])
 
     def __call__(self, x):
-        # x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)  # Upsample requires row major.
-        # x = ttnn.upsample(x, scale_factor=2)
-        x = ttnn.pad(x, padding=((0, 0), (0, 1), (0, 1), (0, 0)), value=0)
         x = self.conv(x)
+        
         return x
 
 
