@@ -3,13 +3,13 @@
 
 import ttnn
 
-from models.experimental.bevformerv2.tt.common import TtConv2D
+from models.experimental.bevformerv2.tt.utils import TTConv2D
 from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
 
 
 class TtConvModule:
     """
-    Lightweight wrapper around :class:`TtConv2D` for FPN.
+    Lightweight wrapper around :class:`TTConv2D` for FPN.
 
     This mirrors the small helper used in other experimental models (e.g. UniAD, VAD),
     but plugs into the configurable :class:`BevFormerV2ModelConfig`.
@@ -31,7 +31,7 @@ class TtConvModule:
         # for reshape / upsample inside the FPN top‑down pathway.
         self.meta = conv_args.conv
 
-        self.conv = TtConv2D(
+        self.conv = TTConv2D(
             conv_args.conv,
             conv_pth.conv,
             device=self.device,
@@ -42,7 +42,7 @@ class TtConvModule:
         )
 
     def __call__(self, x):
-        # TtConv2D conventionally returns (output, out_h, out_w)
+        # TTConv2D conventionally returns (output, out_h, out_w)
         x, _, _ = self.conv(x)
         return x
 
@@ -147,7 +147,7 @@ class TtFPN:
         Upsample ``top`` feature map and add it to ``bottom``.
 
         Both tensors are in the flattened [1, 1, B * H * W, C] format coming out of
-        :class:`TtConv2D`. We:
+        :class:`TTConv2D`. We:
 
           1. convert to ROW_MAJOR layout
           2. reshape to [B, H, W, C]

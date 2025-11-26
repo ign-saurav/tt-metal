@@ -7,7 +7,7 @@ import ttnn
 from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
 
 
-class TtConv2D:
+class TTConv2D:
     def __init__(
         self,
         conv,

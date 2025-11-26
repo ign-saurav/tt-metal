@@ -9,7 +9,7 @@ import ttnn
 
 from models.experimental.bevformerv2.reference.resnet import resnet50_mmdet, ResNet
 from models.experimental.bevformerv2.tt.tt_resnet import TtResNet50_MMD_C345
-from models.experimental.bevformerv2.utils import load_resnet50_backbone_weights
+from models.experimental.bevformerv2.common import load_resnet50_backbone_weights
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (
     fold_batch_norm2d_into_conv2d,
