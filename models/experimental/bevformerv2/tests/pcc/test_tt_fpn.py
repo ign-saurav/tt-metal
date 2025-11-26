@@ -182,7 +182,7 @@ class FPNTestInfra:
     ):
         super().__init__()
         if not hasattr(self, "_model_initialized"):
-            torch.manual_seed(42)  # Seed once for determinism
+            torch.manual_seed(42)
             self._model_initialized = True
             torch.cuda.manual_seed_all(42)
             torch.backends.cudnn.deterministic = True
@@ -276,7 +276,6 @@ class FPNTestInfra:
             converted = converted.reshape(n, h, w, c)
             converted = converted.permute(0, 3, 1, 2).contiguous().to(dtype=torch.float32)
 
-            # Free device memory
             ttnn.deallocate(tt_level)
 
             pcc_passed, pcc_message = check_with_pcc(converted, torch_level, pcc=valid_pcc)

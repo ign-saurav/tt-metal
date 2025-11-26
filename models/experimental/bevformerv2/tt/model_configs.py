@@ -1,10 +1,8 @@
 """Configuration helpers for the BEVFormerV2 TT backbone.
 
-This is intentionally much lighter-weight than the Panoptic‑DeepLab
-`ModelOptimisations`, but follows the same idea:
-
-- Provide **global defaults** for convolution parameters (dtypes, layout, etc.)
-- Allow **per-layer overrides** addressed by a simple string path
+Provides:
+- **Global defaults** for convolution parameters (dtypes, layout, etc.)
+- **Per-layer overrides** addressed by a simple string path
   (for example: ``stem.conv1``, ``layer2.0.conv2``, ``layer4.2.conv3``).
 
 The goal is to make the BEVFormerV2 backbone configurable without changing

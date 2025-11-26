@@ -241,18 +241,13 @@ class TtResNet50_MMD_C345:
         c5 = ttnn.clone(x)
         outputs.append(c5)  # C5 appended (1/32 spatial)
 
-        # Deallocate intermediate x tensor as it's no longer needed
         ttnn.deallocate(x)
 
         return outputs  # [C3, C4, C5]
 
-    # ------------------------------
-    # Maxpool helper (same as TT ResNet)
-    # ------------------------------
     def _apply_maxpool(self, x):
         args = self.maxpool_args
 
-        # Use same splitting logic as the reference if batch_size > 1
         if args.batch_size > 1:
             current_batch_size = args.batch_size
             split_point = current_batch_size // 2

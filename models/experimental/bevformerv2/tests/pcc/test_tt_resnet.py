@@ -83,7 +83,7 @@ class ResNetTestInfra:
     ):
         super().__init__()
         if not hasattr(self, "_model_initialized"):
-            torch.manual_seed(42)  # Seed once for determinism
+            torch.manual_seed(42)
             self._model_initialized = True
             torch.cuda.manual_seed_all(42)
             torch.backends.cudnn.deterministic = True
@@ -105,7 +105,6 @@ class ResNetTestInfra:
         # Prepare parameters
         parameters = _prepare_resnet_parameters(reference_model, torch_input, device)
 
-        # Convert input to TTNN format
         nhwc = torch_input.permute(0, 2, 3, 1).contiguous()
         nhwc = nhwc.reshape(1, 1, nhwc.shape[0] * nhwc.shape[1] * nhwc.shape[2], nhwc.shape[3])
         self.input_tensor = ttnn.from_torch(nhwc, dtype=ttnn.bfloat16, device=device)
@@ -132,7 +131,6 @@ class ResNetTestInfra:
             )
             converted = converted.permute(0, 3, 1, 2).contiguous().to(dtype=torch.float32)
 
-            # Free device memory
             ttnn.deallocate(tt_level)
 
             pcc_passed, pcc_message = check_with_pcc(torch_level, converted, pcc=valid_pcc)

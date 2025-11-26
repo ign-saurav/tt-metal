@@ -11,8 +11,7 @@ class TtConvModule:
     """
     Lightweight wrapper around :class:`TTConv2D` for FPN.
 
-    This mirrors the small helper used in other experimental models (e.g. UniAD, VAD),
-    but plugs into the configurable :class:`BevFormerV2ModelConfig`.
+    Plugs into the configurable :class:`BevFormerV2ModelConfig`.
     """
 
     def __init__(
@@ -66,8 +65,6 @@ class TtFPN:
       FPN module, with ``conv_args.lateral_convs`` and ``conv_args.fpn_convs`` lists.
     * ``conv_pth`` should carry the preprocessed TTNN weights in matching structure:
       ``conv_pth.lateral_convs[i].conv`` / ``conv_pth.fpn_convs[i].conv``.
-    * This class intentionally follows the layout and tensor reshaping strategy used
-      in :mod:`models.experimental.uniad.tt.ttnn_fpn` for ease of cross‑model parity.
     """
 
     def __init__(
@@ -211,7 +208,6 @@ class TtFPN:
         laterals: list[ttnn.Tensor] = []
         for i, lateral_conv in enumerate(self.lateral_convs):
             x = lateral_conv(inputs[i + self.start_level])
-            # We do not need the raw backbone feature after the lateral conv.
             ttnn.deallocate(inputs[i + self.start_level])
             laterals.append(x)
 
@@ -236,8 +232,6 @@ class TtFPN:
         # ------------------------
         # Step 4: Extra levels (P6, P7, ...)
         # ------------------------
-        # We follow the common RetinaNet / BEVFormer configuration:
-        #   - extra levels are built from the last FPN output
         for i in range(used_backbone_levels, self._num_fpn):
             outs.append(self.fpn_convs[i](outs[-1]))
 
