@@ -12,6 +12,7 @@ from models.experimental.miniCPMo.reference.tokenization_minicpmo_fast import Mi
 from models.experimental.miniCPMo.tests.test_siglip_vision_emb import create_siglip_vision_embedding_preprocessor
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.experimental.miniCPMo.tt.tt_modeling_minicpmo import TTMiniCPMO
+from models.experimental.miniCPMo.tests.test_resampler import create_resampler_preprocessor
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
@@ -71,9 +72,20 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
     patch_size = embeddings_model.patch_size
     num_patches_per_side = embeddings_model.num_patches_per_side
 
+    resampler = model.resampler
+    resampler_parameters = preprocess_model_parameters(
+        initialize_model=lambda: resampler,
+        custom_preprocessor=create_resampler_preprocessor(device, weight_dtype),
+        device=device,
+    )
+
+    parameters = {
+        "embeddings": emb_parameters,
+        "resampler": resampler_parameters,
+    }
     with init_empty_weights():
         config._name_or_path = "models/experimental/miniCPMo/reference"
-        tt_model = TTMiniCPMO(config, device, emb_parameters, vpm_state_dict, patch_size, num_patches_per_side).eval()
+        tt_model = TTMiniCPMO(config, device, parameters, vpm_state_dict, patch_size, num_patches_per_side).eval()
 
     load_checkpoint_and_dispatch(
         tt_model,
