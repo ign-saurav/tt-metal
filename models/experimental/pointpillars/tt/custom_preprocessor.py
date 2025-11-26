@@ -174,11 +174,16 @@ def _extract_neck(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
 
         # Use the ConvTranspose2d-specific folding function
         weight, bias = fold_batch_norm2d_into_conv_transpose2d(conv_transpose_layer, bn_layer)
-
-        parameters[f"decoder_{i}"]["weight"] = ttnn.from_torch(weight, dtype=dtype, mesh_mapper=mesh_mapper)
-        bias = bias.reshape((1, 1, 1, -1))
-        parameters[f"decoder_{i}"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
-        parameters[f"decoder_{i}"]["conv_args"] = infer_module_args(conv_transpose_layer)
+        if i == 0:
+            parameters[f"decoder_{i}"]["weight"] = ttnn.from_torch(weight, dtype=dtype, mesh_mapper=mesh_mapper)
+            bias = bias.reshape((1, 1, 1, -1))
+            parameters[f"decoder_{i}"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
+            parameters[f"decoder_{i}"]["conv_args"] = infer_module_args(conv_transpose_layer)
+        else:
+            parameters[f"decoder_{i}"]["weight"] = weight
+            bias = bias.reshape((1, 1, 1, -1))
+            parameters[f"decoder_{i}"]["bias"] = bias
+            parameters[f"decoder_{i}"]["conv_args"] = infer_module_args(conv_transpose_layer)
 
     return parameters
 
