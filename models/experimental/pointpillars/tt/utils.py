@@ -4,6 +4,7 @@
 
 import ttnn
 from models.common.lightweightmodule import LightweightModule
+import torch
 
 
 class TtPointPillarsConv2D(LightweightModule):
@@ -225,7 +226,7 @@ class TtPointPillarsConvTranspose2D(LightweightModule):
         )
 
         self.conv_config = ttnn.Conv2dConfig(
-            weights_dtype=ttnn.bfloat8_b,
+            weights_dtype=ttnn.bfloat16,
             shard_layout=shard_layout,
             deallocate_activation=is_dealloc_act,
             enable_act_double_buffer=False,
@@ -286,3 +287,170 @@ class TtPointPillarsConvTranspose2D(LightweightModule):
             return x, shape
         else:
             return x
+
+
+def prepare_split_conv_transpose2d_weights_bias(
+    in_channels,
+    out_channels,
+    conv_in_channel_split_factor,
+    conv_out_channel_split_factor,
+    torch_weight_tensor,
+    torch_bias_tensor,
+):
+    split_output_channels = out_channels // conv_out_channel_split_factor
+    split_input_channels = in_channels // conv_in_channel_split_factor
+
+    # Split weights - conv_transpose2d uses IOHW format
+    # FIXED: Split output channels first (dimension 0), then input channels (dimension 1)
+    if conv_out_channel_split_factor > 1:
+        split_weight_tensors = list(torch.split(torch_weight_tensor, split_output_channels, 0))
+    else:
+        split_weight_tensors = [torch_weight_tensor]
+
+    for i in range(len(split_weight_tensors)):
+        split_weight_tensors[i] = torch.split(split_weight_tensors[i], split_input_channels, 1)
+
+    # FIXED: Use correct variable name and consider using float32 for better PCC
+    ttnn_split_weights = [
+        [
+            ttnn.from_torch(
+                weight,
+                dtype=ttnn.bfloat16,  # Consider float32 for better numerical accuracy
+            )
+            for weight in output_channel_split_weights  # FIXED: Correct variable name
+        ]
+        for output_channel_split_weights in split_weight_tensors
+    ]
+
+    # Split bias - same as conv2d
+    if conv_out_channel_split_factor > 1:
+        split_bias_tensors = list(torch.split(torch_bias_tensor, split_output_channels, 3))
+    else:
+        split_bias_tensors = [torch_bias_tensor]
+
+    ttnn_split_bias = [
+        ttnn.from_torch(
+            bias,
+            dtype=ttnn.bfloat16,  # Match weights dtype
+        )
+        for bias in split_bias_tensors
+    ]
+
+    return ttnn_split_weights, ttnn_split_bias
+
+
+def split_conv_transpose2d_and_run(
+    hidden_states,
+    conv_weight,
+    conv_bias,
+    device,
+    in_channels,
+    input_height,
+    input_width,
+    out_channels,
+    conv_in_channel_split_factor,
+    conv_out_channel_split_factor,
+    compute_config,
+    conv_config,
+    conv_output_dtype,
+    kernel_size=3,
+    padding=1,
+    output_padding=0,
+    return_weights_and_bias=False,
+    stride=1,
+):
+    split_input_channels = in_channels // conv_in_channel_split_factor
+    split_output_channels = out_channels // conv_out_channel_split_factor
+
+    conv_kwargs = {
+        "in_channels": split_input_channels,
+        "out_channels": split_output_channels,
+        "batch_size": 1,
+        "input_height": input_height,
+        "input_width": input_width,
+        "kernel_size": (kernel_size, kernel_size),
+        "stride": (stride, stride),
+        "padding": (padding, padding),
+        "output_padding": (output_padding, output_padding),
+        "dilation": (1, 1),
+        "groups": 1,
+        "device": device,
+        "conv_config": conv_config,
+        "mirror_kernel": True,  # Required for conv_transpose2d
+    }
+
+    outputs = []
+    device_weights = []
+    device_bias = []
+    # First loop goes over output channel slices and saves outputs in a list
+    for out_channel_slice_id in range(conv_out_channel_split_factor):
+        out_channel_slice_output = None
+        device_weights.append([])
+        # Second loop goes over input channel slices and accumulates the outputs
+        for in_channel_slice_id in range(conv_in_channel_split_factor):
+            hidden_states_slice = hidden_states[
+                :, :, :, in_channel_slice_id * split_input_channels : (in_channel_slice_id + 1) * split_input_channels
+            ]
+            results = ttnn.conv_transpose2d(
+                input_tensor=hidden_states_slice,
+                weight_tensor=conv_weight[in_channel_slice_id][out_channel_slice_id],
+                bias_tensor=conv_bias[out_channel_slice_id],
+                **conv_kwargs,
+                compute_config=compute_config,
+                return_weights_and_bias=return_weights_and_bias,
+                dtype=conv_output_dtype,
+            )
+            results = ttnn.to_memory_config(results, ttnn.DRAM_MEMORY_CONFIG)
+            hidden_states_slice.deallocate(True)
+
+            if return_weights_and_bias:
+                # First time we call this function, weights and biases are passed in on host;
+                # Save them so that we can reuse them on the next calls
+                in_channel_slice_output, [weights, bias] = results
+                device_weights[in_channel_slice_id].append(weights)
+                if in_channel_slice_id == 0:
+                    device_bias.append(bias)
+            else:
+                in_channel_slice_output = results
+
+            in_channel_slice_output = ttnn.move(in_channel_slice_output)
+
+            if in_channel_slice_id == 0:
+                if in_channel_slice_output.memory_config() != ttnn.DRAM_MEMORY_CONFIG:
+                    out_channel_slice_output = ttnn.to_memory_config(in_channel_slice_output, ttnn.DRAM_MEMORY_CONFIG)
+                    in_channel_slice_output.deallocate(True)
+                else:
+                    out_channel_slice_output = in_channel_slice_output
+            else:
+                # out_channel_slice_output = ttnn.add(
+                #     out_channel_slice_output,
+                #     in_channel_slice_output,
+                #     output_tensor=out_channel_slice_output,
+                #     # use_legacy=True,  # until fix for https://github.com/tenstorrent/tt-metal/issues/22307
+                # )
+                out_channel_slice_output = ttnn.add(
+                    out_channel_slice_output,
+                    in_channel_slice_output,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    dtype=ttnn.bfloat16,
+                )
+                in_channel_slice_output.deallocate(True)
+
+        if out_channel_slice_output.memory_config() != ttnn.DRAM_MEMORY_CONFIG:
+            out_channel_slice_output = ttnn.to_memory_config(out_channel_slice_output, ttnn.DRAM_MEMORY_CONFIG)
+        outputs.append(out_channel_slice_output)
+
+    hidden_states.deallocate(True)
+
+    # Concatenate the outputs, if we split by output channels
+    if len(outputs) > 1:
+        output = ttnn.concat(outputs, dim=-1)
+        for output_slice in outputs:
+            output_slice.deallocate(True)
+    else:
+        output = outputs[0]
+
+    if return_weights_and_bias:
+        return output, device_weights, device_bias
+
+    return output
