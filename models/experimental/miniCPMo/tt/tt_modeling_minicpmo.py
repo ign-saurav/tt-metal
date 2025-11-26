@@ -154,7 +154,7 @@ class MiniCPMOPreTrainedModel(Qwen2PreTrainedModel):
 
 
 class TTMiniCPMO(MiniCPMOPreTrainedModel):
-    def __init__(self, config, device, emb_parameters, vpm_state_dict, patch_size, num_patches_per_side):
+    def __init__(self, config, tt_device, emb_parameters, vpm_state_dict, patch_size, num_patches_per_side):
         super().__init__(config)
         # gets killed without meta
         # with torch.device("meta"):
@@ -162,7 +162,7 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
         print("QWEN INITIALIZED")
         self.llm.prepare_inputs_for_generation = types.MethodType(prepare_inputs_for_generation, self.llm)  # patch llm
 
-        self.device = device
+        self.tt_device = tt_device
         self.embed_dim = self.llm.config.hidden_size
         self.position_embedding_weight = emb_parameters["position_embedding"]["weight"]
         self.patch_size = patch_size
@@ -171,7 +171,7 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
         # init vision module
         if self.config.init_vision:
             self.vpm = TtSiglipVisionTransformer(
-                mesh_device=device,
+                mesh_device=tt_device,
                 config=config,
                 parameters=emb_parameters,
                 hidden_size=config.vision_config.hidden_size,  # 1152
@@ -185,8 +185,7 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
 
             self.vision_dim = config.vision_config.hidden_size
             # Initialize resampler with empty weights to avoid OOM
-            with init_empty_weights():
-                self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
+            self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
 
         # init audio module
         if self.config.init_audio:
@@ -224,7 +223,7 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
 
         # Load tokenizer from local files using from_pretrained to get config (chat_template, etc.)
         # Using local path with local_files_only=True won't trigger cache resolution
-        from .tokenization_minicpmo_fast import MiniCPMOTokenizerFast
+        from models.experimental.miniCPMo.reference.tokenization_minicpmo_fast import MiniCPMOTokenizerFast
 
         tokenizer = MiniCPMOTokenizerFast.from_pretrained(local_path, local_files_only=True)
 
@@ -470,9 +469,9 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
                             self.position_embedding_weight,
                             patch_attn_mask[start_idx:end_idx],
                             tgt_sizes[start_idx:end_idx],
-                            self.device,
+                            self.tt_device,
                         )
-                        tmp_hs = self.vpm(
+                        tmp_hs = self.vpm.forward(
                             all_pixel_values[start_idx:end_idx],
                             position_embeddings,
                         )
@@ -481,16 +480,16 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
                     vision_embedding = torch.cat(hs, dim=0)
                 else:
                     position_embeddings = generate_position_embeddings(
-                        all_pixel_values[start_idx:end_idx],
+                        all_pixel_values,
                         self.patch_size,
                         self.num_patches_per_side,
                         self.position_embedding_weight,
-                        patch_attn_mask[start_idx:end_idx],
-                        tgt_sizes[start_idx:end_idx],
-                        self.device,
+                        patch_attn_mask,
+                        tgt_sizes,
+                        self.tt_device,
                     )
-                    vision_embedding = self.vpm(
-                        all_pixel_values[start_idx:end_idx],
+                    vision_embedding = self.vpm.forward(
+                        all_pixel_values,
                         position_embeddings,
                     )
                     vision_embedding = tt2torch_tensor(vision_embedding)

@@ -71,8 +71,16 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
     patch_size = embeddings_model.patch_size
     num_patches_per_side = embeddings_model.num_patches_per_side
 
-    tt_model = TTMiniCPMO(config, device, emb_parameters, vpm_state_dict, patch_size, num_patches_per_side)
+    with init_empty_weights():
+        config._name_or_path = "models/experimental/miniCPMo/reference"
+        tt_model = TTMiniCPMO(config, device, emb_parameters, vpm_state_dict, patch_size, num_patches_per_side).eval()
 
+    load_checkpoint_and_dispatch(
+        tt_model,
+        local_checkpoint_path,
+        device_map="auto",
+        dtype=torch.bfloat16,
+    )
     tt_res = tt_model.chat(image=None, msgs=msgs, tokenizer=tokenizer)
 
     print(tt_res)
