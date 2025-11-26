@@ -9,8 +9,8 @@ import ttnn
 from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_module_args
 from tests.ttnn.utils_for_testing import check_with_pcc
 
-from models.experimental.BevDepth.tests.ref_bev_depth_task_head import BEVDepthHead
-from models.experimental.BevDepth.tt.bev_depth_task_head import TtBEVDepthHead, head_optimisations
+from models.experimental.BevDepth.tests.ref_bev_depth_head import BEVDepthHead
+from models.experimental.BevDepth.tt.bev_depth_head import TtBEVDepthHead, head_optimisations
 from models.experimental.BevDepth.tt.custom_preprocessing import create_custom_mesh_preprocessor
 
 
