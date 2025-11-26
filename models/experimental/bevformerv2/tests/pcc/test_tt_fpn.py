@@ -6,7 +6,7 @@ import pytest
 import torch
 
 import ttnn
-
+from loguru import logger
 from types import SimpleNamespace
 
 from models.experimental.bevformerv2.reference.fpn import FPN as RefFPN
@@ -15,7 +15,7 @@ from models.experimental.bevformerv2.tt.tt_fpn import TtFPN
 from models.experimental.bevformerv2.tt.tt_resnet import TtResNet50_MMD_C345
 from models.experimental.bevformerv2.common import load_resnet50_backbone_weights, load_fpn_weights
 from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
-from tests.ttnn.utils_for_testing import assert_with_pcc
+from tests.ttnn.utils_for_testing import check_with_pcc
 from ttnn.model_preprocessing import (
     fold_batch_norm2d_into_conv2d,
     infer_ttnn_module_args,
@@ -169,172 +169,196 @@ def _prepare_fpn_parameters(model: RefFPN, example_feats, example_outputs, devic
     return parameters
 
 
-@pytest.mark.parametrize("device_params", [{"l1_small_size": 10 * 1024}], indirect=True)
-def test_bevformerv2_fpn_matches_reference(device, reset_seeds):
-    # Reference backbone + FPN configuration (C3, C4, C5 -> P3..P7).
-    backbone = resnet50_mmdet(out_indices=(1, 2, 3))
-    load_resnet50_backbone_weights(backbone)
-    backbone.eval()
+class FPNTestInfra:
+    def __init__(
+        self,
+        device,
+        batch_size,
+        in_channels,
+        height,
+        width,
+        use_pretrained_weights=True,
+        use_backbone=True,
+    ):
+        super().__init__()
+        if not hasattr(self, "_model_initialized"):
+            torch.manual_seed(42)  # Seed once for determinism
+            self._model_initialized = True
+            torch.cuda.manual_seed_all(42)
+            torch.backends.cudnn.deterministic = True
 
-    fpn = RefFPN(
-        in_channels=[512, 1024, 2048],
-        out_channels=256,
-        num_outs=5,
-        add_extra_convs="on_output",
+        self.pcc_passed_all = []
+        self.pcc_message_all = []
+        self.device = device
+        self.batch_size = batch_size
+        self.use_pretrained_weights = use_pretrained_weights
+        self.use_backbone = use_backbone
+
+        # Reference FPN
+        fpn = RefFPN(
+            in_channels=[512, 1024, 2048],
+            out_channels=256,
+            num_outs=5,
+            add_extra_convs="on_output",
+        )
+        if use_pretrained_weights:
+            load_fpn_weights(fpn)
+        fpn.eval()
+
+        # Generate input features
+        if use_backbone:
+            # Use backbone to generate real features
+            backbone = resnet50_mmdet(out_indices=(1, 2, 3))
+            load_resnet50_backbone_weights(backbone)
+            backbone.eval()
+
+            torch_input = torch.randn(batch_size, in_channels, height, width)
+            with torch.no_grad():
+                c_feats = backbone(torch_input)
+                self.torch_outputs = fpn(list(c_feats))
+
+            # Prepare backbone parameters
+            backbone_params = _prepare_resnet_parameters(backbone, torch_input, device)
+
+            # Build TTNN backbone
+            nhwc = torch_input.permute(0, 2, 3, 1).contiguous()
+            nhwc = nhwc.reshape(1, 1, nhwc.shape[0] * nhwc.shape[1] * nhwc.shape[2], nhwc.shape[3])
+            ttnn_input = ttnn.from_torch(nhwc, dtype=ttnn.bfloat16, device=device)
+
+            tt_backbone = TtResNet50_MMD_C345(backbone_params.conv_args, backbone_params.res_model, device)
+            self.tt_c_feats = tt_backbone(ttnn_input, batch_size=torch_input.shape[0])
+            c_feats_list = list(c_feats)  # Convert tuple to list for FPN parameter preparation
+        else:
+            # Use synthetic features
+            c_feats = [
+                torch.randn(batch_size, 512, 32, 32),  # C3
+                torch.randn(batch_size, 1024, 16, 16),  # C4
+                torch.randn(batch_size, 2048, 8, 8),  # C5
+            ]
+            with torch.no_grad():
+                self.torch_outputs = fpn(list(c_feats))
+
+            # Convert input features to TTNN format
+            self.tt_c_feats = []
+            for feat in c_feats:
+                nhwc = feat.permute(0, 2, 3, 1).contiguous()
+                nhwc = nhwc.reshape(1, 1, nhwc.shape[0] * nhwc.shape[1] * nhwc.shape[2], nhwc.shape[3])
+                ttnn_feat = ttnn.from_torch(nhwc, dtype=ttnn.bfloat16, device=device)
+                self.tt_c_feats.append(ttnn_feat)
+            c_feats_list = c_feats
+
+        # Prepare FPN parameters
+        fpn_params = _prepare_fpn_parameters(fpn, c_feats_list, self.torch_outputs, device)
+
+        # Build TTNN FPN
+        model_cfg = BevFormerV2ModelConfig()
+        self.ttnn_model = TtFPN(fpn_params.conv_args, fpn_params.fpn, device, model_configs=model_cfg)
+
+        # Run + validate
+        self.run()
+        self.validate()
+
+    def run(self):
+        self.tt_outputs = self.ttnn_model(list(self.tt_c_feats))
+        return self.tt_outputs
+
+    def validate(self, tt_outputs=None):
+        tt_outputs = self.tt_outputs if tt_outputs is None else tt_outputs
+
+        assert len(self.torch_outputs) == len(
+            tt_outputs
+        ), f"Mismatch between reference ({len(self.torch_outputs)}) and TTNN ({len(tt_outputs)}) FPN levels"
+
+        valid_pcc = 0.99
+        for level_idx, (torch_level, tt_level) in enumerate(zip(self.torch_outputs, tt_outputs)):
+            n, c, h, w = torch_level.shape
+            converted = ttnn.to_torch(tt_level)
+            converted = converted.reshape(n, h, w, c)
+            converted = converted.permute(0, 3, 1, 2).contiguous().to(dtype=torch.float32)
+
+            # Free device memory
+            ttnn.deallocate(tt_level)
+
+            pcc_passed, pcc_message = check_with_pcc(converted, torch_level, pcc=valid_pcc)
+            self.pcc_passed_all.append(pcc_passed)
+            self.pcc_message_all.append(pcc_message)
+
+            assert pcc_passed, logger.error(f"PCC check failed for P{level_idx + 3}: {pcc_message}")
+            logger.info(f"PCC(P{level_idx + 3}) = {pcc_message}")
+
+        assert all(self.pcc_passed_all), logger.error(f"PCC check failed: {self.pcc_message_all}")
+        logger.info(
+            f"FPN passed: "
+            f"batch_size={self.batch_size}, "
+            f"use_pretrained_weights={self.use_pretrained_weights}, "
+            f"use_backbone={self.use_backbone}, "
+            f"PCC={self.pcc_message_all}"
+        )
+
+        return self.pcc_passed_all, self.pcc_message_all
+
+
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 10 * 1024}], indirect=True)
+@pytest.mark.parametrize(
+    "batch_size, in_channels, height, width",
+    [
+        (2, 3, 256, 256),
+    ],
+)
+def test_bevformerv2_fpn_matches_reference(device, reset_seeds, batch_size, in_channels, height, width):
+    """Test FPN with backbone and pretrained weights."""
+    FPNTestInfra(
+        device,
+        batch_size,
+        in_channels,
+        height,
+        width,
+        use_pretrained_weights=True,
+        use_backbone=True,
     )
-    # Load pretrained weights from demo directory
-    load_fpn_weights(fpn)
-    fpn.eval()
-
-    torch_input = torch.randn(2, 3, 256, 256)
-    with torch.no_grad():
-        c_feats = backbone(torch_input)
-        torch_outputs = fpn(list(c_feats))
-
-    backbone_params = _prepare_resnet_parameters(backbone, torch_input, device)
-    fpn_params = _prepare_fpn_parameters(fpn, list(c_feats), torch_outputs, device)
-
-    # Build TTNN backbone to produce C3, C4, C5.
-    nhwc = torch_input.permute(0, 2, 3, 1).contiguous()
-    nhwc = nhwc.reshape(1, 1, nhwc.shape[0] * nhwc.shape[1] * nhwc.shape[2], nhwc.shape[3])
-    ttnn_input = ttnn.from_torch(nhwc, dtype=ttnn.bfloat16, device=device)
-
-    tt_backbone = TtResNet50_MMD_C345(backbone_params.conv_args, backbone_params.res_model, device)
-    tt_c_feats = tt_backbone(ttnn_input, batch_size=torch_input.shape[0])
-
-    # Prepare TTNN FPN conv args / params and run it.
-    model_cfg = BevFormerV2ModelConfig()
-    tt_fpn = TtFPN(fpn_params.conv_args, fpn_params.fpn, device, model_configs=model_cfg)
-
-    ttnn_outputs = tt_fpn(list(tt_c_feats))
-
-    # Compare each FPN level with PCC.
-    assert len(torch_outputs) == len(
-        ttnn_outputs
-    ), f"Mismatch between reference ({len(torch_outputs)}) and TTNN ({len(ttnn_outputs)}) FPN levels"
-
-    for level_idx, (torch_level, tt_level) in enumerate(zip(torch_outputs, ttnn_outputs)):
-        n, c, h, w = torch_level.shape
-        converted = ttnn.to_torch(tt_level)
-        converted = converted.reshape(n, h, w, c)
-        converted = converted.permute(0, 3, 1, 2).contiguous().to(dtype=torch.float32)
-        _, pcc_value = assert_with_pcc(converted, torch_level, 0.95)
-        print(f"PCC(P{level_idx + 3}) = {pcc_value:.5f}")
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 10 * 1024}], indirect=True)
-def test_bevformerv2_fpn_pretrained_weights(device, reset_seeds):
+@pytest.mark.parametrize(
+    "batch_size",
+    [
+        2,
+    ],
+)
+def test_bevformerv2_fpn_pretrained_weights(device, reset_seeds, batch_size):
     """
     Test FPN only with pretrained weights (no backbone).
     Uses random input features to simulate backbone outputs.
     """
-    # Create FPN and load pretrained weights
-    fpn = RefFPN(
-        in_channels=[512, 1024, 2048],
-        out_channels=256,
-        num_outs=5,
-        add_extra_convs="on_output",
+    FPNTestInfra(
+        device,
+        batch_size,
+        in_channels=3,  # Not used when use_backbone=False
+        height=256,  # Not used when use_backbone=False
+        width=256,  # Not used when use_backbone=False
+        use_pretrained_weights=True,
+        use_backbone=False,
     )
-    # Load pretrained weights from demo directory
-    load_fpn_weights(fpn)
-    fpn.eval()
-
-    # Generate random input features simulating backbone outputs (C3, C4, C5)
-    # These shapes are typical for ResNet-50 outputs with input size 256x256
-    batch_size = 2
-    c_feats = [
-        torch.randn(batch_size, 512, 32, 32),  # C3
-        torch.randn(batch_size, 1024, 16, 16),  # C4
-        torch.randn(batch_size, 2048, 8, 8),  # C5
-    ]
-
-    # Run reference FPN
-    with torch.no_grad():
-        torch_outputs = fpn(list(c_feats))
-
-    # Prepare FPN parameters for TTNN
-    fpn_params = _prepare_fpn_parameters(fpn, c_feats, torch_outputs, device)
-
-    # Convert input features to TTNN format
-    ttnn_c_feats = []
-    for feat in c_feats:
-        nhwc = feat.permute(0, 2, 3, 1).contiguous()
-        nhwc = nhwc.reshape(1, 1, nhwc.shape[0] * nhwc.shape[1] * nhwc.shape[2], nhwc.shape[3])
-        ttnn_feat = ttnn.from_torch(nhwc, dtype=ttnn.bfloat16, device=device)
-        ttnn_c_feats.append(ttnn_feat)
-
-    # Build and run TTNN FPN
-    model_cfg = BevFormerV2ModelConfig()
-    tt_fpn = TtFPN(fpn_params.conv_args, fpn_params.fpn, device, model_configs=model_cfg)
-    ttnn_outputs = tt_fpn(ttnn_c_feats)
-
-    # Compare each FPN level with PCC
-    assert len(torch_outputs) == len(
-        ttnn_outputs
-    ), f"Mismatch between reference ({len(torch_outputs)}) and TTNN ({len(ttnn_outputs)}) FPN levels"
-
-    for level_idx, (torch_level, tt_level) in enumerate(zip(torch_outputs, ttnn_outputs)):
-        n, c, h, w = torch_level.shape
-        converted = ttnn.to_torch(tt_level)
-        converted = converted.reshape(n, h, w, c)
-        converted = converted.permute(0, 3, 1, 2).contiguous().to(dtype=torch.float32)
-        _, pcc_value = assert_with_pcc(converted, torch_level, 0.95)
-        print(f"PCC(P{level_idx + 3}) = {pcc_value:.5f}")
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 10 * 1024}], indirect=True)
-def test_bevformerv2_fpn_random_weights(device, reset_seeds):
+@pytest.mark.parametrize(
+    "batch_size",
+    [
+        2,
+    ],
+)
+def test_bevformerv2_fpn_random_weights(device, reset_seeds, batch_size):
     """
     Test FPN only with random weights (no pretrained weights).
     Uses random input features to simulate backbone outputs.
     """
-    # Create FPN with random weights (default PyTorch initialization)
-    fpn = RefFPN(
-        in_channels=[512, 1024, 2048],
-        out_channels=256,
-        num_outs=5,
-        add_extra_convs="on_output",
+    FPNTestInfra(
+        device,
+        batch_size,
+        in_channels=3,  # Not used when use_backbone=False
+        height=256,  # Not used when use_backbone=False
+        width=256,  # Not used when use_backbone=False
+        use_pretrained_weights=False,
+        use_backbone=False,
     )
-    fpn.eval()
-
-    # Generate random input features simulating backbone outputs (C3, C4, C5)
-    # These shapes are typical for ResNet-50 outputs with input size 256x256
-    batch_size = 2
-    c_feats = [
-        torch.randn(batch_size, 512, 32, 32),  # C3
-        torch.randn(batch_size, 1024, 16, 16),  # C4
-        torch.randn(batch_size, 2048, 8, 8),  # C5
-    ]
-
-    # Run reference FPN
-    with torch.no_grad():
-        torch_outputs = fpn(list(c_feats))
-
-    # Prepare FPN parameters for TTNN
-    fpn_params = _prepare_fpn_parameters(fpn, c_feats, torch_outputs, device)
-
-    # Convert input features to TTNN format
-    ttnn_c_feats = []
-    for feat in c_feats:
-        nhwc = feat.permute(0, 2, 3, 1).contiguous()
-        nhwc = nhwc.reshape(1, 1, nhwc.shape[0] * nhwc.shape[1] * nhwc.shape[2], nhwc.shape[3])
-        ttnn_feat = ttnn.from_torch(nhwc, dtype=ttnn.bfloat16, device=device)
-        ttnn_c_feats.append(ttnn_feat)
-
-    # Build and run TTNN FPN
-    model_cfg = BevFormerV2ModelConfig()
-    tt_fpn = TtFPN(fpn_params.conv_args, fpn_params.fpn, device, model_configs=model_cfg)
-    ttnn_outputs = tt_fpn(ttnn_c_feats)
-
-    # Compare each FPN level with PCC
-    assert len(torch_outputs) == len(
-        ttnn_outputs
-    ), f"Mismatch between reference ({len(torch_outputs)}) and TTNN ({len(ttnn_outputs)}) FPN levels"
-
-    for level_idx, (torch_level, tt_level) in enumerate(zip(torch_outputs, ttnn_outputs)):
-        n, c, h, w = torch_level.shape
-        converted = ttnn.to_torch(tt_level)
-        converted = converted.reshape(n, h, w, c)
-        converted = converted.permute(0, 3, 1, 2).contiguous().to(dtype=torch.float32)
-        _, pcc_value = assert_with_pcc(converted, torch_level, 0.95)
-        print(f"PCC(P{level_idx + 3}) = {pcc_value:.5f}")

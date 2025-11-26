@@ -6,11 +6,12 @@ import pytest
 import torch
 
 import ttnn
+from loguru import logger
 
 from models.experimental.bevformerv2.reference.resnet import resnet50_mmdet, ResNet
 from models.experimental.bevformerv2.tt.tt_resnet import TtResNet50_MMD_C345
 from models.experimental.bevformerv2.common import load_resnet50_backbone_weights
-from tests.ttnn.utils_for_testing import assert_with_pcc
+from tests.ttnn.utils_for_testing import check_with_pcc
 from ttnn.model_preprocessing import (
     fold_batch_norm2d_into_conv2d,
     infer_ttnn_module_args,
@@ -71,31 +72,94 @@ def _prepare_resnet_parameters(model: ResNet, example_input: torch.Tensor, devic
     return parameters
 
 
+class ResNetTestInfra:
+    def __init__(
+        self,
+        device,
+        batch_size,
+        in_channels,
+        height,
+        width,
+    ):
+        super().__init__()
+        if not hasattr(self, "_model_initialized"):
+            torch.manual_seed(42)  # Seed once for determinism
+            self._model_initialized = True
+            torch.cuda.manual_seed_all(42)
+            torch.backends.cudnn.deterministic = True
+
+        self.pcc_passed_all = []
+        self.pcc_message_all = []
+        self.device = device
+        self.batch_size = batch_size
+
+        # Reference model
+        reference_model = resnet50_mmdet(out_indices=(1, 2, 3))
+        load_resnet50_backbone_weights(reference_model)
+        reference_model.eval()
+
+        # Torch input + golden output
+        torch_input = torch.randn(batch_size, in_channels, height, width)
+        self.torch_outputs = reference_model(torch_input)
+
+        # Prepare parameters
+        parameters = _prepare_resnet_parameters(reference_model, torch_input, device)
+
+        # Convert input to TTNN format
+        nhwc = torch_input.permute(0, 2, 3, 1).contiguous()
+        nhwc = nhwc.reshape(1, 1, nhwc.shape[0] * nhwc.shape[1] * nhwc.shape[2], nhwc.shape[3])
+        self.input_tensor = ttnn.from_torch(nhwc, dtype=ttnn.bfloat16, device=device)
+
+        # TTNN model
+        self.ttnn_model = TtResNet50_MMD_C345(parameters.conv_args, parameters.res_model, device)
+
+        # Run + validate
+        self.run()
+        self.validate()
+
+    def run(self):
+        self.tt_outputs = self.ttnn_model(self.input_tensor, batch_size=self.batch_size)
+        return self.tt_outputs
+
+    def validate(self, tt_outputs=None):
+        tt_outputs = self.tt_outputs if tt_outputs is None else tt_outputs
+
+        valid_pcc = 0.99
+        for level_idx, (torch_level, tt_level) in enumerate(zip(self.torch_outputs, tt_outputs), start=3):
+            converted = ttnn.to_torch(tt_level)
+            converted = converted.reshape(
+                torch_level.shape[0], torch_level.shape[2], torch_level.shape[3], torch_level.shape[1]
+            )
+            converted = converted.permute(0, 3, 1, 2).contiguous().to(dtype=torch.float32)
+
+            # Free device memory
+            ttnn.deallocate(tt_level)
+
+            pcc_passed, pcc_message = check_with_pcc(torch_level, converted, pcc=valid_pcc)
+            self.pcc_passed_all.append(pcc_passed)
+            self.pcc_message_all.append(pcc_message)
+
+            assert pcc_passed, logger.error(f"PCC check failed for C{level_idx}: {pcc_message}")
+            logger.info(f"PCC(C{level_idx}) = {pcc_message}")
+
+        assert all(self.pcc_passed_all), logger.error(f"PCC check failed: {self.pcc_message_all}")
+        logger.info(f"ResNet50_MMD_C345 passed: " f"batch_size={self.batch_size}, " f"PCC={self.pcc_message_all}")
+
+        return self.pcc_passed_all, self.pcc_message_all
+
+
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 4 * 8192}], indirect=True)
-def test_bevformerv2_resnet_matches_reference(device, reset_seeds):
-    reference_model = resnet50_mmdet(out_indices=(1, 2, 3))
-
-    # Load pretrained weights from demo directory
-    load_resnet50_backbone_weights(reference_model)
-    reference_model.eval()
-
-    torch_input = torch.randn(2, 3, 256, 256)
-    torch_outputs = reference_model(torch_input)
-
-    parameters = _prepare_resnet_parameters(reference_model, torch_input, device)
-
-    nhwc = torch_input.permute(0, 2, 3, 1).contiguous()
-    nhwc = nhwc.reshape(1, 1, nhwc.shape[0] * nhwc.shape[1] * nhwc.shape[2], nhwc.shape[3])
-    ttnn_input = ttnn.from_torch(nhwc, dtype=ttnn.bfloat16, device=device)
-
-    tt_model = TtResNet50_MMD_C345(parameters.conv_args, parameters.res_model, device)
-    tt_outputs = tt_model(ttnn_input, batch_size=torch_input.shape[0])
-
-    for level_idx, (torch_level, tt_level) in enumerate(zip(torch_outputs, tt_outputs), start=3):
-        converted = ttnn.to_torch(tt_level)
-        converted = converted.reshape(
-            torch_level.shape[0], torch_level.shape[2], torch_level.shape[3], torch_level.shape[1]
-        )
-        converted = converted.permute(0, 3, 1, 2).contiguous().to(dtype=torch.float32)
-        _, pcc_value = assert_with_pcc(converted, torch_level, 0.95)
-        print(f"PCC(C{level_idx}) = {pcc_value:.5f}")
+@pytest.mark.parametrize(
+    "batch_size, in_channels, height, width",
+    [
+        (2, 3, 256, 256),
+    ],
+)
+def test_bevformerv2_resnet_matches_reference(device, reset_seeds, batch_size, in_channels, height, width):
+    ResNetTestInfra(
+        device,
+        batch_size,
+        in_channels,
+        height,
+        width,
+    )
