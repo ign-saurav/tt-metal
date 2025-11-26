@@ -42,6 +42,7 @@ from torch.nn.utils.parametrizations import weight_norm
 from tqdm import tqdm
 
 # from transformers import AutoImageProcessor
+from models.experimental.miniCPMo.tt.tt_resampler import TTResampler
 from models.experimental.miniCPMo.tt.ttnn_siglip_vision import TtSiglipVisionTransformer
 
 from models.experimental.miniCPMo.reference.processing_minicpmo import MiniCPMOProcessor
@@ -154,10 +155,12 @@ class MiniCPMOPreTrainedModel(Qwen2PreTrainedModel):
 
 
 class TTMiniCPMO(MiniCPMOPreTrainedModel):
-    def __init__(self, config, tt_device, emb_parameters, vpm_state_dict, patch_size, num_patches_per_side):
+    def __init__(self, config, tt_device, parameters, vpm_state_dict, patch_size, num_patches_per_side):
         super().__init__(config)
         # gets killed without meta
         # with torch.device("meta"):
+        emb_parameters = parameters["embeddings"]
+        resampler_parameters = parameters["resampler"]
         self.llm = Qwen2ForCausalLM(config)
         print("QWEN INITIALIZED")
         self.llm.prepare_inputs_for_generation = types.MethodType(prepare_inputs_for_generation, self.llm)  # patch llm
@@ -185,7 +188,16 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
 
             self.vision_dim = config.vision_config.hidden_size
             # Initialize resampler with empty weights to avoid OOM
-            self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
+            # self.resampler = self.init_resampler(self.embed_dim, self.vision_dim)
+            self.resampler = TTResampler(
+                num_queries=64,
+                embed_dim=3584,
+                num_heads=28,
+                kv_dim=1152,
+                parameters=resampler_parameters,
+                device=tt_device,
+                input_dtype=ttnn.bfloat16,
+            )
 
         # init audio module
         if self.config.init_audio:
@@ -492,8 +504,8 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
                         all_pixel_values,
                         position_embeddings,
                     )
-                    vision_embedding = tt2torch_tensor(vision_embedding)
                 vision_embedding = self.resampler(vision_embedding, tgt_sizes)
+                vision_embedding = tt2torch_tensor(vision_embedding)
 
                 start = 0
                 for pixel_values in pixel_values_list:
