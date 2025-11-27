@@ -60,9 +60,7 @@ from transformers.cache_utils import StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_outputs import ModelOutput
 from transformers.models.whisper.modeling_whisper import ACT2FN
-
-# unused as of now
-# from transformers.models.whisper.modeling_whisper import WHISPER_ATTENTION_CLASSES
+from transformers.models.whisper.modeling_whisper import WhisperAttention
 from transformers.models.whisper.modeling_whisper import WhisperConfig
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
@@ -1981,7 +1979,7 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
         self.embed_dim = config.d_model
         #  import ERR
         #  unused as of now
-        self.self_attn = WHISPER_ATTENTION_CLASSES[config._attn_implementation](
+        self.self_attn = WhisperAttention(
             embed_dim=self.embed_dim,
             num_heads=config.encoder_attention_heads,
             dropout=config.attention_dropout,
