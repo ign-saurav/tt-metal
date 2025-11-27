@@ -452,5 +452,4 @@ def split_conv_transpose2d_and_run(
 
     if return_weights_and_bias:
         return output, device_weights, device_bias
-
     return output

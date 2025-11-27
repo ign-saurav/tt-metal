@@ -392,7 +392,6 @@ class PointPillars(nn.Module):
         #                              coors_batch: (p1 + p2 + ... + pb, 1 + 3),
         #                              num_points_per_pillar: (p1 + p2 + ... + pb, ), (b: batch size)
         pillars, coors_batch, npoints_per_pillar = self.pillar_layer(batched_pts)
-        pillars = pillars.to(dtype=torch.bfloat16)
         # pillars: (p1 + p2 + ... + pb, num_points, c), c = 4
         # coors_batch: (p1 + p2 + ... + pb, 1 + 3)
         # npoints_per_pillar: (p1 + p2 + ... + pb, )
