@@ -188,7 +188,6 @@ class TtnnWhisperEncoder:
                 self.max_source_positions = parent.max_source_positions
                 self.vocab_size = parent.vocab_size
                 self.dropout = parent.dropout
-                self.layer_norm_eps = parent.layer_norm_eps
 
         return Config(self)
 
@@ -207,65 +206,65 @@ class TtnnWhisperEncoder:
             layer_params = {
                 "self_attn": {
                     "query": {
-                        "weight": weights_dict[f"apm.layers.{layer_idx}.self_attn.q_proj.weight"],
+                        "weight": weights_dict[f"layers.{layer_idx}.self_attn.q_proj.weight"],
                         "bias": torch.zeros(
-                            weights_dict[f"apm.layers.{layer_idx}.self_attn.q_proj.weight"].shape[0]
+                            weights_dict[f"layers.{layer_idx}.self_attn.q_proj.weight"].shape[0]
                         ),  # Zero bias for Q
                     },
                     "key": {
-                        "weight": weights_dict[f"apm.layers.{layer_idx}.self_attn.k_proj.weight"],
+                        "weight": weights_dict[f"layers.{layer_idx}.self_attn.k_proj.weight"],
                         "bias": torch.zeros(
-                            weights_dict[f"apm.layers.{layer_idx}.self_attn.k_proj.weight"].shape[0]
+                            weights_dict[f"layers.{layer_idx}.self_attn.k_proj.weight"].shape[0]
                         ),  # Zero bias for K
                     },
                     "value": {
-                        "weight": weights_dict[f"apm.layers.{layer_idx}.self_attn.v_proj.weight"],
+                        "weight": weights_dict[f"layers.{layer_idx}.self_attn.v_proj.weight"],
                         "bias": torch.zeros(
-                            weights_dict[f"apm.layers.{layer_idx}.self_attn.v_proj.weight"].shape[0]
+                            weights_dict[f"layers.{layer_idx}.self_attn.v_proj.weight"].shape[0]
                         ),  # Zero bias for V
                     },
                     "out_proj": {
-                        "weight": weights_dict[f"apm.layers.{layer_idx}.self_attn.out_proj.weight"],
-                        "bias": weights_dict[f"apm.layers.{layer_idx}.self_attn.out_proj.bias"],
+                        "weight": weights_dict[f"layers.{layer_idx}.self_attn.out_proj.weight"],
+                        "bias": weights_dict[f"layers.{layer_idx}.self_attn.out_proj.bias"],
                     },
                 },
                 "self_attn_layer_norm": {
-                    "weight": weights_dict[f"apm.layers.{layer_idx}.self_attn_layer_norm.weight"],
-                    "bias": weights_dict[f"apm.layers.{layer_idx}.self_attn_layer_norm.bias"],
+                    "weight": weights_dict[f"layers.{layer_idx}.self_attn_layer_norm.weight"],
+                    "bias": weights_dict[f"layers.{layer_idx}.self_attn_layer_norm.bias"],
                 },
                 "fc1": {
-                    "weight": weights_dict[f"apm.layers.{layer_idx}.fc1.weight"],
-                    "bias": weights_dict[f"apm.layers.{layer_idx}.fc1.bias"],
+                    "weight": weights_dict[f"layers.{layer_idx}.fc1.weight"],
+                    "bias": weights_dict[f"layers.{layer_idx}.fc1.bias"],
                 },
                 "fc2": {
-                    "weight": weights_dict[f"apm.layers.{layer_idx}.fc2.weight"],
-                    "bias": weights_dict[f"apm.layers.{layer_idx}.fc2.bias"],
+                    "weight": weights_dict[f"layers.{layer_idx}.fc2.weight"],
+                    "bias": weights_dict[f"layers.{layer_idx}.fc2.bias"],
                 },
                 "final_layer_norm": {
-                    "weight": weights_dict[f"apm.layers.{layer_idx}.final_layer_norm.weight"],
-                    "bias": weights_dict[f"apm.layers.{layer_idx}.final_layer_norm.bias"],
+                    "weight": weights_dict[f"layers.{layer_idx}.final_layer_norm.weight"],
+                    "bias": weights_dict[f"layers.{layer_idx}.final_layer_norm.bias"],
                 },
             }
             self.encoder_layers_params.append(layer_params)
 
         # Conv layers - reshape for conv2d simulation (conv1d weights become conv2d weights)
         self.conv1_params = {
-            "weight": weights_dict["apm.conv1.weight"],  # [d_model, num_mel_bins, 3]
-            "bias": weights_dict["apm.conv1.bias"],
+            "weight": weights_dict["conv1.weight"],  # [d_model, num_mel_bins, 3]
+            "bias": weights_dict["conv1.bias"],
         }
         # Reshape conv2 weights for conv2d: [d_model, d_model, 3] -> [d_model, d_model, 3, 1]
-        conv2_weight = weights_dict["apm.conv2.weight"]
+        conv2_weight = weights_dict["conv2.weight"]
         conv2_weight_reshaped = conv2_weight.unsqueeze(-1)  # [d_model, d_model, 3, 1]
         self.conv2_params = {
             "weight": conv2_weight_reshaped,
-            "bias": weights_dict["apm.conv2.bias"],
+            "bias": weights_dict["conv2.bias"],
         }
 
         # Position embeddings and layer norm
-        self.embed_positions = weights_dict["apm.embed_positions.weight"]
+        self.embed_positions = weights_dict["embed_positions.weight"]
         self.layer_norm = {
-            "weight": weights_dict["apm.layer_norm.weight"],
-            "bias": weights_dict["apm.layer_norm.bias"],
+            "weight": weights_dict["layer_norm.weight"],
+            "bias": weights_dict["layer_norm.bias"],
         }
 
         logger.info(f"Loaded weights for {self.encoder_layers} encoder layers")
@@ -450,6 +449,13 @@ class TtnnWhisperEncoder:
         """
         # Convert weights to TTNN format
         parameters = self._convert_weights_to_ttnn(weights_mesh_mapper)
+
+        # Convert input from [batch, num_mel_bins, time_steps] to [batch, time_steps, num_mel_bins]
+        # to match what preprocess_encoder_inputs_minicpm expects
+        if isinstance(input_features, torch.Tensor):
+            input_features = input_features.transpose(
+                1, 2
+            )  # [B, num_mel_bins, time_steps] -> [B, time_steps, num_mel_bins]
 
         # Preprocess inputs (conv1d processing) using MiniCPM-adapted function
         input_embeds = preprocess_encoder_inputs_minicpm(
