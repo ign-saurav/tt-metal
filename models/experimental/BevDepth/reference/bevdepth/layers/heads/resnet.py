@@ -282,6 +282,7 @@ class Bottleneck(BaseModule):
         return out
 
 
+@BACKBONES.register_module()
 @MODELS.register_module()
 class ResNet(BaseModule):
     """ResNet backbone.
