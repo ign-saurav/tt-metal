@@ -89,6 +89,7 @@ class TtPointPillars:
         pillar_features = self.pillar_encoder.forward(pillars, coors_batch, npoints_per_pillar)
 
         # 2. Backbone: (bs, 64, 496, 432) -> [(bs, 64, 248, 216), (bs, 128, 124, 108), (bs, 256, 62, 54)]
+        pillar_features = ttnn.permute(pillar_features, (0, 2, 3, 1))
         xs = self.backbone.forward(pillar_features)
 
         # 3. Neck: [(bs, 64, 248, 216), (bs, 128, 124, 108), (bs, 256, 62, 54)] -> (bs, 384, 248, 216)

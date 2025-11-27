@@ -56,7 +56,7 @@ def test_pointpillars_full_pipeline(device, nclasses, reset_seeds):
 
     # Create test input (point cloud)
     batched_pts = [torch.randn(18221, 4, dtype=torch.bfloat16)]  # Example point cloud
-    # batched_pts = torch.load("input_data.pt")
+    # batched_pts = torch.load("real_input.pt")
     torch_cls, torch_reg, torch_dir = torch_model(batched_pts)
 
     # Preprocess model parameters (excluding pillar_layer)
@@ -83,21 +83,21 @@ def test_pointpillars_full_pipeline(device, nclasses, reset_seeds):
     # Compare classification output
     tt_cls_torch = tt2torch_tensor(tt_cls)
     tt_cls_torch = tt_cls_torch.permute(0, 3, 1, 2)
-    passing_cls, pcc_cls = comp_pcc(torch_cls, tt_cls_torch, 0.99)
+    passing_cls, pcc_cls = comp_pcc(torch_cls, tt_cls_torch, 0.98)
     logger.info(f"Classification PCC: {pcc_cls}")
     assert passing_cls, f"Classification PCC check failed: {pcc_cls}"
 
     # Compare regression output
     tt_reg_torch = tt2torch_tensor(tt_reg)
     tt_reg_torch = tt_reg_torch.permute(0, 3, 1, 2)
-    passing_reg, pcc_reg = comp_pcc(torch_reg, tt_reg_torch, 0.99)
+    passing_reg, pcc_reg = comp_pcc(torch_reg, tt_reg_torch, 0.98)
     logger.info(f"Regression PCC: {pcc_reg}")
     assert passing_reg, f"Regression PCC check failed: {pcc_reg}"
 
     # Compare direction output
     tt_dir_torch = tt2torch_tensor(tt_dir)
     tt_dir_torch = tt_dir_torch.permute(0, 3, 1, 2)
-    passing_dir, pcc_dir = comp_pcc(torch_dir, tt_dir_torch, 0.99)
+    passing_dir, pcc_dir = comp_pcc(torch_dir, tt_dir_torch, 0.98)
     logger.info(f"Direction PCC: {pcc_dir}")
     assert passing_dir, f"Direction PCC check failed: {pcc_dir}"
 

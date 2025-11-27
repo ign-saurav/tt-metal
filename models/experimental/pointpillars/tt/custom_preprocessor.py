@@ -173,17 +173,40 @@ def _extract_neck(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
         bn_layer = block[1]
 
         # Use the ConvTranspose2d-specific folding function
-        weight, bias = fold_batch_norm2d_into_conv_transpose2d(conv_transpose_layer, bn_layer)
         if i == 0:
+            weight, bias = fold_batch_norm2d_into_conv_transpose2d(conv_transpose_layer, bn_layer)
             parameters[f"decoder_{i}"]["weight"] = ttnn.from_torch(weight, dtype=dtype, mesh_mapper=mesh_mapper)
             bias = bias.reshape((1, 1, 1, -1))
             parameters[f"decoder_{i}"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
             parameters[f"decoder_{i}"]["conv_args"] = infer_module_args(conv_transpose_layer)
         else:
+            weight = conv_transpose_layer.weight
             parameters[f"decoder_{i}"]["weight"] = weight
-            bias = bias.reshape((1, 1, 1, -1))
-            parameters[f"decoder_{i}"]["bias"] = bias
             parameters[f"decoder_{i}"]["conv_args"] = infer_module_args(conv_transpose_layer)
+            bias = conv_transpose_layer.bias
+
+            if bias is not None:
+                bias = bias.reshape((1, 1, 1, -1))
+                parameters[f"decoder_{i}"]["bias"] = bias, dtype = dtype, mesh_mapper = mesh_mapper
+            else:
+                # Option 2: Create zero bias if needed
+                out_channels = conv_transpose_layer.out_channels
+                zero_bias = torch.zeros(1, 1, 1, out_channels)
+                parameters[f"decoder_{i}"]["bias"] = zero_bias
+
+            # Extract BatchNorm parameters separately
+            parameters[f"decoder_{i}"]["bn_weight"] = ttnn.from_torch(
+                bn_layer.weight.view(1, -1, 1, 1), dtype=dtype, mesh_mapper=mesh_mapper, layout=ttnn.TILE_LAYOUT
+            )
+            parameters[f"decoder_{i}"]["bn_bias"] = ttnn.from_torch(
+                bn_layer.bias.view(1, -1, 1, 1), dtype=dtype, mesh_mapper=mesh_mapper, layout=ttnn.TILE_LAYOUT
+            )
+            parameters[f"decoder_{i}"]["bn_running_mean"] = ttnn.from_torch(
+                bn_layer.running_mean.view(1, -1, 1, 1), dtype=dtype, mesh_mapper=mesh_mapper, layout=ttnn.TILE_LAYOUT
+            )
+            parameters[f"decoder_{i}"]["bn_running_var"] = ttnn.from_torch(
+                bn_layer.running_var.view(1, -1, 1, 1), dtype=dtype, mesh_mapper=mesh_mapper, layout=ttnn.TILE_LAYOUT
+            )
 
     return parameters
 
