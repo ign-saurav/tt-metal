@@ -64,8 +64,15 @@ class TtNeck:
 
         compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.HiFi2,  # Use HiFi instead of LoFi
+            math_fidelity=ttnn.MathFidelity.HiFi2,
             fp32_dest_acc_en=True,
+            packer_l1_acc=False,
+        )
+        bn_config = ttnn.init_device_compute_kernel_config(
+            self.device.arch(),
+            math_fidelity=ttnn.MathFidelity.LoFi,
+            math_approx_mode=True,
+            fp32_dest_acc_en=False,
             packer_l1_acc=False,
         )
 
@@ -99,6 +106,24 @@ class TtNeck:
             stride=2,
         )
 
+        output1 = ttnn.reshape(output1, outs[0].shape)
+        output1 = ttnn.permute(output1, (0, 3, 1, 2))
+
+        output1 = ttnn.batch_norm(
+            output1,
+            running_mean=self.parameters[f"decoder_1"]["bn_running_mean"],  # Shape: [1, C, 1, 1]
+            running_var=self.parameters[f"decoder_1"]["bn_running_var"],  # Shape: [1, C, 1, 1]
+            training=False,
+            eps=1e-05,
+            weight=self.parameters[f"decoder_1"]["bn_weight"],  # Shape: [1, C, 1, 1]
+            bias=self.parameters[f"decoder_1"]["bn_bias"],  # Shape: [1, C, 1, 1]
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            compute_kernel_config=bn_config,
+        )
+
+        output1 = ttnn.relu(output1)
+        output1 = ttnn.permute(output1, (0, 2, 3, 1))
+
         # Prepare split weights and bias
         conv_weights, conv_bias = prepare_split_conv_transpose2d_weights_bias(
             in_channels=256,
@@ -128,8 +153,27 @@ class TtNeck:
             output_padding=0,
             stride=4,
         )
-        outs.append(ttnn.reshape(output1, outs[0].shape))
-        outs.append(ttnn.reshape(output2, outs[0].shape))
+
+        output2 = ttnn.reshape(output2, outs[0].shape)
+        output2 = ttnn.permute(output2, (0, 3, 1, 2))
+
+        output2 = ttnn.batch_norm(
+            output2,
+            running_mean=self.parameters[f"decoder_2"]["bn_running_mean"],  # Shape: [1, C, 1, 1]
+            running_var=self.parameters[f"decoder_2"]["bn_running_var"],  # Shape: [1, C, 1, 1]
+            training=False,  # Inference mode
+            eps=1e-05,
+            weight=self.parameters[f"decoder_2"]["bn_weight"],  # Shape: [1, C, 1, 1]
+            bias=self.parameters[f"decoder_2"]["bn_bias"],  # Shape: [1, C, 1, 1]
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            compute_kernel_config=bn_config,
+        )
+
+        output2 = ttnn.relu(output2)
+        output2 = ttnn.permute(output2, (0, 2, 3, 1))
+
+        outs.append(output1)
+        outs.append(output2)
 
         # # Concatenate along channel dimension (dim=3 in NHWC format)
         out = ttnn.concat(outs, dim=3)
