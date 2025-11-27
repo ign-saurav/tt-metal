@@ -6,10 +6,11 @@ import torch
 
 from ttnn.model_preprocessing import convert_torch_model_to_ttnn_model, fold_batch_norm2d_into_conv2d
 
-from models.experimental.BevDepth.tests.ref_bev_depth_head import BEVDepthHead, ConvModule
-from models.experimental.BevDepth.tests.ref_bev_depth_neck import SECONDFPN
-
-# from models.experimental.BevDepth.reference.utils import Conv2D
+from mmcv.cnn import ConvModule
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.resnet import BasicBlock
+from models.experimental.BevDepth.reference.bevdepth.layers.necks import SECONDFPN
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.resnet import ResNet
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.bev_depth_head import BEVDepthHead
 
 
 def fold_batch_norm2d_into_conv_transpose2d(conv_transpose, bn, mesh_mapper=None):
@@ -56,57 +57,30 @@ def custom_preprocessor(
         weight, bias = fold_batch_norm2d_into_conv2d(model.conv, model.bn)
         parameters["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
         parameters["bias"] = ttnn.from_torch(torch.reshape(bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
-    elif isinstance(model, torch.nn.Conv2d):
-        parameters["weight"] = ttnn.from_torch(model.weight, mesh_mapper=mesh_mapper)
-        if model.bias is not None:
-            parameters["bias"] = ttnn.from_torch(torch.reshape(model.bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
-    elif isinstance(model, torch.nn.Sequential):
-        # Handle Sequential with ConvTranspose2d + BatchNorm2d + ReLU
-        if len(model) >= 2:
-            if isinstance(model[0], torch.nn.ConvTranspose2d) and isinstance(model[1], torch.nn.BatchNorm2d):
-                weight_ttnn, bias_ttnn = fold_batch_norm2d_into_conv_transpose2d(
-                    model[0], model[1], mesh_mapper=mesh_mapper
-                )
-                parameters["weight"] = weight_ttnn
-                parameters["bias"] = bias_ttnn
-            else:
-                # Let sub-modules handle their own preprocessing
-                for child_name, child in model.named_children():
-                    parameters[child_name] = convert_torch_model_to_ttnn_model(
-                        child,
-                        name=f"{name}.{child_name}",
-                        custom_preprocessor=custom_preprocessor_func,
-                        convert_to_ttnn=convert_to_ttnn,
-                        ttnn_module_args=ttnn_module_args,
-                    )
-        else:
-            # Let sub-modules handle their own preprocessing
-            for child_name, child in model.named_children():
-                parameters[child_name] = convert_torch_model_to_ttnn_model(
-                    child,
-                    name=f"{name}.{child_name}",
-                    custom_preprocessor=custom_preprocessor_func,
-                    convert_to_ttnn=convert_to_ttnn,
-                    ttnn_module_args=ttnn_module_args,
-                )
-    elif isinstance(model, torch.nn.ConvTranspose2d):
-        parameters["weight"] = ttnn.from_torch(model.weight, mesh_mapper=mesh_mapper)
-        if model.bias is not None:
-            parameters["bias"] = ttnn.from_torch(torch.reshape(model.bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
-    elif isinstance(model, torch.nn.ModuleList):
-        # Handle ModuleList (e.g., deblocks in SECONDFPN)
-        for idx, child in enumerate(model):
-            parameters[idx] = convert_torch_model_to_ttnn_model(
-                child,
-                name=f"{name}.{idx}",
-                custom_preprocessor=custom_preprocessor_func,
-                convert_to_ttnn=convert_to_ttnn,
-                ttnn_module_args=ttnn_module_args,
+    elif isinstance(model, BasicBlock):
+        parameters["conv1"] = {}
+        parameters["conv2"] = {}
+        weight, bias = fold_batch_norm2d_into_conv2d(model.conv1, model.norm1)
+        parameters["conv1"]["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
+        parameters["conv1"]["bias"] = ttnn.from_torch(torch.reshape(bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
+        weight, bias = fold_batch_norm2d_into_conv2d(model.conv2, model.norm2)
+        parameters["conv2"]["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
+        parameters["conv2"]["bias"] = ttnn.from_torch(torch.reshape(bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
+        if model.downsample is not None:
+            weight, bias = fold_batch_norm2d_into_conv2d(model.downsample[0], model.downsample[1])
+            parameters["downsample"] = {}
+            parameters["downsample"]["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
+            parameters["downsample"]["bias"] = ttnn.from_torch(
+                torch.reshape(bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper
             )
-    elif isinstance(model, SECONDFPN):
-        # Handle SECONDFPN by processing its deblocks ModuleList
-        # The ModuleList will be handled recursively, but we can also handle it here explicitly
+    elif isinstance(model, ResNet):
+        parameters["conv1"] = {}
+        weight, bias = fold_batch_norm2d_into_conv2d(model.conv1, model.bn1)
+        parameters["conv1"]["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
+        parameters["conv1"]["bias"] = ttnn.from_torch(torch.reshape(bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
         for child_name, child in model.named_children():
+            if child_name in ["conv1", "bn1", "relu"]:
+                continue
             parameters[child_name] = convert_torch_model_to_ttnn_model(
                 child,
                 name=f"{name}.{child_name}",
@@ -114,9 +88,21 @@ def custom_preprocessor(
                 convert_to_ttnn=convert_to_ttnn,
                 ttnn_module_args=ttnn_module_args,
             )
+    elif isinstance(model, SECONDFPN):
+        for i, deblock in enumerate(model.deblocks):
+            conv_transpose = deblock[0]
+            bn = deblock[1]
+
+            weight_ttnn, bias_ttnn = fold_batch_norm2d_into_conv_transpose2d(
+                conv_transpose, bn, mesh_mapper=mesh_mapper
+            )
+
+            parameters[f"deblock_{i}"] = {}
+            parameters[f"deblock_{i}"]["weight"] = weight_ttnn
+            parameters[f"deblock_{i}"]["bias"] = bias_ttnn
     elif isinstance(
         model,
-        (BEVDepthHead,),
+        (BEVDepthHead),
     ):
         # Let the sub-modules handle their own preprocessing
         for child_name, child in model.named_children():
@@ -127,6 +113,14 @@ def custom_preprocessor(
                 convert_to_ttnn=convert_to_ttnn,
                 ttnn_module_args=ttnn_module_args,
             )
+    elif isinstance(model, torch.nn.Conv2d):
+        parameters["weight"] = ttnn.from_torch(model.weight, mesh_mapper=mesh_mapper)
+        if model.bias is not None:
+            parameters["bias"] = ttnn.from_torch(torch.reshape(model.bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
+    elif isinstance(model, torch.nn.ConvTranspose2d):
+        parameters["weight"] = ttnn.from_torch(model.weight, mesh_mapper=mesh_mapper)
+        if model.bias is not None:
+            parameters["bias"] = ttnn.from_torch(torch.reshape(model.bias, (1, 1, 1, -1)), mesh_mapper=mesh_mapper)
 
     return parameters
 

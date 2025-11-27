@@ -9,7 +9,9 @@ import ttnn
 from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_module_args
 from tests.ttnn.utils_for_testing import check_with_pcc
 
-from models.experimental.BevDepth.tests.ref_bev_depth_head import BEVDepthHead
+from models.experimental.BevDepth.reference.bevdepth.exps.nuscenes.mv.bev_depth_lss_r50_256x704_128x128_24e_2key import (
+    BEVDepthLightningModel,
+)
 from models.experimental.BevDepth.tt.bev_depth_head import TtBEVDepthHead, head_optimisations
 from models.experimental.BevDepth.tt.custom_preprocessing import create_custom_mesh_preprocessor
 
@@ -36,8 +38,9 @@ class HeadTestInfra:
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
 
         # Torch model
-        torch_model = BEVDepthHead()
+        torch_model = BEVDepthLightningModel()
         torch_model.load_checkpoint("../reference/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth")
+        torch_model = torch_model.model.head
         torch_model.eval()
 
         # Synthetic input
@@ -57,7 +60,7 @@ class HeadTestInfra:
             run_model=lambda m: m(self.torch_input_tensor),
             device=None,
         )
-        print(parameters)
+        # print(parameters)
 
         # Initialize TTNN model
         self.ttnn_model = TtBEVDepthHead(parameters, model_config, layer_optimisations=head_optimisations)
@@ -81,7 +84,7 @@ class HeadTestInfra:
         self.validate()
 
     def _create_input_tensor(self):
-        shape = (2, 256, 128, 128)
+        shape = (2, 160, 128, 128)
         logger.info(f"Generating synthetic input tensor of shape {shape}")
         return torch.randn(shape, dtype=torch.float32)
 
