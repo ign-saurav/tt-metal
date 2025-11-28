@@ -40,7 +40,7 @@ def load_reference_fpn():
 
         neck = SECONDFPN(
             in_channels=[256, 512, 128],
-            out_channels=[128, 128, 1024],
+            out_channels=[128, 128, 128],  # All deblocks output 128 channels
             upsample_strides=[4, 2, 1],
             # upsample_strides=[1, 2, 4],
         )
@@ -50,16 +50,16 @@ def load_reference_fpn():
         return None
 
 
-def load_reference_depthnet():
+def load_reference_depthnet(depth_channels=112):
     """Load reference DepthNet from BEVDepth"""
     try:
         from models.experimental.BevDepth.reference.bevdepth.layers.backbones.base_lss_fpn import DepthNet
 
         depth_net = DepthNet(
             in_channels=512,
-            mid_channels=256,
-            context_channels=512,
-            depth_channels=118,
+            mid_channels=512,  # Match checkpoint: mid_channels=512
+            context_channels=80,  # Match checkpoint: context_channels=80 (from output_channels)
+            depth_channels=depth_channels,  # Match checkpoint: depth_channels=112
         )
         return depth_net
     except ImportError as e:
@@ -143,37 +143,22 @@ def test_secondfpn_pcc(device, batch_size, height, width):
     """Test TTNN SECONDFPN against reference"""
     from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_TTNN, prepare_secondfpn_parameters
 
-    # Checkpoint weight analysis:
-    # deblocks.0.0.weight: [128, 256, 4, 4] = TransposedConv(256, 128, kernel=4, stride=4)
-    # deblocks.1.0.weight: [128, 512, 2, 2] = TransposedConv(512, 128, kernel=2, stride=2)
-    # deblocks.2.0.weight: [1024, 128, 1, 1] = Conv2d(128, 1024, kernel=1, stride=1)
-    #
-    # Output BN shapes show actual output channels:
-    # deblocks.0.1: 128 channels
-    # deblocks.1.1: 128 channels
-    # deblocks.2.1: 128 channels (NOT 1024!)
-    #
-    # Wait - deblocks.2.1 has 128 channels, so deblocks.2.0 must output 128, not 1024!
-    # The [1024, 128, 1, 1] weight is likely a MISTAKE in my reading or it's a different layer
-
-    # Let me re-examine: ALL BN layers have 128 channels
-    # So all deblocks output 128 channels
-    # Concatenated: 128 + 128 + 128 = 384 channels
-
     in_channels = [256, 512, 128]
-    out_channels = [128, 128, 1024]
-    upsample_strides = [4, 2, 1]  # This is correct!
+    out_channels = [128, 128, 128]  # All deblocks output 128 channels (not 1024 for the third)
+    upsample_strides = [4, 2, 1]
+
     # Create synthetic inputs
     target_h, target_w = 64, 160  # Final resolution
     torch_layer1 = torch.randn(batch_size, 256, target_h // 4, target_w // 4)  # 16x40 → 64x160
     torch_layer2 = torch.randn(batch_size, 512, target_h // 2, target_w // 2)  # 32x80 → 64x160
     torch_layer3 = torch.randn(batch_size, 128, target_h, target_w)  # 64x160 → 64x160
-    # Load reference model with correct config
+
+    # Load reference model with correct config matching checkpoint
     from models.experimental.BevDepth.reference.bevdepth.layers.necks.second_fpn import SECONDFPN
 
     reference_fpn = SECONDFPN(
         in_channels=[256, 512, 128],
-        out_channels=[128, 128, 1024],
+        out_channels=[128, 128, 128],  # Match checkpoint: all output 128 channels
         upsample_strides=[4, 2, 1],
         use_conv_for_no_stride=True,
     )
@@ -182,10 +167,116 @@ def test_secondfpn_pcc(device, batch_size, height, width):
     weights_path = download_bevdepth_weights()
     fpn_state = extract_fpn_depthnet_state_dict(weights_path)
 
+    filtered_state = {}
+    for k, v in fpn_state.items():
+        if "img_neck" in k:
+            new_key = k.replace("model.backbone.img_neck.", "")
+
+            if "deblocks.0.0.weight" in new_key or "deblocks.1.0.weight" in new_key:
+                if v.shape[0] > 128:  # Checkpoint has more output channels than BN
+                    logger.info(f"Truncating {new_key} output channels from {v.shape[0]} to 128 before transpose")
+                    v = v[:128, :, :, :]  # Truncate output channels (dimension 0 in checkpoint format)
+                v = v.permute(1, 0, 2, 3).contiguous()  # Now [in_channels, out_channels, ...]
+
+            if "deblocks.2.0.weight" in new_key:
+                expected_shape = reference_fpn.deblocks[2][0].weight.shape
+                if v.shape != expected_shape:
+                    if v.shape[0] > expected_shape[0] and v.shape[1:] == expected_shape[1:]:
+                        # Take first out_channels channels
+                        v = v[: expected_shape[0], :, :, :]
+                        logger.info(f"Truncating {new_key} from {v.shape} to {expected_shape}")
+                    else:
+                        logger.warning(
+                            f"Skipping {new_key}: checkpoint shape {v.shape} != model shape {expected_shape}"
+                        )
+                        continue
+
+            filtered_state[new_key] = v
+
     # Load weights into reference
-    reference_fpn.load_state_dict(
-        {k.replace("model.backbone.img_neck.", ""): v for k, v in fpn_state.items() if "img_neck" in k}, strict=False
-    )
+    reference_fpn.load_state_dict(filtered_state, strict=False)
+
+    # Fuse BatchNorm into conv layers for fair comparison with TTNN
+    # TTNN fuses BN, so we should too for the reference
+    from models.experimental.BevDepth.tests.test_resnet50_backbone_pcc import fuse_conv_bn_weights
+
+    # Fuse BN for each deblock
+    for i in range(3):
+        deblock = reference_fpn.deblocks[i]
+        conv_layer = deblock[0]
+        bn_layer = deblock[1]
+
+        if hasattr(bn_layer, "weight") and hasattr(bn_layer, "running_mean"):
+            is_transposed = isinstance(conv_layer, torch.nn.ConvTranspose2d)
+
+            conv_weight = conv_layer.weight.data
+            bn_channels = bn_layer.weight.shape[0]
+
+            if is_transposed:
+                # ConvTranspose2d: weight is [in_channels, out_channels, ...]
+                conv_in_channels, conv_out_channels = conv_weight.shape[0], conv_weight.shape[1]
+
+                if conv_out_channels != bn_channels:
+                    if conv_out_channels > bn_channels:
+                        logger.info(
+                            f"Reference deblock {i}: truncating ConvTranspose2d weight output channels from {conv_out_channels} to {bn_channels} to match BN"
+                        )
+                        # Truncate output channels (second dimension)
+                        conv_weight = conv_weight[:, :bn_channels, :, :].clone()
+                    else:
+                        raise ValueError(
+                            f"Reference deblock {i}: ConvTranspose2d has {conv_out_channels} output channels but BN has {bn_channels} channels"
+                        )
+
+                conv_weight_for_fusion = conv_weight.permute(1, 0, 2, 3).contiguous()
+
+                # Fuse BN into conv (weight is now in Conv2d format: [out_channels, in_channels, ...])
+                fused_weight, fused_bias = fuse_conv_bn_weights(
+                    conv_weight_for_fusion,
+                    bn_layer.weight.data,
+                    bn_layer.bias.data,
+                    bn_layer.running_mean,
+                    bn_layer.running_var,
+                    eps=bn_layer.eps,
+                )
+
+                # Transpose back to ConvTranspose2d format [in_channels, out_channels, ...]
+                fused_weight = fused_weight.permute(1, 0, 2, 3).contiguous()
+            else:
+                # Conv2d: weight is [out_channels, in_channels, ...]
+                conv_out_channels = conv_weight.shape[0]
+
+                if conv_out_channels != bn_channels:
+                    if conv_out_channels > bn_channels:
+                        logger.info(
+                            f"Reference deblock {i}: truncating Conv2d weight output channels from {conv_out_channels} to {bn_channels} to match BN"
+                        )
+                        # Truncate output channels (first dimension)
+                        conv_weight = conv_weight[:bn_channels, :, :, :].clone()
+                    else:
+                        raise ValueError(
+                            f"Reference deblock {i}: Conv2d has {conv_out_channels} output channels but BN has {bn_channels} channels"
+                        )
+
+                # Fuse BN into conv (already in correct format)
+                fused_weight, fused_bias = fuse_conv_bn_weights(
+                    conv_weight,
+                    bn_layer.weight.data,
+                    bn_layer.bias.data,
+                    bn_layer.running_mean,
+                    bn_layer.running_var,
+                    eps=bn_layer.eps,
+                )
+            # Update conv layer
+            conv_layer.weight.data = fused_weight
+            if conv_layer.bias is None:
+                conv_layer.bias = torch.nn.Parameter(fused_bias)
+            else:
+                conv_layer.bias.data = fused_bias
+
+            # Replace BN with Identity
+            deblock[1] = torch.nn.Identity()
+
     reference_fpn.eval()
 
     # Reference forward
@@ -240,7 +331,7 @@ def test_secondfpn_pcc(device, batch_size, height, width):
     logger.info(f"  Reference shape: {ref_outputs[0].shape}")
     logger.info(f"  TTNN shape: {ttnn_out_torch.shape}")
 
-    assert pcc_value > 0.90, f"SECONDFPN PCC {pcc_value:.6f} is below threshold 0.90"
+    assert pcc_value > 0.99, f"SECONDFPN PCC {pcc_value:.6f} is below threshold 0.99"
 
     return pcc_value
 
@@ -248,7 +339,7 @@ def test_secondfpn_pcc(device, batch_size, height, width):
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("height, width", [(64, 160)])
-@pytest.mark.parametrize("depth_channels", [118])  # Number of depth bins
+@pytest.mark.parametrize("depth_channels", [112])  # Match checkpoint: depth_channels=112
 def test_depthnet_pcc(device, batch_size, height, width, depth_channels):
     """Test TTNN DepthNet against reference"""
     from models.experimental.BevDepth.tt.ttnn_depthnet import DepthNet_TTNN, prepare_depthnet_parameters
@@ -257,7 +348,7 @@ def test_depthnet_pcc(device, batch_size, height, width, depth_channels):
     torch_input = torch.randn(batch_size, 512, height, width)
 
     # Load reference model
-    reference_depthnet = load_reference_depthnet()
+    reference_depthnet = load_reference_depthnet(depth_channels=depth_channels)
     if reference_depthnet is None:
         logger.warning("Skipping test - BEVDepth reference not available")
         pytest.skip("BEVDepth reference not available")
@@ -279,26 +370,45 @@ def test_depthnet_pcc(device, batch_size, height, width, depth_channels):
     )
     reference_depthnet.eval()
 
-    # Reference forward (without camera params for simplified test)
+    # DepthNet requires all camera parameters in mats_dict
+    # Shapes: (B, num_sweeps, num_cameras, 4, 4) for most, (B, 4, 4) for bda_mat
+    num_sweeps = 1
+    num_cameras = 1  # Single camera for testing
+
     with torch.no_grad():
-        # For testing, we'll skip camera-aware features
-        # Just test the conv pathway
         try:
             ref_output = reference_depthnet(
                 torch_input,
                 mats_dict={
-                    "intrin_mats": torch.eye(4).unsqueeze(0).unsqueeze(0).unsqueeze(0).repeat(batch_size, 1, 1, 1, 1)
+                    "intrin_mats": torch.eye(4)
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                    .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
+                    "ida_mats": torch.eye(4)
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                    .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
+                    "sensor2ego_mats": torch.eye(4)
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                    .unsqueeze(0)
+                    .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
+                    "bda_mat": torch.eye(4).unsqueeze(0).repeat(batch_size, 1, 1),
                 },
             )
-        except:
-            logger.warning("Reference model needs camera params - using simplified comparison")
+        except Exception as e:
+            logger.warning(f"Reference model failed with camera params: {e}")
             pytest.skip("Reference model requires camera parameters")
             return
 
     # Prepare TTNN parameters
+    # Use mid_channels=512 to match checkpoint (from base_exp.py: depth_net_conf)
     depthnet_params = prepare_depthnet_parameters(
         depthnet_state,
         in_channels=512,
+        mid_channels=512,  # Match checkpoint: mid_channels=512
         depth_channels=depth_channels,
     )
 
@@ -312,7 +422,9 @@ def test_depthnet_pcc(device, batch_size, height, width, depth_channels):
         device=device,
         parameters=depthnet_params,
         in_channels=512,
-        depth_channels=depth_channels,
+        mid_channels=512,  # Match checkpoint: mid_channels=512
+        context_channels=80,  # Match checkpoint: context_channels=80 (from output_channels)
+        depth_channels=depth_channels,  # Should be 112 from parametrize
         model_config=model_config,
     )
 
@@ -345,7 +457,7 @@ def test_depthnet_pcc(device, batch_size, height, width, depth_channels):
     logger.info(f"  Reference shape: {ref_depth.shape}")
     logger.info(f"  TTNN shape: {ttnn_depth.shape}")
 
-    assert pcc_value > 0.85, f"DepthNet PCC {pcc_value:.6f} is below threshold 0.85"
+    assert pcc_value > 0.99, f"DepthNet PCC {pcc_value:.6f} is below threshold 0.99"
 
     logger.info("DepthNet passed PCC check!")
     return pcc_value
