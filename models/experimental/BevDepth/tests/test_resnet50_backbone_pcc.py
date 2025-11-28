@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2024 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
@@ -42,7 +42,6 @@ def extract_backbone_state_dict(checkpoint_path):
 
     if "state_dict" in checkpoint:
         state_dict = checkpoint["state_dict"]
-        # Free the full checkpoint to save memory
         del checkpoint
         gc.collect()
     else:
@@ -67,10 +66,6 @@ def extract_backbone_state_dict(checkpoint_path):
 def fuse_conv_bn_weights(conv_weight, bn_weight, bn_bias, bn_mean, bn_var, eps=1e-5):
     """
     Fuse BatchNorm parameters into conv weights for inference.
-
-    Formula:
-    w_fused = w_conv * (gamma / sqrt(var + eps))
-    b_fused = beta - (gamma * mean / sqrt(var + eps))
     """
     # Calculate scale factor from BN
     std = torch.sqrt(bn_var + eps)
@@ -101,7 +96,6 @@ def fuse_batchnorm_into_conv(state_dict):
         )
         fused_state["conv1.weight"] = fused_weight
         fused_state["conv1.bias"] = fused_bias
-        logger.info(f"Fused conv1+bn1: weight mean={fused_weight.mean():.6f}, bias mean={fused_bias.mean():.6f}")
 
     # Fuse BN in each bottleneck block
     for layer_idx in range(1, 5):
@@ -162,28 +156,11 @@ def prepare_ttnn_parameters(state_dict, device):
 
     params = Parameters()
 
-    # # Conv1 - keep as PyTorch tensor
-    # params.conv1 = Parameters()
-    # params.conv1.weight = state_dict['conv1.weight'].to(torch.bfloat16)
-    # params.conv1.bias = None
-
-    # # Log first conv weight stats to verify fused weights are loaded
-    # logger.info(f"Conv1 weight stats: mean={params.conv1.weight.mean():.6f}, std={params.conv1.weight.std():.6f}, shape={params.conv1.weight.shape}")
-    # logger.info(f"Conv1 bias stats: mean={params.conv1.bias.mean():.6f}, std={params.conv1.bias.std():.6f}")
     params.conv1 = Parameters()
     params.conv1.weight = state_dict["conv1.weight"].to(torch.bfloat16)
     params.conv1.bias = state_dict.get("conv1.bias", None)
     if params.conv1.bias is not None:
         params.conv1.bias = params.conv1.bias.to(torch.bfloat16)
-
-    # Log first conv weight stats to verify fused weights are loaded
-    logger.info(
-        f"Conv1 weight stats: mean={params.conv1.weight.mean():.6f}, std={params.conv1.weight.std():.6f}, shape={params.conv1.weight.shape}"
-    )
-    if params.conv1.bias is not None:
-        logger.info(f"Conv1 bias stats: mean={params.conv1.bias.mean():.6f}, std={params.conv1.bias.std():.6f}")
-    else:
-        logger.warning("Conv1 bias is None!")
 
     # Layers - keep as PyTorch tensors
     for layer_idx in range(1, 5):
@@ -198,30 +175,49 @@ def prepare_ttnn_parameters(state_dict, device):
 
             block_params = Parameters()
 
-            # All weights as PyTorch tensors
+            # All weights as PyTorch tensors - load fused biases from state_dict
             block_params.conv1 = Parameters()
             block_params.conv1.weight = state_dict[f"{block_prefix}conv1.weight"].to(torch.bfloat16)
-            block_params.conv1.bias = None
+            # Load fused bias if it exists (from batch norm fusion)
+            conv1_bias_key = f"{block_prefix}conv1.bias"
+            if conv1_bias_key in state_dict:
+                block_params.conv1.bias = state_dict[conv1_bias_key].to(torch.bfloat16)
+            else:
+                block_params.conv1.bias = None
 
             block_params.conv2 = Parameters()
             block_params.conv2.weight = state_dict[f"{block_prefix}conv2.weight"].to(torch.bfloat16)
-            block_params.conv2.bias = None
+            # Load fused bias if it exists
+            conv2_bias_key = f"{block_prefix}conv2.bias"
+            if conv2_bias_key in state_dict:
+                block_params.conv2.bias = state_dict[conv2_bias_key].to(torch.bfloat16)
+            else:
+                block_params.conv2.bias = None
 
             block_params.conv3 = Parameters()
             block_params.conv3.weight = state_dict[f"{block_prefix}conv3.weight"].to(torch.bfloat16)
-            block_params.conv3.bias = None
+            # Load fused bias if it exists
+            conv3_bias_key = f"{block_prefix}conv3.bias"
+            if conv3_bias_key in state_dict:
+                block_params.conv3.bias = state_dict[conv3_bias_key].to(torch.bfloat16)
+            else:
+                block_params.conv3.bias = None
 
             if f"{block_prefix}downsample.0.weight" in state_dict:
                 block_params.downsample = [Parameters()]
                 block_params.downsample[0].weight = state_dict[f"{block_prefix}downsample.0.weight"].to(torch.bfloat16)
-                block_params.downsample[0].bias = None
+                # Load fused bias if it exists
+                downsample_bias_key = f"{block_prefix}downsample.0.bias"
+                if downsample_bias_key in state_dict:
+                    block_params.downsample[0].bias = state_dict[downsample_bias_key].to(torch.bfloat16)
+                else:
+                    block_params.downsample[0].bias = None
 
             layer_params.append(block_params)
             block_idx += 1
 
         setattr(params, layer_name, layer_params)
 
-    logger.info("Prepared PyTorch weight tensors (will convert to TTNN during conv2d)")
     return params
 
 
@@ -238,10 +234,58 @@ def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
 
     # Load reference model
     reference_model = load_reference_backbone()
-    reference_model.load_state_dict(backbone_state, strict=False)
-    reference_model.eval()
 
-    print(f"Reference model state_dict: {reference_model.state_dict().keys()}")
+    # Enable bias for conv1 and all conv layers since we're loading fused weights
+    # ResNet50 from torchvision has bias=False by default, but fused weights include bias
+    if reference_model.conv1.bias is None:
+        # Replace conv1 with a version that has bias
+        reference_model.conv1 = torch.nn.Conv2d(
+            reference_model.conv1.in_channels,
+            reference_model.conv1.out_channels,
+            reference_model.conv1.kernel_size,
+            reference_model.conv1.stride,
+            reference_model.conv1.padding,
+            reference_model.conv1.dilation,
+            reference_model.conv1.groups,
+            bias=True,  # Enable bias for fused weights
+        )
+
+    # Enable bias for all conv layers in bottleneck blocks
+    def enable_conv_bias(module):
+        for name, child in list(module.named_children()):
+            if isinstance(child, torch.nn.Conv2d) and child.bias is None:
+                # Replace with conv that has bias
+                new_conv = torch.nn.Conv2d(
+                    child.in_channels,
+                    child.out_channels,
+                    child.kernel_size,
+                    child.stride,
+                    child.padding,
+                    child.dilation,
+                    child.groups,
+                    bias=True,
+                )
+                # Copy weights
+                new_conv.weight.data = child.weight.data.clone()
+                setattr(module, name, new_conv)
+            else:
+                enable_conv_bias(child)
+
+    enable_conv_bias(reference_model)
+
+    # Now load the fused weights (including biases)
+    reference_model.load_state_dict(backbone_state, strict=False)
+
+    # Replace batch norm with identity since weights are fused
+    def replace_bn_with_identity(module):
+        for name, child in list(module.named_children()):
+            if isinstance(child, torch.nn.BatchNorm2d):
+                setattr(module, name, torch.nn.Identity())
+            else:
+                replace_bn_with_identity(child)
+
+    replace_bn_with_identity(reference_model)
+    reference_model.eval()
 
     # Prepare TTNN model
     model_config = {
@@ -251,31 +295,22 @@ def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
     }
 
     ttnn_params = prepare_ttnn_parameters(backbone_state, device)
+
     ttnn_model = ResNet50_BEVDepth(
         device=device,
         parameters=ttnn_params,
         batch_size=batch_size,
         model_config=model_config,
         return_intermediate=True,
+        return_block_outputs=True,  # Return block-level outputs for debugging
     )
 
-    # # Create input - TTNN conv2d expects (B, H, W, C) format
-    # torch_input = torch.randn(batch_size, 3, height, width)
-    # # Reshape to (B, H, W, C) for TTNN
-    # torch_input_reshaped = torch_input.permute(0, 2, 3, 1).contiguous()
-    # ttnn_input = ttnn.from_torch(
-    #     torch_input_reshaped,
-    #     dtype=ttnn.bfloat16,
-    #     layout=ttnn.TILE_LAYOUT,
-    #     device=device,
-    # )
     # Create input - TTNN conv2d expects (B, H, W, C) format
     torch_input = torch.randn(batch_size, 3, height, width)
     # Reshape to (B, H, W, C) for TTNN
     torch_input_reshaped = torch_input.permute(0, 2, 3, 1).contiguous()
 
     # Use DRAM for input to avoid L1 memory exhaustion
-    # TTNN will manage memory during conv2d operations and handle padding internally
     ttnn_input = ttnn.from_torch(
         torch_input_reshaped,
         dtype=ttnn.bfloat16,
@@ -286,21 +321,28 @@ def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
     # Convert to TILE_LAYOUT after moving to device
     ttnn_input = ttnn.to_layout(ttnn_input, ttnn.TILE_LAYOUT)
 
-    # Reference forward
+    # Reference forward (batch norm is replaced with Identity, so bn1 does nothing)
     with torch.no_grad():
         x = reference_model.conv1(torch_input)
-        x = reference_model.bn1(x)
+        x = reference_model.bn1(x)  # Now Identity, does nothing
         x = reference_model.relu(x)
+        ref_conv1_output = x.clone()  # Save conv1 output (before maxpool) for comparison
         x = reference_model.maxpool(x)
+        ref_layer1_input = x.clone()  # Save input to layer1 for comparison
 
-        ref_layer1 = reference_model.layer1(x)
+        # Get layer1 block outputs for detailed comparison
+        ref_layer1_blocks = []
+        for i, block in enumerate(reference_model.layer1):
+            x = block(x)
+            ref_layer1_blocks.append(x.clone())
+        ref_layer1 = x
+
         ref_layer2 = reference_model.layer2(ref_layer1)
         ref_layer3 = reference_model.layer3(ref_layer2)
         ref_layer4 = reference_model.layer4(ref_layer3)
 
-    # TTNN forward - pass original dimensions to avoid shape mismatch
+    # TTNN forward
     ttnn_features = ttnn_model(ttnn_input, input_height=height, input_width=width)
-    print(f"TTNN model state_dict: {ttnn_features}")
 
     # Compare outputs
     pcc_results = {}
@@ -325,35 +367,21 @@ def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
         pcc_results[layer_name] = pcc_value
 
         logger.info(f"{layer_name}: PCC = {pcc_value:.6f}")
-        logger.info(f"  Reference shape: {ref_output.shape}")
-        logger.info(f"  TTNN shape: {ttnn_output.shape}")
-        logger.info(f"  Reference stats: mean={ref_output.mean():.6f}, std={ref_output.std():.6f}")
-        logger.info(f"  TTNN stats: mean={ttnn_output.mean():.6f}, std={ttnn_output.std():.6f}")
 
     # Assert PCC thresholds
     for layer_name, pcc_value in pcc_results.items():
         assert pcc_value > 0.99, f"{layer_name} PCC {pcc_value:.6f} is below threshold 0.99"
 
-    logger.info("All layers passed PCC check!")
     return pcc_results
 
 
 if __name__ == "__main__":
-    import ttnn
-
-    # Use default L1 size or 8KB (8192) as recommended for simple CNNs
-    # Larger values can cause conflicts with static circular buffers
-    # If memory issues persist, we may need to use sharded memory configs instead
-    # device = ttnn.open_device(device_id=0)  # Use default L1 size
     device = ttnn.open_device(
         device_id=0,
         l1_small_size=32768,  # Increase L1_SMALL allocation
     )
 
     try:
-        # Start with smaller input size to avoid L1 memory issues
-        # Once working, we can optimize for larger sizes (128x352, 256x704)
-        # Smaller size helps verify the implementation works correctly
         results = test_resnet50_bevdepth_pcc(device, batch_size=1, height=256, width=640)
         print("\nPCC Results:")
         for layer, pcc in results.items():
