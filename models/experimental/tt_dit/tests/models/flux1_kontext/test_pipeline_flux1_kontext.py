@@ -34,8 +34,9 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
 @pytest.mark.parametrize(
     "mesh_device, cfg, sp, tp, topology, num_links",
     [
-        [(1, 4), (2, 1), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
-        [(2, 4), (2, 1), (2, 0), (2, 1), ttnn.Topology.Linear, 1],
+        [(1, 4), (1, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
+        [(2, 4), (1, 0), (2, 0), (4, 1), ttnn.Topology.Linear, 1],
+        # [(2, 4), (2, 1), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
         [(2, 4), (2, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
     ],
     ids=[
