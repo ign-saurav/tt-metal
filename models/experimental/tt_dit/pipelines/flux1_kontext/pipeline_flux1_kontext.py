@@ -639,7 +639,8 @@ class Flux1KontextPipeline:
             tt_prompt_rope_sin_list = []
             for i, submesh_device in enumerate(self._submesh_devices):
                 tt_prompt_embeds = ttnn.from_torch(
-                    prompt_embeds[i].unsqueeze(0) if self._parallel_config.cfg_parallel.factor > 1 else prompt_embeds,
+                    prompt_embeds[0].unsqueeze(0) if self._parallel_config.cfg_parallel.factor > 1 else prompt_embeds,
+                    # prompt_embeds[i].unsqueeze(0) if self._parallel_config.cfg_parallel.factor > 1 else prompt_embeds,
                     layout=ttnn.TILE_LAYOUT,
                     dtype=ttnn.bfloat16,
                     device=submesh_device if not traced else None,
@@ -651,7 +652,8 @@ class Flux1KontextPipeline:
                 )
 
                 tt_pooled_prompt_embeds = ttnn.from_torch(
-                    pooled_prompt_embeds[i].unsqueeze(0)
+                    # pooled_prompt_embeds[i].unsqueeze(0)
+                    pooled_prompt_embeds[0].unsqueeze(0)
                     if self._parallel_config.cfg_parallel.factor > 1
                     else pooled_prompt_embeds,
                     layout=ttnn.TILE_LAYOUT,
@@ -696,10 +698,11 @@ class Flux1KontextPipeline:
                 #     )
 
                 if guidance is not None:
-                    if self._parallel_config.cfg_parallel.factor > 1:
-                        guidance_tensor = guidance[i].unsqueeze(0).unsqueeze(-1)
-                    else:
-                        guidance_tensor = guidance.unsqueeze(-1)
+                    # if self._parallel_config.cfg_parallel.factor > 1:
+                    #     guidance_tensor = guidance[i].unsqueeze(0).unsqueeze(-1)
+                    # else:
+                    # guidance_tensor = guidance.unsqueeze(-1)
+                    guidance_tensor = guidance.unsqueeze(-1)
                     tt_guidance = ttnn.from_torch(
                         guidance_tensor,
                         layout=ttnn.TILE_LAYOUT,
