@@ -19,7 +19,14 @@ class BasicBlock_TTNN:
 
         identity = x
 
-        # Conv1: 3x3
+        # Input x is sharded in DRAM from reduce conv
+        # Keep it sharded - conv2d with BLOCK_SHARDED can handle sharded inputs
+        # No need to convert to interleaved (sharded_to_interleaved only works for L1 sharded)
+        # Just ensure TILE_LAYOUT if needed
+        if x.layout != ttnn.TILE_LAYOUT:
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+
+        # Conv1: 3x3 - use BLOCK_SHARDED to avoid L1 buffer overflow
         out = ttnn_conv2d(
             input_tensor=x,
             weight_tensor=self.params.conv1_weight,
@@ -34,13 +41,26 @@ class BasicBlock_TTNN:
             stride=(1, 1),
             padding=(1, 1),
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            **self.model_config,
+            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            packer_l1_acc=False,
         )
 
         if len(out.shape) == 3:
             out = ttnn.reshape(out, (batch_size, height, width, self.out_channels))
 
-        # Conv2: 3x3 (no activation)
+        # Ensure out is in DRAM before conv2
+        if out.is_sharded():
+            out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
+        # Otherwise, assume it's already in DRAM
+        if out.layout != ttnn.TILE_LAYOUT:
+            out = ttnn.to_layout(out, ttnn.TILE_LAYOUT)
+            if out.is_sharded():
+                out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
+
+        # Conv2: 3x3 (no activation) - use BLOCK_SHARDED to avoid L1 buffer overflow
         out = ttnn_conv2d(
             input_tensor=out,
             weight_tensor=self.params.conv2_weight,
@@ -55,7 +75,11 @@ class BasicBlock_TTNN:
             stride=(1, 1),
             padding=(1, 1),
             activation=None,
-            **self.model_config,
+            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            packer_l1_acc=False,
         )
 
         if len(out.shape) == 3:
@@ -79,7 +103,20 @@ class ASPP_TTNN:
     def __call__(self, x, batch_size, height, width):
         from models.experimental.BevDepth.tt.utils import ttnn_conv2d
 
-        # Branch 1: 1x1 conv, dilation=1
+        # Ensure input is in DRAM before conv2d
+        # Avoid calling memory_config() which might fail if buffer isn't allocated
+        if x.is_sharded():
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+        # Otherwise, assume it's already in DRAM (from previous operations)
+
+        # Ensure TILE_LAYOUT (required for DRAM conv)
+        if x.layout != ttnn.TILE_LAYOUT:
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+            # After layout conversion, if it becomes sharded, convert to interleaved
+            if x.is_sharded():
+                x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+
+        # Branch 1: 1x1 conv, dilation=1 - use BLOCK_SHARDED to avoid L1 buffer overflow
         x1 = ttnn_conv2d(
             input_tensor=x,
             weight_tensor=self.params.aspp1_weight,
@@ -94,12 +131,16 @@ class ASPP_TTNN:
             stride=(1, 1),
             padding=(0, 0),
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            **self.model_config,
+            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            packer_l1_acc=False,
         )
         if len(x1.shape) == 3:
             x1 = ttnn.reshape(x1, (batch_size, height, width, self.mid_channels))
 
-        # Branch 2-4: 3x3 conv with dilation (simplified - use padding instead)
+        # Branch 2-4: 3x3 conv with dilation (simplified - use padding instead) - use BLOCK_SHARDED
         x2 = ttnn_conv2d(
             input_tensor=x,
             weight_tensor=self.params.aspp2_weight,
@@ -114,13 +155,25 @@ class ASPP_TTNN:
             stride=(1, 1),
             padding=(6, 6),  # dilation=6
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            **self.model_config,
+            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            packer_l1_acc=False,
         )
         if len(x2.shape) == 3:
             x2 = ttnn.reshape(x2, (batch_size, height, width, self.mid_channels))
 
         # Global pooling branch
         x5 = ttnn.global_avg_pool2d(x)
+        # Ensure x5 is in DRAM
+        if x5.is_sharded():
+            x5 = ttnn.sharded_to_interleaved(x5, ttnn.DRAM_MEMORY_CONFIG)
+        # Otherwise, assume it's already in DRAM
+        if x5.layout != ttnn.TILE_LAYOUT:
+            x5 = ttnn.to_layout(x5, ttnn.TILE_LAYOUT)
+            if x5.is_sharded():
+                x5 = ttnn.sharded_to_interleaved(x5, ttnn.DRAM_MEMORY_CONFIG)
         x5 = ttnn_conv2d(
             input_tensor=x5,
             weight_tensor=self.params.global_weight,
@@ -135,14 +188,27 @@ class ASPP_TTNN:
             stride=(1, 1),
             padding=(0, 0),
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            **self.model_config,
+            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            packer_l1_acc=False,
         )
         x5 = ttnn.upsample(x5, (batch_size, height, width, self.mid_channels))
 
         # Concatenate (simplified - use only 3 branches)
         out = ttnn.concat([x1, x2, x5], dim=-1)
 
-        # Final conv
+        # Ensure out is in DRAM before final conv
+        if out.is_sharded():
+            out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
+        # Otherwise, assume it's already in DRAM
+        if out.layout != ttnn.TILE_LAYOUT:
+            out = ttnn.to_layout(out, ttnn.TILE_LAYOUT)
+            if out.is_sharded():
+                out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
+
+        # Final conv - use BLOCK_SHARDED to avoid L1 buffer overflow
         out = ttnn_conv2d(
             input_tensor=out,
             weight_tensor=self.params.conv1_weight,
@@ -157,7 +223,11 @@ class ASPP_TTNN:
             stride=(1, 1),
             padding=(0, 0),
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            **self.model_config,
+            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            packer_l1_acc=False,
         )
 
         return out
@@ -201,7 +271,17 @@ class DepthNet_TTNN:
 
         height, width = x.shape[1], x.shape[2]
 
-        # Reduce conv
+        # Input from test should already be in TILE_LAYOUT and DRAM_MEMORY_CONFIG
+        # Only convert if absolutely necessary (if sharded)
+        # Avoid unnecessary memory config/layout conversions that might create unallocated tensors
+        if x.is_sharded():
+            # Convert sharded to interleaved DRAM
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+        # Otherwise, assume input is already in the correct state (DRAM, INTERLEAVED, TILE_LAYOUT)
+        # and proceed directly to conv2d
+
+        # Reduce conv - use BLOCK_SHARDED to avoid L1 buffer overflow
+        # The output will be sharded in DRAM, which we'll keep sharded for subsequent operations
         x = ttnn_conv2d(
             input_tensor=x,
             weight_tensor=self.params.reduce_weight,
@@ -216,13 +296,25 @@ class DepthNet_TTNN:
             stride=(1, 1),
             padding=(1, 1),
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            **self.model_config,
+            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            packer_l1_acc=False,
         )
 
+        # Reshape if needed
         if len(x.shape) == 3:
             x = ttnn.reshape(x, (batch_size, height, width, self.mid_channels))
 
-        # Context branch
+        # The reduce conv output is sharded in DRAM (BLOCK_SHARDED)
+        # We'll keep it sharded and pass it to both context and depth branches
+        # Each branch will handle the sharded tensor appropriately
+        # Note: sharded_to_interleaved only works for L1 sharded tensors, not DRAM sharded
+        # So we keep it sharded and let the conv2d operations handle it
+
+        # Context branch - x is sharded in DRAM from reduce conv
+        # Pass it directly to conv2d which can handle sharded inputs
         context = ttnn_conv2d(
             input_tensor=x,
             weight_tensor=self.params.context_weight,
@@ -237,13 +329,17 @@ class DepthNet_TTNN:
             stride=(1, 1),
             padding=(0, 0),
             activation=None,
-            **self.model_config,
+            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            packer_l1_acc=False,
         )
 
         if len(context.shape) == 3:
             context = ttnn.reshape(context, (batch_size, height, width, self.context_channels))
 
-        # Depth branch: 3 BasicBlocks
+        # Depth branch: use x directly (it's already in the right state and allocated)
         depth = self.block1(x, batch_size, height, width)
         depth = self.block2(depth, batch_size, height, width)
         depth = self.block3(depth, batch_size, height, width)
@@ -251,8 +347,18 @@ class DepthNet_TTNN:
         # ASPP
         depth = self.aspp(depth, batch_size, height, width)
 
+        # Ensure depth is in DRAM before DCN conv
+        if depth.is_sharded():
+            depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
+        # Otherwise, assume it's already in DRAM
+        if depth.layout != ttnn.TILE_LAYOUT:
+            depth = ttnn.to_layout(depth, ttnn.TILE_LAYOUT)
+            if depth.is_sharded():
+                depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
+
         # DCN (Deformable Conv) - using regular grouped conv as approximation
         # TODO: Replace with actual DCN when available in TTNN
+        # Use BLOCK_SHARDED to avoid L1 buffer overflow
         depth = ttnn_conv2d(
             input_tensor=depth,
             weight_tensor=self.params.dcn_weight,
@@ -267,13 +373,26 @@ class DepthNet_TTNN:
             stride=(1, 1),
             padding=(1, 1),
             activation=None,
-            **self.model_config,
+            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            packer_l1_acc=False,
         )
 
         if len(depth.shape) == 3:
             depth = ttnn.reshape(depth, (batch_size, height, width, self.mid_channels))
 
-        # Final depth conv
+        # Ensure depth is in DRAM before final conv
+        if depth.is_sharded():
+            depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
+        # Otherwise, assume it's already in DRAM
+        if depth.layout != ttnn.TILE_LAYOUT:
+            depth = ttnn.to_layout(depth, ttnn.TILE_LAYOUT)
+            if depth.is_sharded():
+                depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
+
+        # Final depth conv - use BLOCK_SHARDED to avoid L1 buffer overflow
         depth = ttnn_conv2d(
             input_tensor=depth,
             weight_tensor=self.params.final_weight,
@@ -288,7 +407,11 @@ class DepthNet_TTNN:
             stride=(1, 1),
             padding=(0, 0),
             activation=None,
-            **self.model_config,
+            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            packer_l1_acc=False,
         )
 
         if len(depth.shape) == 3:
