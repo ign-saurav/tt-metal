@@ -72,6 +72,7 @@ def _custom_preprocessor(model, name):
         (0, False, 100, 1),
         (0, True, 100, 2),
         (1, False, 100, 1),
+        (1, True, 100, 1),
     ],
 )
 def test_groupmultiheadattention(
@@ -468,3 +469,203 @@ def test_groupmultiheadattention_cross_attention(device, reset_seeds):
 
     assert pcc_passed, logger.error(f"PCC check failed for GroupMultiheadAttention cross-attention: {pcc_message}")
     logger.info(f"GroupMultiheadAttention cross-attention PCC passed: {pcc_message}")
+
+
+# @pytest.mark.parametrize("device_params", [{"l1_small_size": 4 * 8192}], indirect=True)
+# def test_groupmultiheadattention_key_padding_mask_raises(device, reset_seeds):
+#     """Test that providing key_padding_mask raises NotImplementedError."""
+#     torch.manual_seed(42)
+
+#     # Load weights (needed to initialize model structure)
+#     weights, embed_dims, num_heads = _load_weights_from_checkpoint(layer_idx=0)
+
+#     reference_model = GroupMultiheadAttention(
+#         embed_dims=embed_dims,
+#         num_heads=num_heads,
+#         dropout_layer=dict(type="Dropout", drop_prob=0.0),
+#         batch_first=False,
+#     )
+
+#     # We don't strictly need to load state_dict for this test, but let's be consistent
+#     reference_model.attn.in_proj_weight.data = weights["in_proj_weight"]
+#     reference_model.attn.in_proj_bias.data = weights["in_proj_bias"]
+#     reference_model.attn.out_proj.weight.data = weights["out_proj.weight"]
+#     reference_model.attn.out_proj.bias.data = weights["out_proj.bias"]
+#     reference_model.eval()
+
+#     parameters = preprocess_model_parameters(
+#         initialize_model=lambda: reference_model,
+#         device=device,
+#         custom_preprocessor=_custom_preprocessor,
+#     )
+
+#     ttnn_model = TtMultiheadAttention(
+#         params=parameters,
+#         device=device,
+#         embed_dims=embed_dims,
+#         num_heads=num_heads,
+#         batch_first=False,
+#     )
+
+#     # Create dummy inputs
+#     query = torch.randn(10, 1, embed_dims)
+#     ttnn_query = ttnn.from_torch(query, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+#     key_padding_mask = torch.zeros(1, 10) # Shape doesn't matter for the exception
+
+#     with pytest.raises(NotImplementedError, match="key_padding_mask is not supported yet"):
+#         ttnn_model(
+#             query=ttnn_query,
+#             key_padding_mask=key_padding_mask
+#         )
+
+
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 4 * 8192}], indirect=True)
+def test_groupmultiheadattention_2d_attn_mask(device, reset_seeds):
+    """Test with 2D attention mask (tgt_len, src_len) which should broadcast."""
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+
+    weights, embed_dims, num_heads = _load_weights_from_checkpoint(layer_idx=0)
+    num_queries = 64
+    batch_size = 1
+
+    reference_model = GroupMultiheadAttention(
+        embed_dims=embed_dims,
+        num_heads=num_heads,
+        dropout_layer=dict(type="Dropout", drop_prob=0.0),
+        batch_first=False,
+    )
+
+    reference_model.attn.in_proj_weight.data = weights["in_proj_weight"]
+    reference_model.attn.in_proj_bias.data = weights["in_proj_bias"]
+    reference_model.attn.out_proj.weight.data = weights["out_proj.weight"]
+    reference_model.attn.out_proj.bias.data = weights["out_proj.bias"]
+    reference_model.eval()
+
+    parameters = preprocess_model_parameters(
+        initialize_model=lambda: reference_model,
+        device=device,
+        custom_preprocessor=_custom_preprocessor,
+    )
+
+    query = torch.randn(num_queries, batch_size, embed_dims)
+    identity = torch.randn(num_queries, batch_size, embed_dims)
+    query_pos = torch.randn(num_queries, batch_size, embed_dims)
+
+    # 2D Attention Mask: (tgt_len, src_len)
+    # Using num_queries for both since it's self-attention
+    attn_mask_torch = torch.randn(num_queries, num_queries)
+
+    with torch.no_grad():
+        reference_output = reference_model(
+            query=query,
+            identity=identity,
+            query_pos=query_pos,
+            attn_mask=attn_mask_torch,
+        )
+
+    ttnn_model = TtMultiheadAttention(
+        params=parameters,
+        device=device,
+        embed_dims=embed_dims,
+        num_heads=num_heads,
+        batch_first=False,
+    )
+
+    ttnn_query = ttnn.from_torch(query, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_identity = ttnn.from_torch(identity, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_query_pos = ttnn.from_torch(query_pos, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+    # For TTNN, we generally expect the mask to be compatible.
+    # If ttnn.add supports broadcasting, this works.
+    # If not, we might need to manually broadcast in the test or fix the model.
+    # Assuming ttnn supports broadcasting for now as standard library behavior.
+    ttnn_attn_mask = ttnn.from_torch(attn_mask_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+
+    ttnn_output = ttnn_model(
+        query=ttnn_query,
+        identity=ttnn_identity,
+        query_pos=ttnn_query_pos,
+        attn_mask=ttnn_attn_mask,
+        batch_first=False,
+    )
+
+    ttnn_output_torch = ttnn.to_torch(ttnn_output)
+    pcc_passed, pcc_message = assert_with_pcc(reference_output, ttnn_output_torch, pcc=0.99)
+
+    assert pcc_passed, logger.error(f"PCC check failed for 2D attn_mask: {pcc_message}")
+    logger.info(f"GroupMultiheadAttention 2D attn_mask PCC passed: {pcc_message}")
+
+
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 4 * 8192}], indirect=True)
+def test_groupmultiheadattention_attn_mask_batch_first(device, reset_seeds):
+    """Test attention mask with batch_first=True."""
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+
+    weights, embed_dims, num_heads = _load_weights_from_checkpoint(layer_idx=0)
+    num_queries = 64
+    batch_size = 2  # Using >1 batch size to verify batch dimension handling
+
+    reference_model = GroupMultiheadAttention(
+        embed_dims=embed_dims,
+        num_heads=num_heads,
+        dropout_layer=dict(type="Dropout", drop_prob=0.0),
+        batch_first=True,
+    )
+
+    reference_model.attn.in_proj_weight.data = weights["in_proj_weight"]
+    reference_model.attn.in_proj_bias.data = weights["in_proj_bias"]
+    reference_model.attn.out_proj.weight.data = weights["out_proj.weight"]
+    reference_model.attn.out_proj.bias.data = weights["out_proj.bias"]
+    reference_model.eval()
+
+    parameters = preprocess_model_parameters(
+        initialize_model=lambda: reference_model,
+        device=device,
+        custom_preprocessor=_custom_preprocessor,
+    )
+
+    # batch_first=True inputs: (batch, seq, embed)
+    query = torch.randn(batch_size, num_queries, embed_dims)
+    identity = torch.randn(batch_size, num_queries, embed_dims)
+    query_pos = torch.randn(batch_size, num_queries, embed_dims)
+
+    # Mask: (batch * num_heads, tgt_len, src_len)
+    # Note: PyTorch MultiheadAttention expects mask to be (N*num_heads, L, S) if 3D.
+    # N is batch size.
+    attn_mask_torch = torch.randn(batch_size * num_heads, num_queries, num_queries)
+
+    with torch.no_grad():
+        reference_output = reference_model(
+            query=query,
+            identity=identity,
+            query_pos=query_pos,
+            attn_mask=attn_mask_torch,
+        )
+
+    ttnn_model = TtMultiheadAttention(
+        params=parameters,
+        device=device,
+        embed_dims=embed_dims,
+        num_heads=num_heads,
+        batch_first=True,
+    )
+
+    ttnn_query = ttnn.from_torch(query, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_identity = ttnn.from_torch(identity, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_query_pos = ttnn.from_torch(query_pos, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_attn_mask = ttnn.from_torch(attn_mask_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+
+    ttnn_output = ttnn_model(
+        query=ttnn_query,
+        identity=ttnn_identity,
+        query_pos=ttnn_query_pos,
+        attn_mask=ttnn_attn_mask,
+        batch_first=True,
+    )
+
+    ttnn_output_torch = ttnn.to_torch(ttnn_output)
+    pcc_passed, pcc_message = assert_with_pcc(reference_output, ttnn_output_torch, pcc=0.99)
+
+    assert pcc_passed, logger.error(f"PCC check failed for batch_first attn_mask: {pcc_message}")
+    logger.info(f"GroupMultiheadAttention batch_first attn_mask PCC passed: {pcc_message}")
