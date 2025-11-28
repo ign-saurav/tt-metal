@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-from loguru import logger
 
 
 def ttnn_conv2d(
@@ -35,24 +34,17 @@ def ttnn_conv2d(
     """
     import torch
 
-    logger.info(f"ttnn_conv2d called with:")
-    logger.info(f"  input_tensor: shape={input_tensor.shape}, type={type(input_tensor)}")
-    logger.info(f"  weight_tensor: shape={weight_tensor.shape}, type={type(weight_tensor)}")
-
     # Convert PyTorch weights to TTNN if needed
-    # Ensure weight is on device with proper layout
-    # if hasattr(weight_tensor, 'layout') and weight_tensor.layout == ttnn.ROW_MAJOR_LAYOUT:
-    #     weight_tensor = ttnn.to_layout(weight_tensor, ttnn.TILE_LAYOUT)
-    #     weight_tensor = ttnn.to_device(weight_tensor, device)
     if isinstance(weight_tensor, torch.Tensor):
-        logger.info(f"Converting PyTorch weight shape {weight_tensor.shape} to TTNN")
         weight_tensor = ttnn.from_torch(
             weight_tensor,
             dtype=weights_dtype,
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
-        logger.info(f"After conversion to TTNN: shape={weight_tensor.shape}, layout={weight_tensor.layout}")
     if bias_tensor is not None and isinstance(bias_tensor, torch.Tensor):
+        # Reshape bias from (out_channels,) to (1, 1, 1, out_channels) for TTNN
+        if len(bias_tensor.shape) == 1:
+            bias_tensor = bias_tensor.view(1, 1, 1, -1)
         bias_tensor = ttnn.from_torch(
             bias_tensor,
             dtype=weights_dtype,

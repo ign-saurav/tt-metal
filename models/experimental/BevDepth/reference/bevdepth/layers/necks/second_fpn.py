@@ -35,8 +35,7 @@ class SECONDFPN(BaseModule):
         out_channels=[256, 256, 256],
         upsample_strides=[1, 2, 4],
         norm_cfg=dict(type="BN", eps=1e-3, momentum=0.01),
-        # upsample_cfg=dict(type="deconv", bias=False),
-        upsample_cfg=dict(type="Conv2d", bias=False),
+        upsample_cfg=dict(type="deconv", bias=False),
         conv_cfg=dict(type="Conv2d", bias=False),
         use_conv_for_no_stride=False,
         init_cfg=[
@@ -67,14 +66,8 @@ class SECONDFPN(BaseModule):
                 upsample_layer = build_conv_layer(
                     conv_cfg, in_channels=in_channels[i], out_channels=out_channel, kernel_size=stride, stride=stride
                 )
+            deblock = nn.Sequential(upsample_layer, build_norm_layer(norm_cfg, out_channel)[1], nn.ReLU(inplace=True))
 
-            # Skip BN and ReLU for the last layer (index 2)
-            if i == 2:
-                deblock = nn.Sequential(upsample_layer)
-            else:
-                deblock = nn.Sequential(
-                    upsample_layer, build_norm_layer(norm_cfg, out_channel)[1], nn.ReLU(inplace=True)
-                )
             deblocks.append(deblock)
         self.deblocks = nn.ModuleList(deblocks)
 

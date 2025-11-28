@@ -33,7 +33,11 @@ def _voxel_pooling_inference_fallback(
     context_features: torch.Tensor,
     voxel_num: torch.Tensor,
 ) -> torch.Tensor:
-    """Pure PyTorch replacement for the CUDA voxel pooling op."""
+    """Pure PyTorch replacement for the CUDA voxel pooling op.
+
+    This function handles flexible input sizes by inferring spatial dimensions
+    from the actual tensor shapes rather than assuming they match geom_xyz.
+    """
     device = context_features.device
     if isinstance(voxel_num, torch.Tensor):
         voxel_sizes = voxel_num.detach().cpu().tolist()
@@ -43,11 +47,90 @@ def _voxel_pooling_inference_fallback(
 
     B, num_cams, num_depth, num_height, num_width, _ = geom_xyz.shape
     channels = context_features.shape[1]
+    depth_channels = depth.shape[1]
+
+    # depth and context_features come in as (B*num_cams, C, H, W)
+    # Infer actual spatial dimensions from tensor shapes (flexible for different input sizes)
+    if len(depth.shape) == 4:
+        # depth: (B*num_cams, depth_channels, H, W)
+        _, _, actual_height, actual_width = depth.shape
+    else:
+        # Fallback: infer from total elements
+        depth_total_elements = depth.numel()
+        spatial_size = depth_total_elements // (B * num_cams * depth_channels)
+        # Try to match geom_xyz aspect ratio, then adjust
+        if spatial_size == num_height * num_width:
+            actual_height, actual_width = num_height, num_width
+        else:
+            # Infer from spatial size - try to maintain aspect ratio
+            aspect_ratio = num_width / num_height if num_height > 0 else 1.0
+            actual_width = int((spatial_size * aspect_ratio) ** 0.5)
+            actual_height = spatial_size // actual_width
+            # Ensure valid dimensions
+            while actual_height * actual_width != spatial_size and actual_width > 0:
+                actual_width -= 1
+                actual_height = spatial_size // actual_width if actual_width > 0 else 1
 
     # Reshape depth and context_features from (B*num_cams, ...) to (B, num_cams, ...)
-    depth = depth.view(B, num_cams, num_depth, num_height, num_width)
-    context = context_features.view(B, num_cams, channels, num_height, num_width)
-    context = context.permute(0, 1, 3, 4, 2).contiguous().unsqueeze(2).expand(-1, -1, num_depth, -1, -1, -1)
+    # Use actual spatial dimensions from tensor shapes
+    depth = depth.view(B, num_cams, depth_channels, actual_height, actual_width)
+    # Extract first num_depth channels (depth_channels should be >= num_depth)
+    if depth_channels >= num_depth:
+        depth = depth[:, :, :num_depth, :, :]
+    else:
+        # If fewer channels, pad or handle gracefully
+        raise ValueError(f"depth_channels ({depth_channels}) < num_depth ({num_depth})")
+
+    # context_features: (B*num_cams, channels, H, W)
+    if len(context_features.shape) == 4:
+        _, _, ctx_height, ctx_width = context_features.shape
+        if ctx_height != actual_height or ctx_width != actual_width:
+            # Reshape to match depth spatial dimensions if needed
+            context_features = context_features.view(B, num_cams, channels, ctx_height, ctx_width)
+            # Interpolate if dimensions don't match
+            if ctx_height != actual_height or ctx_width != actual_width:
+                context_features = torch.nn.functional.interpolate(
+                    context_features.view(B * num_cams, channels, ctx_height, ctx_width),
+                    size=(actual_height, actual_width),
+                    mode="bilinear",
+                    align_corners=False,
+                ).view(B, num_cams, channels, actual_height, actual_width)
+        else:
+            context_features = context_features.view(B, num_cams, channels, actual_height, actual_width)
+    else:
+        context_features = context_features.view(B, num_cams, channels, actual_height, actual_width)
+
+    context = context_features.permute(0, 1, 3, 4, 2).contiguous().unsqueeze(2).expand(-1, -1, num_depth, -1, -1, -1)
+
+    # Reshape geom_xyz to match actual feature map dimensions if they differ
+    if num_height != actual_height or num_width != actual_width:
+        # Reshape geom_xyz from (B, num_cams, num_depth, num_height, num_width, 3)
+        # to (B, num_cams, num_depth, actual_height, actual_width, 3)
+        # First flatten spatial dimensions, then reshape
+        geom_xyz_flat = geom_xyz.view(B, num_cams, num_depth, num_height * num_width, 3)
+        # If total elements match, we can reshape directly
+        if num_height * num_width == actual_height * actual_width:
+            geom_xyz = geom_xyz_flat.view(B, num_cams, num_depth, actual_height, actual_width, 3)
+        else:
+            # If dimensions don't match, we need to interpolate the coordinates
+            # Interpolate each coordinate channel separately
+            # Convert to float for interpolation (interpolate requires float)
+            geom_xyz_reshaped = geom_xyz.view(B, num_cams, num_depth, num_height, num_width, 3).float()
+            # Permute to (B, num_cams, num_depth, 3, num_height, num_width) for interpolation
+            geom_xyz_perm = geom_xyz_reshaped.permute(0, 1, 2, 5, 3, 4).contiguous()
+            geom_xyz_interp = F.interpolate(
+                geom_xyz_perm.view(B * num_cams * num_depth, 3, num_height, num_width),
+                size=(actual_height, actual_width),
+                mode="bilinear",
+                align_corners=False,
+            )
+            # Reshape back to (B, num_cams, num_depth, actual_height, actual_width, 3)
+            # Keep as float for now, will convert to long when extracting coordinates
+            geom_xyz = (
+                geom_xyz_interp.view(B, num_cams, num_depth, 3, actual_height, actual_width)
+                .permute(0, 1, 2, 4, 5, 3)
+                .contiguous()
+            )
 
     geom = geom_xyz.long()
     x = geom[..., 0]
