@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import torch
 import ttnn
-from loguru import logger
 from models.experimental.BevDepth.tt.utils import ttnn_conv2d
 
 
@@ -242,7 +242,7 @@ class Bottleneck:
         # Conv3 - 1x1 without ReLU
         config = get_conv_config("bottleneck_1x1_last")
         config = config.copy()  # MUST copy before modifying
-        config["deallocate_activation"] = False
+        config["deallocate_activation"] = True  # Deallocate like the demo
         out = ttnn_conv2d(
             input_tensor=out,
             weight_tensor=self.conv3_weight_torch,  # Direct PyTorch tensor
@@ -301,18 +301,30 @@ class Bottleneck:
             # if identity.layout != out.layout:
             #     identity = ttnn.to_layout(identity, out.layout)
 
-        # Add and ReLU
-        out = ttnn.add(out, identity, activations=[ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)])
+        # Add and ReLU - use in-place add like the demo
+        # Ensure both tensors have matching memory config
+        if identity.memory_config() != out.memory_config():
+            identity = ttnn.to_memory_config(identity, out.memory_config())
+
+        # Use in-place add like the demo implementation
+        out = ttnn.add_(
+            out,
+            identity,
+            activations=[ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)],
+        )
 
         return out, out_height, out_width
 
 
 class ResNet50_BEVDepth:
-    def __init__(self, device, parameters, batch_size, model_config, return_intermediate=True):
+    def __init__(
+        self, device, parameters, batch_size, model_config, return_intermediate=True, return_block_outputs=False
+    ):
         self.device = device
         self.batch_size = batch_size
         self.model_config = model_config
         self.return_intermediate = return_intermediate
+        self.return_block_outputs = return_block_outputs  # Return outputs from each block
 
         # Conv1 - keep as PyTorch tensor, convert lazily
         self.conv1_weight_torch = parameters.conv1.weight
@@ -322,38 +334,32 @@ class ResNet50_BEVDepth:
 
         # Build layers
         self.in_channels = 64
-
-        logger.info("Building layer1...")
         self.layer1 = self._make_layer(parameters.layer1, 64, 3, stride=1)
-        logger.info(f"Layer1 created with {len(self.layer1)} blocks")
-
-        logger.info("Building layer2...")
         self.layer2 = self._make_layer(parameters.layer2, 128, 4, stride=2)
-        logger.info(f"Layer2 created with {len(self.layer2)} blocks")
-
-        logger.info("Building layer3...")
         self.layer3 = self._make_layer(parameters.layer3, 256, 6, stride=2)
-        logger.info(f"Layer3 created with {len(self.layer3)} blocks")
-
-        logger.info("Building layer4...")
         self.layer4 = self._make_layer(parameters.layer4, 512, 3, stride=2)
-        logger.info(f"Layer4 created with {len(self.layer4)} blocks")
-
-        logger.info("ResNet50_BEVDepth initialization complete")
 
     def _get_conv1_weights(self):
-        """Get conv1 weights in TTNN format (convert if needed, ROW_MAJOR_LAYOUT for host)"""
+        """Get conv1 weights in TTNN format (convert if needed, ROW_MAJOR_LAYOUT for host)
+
+        Note: ttnn.conv2d expects weights in PyTorch format or TTNN ROW_MAJOR_LAYOUT format.
+        It will handle the conversion to TILE_LAYOUT internally.
+        """
         if self.conv1_weight_ttnn is None:
+            # Convert weight to bfloat16 first to match reference model precision
+            weight_torch = self.conv1_weight_torch.to(torch.bfloat16)
             self.conv1_weight_ttnn = ttnn.from_torch(
-                self.conv1_weight_torch,
-                dtype=ttnn.bfloat16,
+                weight_torch,
+                dtype=self.model_config["WEIGHTS_DTYPE"],
                 layout=ttnn.ROW_MAJOR_LAYOUT,  # Host weights must be ROW_MAJOR_LAYOUT
                 # device=None keeps on host, TTNN will convert to TILE_LAYOUT when moving to device
             )
         if self.conv1_bias_torch is not None and self.conv1_bias_ttnn is None:
+            # Convert bias to bfloat16 first to match reference model precision
+            bias_torch = self.conv1_bias_torch.to(torch.bfloat16)
             self.conv1_bias_ttnn = ttnn.from_torch(
-                self.conv1_bias_torch.reshape(1, 1, 1, -1),
-                dtype=ttnn.bfloat16,
+                bias_torch.reshape(1, 1, 1, -1),
+                dtype=self.model_config["WEIGHTS_DTYPE"],
                 layout=ttnn.ROW_MAJOR_LAYOUT,  # Host weights must be ROW_MAJOR_LAYOUT
             )
         return self.conv1_weight_ttnn, self.conv1_bias_ttnn
@@ -400,20 +406,26 @@ class ResNet50_BEVDepth:
 
     def __call__(self, x, input_height=None, input_width=None):
         batch_size = self.batch_size
-        # Input is in (B, H, W, C) format from TTNN
-        # Use provided dimensions or extract from tensor shape
+
         if input_height is None or input_width is None:
             _, height, width, _ = x.shape
         else:
             height, width = input_height, input_width
 
-        # Conv1: 7x7, stride 2 with ReLU (convert weights lazily)
-        conv1_weight, conv1_bias = self._get_conv1_weights()
+        # Initialize features dict early for debugging outputs
+        features = {}
+        block_outputs = {}  # Store block-level outputs for debugging
+
+        # Conv1: 7x7, stride 2 with ReLU
+        # Use ttnn_conv2d wrapper to ensure proper weight/bias conversion
         config = get_conv_config("conv1_7x7")
+        config = config.copy()  # MUST copy before modifying
+
+        # Use ttnn_conv2d wrapper which handles PyTorch->TTNN conversion properly
         x = ttnn_conv2d(
             input_tensor=x,
-            weight_tensor=conv1_weight,
-            bias_tensor=conv1_bias,
+            weight_tensor=self.conv1_weight_torch,  # Pass PyTorch tensor directly
+            bias_tensor=self.conv1_bias_torch,  # Pass PyTorch tensor directly
             device=self.device,
             batch_size=batch_size,
             input_height=height,
@@ -426,11 +438,28 @@ class ResNet50_BEVDepth:
             math_fidelity=self.model_config["MATH_FIDELITY"],
             weights_dtype=self.model_config["WEIGHTS_DTYPE"],
             activations_dtype=self.model_config["ACTIVATIONS_DTYPE"],
-            **config,
+            activation=config.get("activation", ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)),
+            deallocate_activation=config.get("deallocate_activation", True),
+            reallocate_halo_output=config.get("reallocate_halo_output", False),
+            shard_layout=config.get("shard_layout", ttnn.TensorMemoryLayout.BLOCK_SHARDED),
+            packer_l1_acc=config.get("packer_l1_acc", True),
+            enable_act_double_buffer=config.get("enable_act_double_buffer", True),
+            enable_weights_double_buffer=config.get("enable_weights_double_buffer", False),
         )
 
-        height = height // 2
-        width = width // 2
+        # Calculate output dimensions after conv1 (stride 2)
+        height = (height + 2 * 3 - 7) // 2 + 1  # (input_h + 2*padding - kernel_h) // stride_h + 1
+        width = (width + 2 * 3 - 7) // 2 + 1  # (input_w + 2*padding - kernel_w) // stride_w + 1
+
+        # Reshape if needed (ttnn_conv2d might return different shape)
+        if len(x.shape) == 3:
+            x = ttnn.reshape(x, (batch_size, height, width, 64))
+
+        # Store conv1 output for debugging (before maxpool)
+        if self.return_block_outputs:
+            features["conv1_output"] = x
+
+        # Reshape for maxpool - demo passes directly but we need to reshape for our format
         pool_input = ttnn.reshape(x, (batch_size, 1, height * width, 64))
 
         # MaxPool: 3x3, stride 2
@@ -451,18 +480,24 @@ class ResNet50_BEVDepth:
 
         x = ttnn.reshape(x, (batch_size, height, width, 64))
 
-        logger.info(f"After maxpool, x.shape = {x.shape}, expected: ({batch_size}, {height}, {width}, 64)")
-
-        features = {}
+        # Store layer1 input if requested
+        if self.return_block_outputs:
+            features["layer1_input"] = x
 
         # Layer1
         for i, block in enumerate(self.layer1):
-            logger.info(f"Before layer1 block {i}, x.shape = {x.shape}, ndim = {len(x.shape)}")
-
             x, height, width = block(x, self.device, batch_size, height, width)
-            logger.info(f"After layer1 block {i}, x.shape = {x.shape}")
+
+            # Store block output if requested
+            if self.return_block_outputs:
+                block_outputs[f"layer1_block{i}"] = x
+
         if self.return_intermediate:
             features["layer1"] = x
+
+        # Add block outputs to features if requested
+        if self.return_block_outputs:
+            features.update(block_outputs)
 
         # Layer2
         for i, block in enumerate(self.layer2):
