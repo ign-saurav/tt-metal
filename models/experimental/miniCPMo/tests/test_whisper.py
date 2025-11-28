@@ -79,11 +79,18 @@ def test_ttnn_whisper_encoder(device, input_dtype, weight_dtype):
 
     wavforms = torch.load("wavforms.pt")
     audio_attention_mask = torch.load("audio_attention_mask.pt")
+
+    # Run reference model
     apm.audio_encoder_layer = -1
-    audio_states = apm(wavforms, output_hidden_states=True, attention_mask=audio_attention_mask).hidden_states[
-        apm.audio_encoder_layer
-    ]
-    print(audio_states.shape)
+    encoder = apm
+
+    encoder_outputs = encoder(
+        input_features=wavforms,
+        output_hidden_states=True,
+        attention_mask=audio_attention_mask,
+    )
+    audio_states = encoder_outputs.last_hidden_state
+    print(f"Reference output shape: {audio_states.shape}")
 
     ttnn_model = TtnnWhisperEncoder(
         mesh_device=device,
@@ -93,12 +100,15 @@ def test_ttnn_whisper_encoder(device, input_dtype, weight_dtype):
     # Load weights into TTNN model
     ttnn_model.load_weights(apm_state_dict)
 
-    # TTNN forward pass using adapted MiniCPM functions
-    ttnn_output = ttnn_model.forward(wavforms)
+    # TTNN forward pass
+    ttnn_output = ttnn_model.forward(wavforms, attention_mask=audio_attention_mask)
 
+    # Final output comparison
     ttnn_output = tt2torch_tensor(ttnn_output)
-
+    logger.info(f"TTNN output shape before reshape: {ttnn_output.shape}")
+    logger.info(f"Reference output shape: {audio_states.shape}")
     ttnn_output = ttnn_output.reshape(audio_states.shape)
+    logger.info(f"TTNN output shape after reshape: {ttnn_output.shape}")
     does_pass, pcc_message = check_with_pcc(ttnn_output, audio_states, 0.98)
-    logger.info(f"PCC: {pcc_message}")
+    logger.info(f"Final Output PCC: {pcc_message}")
     assert does_pass, f"PCC check failed"
