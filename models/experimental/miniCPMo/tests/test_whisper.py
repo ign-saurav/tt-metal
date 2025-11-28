@@ -94,7 +94,7 @@ def test_ttnn_whisper_encoder(device, input_dtype, weight_dtype):
     ttnn_model.load_weights(apm_state_dict)
 
     # TTNN forward pass using adapted MiniCPM functions
-    ttnn_output = ttnn_model.forward(wavforms)
+    ttnn_output = ttnn_model.forward(wavforms, attention_mask=audio_attention_mask)
 
     ttnn_output = tt2torch_tensor(ttnn_output)
 
