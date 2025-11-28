@@ -10,7 +10,6 @@ import ttnn
 from loguru import logger
 from diffusers.utils import load_image
 
-from ....parallel.config import DiTParallelConfig, ParallelFactor, EncoderParallelConfig, VAEParallelConfig
 from ....pipelines.flux1_kontext.pipeline_flux1_kontext import Flux1KontextPipeline
 from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large import (
     TimingCollector,
@@ -27,26 +26,30 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
     indirect=True,
 )
 @pytest.mark.parametrize(
-    ("model_variant", "width", "height", "num_inference_steps"),
+    ("model_variant", "width", "height", "guidance_scale", "true_cfg_scale", "num_inference_steps"),
     [
-        ("dev", 1024, 1024, 28),
+        ("dev", 1024, 1024, 3.5, 1.0, 28),
     ],
 )
 @pytest.mark.parametrize(
-    ("mesh_device", "sp", "tp", "encoder_tp", "vae_tp", "topology", "num_links", "mesh_test_id"),
+    "mesh_device, cfg, sp, tp, topology, num_links",
     [
-        pytest.param((1, 4), (1, 0), (4, 1), (4, 1), (4, 1), ttnn.Topology.Linear, 1, "1x4sp0tp1", id="1x4sp0tp1"),
-        pytest.param((2, 4), (2, 0), (4, 1), (4, 1), (4, 1), ttnn.Topology.Linear, 1, "2x4sp0tp1", id="2x4sp0tp1"),
-        # pytest.param((4, 8), (4, 0), (8, 1), (4, 0), (4, 0), ttnn.Topology.Linear, 4, "4x8sp0tp1", id="4x8sp0tp1"),
-        # pytest.param((4, 8), (8, 1), (4, 0), (4, 0), (4, 0), ttnn.Topology.Linear, 4, "4x8sp1tp0", id="4x8sp1tp0"),
+        [(1, 4), (2, 1), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
+        [(2, 4), (2, 1), (2, 0), (2, 1), ttnn.Topology.Linear, 1],
+        [(2, 4), (2, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
+    ],
+    ids=[
+        "1x4cfg1sp0tp1",
+        "2x4cfg1sp0tp1",
+        "2x4cfg0sp0tp1",
     ],
     indirect=["mesh_device"],
 )
 @pytest.mark.parametrize(
-    ("enable_t5_text_encoder", "use_torch_t5_text_encoder", "use_torch_clip_text_encoder"),
+    ("use_torch_t5_text_encoder", "use_torch_clip_text_encoder"),
     [
-        # pytest.param(True, True, True, id="encoder_cpu"),
-        pytest.param(True, False, False, id="encoder_device"),
+        # pytest.param(True, True, id="encoder_cpu"),
+        pytest.param(False, False, id="encoder_device"),
     ],
 )
 @pytest.mark.parametrize(
@@ -63,50 +66,26 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
         pytest.param(False, id="no_use_cache"),
     ],
 )
-@pytest.mark.parametrize(
-    "preferred_kontext_resolution",
-    [
-        # (672, 1568),
-        # (688, 1504),
-        # (720, 1456),
-        # (752, 1392),
-        # (800, 1328),
-        # (832, 1248),
-        # (880, 1184),
-        # (944, 1104),
-        (1024, 1024),
-        # (1104, 944),
-        # (1184, 880),
-        # (1248, 832),
-        # (1328, 800),
-        # (1392, 752),
-        # (1456, 720),
-        # (1504, 688),
-        # (1568, 672),
-    ],
-)
 def test_flux1_pipeline(
     *,
     mesh_device: ttnn.MeshDevice,
     model_variant: str,
     width: int,
     height: int,
+    guidance_scale: float,
+    true_cfg_scale: float,
     num_inference_steps: int,
+    cfg: tuple[int, int],
     sp: tuple[int, int],
     tp: tuple[int, int],
-    encoder_tp: tuple[int, int],
-    vae_tp: tuple[int, int],
     topology: ttnn.Topology,
     num_links: int,
     no_prompt: bool,
-    enable_t5_text_encoder: bool,
     use_torch_t5_text_encoder: bool,
     use_torch_clip_text_encoder: bool,
     model_location_generator,
     traced: bool,
-    mesh_test_id: str,
     use_cache: bool,
-    preferred_kontext_resolution: list,
     is_ci_env: bool,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -119,71 +98,36 @@ def test_flux1_pipeline(
         if traced:
             pytest.skip("Skipping traced test in CI environment. Use Performance test for detailed timing analysis.")
 
-    sp_factor, sp_axis = sp
-    tp_factor, tp_axis = tp
-
-    parallel_config = DiTParallelConfig(
-        cfg_parallel=ParallelFactor(factor=1, mesh_axis=0),
-        tensor_parallel=ParallelFactor(factor=tp_factor, mesh_axis=tp_axis),
-        sequence_parallel=ParallelFactor(factor=sp_factor, mesh_axis=sp_axis),
-    )
-    encoder_parallel_config = EncoderParallelConfig(
-        tensor_parallel=ParallelFactor(factor=encoder_tp[0], mesh_axis=encoder_tp[1])
-    )
-    vae_parallel_config = VAEParallelConfig(tensor_parallel=ParallelFactor(factor=vae_tp[0], mesh_axis=vae_tp[1]))
-
-    logger.info(f"Mesh device shape: {mesh_device.shape}")
-    logger.info(f"Parallel config: {parallel_config}")
-    logger.info(f"Encoder parallel config: {encoder_parallel_config}")
-    logger.info(f"VAE parallel config: {vae_parallel_config}")
-    logger.info(f"T5 enabled: {enable_t5_text_encoder}")
-
+    # Create timing collector
     timing_collector = TimingCollector()
 
     pipeline = Flux1KontextPipeline.create_pipeline(
         checkpoint_name=model_location_generator(f"black-forest-labs/FLUX.1-Kontext-{model_variant}"),
         mesh_device=mesh_device,
-        dit_sp=sp,
-        dit_tp=tp,
-        encoder_tp=encoder_tp,
-        vae_tp=vae_tp,
-        enable_t5_text_encoder=enable_t5_text_encoder,
+        cfg_config=cfg,
+        sp_config=sp,
+        tp_config=tp,
         use_torch_t5_text_encoder=use_torch_t5_text_encoder,
         use_torch_clip_text_encoder=use_torch_clip_text_encoder,
         use_torch_vae_encoder=False,
         num_links=num_links,
         topology=topology,
-        preferred_kontext_resolution=preferred_kontext_resolution,
     )
 
+    # Set timing collector
     pipeline.timing_collector = timing_collector
 
     input_image = load_image(
         "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/cat.png"
     )
     prompts = [
-        "Add a hat to the cat and make it look like it is dancing",
-        # "A luxury sports car.",
-        # "Neon-lit cyberpunk alley, rain-soaked, cinematic wide shot",
-        # "Golden retriever astronaut drifting in sunlit space",
-        # "Minimalist Scandinavian kitchen, morning light, ultra clean",
-        # "Ancient desert temple at dawn, soft fog, wide angle",
-        # "Steampunk airship over Victorian city, dramatic clouds",
-        # "Macro dewdrops on fern, shallow depth of field",
-        # "Luxury wristwatch on marble, studio lighting, hyper-detail",
-        # "Stormy coastline lighthouse, crashing waves, long exposure",
-        # "Futuristic Tokyo street market, vibrant signage, motion blur",
+        "Add a hat to the cat",
     ]
+    negative_prompts = [""] * len(prompts)
 
-    # negative_prompts = [""] * len(prompts)
-    negative_prompts = ["Cowboy hat, yellow colour hat, fuzzy look, pixelated effect"]
-
-    filename_prefix = f"flux_{model_variant}_{width}_{height}_{mesh_test_id}"
-    if enable_t5_text_encoder:
-        if use_torch_t5_text_encoder:
-            filename_prefix += "_t5cpu"
-    else:
-        filename_prefix += "_t5off"
+    filename_prefix = f"flux_{model_variant}_{width}_{height}"
+    if use_torch_t5_text_encoder:
+        filename_prefix += "_t5cpu"
     if use_torch_clip_text_encoder:
         filename_prefix += "_clipcpu"
     if not traced:
@@ -196,6 +140,8 @@ def test_flux1_pipeline(
             height=height,
             prompt=prompt,
             negative_prompt=negative_prompt,
+            cfg_scale=true_cfg_scale,
+            guidance_scale=guidance_scale,
             num_inference_steps=num_inference_steps,
             seed=seed,
             traced=traced,
