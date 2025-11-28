@@ -27,7 +27,19 @@ class TtMultiheadAttention:
         self.attn_in_proj__weight = ttnn.to_layout(self.attn_in_proj__weight, layout=ttnn.TILE_LAYOUT)
         self.attn_in_proj__bias = params.in_proj_bias
         self.attn_in_proj__bias = ttnn.to_layout(self.attn_in_proj__bias, layout=ttnn.TILE_LAYOUT)
-        self.attn_in_proj__weight_permute = self.attn_in_proj__weight
+        # Canonicalize fused QKV weight to packed shape [3 * embed_dims, embed_dims]
+        w = self.attn_in_proj__weight
+        if w.shape[0] == 3 * self.embed_dims and w.shape[1] == self.embed_dims:
+            # Already in PyTorch layout [3*D, D]
+            self.attn_in_proj__packed = w
+        elif w.shape[0] == self.embed_dims and w.shape[1] == 3 * self.embed_dims:
+            # Transposed layout [D, 3*D] (e.g., produced via preprocess_linear_weight) – transpose back
+            self.attn_in_proj__packed = ttnn.permute(w, (1, 0))
+        else:
+            raise ValueError(
+                f"Unexpected in_proj_weight shape {w.shape}; expected (3*{self.embed_dims}, {self.embed_dims}) "
+                f"or ({self.embed_dims}, 3*{self.embed_dims})"
+            )
         self.attn_in_proj__bias_squeeze = ttnn.squeeze(self.attn_in_proj__bias, 0)
         self.attn_out_proj_weight = params.out_proj.weight
         self.attn_out_proj_weight = ttnn.to_layout(self.attn_out_proj_weight, layout=ttnn.TILE_LAYOUT)
@@ -44,9 +56,12 @@ class TtMultiheadAttention:
         key_pos=None,
         attn_mask=None,
         key_padding_mask=None,
-        batch_first=False,
+        batch_first=None,
         **kwargs,
     ):
+        if batch_first is None:
+            batch_first = self.batch_first
+
         if key is None:
             key = query
         if value is None:
@@ -83,7 +98,7 @@ class TtMultiheadAttention:
 
         in_proj_bias = self.attn_in_proj__bias_squeeze
 
-        in_proj_weight = self.attn_in_proj__weight_permute
+        in_proj_weight = self.attn_in_proj__packed
 
         tgt_len, bsz, embed_dim = query.shape
         src_len, _, _ = key.shape
@@ -142,6 +157,9 @@ class TtMultiheadAttention:
             attn_output_weights = attn_output_weights + attn_mask
         else:
             attn_output_weights = ttnn.matmul(q_scaled, key_transposed)
+
+        if key_padding_mask is not None:
+            raise NotImplementedError("key_padding_mask is not supported yet in TtMultiheadAttention")
 
         attn_output_weights = ttnn.softmax(attn_output_weights, dim=-1)
 

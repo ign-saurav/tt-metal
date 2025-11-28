@@ -278,6 +278,102 @@ def test_groupmultiheadattention_self_attention(device, reset_seeds):
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 4 * 8192}], indirect=True)
+def test_groupmultiheadattention_self_attention_with_attn_mask(device, reset_seeds):
+    """Test self-attention case with a non-None attention mask."""
+    torch.manual_seed(42)
+    torch.cuda.manual_seed_all(42)
+
+    # Load weights from checkpoint
+    weights, embed_dims, num_heads = _load_weights_from_checkpoint(layer_idx=0)
+
+    num_queries = 64
+    batch_size = 1
+
+    # Create reference model
+    reference_model = GroupMultiheadAttention(
+        embed_dims=embed_dims,
+        num_heads=num_heads,
+        dropout_layer=dict(type="Dropout", drop_prob=0.0),
+        batch_first=False,
+    )
+
+    # Load weights into the reference model
+    reference_model.attn.in_proj_weight.data = weights["in_proj_weight"]
+    reference_model.attn.in_proj_bias.data = weights["in_proj_bias"]
+    reference_model.attn.out_proj.weight.data = weights["out_proj.weight"]
+    reference_model.attn.out_proj.bias.data = weights["out_proj.bias"]
+
+    reference_model.eval()
+
+    # Prepare parameters
+    parameters = preprocess_model_parameters(
+        initialize_model=lambda: reference_model,
+        device=device,
+        custom_preprocessor=_custom_preprocessor,
+    )
+
+    # Create test inputs (self-attention: query=key=value)
+    query = torch.randn(num_queries, batch_size, embed_dims)
+    query_pos = torch.randn(num_queries, batch_size, embed_dims)
+    identity = torch.randn(num_queries, batch_size, embed_dims)
+
+    # Create a 3D attention mask of shape (batch_size * num_heads, tgt_len, src_len)
+    attn_mask_torch = torch.randn(batch_size * num_heads, num_queries, num_queries)
+
+    # Run reference model with attention mask
+    with torch.no_grad():
+        reference_output = reference_model(
+            query=query,
+            key=None,  # Will default to query
+            value=None,  # Will default to key
+            identity=identity,
+            query_pos=query_pos,
+            key_pos=None,  # Will default to query_pos
+            attn_mask=attn_mask_torch,
+            key_padding_mask=None,
+        )
+
+    # Create TTNN model
+    ttnn_model = TtMultiheadAttention(
+        params=parameters,
+        device=device,
+        embed_dims=embed_dims,
+        num_heads=num_heads,
+        batch_first=False,
+    )
+
+    # Convert inputs to TTNN format
+    ttnn_query = ttnn.from_torch(query, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_query_pos = ttnn.from_torch(query_pos, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_identity = ttnn.from_torch(identity, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+    ttnn_attn_mask = ttnn.from_torch(attn_mask_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+
+    # Run TTNN model with attention mask
+    ttnn_output = ttnn_model(
+        query=ttnn_query,
+        key=None,
+        value=None,
+        identity=ttnn_identity,
+        query_pos=ttnn_query_pos,
+        key_pos=None,
+        attn_mask=ttnn_attn_mask,
+        key_padding_mask=None,
+        batch_first=False,
+    )
+
+    # Convert TTNN output back to torch
+    ttnn_output_torch = ttnn.to_torch(ttnn_output)
+
+    # Compare outputs
+    pcc_passed, pcc_message = assert_with_pcc(reference_output, ttnn_output_torch, pcc=0.99)
+
+    assert pcc_passed, logger.error(
+        f"PCC check failed for GroupMultiheadAttention self-attention with attn_mask: {pcc_message}"
+    )
+    logger.info(f"GroupMultiheadAttention self-attention with attn_mask PCC passed: {pcc_message}")
+
+
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 4 * 8192}], indirect=True)
 def test_groupmultiheadattention_cross_attention(device, reset_seeds):
     """Test cross-attention case (query != key) using real weights."""
     torch.manual_seed(42)

@@ -30,7 +30,7 @@ class GroupMultiheadAttention(nn.Module):
         attn_drop=0.0,
         proj_drop=0.0,
         group=1,
-        dropout_layer=dict(drop_prob=0.0),
+        dropout_layer=dict(type="Dropout", drop_prob=0.0),
         init_cfg=None,
         batch_first=False,
         **kwargs,
@@ -57,7 +57,6 @@ class GroupMultiheadAttention(nn.Module):
         self.proj_drop = nn.Dropout(proj_drop)
 
         # Residual dropout
-        drop_prob = dropout_layer.get("drop_prob", 0.0)
         self.dropout_layer = build_dropout(dropout_layer) if dropout_layer else nn.Identity()
 
     def forward(
