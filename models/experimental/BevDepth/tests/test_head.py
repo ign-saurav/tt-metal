@@ -48,6 +48,12 @@ class HeadTestInfra:
 
         # Torch output
         self.torch_output = torch_model(self.torch_input_tensor)
+        print(f"Torch output type: {type(self.torch_output)}")
+        print(f"length of torch output: {len(self.torch_output)}")
+        print(f"type of torch output[0]: {type(self.torch_output[0])}")
+        print(f"length of torch output[0]: {len(self.torch_output[0])}")
+        print(f"type of torch output[0][0]: {type(self.torch_output[0][0])}")
+        print(f"length of torch output[0][0]: {len(self.torch_output[0][0])}")
 
         # Preprocess model parameters
         parameters = preprocess_model_parameters(
@@ -114,9 +120,21 @@ class HeadTestInfra:
     def validate(self):
         logger.info("Validating TTNN output against PyTorch...")
 
-        # Output is a list of dicts (one per task head)
-        # Each dict has keys: "reg", "height", "dim", "rot", "vel", "heatmap"
-        assert isinstance(self.torch_output, list), "Torch output should be a list"
+        # Torch output structure: tuple of 6 lists, each list contains one dict
+        # torch_output = (
+        #     [{"reg": ..., "height": ..., "dim": ..., "rot": ..., "vel": ..., "heatmap": ...}],  # task head 0
+        #     [...],  # task head 1
+        #     ...
+        # )
+        # TTNN output structure: list of 6 dicts
+        # ttnn_output = [
+        #     {"reg": ..., "height": ..., ...},  # task head 0
+        #     {...},  # task head 1
+        #     ...
+        # ]
+        assert isinstance(
+            self.torch_output, (tuple, list)
+        ), f"Torch output should be a tuple or list, got {type(self.torch_output)}"
         assert isinstance(self.ttnn_output, list), "TTNN output should be a list"
         assert len(self.torch_output) == len(
             self.ttnn_output
@@ -127,8 +145,19 @@ class HeadTestInfra:
         all_messages = []
 
         # Iterate through each task head
-        for head_idx, (torch_head_output, tt_head_output) in enumerate(zip(self.torch_output, self.ttnn_output)):
-            assert isinstance(torch_head_output, dict), f"Torch head {head_idx} output should be a dict"
+        for head_idx, (torch_head_list, tt_head_output) in enumerate(zip(self.torch_output, self.ttnn_output)):
+            # Torch output: each element is a list containing one dict
+            assert isinstance(
+                torch_head_list, list
+            ), f"Torch head {head_idx} output should be a list, got {type(torch_head_list)}"
+            assert (
+                len(torch_head_list) == 1
+            ), f"Torch head {head_idx} list should contain exactly 1 dict, got {len(torch_head_list)}"
+            torch_head_output = torch_head_list[0]
+
+            assert isinstance(
+                torch_head_output, dict
+            ), f"Torch head {head_idx} output[0] should be a dict, got {type(torch_head_output)}"
             assert isinstance(tt_head_output, dict), f"TTNN head {head_idx} output should be a dict"
 
             # Ensure both dicts have the same keys

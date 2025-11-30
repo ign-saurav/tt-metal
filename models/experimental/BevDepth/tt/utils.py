@@ -205,7 +205,7 @@ class TTConv2D:
             shard_layout=self.shard_layout,
             enable_act_double_buffer=self.enable_act_double_buffer,
             enable_weights_double_buffer=self.enable_weights_double_buffer,
-            in_place=True,
+            in_place=False,
         )
         compute_config = ttnn.init_device_compute_kernel_config(
             device.arch(),
@@ -355,23 +355,37 @@ class TTConvTranspose2D:
             self.math_fidelity = self.kernel_fidelity["MATH_FIDELITY"]
 
     def __call__(self, device, input_tensor, input_shape):
+        # conv_config = ttnn.Conv2dConfig(
+        #     weights_dtype=self.weights_dtype,
+        #     activation=self.activation,
+        #     deallocate_activation=self.deallocate_activation,
+        #     reallocate_halo_output=self.reallocate_halo_output,
+        #     reshard_if_not_optimal=self.reshard_if_not_optimal,
+        #     shard_layout=self.shard_layout,
+        #     enable_act_double_buffer=self.enable_act_double_buffer,
+        #     enable_weights_double_buffer=self.enable_weights_double_buffer,
+        #     in_place=False,
+        # )
+        # compute_config = ttnn.init_device_compute_kernel_config(
+        #     device.arch(),
+        #     math_fidelity=self.kernel_fidelity["MATH_FIDELITY"],
+        #     fp32_dest_acc_en=self.fp32_dest_acc_en,
+        #     packer_l1_acc=self.packer_l1_acc,
+        #     math_approx_mode=self.math_approx_mode,
+        # )
         conv_config = ttnn.Conv2dConfig(
-            weights_dtype=self.weights_dtype,
-            activation=self.activation,
-            deallocate_activation=self.deallocate_activation,
-            reallocate_halo_output=self.reallocate_halo_output,
-            reshard_if_not_optimal=self.reshard_if_not_optimal,
-            shard_layout=self.shard_layout,
-            enable_act_double_buffer=self.enable_act_double_buffer,
-            enable_weights_double_buffer=self.enable_weights_double_buffer,
-            in_place=True,
+            weights_dtype=ttnn.bfloat8_b,
+            shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            deallocate_activation=True,
+            enable_act_double_buffer=False,
+            output_layout=ttnn.TILE_LAYOUT,
+            act_block_h_override=32,
         )
         compute_config = ttnn.init_device_compute_kernel_config(
-            device.arch(),
-            math_fidelity=self.kernel_fidelity["MATH_FIDELITY"],
-            fp32_dest_acc_en=self.fp32_dest_acc_en,
-            packer_l1_acc=self.packer_l1_acc,
-            math_approx_mode=self.math_approx_mode,
+            input_tensor.device().arch(),
+            math_fidelity=ttnn.MathFidelity.LoFi,
+            fp32_dest_acc_en=True,
+            packer_l1_acc=True,
         )
         if self.num_cores_nhw is not None:
             shard_grid = get_shard_grid_from_num_cores(self.num_cores_nhw, device)
@@ -383,7 +397,7 @@ class TTConvTranspose2D:
         if self.act_block_w is not None:
             conv_config.act_block_w_div = self.act_block_w
 
-        [output_tensor, [_out_height, _out_width], [self.weights, self.bias]] = ttnn.conv_transpose2d(
+        [output_tensor, [_out_height, _out_width]] = ttnn.conv_transpose2d(
             input_tensor=input_tensor,
             weight_tensor=self.weights,
             bias_tensor=self.bias,
@@ -398,10 +412,10 @@ class TTConvTranspose2D:
             batch_size=input_shape[-4],
             input_height=input_shape[-3],
             input_width=input_shape[-2],
-            conv_config=conv_config,
-            compute_config=compute_config,
+            # conv_config=conv_config,
+            # compute_config=compute_config,
             groups=self.groups,
-            return_weights_and_bias=True,
+            return_weights_and_bias=False,
             return_output_dim=True,
             dtype=self.dtype,
             memory_config=self.memory_config,
