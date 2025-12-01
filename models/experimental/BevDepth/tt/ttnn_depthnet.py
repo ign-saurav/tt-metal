@@ -19,12 +19,48 @@ class BasicBlock_TTNN:
 
         identity = x
 
-        # Input x is sharded in DRAM from reduce conv
-        # Keep it sharded - conv2d with BLOCK_SHARDED can handle sharded inputs
-        # No need to convert to interleaved (sharded_to_interleaved only works for L1 sharded)
-        # Just ensure TILE_LAYOUT if needed
+        # Input x should be allocated from reduce conv, but verify
+        # Ensure tensor is properly allocated BEFORE any operations
+        if not x.is_allocated():
+            logger.error(
+                f"Input tensor to BasicBlock is not allocated - shape: {x.shape}, sharded: {x.is_sharded()}, layout: {x.layout}"
+            )
+            # Try to recover by converting sharded to interleaved (this allocates)
+            if x.is_sharded():
+                x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+                if not x.is_allocated():
+                    raise RuntimeError("Tensor still not allocated after sharded_to_interleaved")
+            else:
+                # Not sharded and not allocated - this is a critical error
+                # We cannot materialize an unallocated, non-sharded tensor
+                # This indicates a bug upstream (conv2d should return allocated tensors)
+                raise RuntimeError(
+                    f"Input tensor to BasicBlock is not allocated and not sharded. "
+                    f"Shape: {x.shape}, Layout: {x.layout}. "
+                    f"This should not happen - upstream operations should return allocated tensors."
+                )
+
+        # Ensure tensor is in interleaved DRAM (not sharded) for stability
+        if x.is_sharded():
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+
+        # Verify allocation before to_layout (to_layout can create unallocated views)
+        if not x.is_allocated():
+            logger.error("Tensor is not allocated before to_layout in BasicBlock")
+            raise RuntimeError("Tensor buffer is not allocated before to_layout - cannot proceed")
+
+        # Now safe to call to_layout (tensor is allocated)
         if x.layout != ttnn.TILE_LAYOUT:
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+            # Verify allocation after to_layout
+            if not x.is_allocated():
+                logger.error("Tensor became unallocated after to_layout")
+                raise RuntimeError("Tensor buffer is not allocated after to_layout - cannot proceed")
+
+        # Final verification: tensor should be allocated, in TILE_LAYOUT, and in DRAM
+        if not x.is_allocated():
+            logger.error("Tensor is still not allocated after all operations")
+            raise RuntimeError("Tensor buffer is not allocated - cannot proceed")
 
         # Conv1: 3x3 - use BLOCK_SHARDED to avoid L1 buffer overflow
         out = ttnn_conv2d(
@@ -281,7 +317,10 @@ class DepthNet_TTNN:
         # and proceed directly to conv2d
 
         # Reduce conv - use BLOCK_SHARDED to avoid L1 buffer overflow
-        # The output will be sharded in DRAM, which we'll keep sharded for subsequent operations
+        # Immediately convert sharded output to interleaved DRAM to ensure allocation
+        logger.debug(
+            f"Before reduce_conv: x.shape={x.shape}, x.is_allocated()={x.is_allocated()}, x.is_sharded()={x.is_sharded()}"
+        )
         x = ttnn_conv2d(
             input_tensor=x,
             weight_tensor=self.params.reduce_weight,
@@ -302,16 +341,75 @@ class DepthNet_TTNN:
             shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
             packer_l1_acc=False,
         )
+        logger.debug(
+            f"After reduce_conv: x.shape={x.shape}, x.is_allocated()={x.is_allocated()}, x.is_sharded()={x.is_sharded()}"
+        )
 
-        # Reshape if needed
+        # Verify output shape is correct (should be mid_channels, not in_channels)
+        if x.shape[-1] != self.mid_channels:
+            logger.error(f"reduce_conv output shape mismatch! Expected channels={self.mid_channels}, got {x.shape[-1]}")
+            logger.error(
+                f"Full shape: {x.shape}, Expected: [batch_size={batch_size}, height={height}, width={width}, channels={self.mid_channels}]"
+            )
+            raise RuntimeError(
+                f"reduce_conv output has wrong shape. Expected channels={self.mid_channels}, got {x.shape[-1]}. "
+                f"Full shape: {x.shape}"
+            )
+
+        # Immediately convert sharded to interleaved DRAM to ensure proper allocation
+        # This must be done before any reshape or layout operations
+        # The conv2d output should be allocated, but converting sharded to interleaved
+        # ensures we have a stable, allocated tensor in DRAM
+        if x.is_sharded():
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+            logger.debug(f"After sharded_to_interleaved: x.shape={x.shape}, x.is_allocated()={x.is_allocated()}")
+
+        # Verify tensor is allocated after conversion
+        # If not allocated and not sharded, this indicates a bug in conv2d or ttnn
+        if not x.is_allocated():
+            logger.error(f"Tensor from reduce_conv is not allocated - shape: {x.shape}, sharded: {x.is_sharded()}")
+            logger.error("This indicates a bug - conv2d should always return allocated tensors")
+            raise RuntimeError(
+                f"Tensor buffer is not allocated after conv2d. "
+                f"Shape: {x.shape}, Sharded: {x.is_sharded()}, Layout: {x.layout}. "
+                f"This should not happen - conv2d output should be allocated."
+            )
+
+        # Ensure tensor is allocated BEFORE any layout operations
+        # to_layout can create unallocated views if called on unallocated tensors
+        if not x.is_allocated():
+            logger.error("Tensor is not allocated before to_layout - this should not happen")
+            raise RuntimeError("Tensor buffer is not allocated before to_layout - cannot proceed")
+
+        # Now safe to call to_layout (tensor is allocated)
+        if x.layout != ttnn.TILE_LAYOUT:
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+            # Verify allocation after to_layout (it should remain allocated)
+            if not x.is_allocated():
+                logger.error("Tensor became unallocated after to_layout - this is a bug")
+                raise RuntimeError("Tensor buffer is not allocated after to_layout")
+
+        # Reshape if needed - tensor is allocated and in TILE_LAYOUT
         if len(x.shape) == 3:
             x = ttnn.reshape(x, (batch_size, height, width, self.mid_channels))
+            # Reshape should not affect allocation, but verify
+            if not x.is_allocated():
+                logger.error("Tensor became unallocated after reshape - this is a bug")
+                # If reshape created an unallocated view, we cannot materialize it
+                # because to_torch requires allocation
+                raise RuntimeError(
+                    "Tensor buffer is not allocated after reshape. "
+                    "This indicates a bug - reshape should not create unallocated views on allocated tensors."
+                )
 
-        # The reduce conv output is sharded in DRAM (BLOCK_SHARDED)
-        # We'll keep it sharded and pass it to both context and depth branches
-        # Each branch will handle the sharded tensor appropriately
-        # Note: sharded_to_interleaved only works for L1 sharded tensors, not DRAM sharded
-        # So we keep it sharded and let the conv2d operations handle it
+        # Final check: ensure tensor is in interleaved DRAM (not sharded)
+        if x.is_sharded():
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+
+        # Verify final state - tensor should be allocated, in TILE_LAYOUT, and in DRAM
+        if not x.is_allocated():
+            logger.error(f"Tensor is not allocated after all processing - shape: {x.shape}")
+            raise RuntimeError("Tensor buffer is not allocated after all processing")
 
         # Context branch - x is sharded in DRAM from reduce conv
         # Pass it directly to conv2d which can handle sharded inputs
@@ -339,7 +437,42 @@ class DepthNet_TTNN:
         if len(context.shape) == 3:
             context = ttnn.reshape(context, (batch_size, height, width, self.context_channels))
 
-        # Depth branch: use x directly (it's already in the right state and allocated)
+        # Depth branch: verify x is allocated before passing to block1
+        logger.debug(
+            f"Before block1: x.shape={x.shape}, x.is_allocated()={x.is_allocated()}, x.is_sharded()={x.is_sharded()}, expected_channels={self.mid_channels}"
+        )
+
+        # Verify shape is correct (should be mid_channels after reduce_conv)
+        if x.shape[-1] != self.mid_channels:
+            logger.error(
+                f"Tensor x has wrong shape before block1! Expected channels={self.mid_channels}, got {x.shape[-1]}"
+            )
+            logger.error(f"Full shape: {x.shape}. This suggests reduce_conv did not update x correctly.")
+            raise RuntimeError(
+                f"Tensor x has wrong shape before block1. Expected channels={self.mid_channels}, got {x.shape[-1]}. "
+                f"Full shape: {x.shape}. This indicates reduce_conv did not update the tensor correctly."
+            )
+
+        if not x.is_allocated():
+            logger.error(f"Tensor x is not allocated before block1 - shape: {x.shape}, sharded: {x.is_sharded()}")
+            # Try to fix by converting sharded to interleaved if sharded
+            if x.is_sharded():
+                x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+                logger.debug(
+                    f"After sharded_to_interleaved before block1: x.shape={x.shape}, x.is_allocated()={x.is_allocated()}"
+                )
+            else:
+                # Not sharded and not allocated - this shouldn't happen
+                raise RuntimeError(
+                    f"Tensor x is not allocated and not sharded before block1. "
+                    f"Shape: {x.shape}, Expected channels: {self.mid_channels}. "
+                    f"This indicates a bug in the processing pipeline."
+                )
+
+        # Ensure x is in TILE_LAYOUT before passing to block1
+        if x.layout != ttnn.TILE_LAYOUT:
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+
         depth = self.block1(x, batch_size, height, width)
         depth = self.block2(depth, batch_size, height, width)
         depth = self.block3(depth, batch_size, height, width)
@@ -356,29 +489,80 @@ class DepthNet_TTNN:
             if depth.is_sharded():
                 depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
 
-        # DCN (Deformable Conv) - using regular grouped conv as approximation
-        # TODO: Replace with actual DCN when available in TTNN
-        # Use BLOCK_SHARDED to avoid L1 buffer overflow
-        depth = ttnn_conv2d(
-            input_tensor=depth,
-            weight_tensor=self.params.dcn_weight,
-            bias_tensor=self.params.dcn_bias,
-            device=self.device,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            in_channels=self.mid_channels,
-            out_channels=self.mid_channels,
-            kernel_size=(3, 3),
-            stride=(1, 1),
-            padding=(1, 1),
-            activation=None,
-            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            packer_l1_acc=False,
-        )
+        # DCN (Deformable Conv) - using torchvision's deform_conv2d (no compiled extensions needed)
+        # Similar approach to uniad/vadv2: convert to PyTorch, run deform_conv2d, convert back
+        try:
+            from torchvision.ops import deform_conv2d as tv_deform_conv2d
+
+            # Convert TTNN tensor to PyTorch (NCHW format)
+            depth_torch = ttnn.to_torch(depth)
+            # Handle different tensor formats
+            if len(depth_torch.shape) == 4:
+                if depth_torch.shape[1] == 1 and depth_torch.shape[2] == height * width:
+                    # Flattened format: [B, 1, H*W, C] -> [B, H, W, C]
+                    depth_torch = depth_torch.reshape(batch_size, height, width, self.mid_channels)
+                elif depth_torch.shape[1] == height and depth_torch.shape[2] == width:
+                    # Already in [B, H, W, C] format
+                    pass
+                else:
+                    # Try to infer from total elements
+                    total_elements = depth_torch.numel()
+                    expected_elements = batch_size * height * width * self.mid_channels
+                    if total_elements == expected_elements:
+                        depth_torch = depth_torch.reshape(batch_size, height, width, self.mid_channels)
+            # Convert from [B, H, W, C] to [B, C, H, W] for PyTorch
+            depth_torch = depth_torch.permute(0, 3, 1, 2).contiguous().float()
+
+            # Generate offset using conv_offset layer (similar to DeformConv2dPack)
+            offset = self.params.dcn_conv_offset(depth_torch)
+
+            # Run torchvision's deform_conv2d
+            # torchvision uses [x, y] order for offsets, which matches our conv_offset output
+            depth_torch = tv_deform_conv2d(
+                input=depth_torch.float(),
+                offset=offset.float(),
+                weight=self.params.dcn_weight.float(),
+                bias=self.params.dcn_bias.float() if self.params.dcn_bias is not None else None,
+                stride=(1, 1),
+                padding=(1, 1),
+                dilation=(1, 1),
+            )
+
+            # Convert back to TTNN format [B, H, W, C]
+            depth_torch = depth_torch.permute(0, 2, 3, 1).contiguous()  # [B, C, H, W] -> [B, H, W, C]
+            depth_torch = depth_torch.reshape(1, 1, batch_size * height * width, self.mid_channels)
+
+            # Convert back to TTNN tensor
+            depth = ttnn.from_torch(
+                depth_torch,
+                device=self.device,
+                dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+                layout=ttnn.TILE_LAYOUT,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
+        except ImportError:
+            # Fallback to regular grouped conv if torchvision not available
+            logger.warning("torchvision.ops.deform_conv2d not available, using regular Conv2d as approximation")
+            depth = ttnn_conv2d(
+                input_tensor=depth,
+                weight_tensor=self.params.dcn_weight,
+                bias_tensor=self.params.dcn_bias,
+                device=self.device,
+                batch_size=batch_size,
+                input_height=height,
+                input_width=width,
+                in_channels=self.mid_channels,
+                out_channels=self.mid_channels,
+                kernel_size=(3, 3),
+                stride=(1, 1),
+                padding=(1, 1),
+                activation=None,
+                math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+                weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+                activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+                packer_l1_acc=False,
+            )
 
         if len(depth.shape) == 3:
             depth = ttnn.reshape(depth, (batch_size, height, width, self.mid_channels))
@@ -492,11 +676,51 @@ def prepare_depthnet_parameters(state_dict, in_channels=512, mid_channels=256, d
     params.aspp.conv1_weight = state_dict[f"{prefix}depth_conv.3.conv1.weight"].to(torch.bfloat16)
     params.aspp.conv1_bias = state_dict.get(f"{prefix}depth_conv.3.conv1.bias", None)
 
-    # DCN layer (depth_conv.4)
+    # DCN layer (depth_conv.4) - DeformConv2dPack has both weight and conv_offset
     params.dcn_weight = state_dict[f"{prefix}depth_conv.4.weight"].to(torch.bfloat16)
     params.dcn_bias = state_dict.get(f"{prefix}depth_conv.4.bias", None)
     if params.dcn_bias is not None:
         params.dcn_bias = params.dcn_bias.to(torch.bfloat16)
+
+    # Load conv_offset layer (for DeformConv2dPack)
+    # Offset shape: (deform_groups * 2 * kernel_size[0] * kernel_size[1], in_channels, kernel_size[0], kernel_size[1])
+    # For DCN with groups=4, kernel=3: offset_channels = 1 * 2 * 3 * 3 = 18
+    # But DeformConv2dPack uses deform_groups=1 by default, so offset_channels = 1 * 2 * 3 * 3 = 18
+    try:
+        conv_offset_weight = state_dict[f"{prefix}depth_conv.4.conv_offset.weight"]
+        conv_offset_bias = state_dict.get(f"{prefix}depth_conv.4.conv_offset.bias", None)
+
+        # Create a PyTorch Conv2d layer for offset generation
+        # This will be used to generate offsets from input features
+        offset_channels = conv_offset_weight.shape[0]  # Should be 18 for kernel=3, deform_groups=1
+        params.dcn_conv_offset = torch.nn.Conv2d(
+            mid_channels,
+            offset_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=conv_offset_bias is not None,
+        )
+        params.dcn_conv_offset.weight.data = conv_offset_weight
+        if conv_offset_bias is not None:
+            params.dcn_conv_offset.bias.data = conv_offset_bias
+        params.dcn_conv_offset.eval()  # Set to eval mode
+        logger.info(f"Loaded DCN conv_offset layer: {offset_channels} offset channels")
+    except KeyError:
+        logger.warning(f"conv_offset not found for depth_conv.4, DCN will use zero offsets (may reduce accuracy)")
+        # Create a dummy conv_offset that outputs zeros
+        offset_channels = 18  # 2 * 3 * 3 for kernel=3
+        params.dcn_conv_offset = torch.nn.Conv2d(
+            mid_channels,
+            offset_channels,
+            kernel_size=3,
+            stride=1,
+            padding=1,
+            bias=True,
+        )
+        params.dcn_conv_offset.weight.data.zero_()
+        params.dcn_conv_offset.bias.data.zero_()
+        params.dcn_conv_offset.eval()
 
     # Final conv (depth_conv.5)
     params.final_weight = state_dict[f"{prefix}depth_conv.5.weight"].to(torch.bfloat16)
