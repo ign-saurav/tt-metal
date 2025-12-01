@@ -106,8 +106,9 @@ if __name__ == "__main__":
                 _TORCHVISION_DCN_AVAILABLE,
             )
 
-            # Determine if we have proper DCN support (MMCV or torchvision)
-            has_dcn_support = _MMCV_DCN_AVAILABLE or _TORCHVISION_DCN_AVAILABLE
+            # Determine if we have proper DCN support (torchvision or MMCV)
+            # torchvision is preferred (no compiled extensions needed, like uniad/vadv2)
+            has_dcn_support = _TORCHVISION_DCN_AVAILABLE or _MMCV_DCN_AVAILABLE
 
             # Only filter out conv_offset keys if we're using Conv2d fallback (no DCN at all)
             if not has_dcn_support:
@@ -132,17 +133,25 @@ if __name__ == "__main__":
                     print(f"   This means:")
                     print(f"   - DCN-specific weights (conv_offset) will be ignored")
                     print(f"   - Model accuracy may differ from the original trained model")
-                    print(f"   - To get correct behavior, install torchvision (pip install torchvision) or mmcv-full")
+                    print(f"   - To get correct behavior, install torchvision (pip install torchvision)")
                     print(
                         f"   - Affected layers: {', '.join(dcn_keys_info[:3])}{'...' if len(dcn_keys_info) > 3 else ''}"
                     )
 
                 state_dict_to_load = filtered_state_dict
             else:
-                # We have DCN support (MMCV or torchvision), so keep all keys including conv_offset
+                # We have DCN support (torchvision or MMCV), so keep all keys including conv_offset
                 state_dict_to_load = state_dict
-                if _TORCHVISION_DCN_AVAILABLE and not _MMCV_DCN_AVAILABLE:
-                    print(f"\nℹ Using torchvision's DCN implementation (MMCV extensions not available)")
+                if _TORCHVISION_DCN_AVAILABLE:
+                    if _MMCV_DCN_AVAILABLE:
+                        print(
+                            f"\nℹ Using torchvision's DCN implementation (primary option, no compiled extensions needed)"
+                        )
+                    else:
+                        print(f"\nℹ Using torchvision's DCN implementation (MMCV extensions not available)")
+                    print(f"   All DCN weights including conv_offset will be loaded correctly.")
+                elif _MMCV_DCN_AVAILABLE:
+                    print(f"\nℹ Using MMCV's DCN implementation (torchvision not available)")
                     print(f"   All DCN weights including conv_offset will be loaded correctly.")
 
             # Load weights into model
