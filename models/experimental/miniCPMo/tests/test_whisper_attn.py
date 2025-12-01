@@ -14,7 +14,7 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from models.experimental.miniCPMo.reference.tokenization_minicpmo_fast import MiniCPMOTokenizerFast
-from models.experimental.minicpm_o_2_6.tt.ttnn_whisper_encoder import whisper_attention_minicpm
+from models.experimental.miniCPMo.tt.ttnn_whisper_encoder import whisper_attention_minicpm
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_weight, preprocess_linear_bias
 
 
