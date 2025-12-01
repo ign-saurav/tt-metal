@@ -26,9 +26,6 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
         init_audio=True,
         init_tts=False,
     )
-    import pdb
-
-    pdb.set_trace()
 
     print("Initializing MiniCPM-o model...")
     # Initialize the model directly with the config
