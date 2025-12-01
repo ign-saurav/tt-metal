@@ -1,5 +1,4 @@
-# from .io import read_pickle, write_pickle, read_points, write_points, read_calib, \
-#     read_label, write_label
+from .io import read_pickle, write_pickle, read_points, write_points, read_calib, read_label, write_label
 from .process import (
     bbox_camera2lidar,
     bbox3d2bevcorners,
@@ -23,5 +22,4 @@ from .process import (
     bbox3d2corners_camera,
     points_camera2image,
 )
-
-# from .vis_o3d import vis_pc, vis_img_3d
+from .vis_o3d import vis_pc, vis_img_3d
