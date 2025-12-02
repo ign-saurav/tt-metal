@@ -66,7 +66,7 @@ from transformers.modeling_outputs import ModelOutput
 from transformers.models.whisper.modeling_whisper import ACT2FN
 
 # unused as of now
-# from transformers.models.whisper.modeling_whisper import WHISPER_ATTENTION_CLASSES
+from transformers.models.whisper.modeling_whisper import WhisperAttention
 from transformers.models.whisper.modeling_whisper import WhisperConfig
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
@@ -86,6 +86,8 @@ from models.experimental.miniCPMo.reference.resampler import Resampler
 from models.experimental.miniCPMo.reference.utils import NumberToTextConverter
 from models.experimental.miniCPMo.reference.utils import sentence_end
 from models.experimental.miniCPMo.reference.utils import VoiceChecker
+from models.experimental.miniCPMo.tt.ttnn_whisper_encoder import TtnnWhisperEncoder
+from models.experimental.miniCPMo.tt.ttnn_audio_projector import TtnnAudioProjector
 
 logger = logging.getLogger(__name__)
 
@@ -155,24 +157,25 @@ class MiniCPMOPreTrainedModel(Qwen2PreTrainedModel):
 
 
 class TTMiniCPMO(MiniCPMOPreTrainedModel):
-    def __init__(self, config, tt_device, parameters, vpm_state_dict, patch_size, num_patches_per_side):
+    def __init__(self, config, tt_device, patch_size=None, num_patches_per_side=None, parameters=None, state_dict=None):
         super().__init__(config)
         # gets killed without meta
         # with torch.device("meta"):
-        emb_parameters = parameters["embeddings"]
-        resampler_parameters = parameters["resampler"]
         self.llm = Qwen2ForCausalLM(config)
         print("QWEN INITIALIZED")
         self.llm.prepare_inputs_for_generation = types.MethodType(prepare_inputs_for_generation, self.llm)  # patch llm
 
+        self.tt_state_dict = state_dict
         self.tt_device = tt_device
         self.embed_dim = self.llm.config.hidden_size
-        self.position_embedding_weight = emb_parameters["position_embedding"]["weight"]
-        self.patch_size = patch_size
-        self.num_patches_per_side = num_patches_per_side
 
         # init vision module
         if self.config.init_vision:
+            self.patch_size = patch_size
+            self.num_patches_per_side = num_patches_per_side
+            emb_parameters = parameters["embeddings"]
+            resampler_parameters = parameters["resampler"]
+            self.position_embedding_weight = emb_parameters["position_embedding"]["weight"]
             self.vpm = TtSiglipVisionTransformer(
                 mesh_device=tt_device,
                 config=config,
@@ -184,7 +187,7 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
                 image_size=config.vision_config.image_size,  # 980
                 num_channels=config.vision_config.num_channels,  # 3
             )
-            self.vpm.load_weights(vpm_state_dict)
+            self.vpm.load_weights(state_dict)
 
             self.vision_dim = config.vision_config.hidden_size
             # Initialize resampler with empty weights to avoid OOM
@@ -201,10 +204,17 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
 
         # init audio module
         if self.config.init_audio:
-            self.apm = self.init_audio_module()
-            audio_output_dim = int(self.apm.config.encoder_ffn_dim // 4)
-            self.audio_avg_pooler = nn.AvgPool1d(self.config.audio_pool_step, stride=self.config.audio_pool_step)
-            self.audio_projection_layer = MultiModalProjector(in_dim=audio_output_dim, out_dim=self.embed_dim)
+            self.tt_apm = TtnnWhisperEncoder(mesh_device=tt_device, config=config.audio_config.to_dict())
+            # Load weights into TTNN model
+            self.tt_apm.load_weights(state_dict["apm"])
+
+            self.tt_audio_projection_layer = TtnnAudioProjector(
+                device=self.tt_device,
+                input_dim=config.audio_config.encoder_ffn_dim // 4,
+                output_dim=self.embed_dim,
+                pool_step=config.audio_pool_step,
+            )
+            self.tt_audio_projection_layer.load_weights(state_dict["audio_projection_layer"])
             self.audio_encoder_layer = -1
 
         # init tts module
@@ -591,22 +601,19 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
 
             if self.audio_past_key_values is not None:
                 cache_length = self.audio_past_key_values[0][0].shape[2]
-                apm_max_len = self.apm.embed_positions.weight.shape[0]
+
+                apm_max_len = self.tt_state_dict["apm"]["embed_positions.weight"].shape[0]
                 if cache_length + max_seq_len >= apm_max_len:
                     logger.warning(
                         f"audio_past_key_values length {cache_length + max_seq_len} exceed {apm_max_len}, reset."
                     )
                     self.audio_past_key_values = None
 
-            audio_outputs = self.apm(wavforms, past_key_values=self.audio_past_key_values, use_cache=True)
+            audio_outputs = self.tt_apm(wavforms, past_key_values=self.audio_past_key_values, use_cache=True)
             audio_states = audio_outputs.last_hidden_state  # [:, :audio_feat_lengths, :]
             self.audio_past_key_values = audio_outputs.past_key_values
 
-            audio_embeds = self.audio_projection_layer(audio_states)
-
-            audio_embeds = audio_embeds.transpose(1, 2)
-            audio_embeds = self.audio_avg_pooler(audio_embeds)
-            audio_embeds = audio_embeds.transpose(1, 2)
+            audio_embeds = self.tt_audio_projection_layer(audio_states)
 
             _, feature_lens_after_pooling = self._get_feat_extract_output_lengths(audio_feature_lens)
 
@@ -665,8 +672,10 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
             audio_attention_mask_ = padding_mask.view(batch_size, 1, 1, max_seq_len).expand(
                 batch_size, 1, max_seq_len, max_seq_len
             )
+
             audio_attention_mask = audio_attention_mask_.to(
-                dtype=self.apm.conv1.weight.dtype, device=self.apm.conv1.weight.device
+                dtype=self.tt_state_dict["apm"]["conv1.weight"].dtype,
+                device=self.tt_state_dict["apm"]["conv1.weight"].device,
             )
 
             if chunk_length > 0:
@@ -680,14 +689,10 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
                 audio_attention_mask_ = torch.logical_or(audio_attention_mask_, torch.logical_not(chunk_mask))
 
             audio_attention_mask[audio_attention_mask_] = float("-inf")
-            audio_states = self.apm(
-                wavforms, output_hidden_states=True, attention_mask=audio_attention_mask
-            ).hidden_states[self.audio_encoder_layer]
-            audio_embeds = self.audio_projection_layer(audio_states)
+            audio_states = self.tt_apm.forward(wavforms, attention_mask=audio_attention_mask)
+            audio_embeds = self.tt_audio_projection_layer.forward(audio_states)
 
-            audio_embeds = audio_embeds.transpose(1, 2)
-            audio_embeds = self.audio_avg_pooler(audio_embeds)
-            audio_embeds = audio_embeds.transpose(1, 2)
+            audio_embeds = tt2torch_tensor(audio_embeds)
 
             _, feature_lens_after_pooling = self._get_feat_extract_output_lengths(audio_feature_lens)
 
@@ -703,16 +708,14 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
                 final_audio_embeds.append(target_audio_embeds)
             return final_audio_embeds
         elif self.training and dummy:
-            dtype = self.apm.embed_positions.weight.dtype
-            device = self.apm.embed_positions.weight.device
+            dtype = self.tt_state_dict["apm"]["embed_positions.weight"].dtype
+            device = self.tt_state_dict["apm"]["embed_positions.weight"].device
 
             dummy_wavs = torch.zeros((1, 80, 100), device=device, dtype=dtype)
-            audio_states = self.apm(dummy_wavs, output_hidden_states=True).hidden_states[self.audio_encoder_layer]
+            audio_states = self.tt_apm(dummy_wavs, output_hidden_states=True).hidden_states[self.audio_encoder_layer]
 
-            audio_embeds = self.audio_projection_layer(audio_states)
+            audio_embeds = self.tt_audio_projection_layer(audio_states)
 
-            audio_embeds = audio_embeds.transpose(1, 2)
-            audio_embeds = self.audio_avg_pooler(audio_embeds)
             audio_embeds = audio_embeds.transpose(1, 2)
             return [audio_embeds]
 
@@ -2085,7 +2088,7 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
         self.embed_dim = config.d_model
         #  import ERR
         #  unused as of now
-        self.self_attn = WHISPER_ATTENTION_CLASSES[config._attn_implementation](
+        self.self_attn = WhisperAttention(
             embed_dim=self.embed_dim,
             num_heads=config.encoder_attention_heads,
             dropout=config.attention_dropout,
