@@ -604,7 +604,6 @@ class Flux1KontextPipeline:
                     self._scheduler.config.get("max_shift", 1.15),
                 ),
             )
-            print(f"{latents.shape=} {spatial_seq_length=}{self._submesh_devices=}")
             self.image_ids = image_ids
             self.original_latents_shape = list(latents.shape)
             if image_ids is None:
@@ -612,7 +611,6 @@ class Flux1KontextPipeline:
                     self.original_latents_shape[1] // self._submesh_devices[0].shape[sp_axis]
                 )
             if image_ids is not None:
-                print(f"{image_latents.shape=}")
                 latents = torch.cat([latents, image_latents], dim=1)
 
             guidance = (
@@ -639,8 +637,9 @@ class Flux1KontextPipeline:
             tt_prompt_rope_sin_list = []
             for i, submesh_device in enumerate(self._submesh_devices):
                 tt_prompt_embeds = ttnn.from_torch(
-                    prompt_embeds[0].unsqueeze(0) if self._parallel_config.cfg_parallel.factor > 1 else prompt_embeds,
-                    # prompt_embeds[i].unsqueeze(0) if self._parallel_config.cfg_parallel.factor > 1 else prompt_embeds,
+                    prompt_embeds[i].unsqueeze(0)
+                    if ((self._parallel_config.cfg_parallel.factor > 1) and cfg_enabled)
+                    else prompt_embeds,
                     layout=ttnn.TILE_LAYOUT,
                     dtype=ttnn.bfloat16,
                     device=submesh_device if not traced else None,
@@ -652,9 +651,8 @@ class Flux1KontextPipeline:
                 )
 
                 tt_pooled_prompt_embeds = ttnn.from_torch(
-                    # pooled_prompt_embeds[i].unsqueeze(0)
-                    pooled_prompt_embeds[0].unsqueeze(0)
-                    if self._parallel_config.cfg_parallel.factor > 1
+                    pooled_prompt_embeds[i].unsqueeze(0)
+                    if ((self._parallel_config.cfg_parallel.factor > 1) and cfg_enabled)
                     else pooled_prompt_embeds,
                     layout=ttnn.TILE_LAYOUT,
                     dtype=ttnn.bfloat16,
@@ -698,11 +696,20 @@ class Flux1KontextPipeline:
                 #     )
 
                 if guidance is not None:
-                    # if self._parallel_config.cfg_parallel.factor > 1:
-                    #     guidance_tensor = guidance[i].unsqueeze(0).unsqueeze(-1)
-                    # else:
-                    # guidance_tensor = guidance.unsqueeze(-1)
-                    guidance_tensor = guidance.unsqueeze(-1)
+                    if (self._parallel_config.cfg_parallel.factor > 1) and cfg_enabled:
+                        guidance_tensor = (
+                            guidance[
+                                i
+                                * prompt_count
+                                * num_images_per_prompt : (i + 1)
+                                * prompt_count
+                                * num_images_per_prompt
+                            ]
+                            .unsqueeze(0)
+                            .unsqueeze(-1)
+                        )
+                    else:
+                        guidance_tensor = guidance.unsqueeze(-1)
                     tt_guidance = ttnn.from_torch(
                         guidance_tensor,
                         layout=ttnn.TILE_LAYOUT,
@@ -801,7 +808,6 @@ class Flux1KontextPipeline:
                 tt_prompt_rope_sin_list.append(tt_prompt_rope_sin)
 
             logger.info("denoising...")
-
             for i, t in enumerate(tqdm.tqdm(self._scheduler.timesteps)):
                 with timer.time_step("denoising_step") if timer else nullcontext():
                     sigma_difference = self._scheduler.sigmas[i + 1] - self._scheduler.sigmas[i]
@@ -1091,9 +1097,6 @@ class Flux1KontextPipeline:
         for submesh_id, submesh_device in enumerate(self._submesh_devices):
             ttnn.synchronize_device(submesh_device)  # Helps with accurate time profiling.
             sigma_difference_device = sigma_difference_device_list[submesh_id]
-            print(f"sigma_difference_device: {sigma_difference_device.shape}")
-            print(f"self.latents_seq_length: {self.latents_seq_length}")
-            print(f"noise_pred_list[submesh_id]: {noise_pred_list[submesh_id].shape}")
             ttnn.multiply_(sigma_difference_device, noise_pred_list[submesh_id])
             if self.image_ids is not None:
                 randn_latents = latents[submesh_id][:, : self.latents_seq_length]

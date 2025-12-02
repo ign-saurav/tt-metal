@@ -28,7 +28,7 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
 @pytest.mark.parametrize(
     ("model_variant", "width", "height", "guidance_scale", "true_cfg_scale", "num_inference_steps"),
     [
-        ("dev", 1024, 1024, 3.5, 1.0, 28),
+        ("dev", 1024, 1024, 3.5, 1.6, 28),
     ],
 )
 @pytest.mark.parametrize(
@@ -36,12 +36,13 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
     [
         [(1, 4), (1, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
         [(2, 4), (1, 0), (2, 0), (4, 1), ttnn.Topology.Linear, 1],
-        # [(2, 4), (2, 1), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
+        [(2, 4), (2, 1), (2, 1), (2, 0), ttnn.Topology.Linear, 1],
         [(2, 4), (2, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
     ],
     ids=[
-        "1x4cfg1sp0tp1",
-        "2x4cfg1sp0tp1",
+        "1x4sp0tp1",
+        "2x4sp0tp1",
+        "2x4cfg1sp1tp0",
         "2x4cfg0sp0tp1",
     ],
     indirect=["mesh_device"],
@@ -49,21 +50,21 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
 @pytest.mark.parametrize(
     ("use_torch_t5_text_encoder", "use_torch_clip_text_encoder"),
     [
-        # pytest.param(True, True, id="encoder_cpu"),
+        pytest.param(True, True, id="encoder_cpu"),
         pytest.param(False, False, id="encoder_device"),
     ],
 )
 @pytest.mark.parametrize(
     "traced",
     [
-        # pytest.param(True, id="traced"),
+        pytest.param(True, id="traced"),
         pytest.param(False, id="not_traced"),
     ],
 )
 @pytest.mark.parametrize(
     "use_cache",
     [
-        # pytest.param(True, id="yes_use_cache"),
+        pytest.param(True, id="yes_use_cache"),
         pytest.param(False, id="no_use_cache"),
     ],
 )
