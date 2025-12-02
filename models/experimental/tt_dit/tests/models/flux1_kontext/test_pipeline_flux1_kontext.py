@@ -28,16 +28,16 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
 @pytest.mark.parametrize(
     ("model_variant", "width", "height", "guidance_scale", "true_cfg_scale", "num_inference_steps"),
     [
-        ("dev", 1024, 1024, 3.5, 1.6, 28),
+        ("dev", 1024, 1024, 2.5, 1.6, 28),
     ],
 )
 @pytest.mark.parametrize(
     "mesh_device, cfg, sp, tp, topology, num_links",
     [
-        [(1, 4), (1, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
+        [(1, 4), (1, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],  # Fully functional
         [(2, 4), (1, 0), (2, 0), (4, 1), ttnn.Topology.Linear, 1],
         [(2, 4), (2, 1), (2, 1), (2, 0), ttnn.Topology.Linear, 1],
-        [(2, 4), (2, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
+        [(2, 4), (2, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],  # Fully functional
     ],
     ids=[
         "1x4sp0tp1",
@@ -159,6 +159,7 @@ def test_flux1_pipeline(
         logger.info(f"Total encoding time: {timing_data.total_encoding_time:.2f}s")
         logger.info(f"VAE decoding time: {timing_data.vae_decoding_time:.2f}s")
         logger.info(f"Total pipeline time: {timing_data.total_time:.2f}s")
+        logger.info(f"Total pipeline FPS: {(1 / timing_data.total_time):.2f}")
         if timing_data.denoising_step_times:
             avg_step_time = sum(timing_data.denoising_step_times) / len(timing_data.denoising_step_times)
             logger.info(f"Average denoising step time: {avg_step_time:.2f}s")
@@ -174,4 +175,4 @@ def test_flux1_pipeline(
                 prompt = new_prompt
             if prompt[0] == "q":
                 break
-            run(prompt=prompt, number=i, seed=i)
+            run(prompt=prompt, negative_prompt="", number=i, seed=i)
