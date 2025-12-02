@@ -75,8 +75,11 @@ class SD35MediumFinalLayer:
             shift = ttnn.zeros_like(scale)
 
         # Ensure proper broadcasting
-        scale_expanded = ttnn.unsqueeze(scale, 1)
-        shift_expanded = ttnn.unsqueeze(shift, 1)
+        # x is [1, B, seq_len, hidden_size]
+        # scale/shift are [1, B, hidden_size]
+        # Need to unsqueeze at dimension 2 (seq_len) to get [1, B, 1, hidden_size]
+        scale_expanded = ttnn.unsqueeze(scale, 2)
+        shift_expanded = ttnn.unsqueeze(shift, 2)
 
         return x * (1 + scale_expanded) + shift_expanded
 
@@ -129,3 +132,66 @@ class SD35MediumFinalLayer:
             self.adaLN_modulation.load_torch_state_dict(normalized_adaLN_state_dict)
         else:
             self.adaLN_modulation.load_torch_state_dict({})
+
+    def to_cached_state_dict(self, path_prefix):
+        """Convert final layer state to cached state dict"""
+        cache_dict = {}
+
+        # Cache norm_final (if it has parameters)
+        if hasattr(self.norm_final, "to_cached_state_dict"):
+            norm_cache = self.norm_final.to_cached_state_dict(path_prefix + "norm_final.")
+            for key, value in norm_cache.items():
+                cache_dict[f"norm_final.{key}"] = value
+
+        # Cache linear
+        if hasattr(self.linear, "to_cached_state_dict"):
+            linear_cache = self.linear.to_cached_state_dict(path_prefix + "linear.")
+            for key, value in linear_cache.items():
+                cache_dict[f"linear.{key}"] = value
+
+        # Cache adaLN_modulation
+        if hasattr(self.adaLN_modulation, "to_cached_state_dict"):
+            adaLN_cache = self.adaLN_modulation.to_cached_state_dict(path_prefix + "adaLN_modulation.")
+            for key, value in adaLN_cache.items():
+                cache_dict[f"adaLN_modulation.{key}"] = value
+
+        return cache_dict
+
+    def from_cached_state_dict(self, cache_dict):
+        """Load final layer state from cached state dict"""
+        from loguru import logger
+
+        def substate(state, key):
+            prefix = f"{key}."
+            result = {}
+            for k, v in state.items():
+                if k.startswith(prefix):
+                    new_key = k[len(prefix) :]
+                    result[new_key] = v
+            return result
+
+        logger.debug(f"FinalLayer.from_cached_state_dict: Available keys: {list(cache_dict.keys())}")
+
+        # Load norm_final
+        if hasattr(self.norm_final, "from_cached_state_dict"):
+            norm_dict = substate(cache_dict, "norm_final")
+            if norm_dict:
+                self.norm_final.from_cached_state_dict(norm_dict)
+            else:
+                logger.warning("FinalLayer: No keys found for norm_final")
+
+        # Load linear
+        if hasattr(self.linear, "from_cached_state_dict"):
+            linear_dict = substate(cache_dict, "linear")
+            if linear_dict:
+                self.linear.from_cached_state_dict(linear_dict)
+            else:
+                logger.warning("FinalLayer: No keys found for linear")
+
+        # Load adaLN_modulation
+        if hasattr(self.adaLN_modulation, "from_cached_state_dict"):
+            adaLN_dict = substate(cache_dict, "adaLN_modulation")
+            if adaLN_dict:
+                self.adaLN_modulation.from_cached_state_dict(adaLN_dict)
+            else:
+                logger.warning("FinalLayer: No keys found for adaLN_modulation")

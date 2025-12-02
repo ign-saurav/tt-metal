@@ -159,3 +159,57 @@ class SD35MediumJointBlock:
 
         self.context_block.load_state_dict(context_state_dict)
         self.x_block.load_state_dict(x_state_dict)
+
+    def to_cached_state_dict(self, path_prefix):
+        """Convert joint block state to cached state dict"""
+        cache_dict = {}
+
+        # Cache context_block
+        if hasattr(self.context_block, "to_cached_state_dict"):
+            context_cache = self.context_block.to_cached_state_dict(path_prefix + "context_block.")
+            for key, value in context_cache.items():
+                cache_dict[f"context_block.{key}"] = value
+
+        # Cache x_block
+        if hasattr(self.x_block, "to_cached_state_dict"):
+            x_cache = self.x_block.to_cached_state_dict(path_prefix + "x_block.")
+            for key, value in x_cache.items():
+                cache_dict[f"x_block.{key}"] = value
+
+        return cache_dict
+
+    def from_cached_state_dict(self, cache_dict):
+        """Load joint block state from cached state dict"""
+        from loguru import logger
+
+        def substate(state, key):
+            prefix = f"{key}."
+            result = {}
+            for k, v in state.items():
+                if k.startswith(prefix):
+                    new_key = k[len(prefix) :]
+                    result[new_key] = v
+            return result
+
+        # Debug: log available keys
+        logger.debug(
+            f"JointBlock.from_cached_state_dict: Available keys: {list(cache_dict.keys())[:20]}..."
+        )  # Show first 20 keys
+
+        # Load context_block
+        if hasattr(self.context_block, "from_cached_state_dict"):
+            context_block_dict = substate(cache_dict, "context_block")
+            logger.debug(f"JointBlock: context_block keys: {list(context_block_dict.keys())[:20]}...")
+            if context_block_dict:  # Only call if we have keys
+                self.context_block.from_cached_state_dict(context_block_dict)
+            else:
+                logger.warning("JointBlock: No keys found for context_block")
+
+        # Load x_block
+        if hasattr(self.x_block, "from_cached_state_dict"):
+            x_block_dict = substate(cache_dict, "x_block")
+            logger.debug(f"JointBlock: x_block keys: {list(x_block_dict.keys())[:20]}...")
+            if x_block_dict:  # Only call if we have keys
+                self.x_block.from_cached_state_dict(x_block_dict)
+            else:
+                logger.warning("JointBlock: No keys found for x_block")

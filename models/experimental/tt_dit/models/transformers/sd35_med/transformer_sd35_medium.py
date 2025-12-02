@@ -6,6 +6,7 @@ SD3.5 Medium Multi-Modal Diffusion Transformer (MMDiTX) Implementation
 Complete model integrating all components for joint context-x processing.
 """
 
+import os
 import ttnn
 import torch
 from loguru import logger
@@ -279,25 +280,83 @@ class SD35MediumMMDiTX:
         pos_embed = self._cropped_pos_embed(hw, actual_num_patches)
         x = x + pos_embed
 
+        # Reshape x from [B, num_patches, hidden_size] to [1, B, num_patches, hidden_size] for joint blocks
+        B = int(x.shape[0])
+        num_patches = int(x.shape[1])
+        hidden_size = int(x.shape[2])
+        x = ttnn.reshape(x, [1, B, num_patches, hidden_size])
+
         # Time embedding: MLP(256 -> 1536 -> 1536)
         c = self.t_embedder(t)
+        # Reshape c from [B, 1, hidden_size] to [1, B, hidden_size] for joint blocks
+        if len(c.shape) == 3:  # [B, 1, hidden_size]
+            B_c = int(c.shape[0])
+            hidden_size_c = int(c.shape[2])
+            c = ttnn.reshape(c, [1, B_c, hidden_size_c])
+        logger.debug(f"Transformer: c shape after t_embedder and reshape: {c.shape}")
 
         # Class embedding (if available): MLP(2048 -> 1536 -> 1536)
         if y is not None:
             y_emb = self.y_embedder(y)
+            # Reshape y_emb to match c shape if needed
+            if len(y_emb.shape) == 3:  # [B, 1, hidden_size]
+                B_y = int(y_emb.shape[0])
+                hidden_size_y = int(y_emb.shape[2])
+                y_emb = ttnn.reshape(y_emb, [1, B_y, hidden_size_y])
             c = c + y_emb
 
         # Context embedding: Linear(4096, 1536)
         if context is not None:
+            # Log context shape before embedding
+            logger.debug(f"Context shape before context_embedder: {context.shape}")
+
             context = self.context_embedder(context)
+
+            # Log context shape after embedding
+            logger.debug(f"Context shape after context_embedder: {context.shape}")
+
+            # Reshape context to [1, B, L, hidden_size] for joint blocks
+            # Handle both 3D [B, L, hidden_size] and 4D cases
+            if len(context.shape) == 3:  # [B, L, hidden_size]
+                B_ctx = int(context.shape[0])
+                L = int(context.shape[1])
+                hidden_size_ctx = int(context.shape[2])
+                context = ttnn.reshape(context, [1, B_ctx, L, hidden_size_ctx])
+            elif len(context.shape) == 4:  # [1, B, L, hidden_size] or [B, B, L, hidden_size] or [B, 1, L, hidden_size]
+                first_dim = int(context.shape[0])
+                if first_dim == 1:
+                    # Already in correct format [1, B, L, hidden_size]
+                    pass
+                else:
+                    # Handle [B, B, L, hidden_size] or other 4D cases
+                    # If first two dims are the same, it might be a duplicate batch dimension
+                    # We'll take the second dimension as the actual batch size
+                    B_ctx = int(context.shape[1])
+                    L = int(context.shape[2])
+                    hidden_size_ctx = int(context.shape[3])
+                    # Reshape by flattening first two dimensions: [B*B, L, hidden_size] -> [1, B, L, hidden_size]
+                    # But we need to be careful - if it's [2, 2, 154, 1536], we can't just reshape to [1, 2, 154, 1536]
+                    # We need to select one of the batch dimensions
+                    # For now, let's try taking the first slice: context[0, :, :, :] -> [B, L, hidden_size]
+                    context_slice = context[0, :, :, :]  # Take first batch, shape becomes [B, L, hidden_size]
+                    context = ttnn.reshape(context_slice, [1, B_ctx, L, hidden_size_ctx])
+
+            logger.debug(f"Context shape after reshape: {context.shape}")
         else:
             context = None
 
         # Forward through joint blocks
         x = self.forward_core_with_concat(x, c, context, skip_layers, controlnet_hidden_states)
 
-        # Final layer
+        # Final layer (expects [1, B, seq_len, hidden_size], outputs [1, B, seq_len, output_dim])
         x = self.final_layer(x, c)
+
+        # Reshape x from [1, B, seq_len, output_dim] to [B, seq_len, output_dim] for unpatchify
+        # Final layer output: [1, B, seq_len, output_dim]
+        B_final = int(x.shape[1])
+        seq_len_final = int(x.shape[2])
+        output_dim = int(x.shape[3])
+        x = ttnn.reshape(x, [B_final, seq_len_final, output_dim])
 
         # Unpatchify: convert from [B, num_patches, patch_size^2 * out_channels] to [B, out_channels, H, W]
         x = self._unpatchify(x, hw)
@@ -540,3 +599,133 @@ class SD35MediumMMDiTX:
             logger.info("✓ All transformer weights loaded successfully!")
 
         logger.info("=" * 80)
+
+    def to_cached_state_dict(self, path_prefix):
+        """Convert model state to cached state dict for saving"""
+        cache_dict = {}
+
+        # Cache x_embedder (patch embedder)
+        if hasattr(self.x_embedder, "to_cached_state_dict"):
+            x_embedder_cache = self.x_embedder.to_cached_state_dict(path_prefix + "x_embedder.")
+            for key, value in x_embedder_cache.items():
+                cache_dict[f"x_embedder.{key}"] = value
+
+        # Cache pos_embed (positional embedding) - save as file path
+        if self.pos_embed is not None:
+            pos_embed_file = os.path.join(path_prefix, "pos_embed.pt")
+            pos_embed_torch = ttnn.to_torch(self.pos_embed)
+            import torch
+
+            torch.save(pos_embed_torch, pos_embed_file)
+            cache_dict["pos_embed"] = pos_embed_file
+
+        # Cache t_embedder (timestep embedder)
+        if hasattr(self.t_embedder, "to_cached_state_dict"):
+            t_embedder_cache = self.t_embedder.to_cached_state_dict(path_prefix + "t_embedder.")
+            for key, value in t_embedder_cache.items():
+                cache_dict[f"t_embedder.{key}"] = value
+
+        # Cache y_embedder (class embedder)
+        if hasattr(self.y_embedder, "to_cached_state_dict"):
+            y_embedder_cache = self.y_embedder.to_cached_state_dict(path_prefix + "y_embedder.")
+            for key, value in y_embedder_cache.items():
+                cache_dict[f"y_embedder.{key}"] = value
+
+        # Cache context_embedder
+        if hasattr(self.context_embedder, "to_cached_state_dict"):
+            context_embedder_cache = self.context_embedder.to_cached_state_dict(path_prefix + "context_embedder.")
+            for key, value in context_embedder_cache.items():
+                cache_dict[f"context_embedder.{key}"] = value
+
+        # Cache joint_blocks
+        for i, block in enumerate(self.joint_blocks):
+            if hasattr(block, "to_cached_state_dict"):
+                block_cache = block.to_cached_state_dict(path_prefix + f"joint_blocks.{i}.")
+                for key, value in block_cache.items():
+                    cache_dict[f"joint_blocks.{i}.{key}"] = value
+
+        # Cache final_layer
+        if hasattr(self.final_layer, "to_cached_state_dict"):
+            final_layer_cache = self.final_layer.to_cached_state_dict(path_prefix + "final_layer.")
+            for key, value in final_layer_cache.items():
+                cache_dict[f"final_layer.{key}"] = value
+
+        return cache_dict
+
+    @staticmethod
+    def is_cache_valid(cache_dict):
+        """Check if cache dict contains all required keys for a valid cache"""
+        # Required keys that must exist for a valid cache
+        required_embedder_keys = [
+            "t_embedder.linear1.weight",
+            "t_embedder.linear1.bias",
+        ]
+        required_joint_block_keys = [
+            "joint_blocks.0.context_block.adaLN_modulation.weight",
+            "joint_blocks.0.context_block.adaLN_modulation.bias",
+        ]
+        required_final_layer_keys = [
+            "final_layer.linear.weight",
+            "final_layer.linear.bias",
+            "final_layer.adaLN_modulation.weight",
+            "final_layer.adaLN_modulation.bias",
+        ]
+
+        # If cache is empty, it's invalid
+        if len(cache_dict) == 0:
+            return False
+
+        # Check if embedder keys exist
+        has_embedder_keys = all(key in cache_dict for key in required_embedder_keys)
+
+        # Check if joint block keys exist
+        has_joint_block_keys = all(key in cache_dict for key in required_joint_block_keys)
+
+        # Check if final layer keys exist
+        has_final_layer_keys = all(key in cache_dict for key in required_final_layer_keys)
+
+        # Cache is valid only if it has all required keys
+        # This ensures caches created before all components were cacheable are invalidated
+        return has_embedder_keys and has_joint_block_keys and has_final_layer_keys
+
+    def from_cached_state_dict(self, cache_dict):
+        """Load model state from cached state dict"""
+        # Load x_embedder
+        if hasattr(self.x_embedder, "from_cached_state_dict"):
+            self.x_embedder.from_cached_state_dict(substate(cache_dict, "x_embedder"))
+
+        # Load pos_embed (positional embedding) - handle file path or tensor
+        if "pos_embed" in cache_dict:
+            pos_embed_value = cache_dict["pos_embed"]
+            # If it's a string, it's a file path - load it
+            if isinstance(pos_embed_value, str):
+                import torch
+
+                pos_embed_torch = torch.load(pos_embed_value)
+            else:
+                # It's already a torch tensor
+                pos_embed_torch = pos_embed_value
+            self.pos_embed = ttnn.from_torch(pos_embed_torch, device=self.mesh_device)
+
+        # Load t_embedder
+        if hasattr(self.t_embedder, "from_cached_state_dict"):
+            t_embedder_dict = substate(cache_dict, "t_embedder")
+            logger.debug(f"Transformer: t_embedder_dict keys: {list(t_embedder_dict.keys())}")
+            self.t_embedder.from_cached_state_dict(t_embedder_dict)
+
+        # Load y_embedder
+        if hasattr(self.y_embedder, "from_cached_state_dict"):
+            self.y_embedder.from_cached_state_dict(substate(cache_dict, "y_embedder"))
+
+        # Load context_embedder
+        if hasattr(self.context_embedder, "from_cached_state_dict"):
+            self.context_embedder.from_cached_state_dict(substate(cache_dict, "context_embedder"))
+
+        # Load joint_blocks
+        for i, block in enumerate(self.joint_blocks):
+            if hasattr(block, "from_cached_state_dict"):
+                block.from_cached_state_dict(substate(cache_dict, f"joint_blocks.{i}"))
+
+        # Load final_layer
+        if hasattr(self.final_layer, "from_cached_state_dict"):
+            self.final_layer.from_cached_state_dict(substate(cache_dict, "final_layer"))

@@ -158,6 +158,10 @@ class SD35MediumDismantledBlock:
 
     def pre_attention_qkv(self, x, c):
         """Pre-attention: return QKV tuples for joint attention"""
+        from loguru import logger
+
+        logger.debug(f"DismantledBlock.pre_attention_qkv: x shape: {x.shape}, c shape: {c.shape}")
+
         # Apply modulation
         if not self.scale_mod_only:
             # Apply SiLU first, then Linear (matching Sequential(SiLU(), Linear()))
@@ -178,11 +182,30 @@ class SD35MediumDismantledBlock:
                 shift_mlp = ttnn.unsqueeze(shift_mlp, 2)
                 scale_mlp = ttnn.unsqueeze(scale_mlp, 2)
                 gate_mlp = ttnn.unsqueeze(gate_mlp, 2)
-            modulated_x = self.norm1(x) * (1 + scale_msa) + shift_msa
+            norm1_out = self.norm1(x)
+            logger.debug(
+                f"DismantledBlock.pre_attention_qkv: norm1_out shape: {norm1_out.shape}, scale_msa shape: {scale_msa.shape}, shift_msa shape: {shift_msa.shape}"
+            )
+            modulated_x = norm1_out * (1 + scale_msa) + shift_msa
         else:
             modulated_x = self.norm1(x)
 
+        logger.debug(f"DismantledBlock.pre_attention_qkv: modulated_x shape: {modulated_x.shape}")
+
         # Get QKV tensors for joint attention
+        # Handle case where first dimension might not be 1
+        if int(modulated_x.shape[0]) != 1:
+            logger.warning(
+                f"DismantledBlock.pre_attention_qkv: modulated_x has unexpected first dimension: {modulated_x.shape[0]}, expected 1. Reshaping..."
+            )
+            # Reshape from [B, B, seq_len, C] to [1, B, seq_len, C] by taking first slice
+            B_actual = int(modulated_x.shape[1])
+            seq_len = int(modulated_x.shape[2])
+            C = int(modulated_x.shape[3])
+            modulated_x = modulated_x[0, :, :, :]  # Take first batch, shape becomes [B, seq_len, C]
+            modulated_x = ttnn.reshape(modulated_x, [1, B_actual, seq_len, C])
+            logger.debug(f"DismantledBlock.pre_attention_qkv: After reshape, modulated_x shape: {modulated_x.shape}")
+
         _, B, seq_len, C = modulated_x.shape
 
         # Access the attention module's QKV projection directly
@@ -271,6 +294,20 @@ class SD35MediumDismantledBlock:
 
         # First attention QKV
         modulated_x1 = x_norm * (1 + scale_msa) + shift_msa
+
+        # Handle case where first dimension might not be 1
+        if int(modulated_x1.shape[0]) != 1:
+            from loguru import logger
+
+            logger.warning(
+                f"DismantledBlock.pre_attention_x: modulated_x1 has unexpected first dimension: {modulated_x1.shape[0]}, expected 1. Reshaping..."
+            )
+            B_actual = int(modulated_x1.shape[1])
+            seq_len = int(modulated_x1.shape[2])
+            C = int(modulated_x1.shape[3])
+            modulated_x1 = modulated_x1[0, :, :, :]  # Take first batch, shape becomes [B, seq_len, C]
+            modulated_x1 = ttnn.reshape(modulated_x1, [1, B_actual, seq_len, C])
+
         _, B, seq_len, C = modulated_x1.shape
         qkv1 = self.attn.qkv(modulated_x1)
         qkv1 = ttnn.reshape(qkv1, (1, B, seq_len, 3, self.num_heads, self.attn.head_dim))
@@ -503,3 +540,199 @@ class SD35MediumDismantledBlock:
             self.adaLN_modulation.load_torch_state_dict(normalized_adaLN_state_dict)
         else:
             self.adaLN_modulation.load_torch_state_dict({})
+
+    def to_cached_state_dict(self, path_prefix):
+        """Convert block state to cached state dict"""
+        cache_dict = {}
+
+        # Cache attention
+        if hasattr(self, "attn") and hasattr(self.attn, "qkv"):
+            if hasattr(self.attn.qkv, "to_cached_state_dict"):
+                qkv_cache = self.attn.qkv.to_cached_state_dict(path_prefix + "attn.qkv.")
+                for key, value in qkv_cache.items():
+                    cache_dict[f"attn.qkv.{key}"] = value
+            if hasattr(self.attn, "proj") and hasattr(self.attn.proj, "to_cached_state_dict"):
+                proj_cache = self.attn.proj.to_cached_state_dict(path_prefix + "attn.proj.")
+                for key, value in proj_cache.items():
+                    cache_dict[f"attn.proj.{key}"] = value
+            if (
+                hasattr(self.attn, "ln_q")
+                and self.attn.ln_q is not None
+                and hasattr(self.attn.ln_q, "to_cached_state_dict")
+            ):
+                ln_q_cache = self.attn.ln_q.to_cached_state_dict(path_prefix + "attn.ln_q.")
+                for key, value in ln_q_cache.items():
+                    cache_dict[f"attn.ln_q.{key}"] = value
+            if (
+                hasattr(self.attn, "ln_k")
+                and self.attn.ln_k is not None
+                and hasattr(self.attn.ln_k, "to_cached_state_dict")
+            ):
+                ln_k_cache = self.attn.ln_k.to_cached_state_dict(path_prefix + "attn.ln_k.")
+                for key, value in ln_k_cache.items():
+                    cache_dict[f"attn.ln_k.{key}"] = value
+
+        # Cache second attention (if exists)
+        if hasattr(self, "attn2") and hasattr(self.attn2, "qkv"):
+            if hasattr(self.attn2.qkv, "to_cached_state_dict"):
+                qkv_cache = self.attn2.qkv.to_cached_state_dict(path_prefix + "attn2.qkv.")
+                for key, value in qkv_cache.items():
+                    cache_dict[f"attn2.qkv.{key}"] = value
+            if hasattr(self.attn2, "proj") and hasattr(self.attn2.proj, "to_cached_state_dict"):
+                proj_cache = self.attn2.proj.to_cached_state_dict(path_prefix + "attn2.proj.")
+                for key, value in proj_cache.items():
+                    cache_dict[f"attn2.proj.{key}"] = value
+            if (
+                hasattr(self.attn2, "ln_q")
+                and self.attn2.ln_q is not None
+                and hasattr(self.attn2.ln_q, "to_cached_state_dict")
+            ):
+                ln_q_cache = self.attn2.ln_q.to_cached_state_dict(path_prefix + "attn2.ln_q.")
+                for key, value in ln_q_cache.items():
+                    cache_dict[f"attn2.ln_q.{key}"] = value
+            if (
+                hasattr(self.attn2, "ln_k")
+                and self.attn2.ln_k is not None
+                and hasattr(self.attn2.ln_k, "to_cached_state_dict")
+            ):
+                ln_k_cache = self.attn2.ln_k.to_cached_state_dict(path_prefix + "attn2.ln_k.")
+                for key, value in ln_k_cache.items():
+                    cache_dict[f"attn2.ln_k.{key}"] = value
+
+        # Cache normalization layers
+        if hasattr(self.norm1, "to_cached_state_dict"):
+            norm1_cache = self.norm1.to_cached_state_dict(path_prefix + "norm1.")
+            for key, value in norm1_cache.items():
+                cache_dict[f"norm1.{key}"] = value
+
+        if not self.pre_only and hasattr(self, "norm2") and hasattr(self.norm2, "to_cached_state_dict"):
+            norm2_cache = self.norm2.to_cached_state_dict(path_prefix + "norm2.")
+            for key, value in norm2_cache.items():
+                cache_dict[f"norm2.{key}"] = value
+
+        # Cache MLP (if exists)
+        if not self.pre_only and hasattr(self, "mlp"):
+            if hasattr(self.mlp, "to_cached_state_dict"):
+                mlp_cache = self.mlp.to_cached_state_dict(path_prefix + "mlp.")
+                for key, value in mlp_cache.items():
+                    cache_dict[f"mlp.{key}"] = value
+
+        # Cache AdaLN modulation
+        if hasattr(self.adaLN_modulation, "to_cached_state_dict"):
+            adaLN_cache = self.adaLN_modulation.to_cached_state_dict(path_prefix + "adaLN_modulation.")
+            for key, value in adaLN_cache.items():
+                cache_dict[f"adaLN_modulation.{key}"] = value
+
+        return cache_dict
+
+    def from_cached_state_dict(self, cache_dict):
+        """Load block state from cached state dict"""
+        from loguru import logger
+
+        def substate(state, key):
+            prefix = f"{key}."
+            result = {}
+            for k, v in state.items():
+                if k.startswith(prefix):
+                    new_key = k[len(prefix) :]
+                    result[new_key] = v
+            return result
+
+        # Debug: log available keys
+        logger.debug(
+            f"DismantledBlock.from_cached_state_dict: Available keys: {list(cache_dict.keys())[:20]}..."
+        )  # Show first 20 keys
+
+        # Load attention
+        if hasattr(self, "attn") and hasattr(self.attn, "qkv"):
+            if hasattr(self.attn.qkv, "from_cached_state_dict"):
+                attn_qkv_dict = substate(cache_dict, "attn.qkv")
+                logger.debug(f"DismantledBlock: attn.qkv keys: {list(attn_qkv_dict.keys())}")
+                if attn_qkv_dict:  # Only call if we have keys
+                    self.attn.qkv.from_cached_state_dict(attn_qkv_dict)
+                else:
+                    logger.warning("DismantledBlock: No keys found for attn.qkv")
+            if hasattr(self.attn, "proj") and hasattr(self.attn.proj, "from_cached_state_dict"):
+                attn_proj_dict = substate(cache_dict, "attn.proj")
+                if attn_proj_dict:
+                    self.attn.proj.from_cached_state_dict(attn_proj_dict)
+            if (
+                hasattr(self.attn, "ln_q")
+                and self.attn.ln_q is not None
+                and hasattr(self.attn.ln_q, "from_cached_state_dict")
+            ):
+                attn_ln_q_dict = substate(cache_dict, "attn.ln_q")
+                if attn_ln_q_dict:
+                    self.attn.ln_q.from_cached_state_dict(attn_ln_q_dict)
+            if (
+                hasattr(self.attn, "ln_k")
+                and self.attn.ln_k is not None
+                and hasattr(self.attn.ln_k, "from_cached_state_dict")
+            ):
+                attn_ln_k_dict = substate(cache_dict, "attn.ln_k")
+                if attn_ln_k_dict:
+                    self.attn.ln_k.from_cached_state_dict(attn_ln_k_dict)
+
+        # Load second attention (if exists)
+        if hasattr(self, "attn2") and hasattr(self.attn2, "qkv"):
+            if hasattr(self.attn2.qkv, "from_cached_state_dict"):
+                attn2_qkv_dict = substate(cache_dict, "attn2.qkv")
+                if attn2_qkv_dict:
+                    self.attn2.qkv.from_cached_state_dict(attn2_qkv_dict)
+            if hasattr(self.attn2, "proj") and hasattr(self.attn2.proj, "from_cached_state_dict"):
+                attn2_proj_dict = substate(cache_dict, "attn2.proj")
+                if attn2_proj_dict:
+                    self.attn2.proj.from_cached_state_dict(attn2_proj_dict)
+            if (
+                hasattr(self.attn2, "ln_q")
+                and self.attn2.ln_q is not None
+                and hasattr(self.attn2.ln_q, "from_cached_state_dict")
+            ):
+                attn2_ln_q_dict = substate(cache_dict, "attn2.ln_q")
+                if attn2_ln_q_dict:
+                    self.attn2.ln_q.from_cached_state_dict(attn2_ln_q_dict)
+                else:
+                    from loguru import logger
+
+                    logger.warning(
+                        "DismantledBlock: attn2.ln_q exists but no keys found in cache. Cache may need to be recreated."
+                    )
+            if (
+                hasattr(self.attn2, "ln_k")
+                and self.attn2.ln_k is not None
+                and hasattr(self.attn2.ln_k, "from_cached_state_dict")
+            ):
+                attn2_ln_k_dict = substate(cache_dict, "attn2.ln_k")
+                if attn2_ln_k_dict:
+                    self.attn2.ln_k.from_cached_state_dict(attn2_ln_k_dict)
+                else:
+                    from loguru import logger
+
+                    logger.warning(
+                        "DismantledBlock: attn2.ln_k exists but no keys found in cache. Cache may need to be recreated."
+                    )
+
+        # Load normalization layers
+        if hasattr(self.norm1, "from_cached_state_dict"):
+            norm1_dict = substate(cache_dict, "norm1")
+            if norm1_dict:
+                self.norm1.from_cached_state_dict(norm1_dict)
+
+        if not self.pre_only and hasattr(self, "norm2") and hasattr(self.norm2, "from_cached_state_dict"):
+            norm2_dict = substate(cache_dict, "norm2")
+            if norm2_dict:
+                self.norm2.from_cached_state_dict(norm2_dict)
+
+        # Load MLP (if exists)
+        if not self.pre_only and hasattr(self, "mlp") and hasattr(self.mlp, "from_cached_state_dict"):
+            mlp_dict = substate(cache_dict, "mlp")
+            if mlp_dict:
+                self.mlp.from_cached_state_dict(mlp_dict)
+
+        # Load AdaLN modulation
+        if hasattr(self.adaLN_modulation, "from_cached_state_dict"):
+            adaLN_dict = substate(cache_dict, "adaLN_modulation")
+            if adaLN_dict:
+                self.adaLN_modulation.from_cached_state_dict(adaLN_dict)
+            else:
+                logger.warning("DismantledBlock: No keys found for adaLN_modulation")

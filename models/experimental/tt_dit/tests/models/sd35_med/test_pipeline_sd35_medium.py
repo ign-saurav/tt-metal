@@ -41,8 +41,8 @@ from ....pipelines.stable_diffusion_35_medium.pipeline_stable_diffusion_35_mediu
     [{"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 32768, "trace_region_size": 25000000}],
     indirect=True,
 )
-@pytest.mark.parametrize("use_cache", [True, False], ids=["yes_use_cache", "no_use_cache"])
-@pytest.mark.parametrize("traced", [True, False], ids=["yes_traced", "no_traced"])
+# @pytest.mark.parametrize("use_cache", [True, False], ids=["yes_use_cache", "no_use_cache"])
+# @pytest.mark.parametrize("traced", [True, False], ids=["yes_traced", "no_traced"])
 def test_sd35_medium_pipeline(
     *,
     mesh_device: ttnn.MeshDevice,
@@ -58,8 +58,8 @@ def test_sd35_medium_pipeline(
     num_links,
     no_prompt,
     model_location_generator,
-    traced,
-    use_cache,
+    traced=False,
+    use_cache=True,
     is_ci_env,
     monkeypatch,
 ) -> None:

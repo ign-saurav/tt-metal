@@ -76,3 +76,62 @@ class TimestepEmbedder(nn.Module):
         x = self.linear2(x)
 
         return x
+
+    def to_cached_state_dict(self, path_prefix):
+        """Convert embedder state to cached state dict"""
+        cache_dict = {}
+        if hasattr(self.linear1, "to_cached_state_dict"):
+            linear1_cache = self.linear1.to_cached_state_dict(path_prefix + "linear1.")
+            # linear1_cache already has keys like "weight", "bias" with full paths as values
+            # We need to add "linear1." prefix to the keys
+            for k, v in linear1_cache.items():
+                cache_dict[f"linear1.{k}"] = v
+        if hasattr(self.linear2, "to_cached_state_dict"):
+            linear2_cache = self.linear2.to_cached_state_dict(path_prefix + "linear2.")
+            for k, v in linear2_cache.items():
+                cache_dict[f"linear2.{k}"] = v
+        return cache_dict
+
+    def from_cached_state_dict(self, cache_dict):
+        """Load embedder state from cached state dict"""
+        from loguru import logger
+
+        def substate(state, key):
+            prefix = f"{key}."
+            result = {}
+            for k, v in state.items():
+                if k.startswith(prefix):
+                    # Remove the prefix from the key
+                    new_key = k[len(prefix) :]
+                    result[new_key] = v
+            return result
+
+        # Debug: log available keys
+        logger.debug(f"TimestepEmbedder.from_cached_state_dict: Available keys: {list(cache_dict.keys())}")
+
+        if hasattr(self.linear1, "from_cached_state_dict"):
+            linear1_dict = substate(cache_dict, "linear1")
+            logger.debug(f"TimestepEmbedder: linear1_dict keys: {list(linear1_dict.keys())}")
+            if linear1_dict:  # Only call if we have keys
+                self.linear1.from_cached_state_dict(linear1_dict)
+            else:
+                error_msg = (
+                    "TimestepEmbedder: No keys found for linear1 in cache. "
+                    "This may indicate the cache was created before embedder caching was implemented. "
+                    "Please delete the cache directory and recreate it."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+        if hasattr(self.linear2, "from_cached_state_dict"):
+            linear2_dict = substate(cache_dict, "linear2")
+            logger.debug(f"TimestepEmbedder: linear2_dict keys: {list(linear2_dict.keys())}")
+            if linear2_dict:  # Only call if we have keys
+                self.linear2.from_cached_state_dict(linear2_dict)
+            else:
+                error_msg = (
+                    "TimestepEmbedder: No keys found for linear2 in cache. "
+                    "This may indicate the cache was created before embedder caching was implemented. "
+                    "Please delete the cache directory and recreate it."
+                )
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
