@@ -1,4 +1,5 @@
 import ttnn
+import torch
 from dataclasses import dataclass
 
 from models.experimental.BevDepth.tt.utils import TTConv2D, TTConvTranspose2D
@@ -160,7 +161,8 @@ class TtResLayer:
 
     def __call__(self, x, device):
         for block in self.blocks:
-            x, output_shape = block(x, device)
+            x, output_shape = block(x, device)  # copy()
+            # x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG) #run with bfloat8_b
         return x, output_shape
 
 
@@ -208,6 +210,7 @@ class TtResNet:
         )
 
         layer3_params = parameters.get("layer3", {})
+        print(f"Layer3 params: {layer3_params}")
         self.layer3 = TtResLayer(
             320,
             640,
@@ -223,7 +226,6 @@ class TtResNet:
             raise ValueError("Device must be provided in __call__")
 
         input_shape = x.shape
-
         # Conv1 + ReLU (BN already folded)
         # Output 0: After conv1+bn1+relu -> (B, 160, 128, 128) in NHWC format
         x0, output_shape0 = self.conv1(device, x, input_shape)
@@ -426,8 +428,7 @@ class TtBEVDepthHead:
         if checkpoint_path is not None:
             torch_model.load_checkpoint(checkpoint_path)
         torch_model = torch_model.model.head
-        torch_model.eval()
-        self.neck = torch_model.neck
+        self.neck = torch_model.neck.eval()
         # Initialize shared_conv as TTConv2D
         shared_conv_params = parameters.get("shared_conv", {})
         self.shared_conv = TTConv2D(
@@ -463,6 +464,11 @@ class TtBEVDepthHead:
         # This matches the reference neck config: in_channels=[160, 160, 320, 640]
         trunk_outputs = self.trunk(x, device)
         x0, x1, x2, x3 = trunk_outputs
+        print(f"Trunk outputs shapes: x0: {x0.shape}, x1: {x1.shape}, x2: {x2.shape}, x3: {x3.shape}")
+        print(f"x0: {ttnn.to_torch(x0).permute(0, 3, 1, 2).reshape(-1)[:10]}")
+        print(f"x1: {ttnn.to_torch(x1).permute(0, 3, 1, 2).reshape(-1)[:10]}")
+        print(f"x2: {ttnn.to_torch(x2).permute(0, 3, 1, 2).reshape(-1)[:10]}")
+        print(f"x3: {ttnn.to_torch(x3).permute(0, 3, 1, 2).reshape(-1)[:10]}")
 
         # Convert TTNN tensors to PyTorch for reference neck
         # Reference neck expects NCHW format, TTNN uses NHWC
@@ -472,21 +478,28 @@ class TtBEVDepthHead:
         x3_torch = ttnn.to_torch(x3)
 
         # Convert from NHWC to NCHW
-        x0_torch = x0_torch.permute(0, 3, 1, 2)
-        x1_torch = x1_torch.permute(0, 3, 1, 2)
-        x2_torch = x2_torch.permute(0, 3, 1, 2)
-        x3_torch = x3_torch.permute(0, 3, 1, 2)
+        x0_torch = x0_torch.permute(0, 3, 1, 2).float()
+        x1_torch = x1_torch.permute(0, 3, 1, 2).float()
+        x2_torch = x2_torch.permute(0, 3, 1, 2).float()
+        x3_torch = x3_torch.permute(0, 3, 1, 2).float()
+        print(f"x0_torch: {x0_torch.reshape(-1)[:10]}")
+        print(f"x1_torch: {x1_torch.reshape(-1)[:10]}")
+        print(f"x2_torch: {x2_torch.reshape(-1)[:10]}")
+        print(f"x3_torch: {x3_torch.reshape(-1)[:10]}")
 
         # Reference neck expects list of tensors matching in_channels=[160, 160, 320, 640]
         neck_inputs = [x0_torch, x1_torch, x2_torch, x3_torch]
-        neck_output = self.neck(neck_inputs)
+        with torch.no_grad():
+            neck_output = self.neck(neck_inputs)
 
         # neck_output is a list with one tensor [out] in NCHW format
         x = neck_output[0]
+        print(f"Neck output: {x.shape}")
+        print(f"Neck output: {x.reshape(-1)[:10]}")
 
         # Convert back to TTNN format (NHWC)
         x = x.permute(0, 2, 3, 1)  # NCHW -> NHWC
-        x = ttnn.from_torch(x, dtype=ttnn.bfloat8_b, device=device)
+        x = ttnn.from_torch(x, dtype=ttnn.bfloat16, device=device)
         x = ttnn.to_device(x, device, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         # Shared conv: 256 -> 64 channels (64+64+128 = 256 from concatenation)

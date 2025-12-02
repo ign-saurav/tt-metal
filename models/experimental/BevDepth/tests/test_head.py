@@ -46,14 +46,10 @@ class HeadTestInfra:
         # Synthetic input
         self.torch_input_tensor = self._create_input_tensor()
 
-        # Torch output
-        self.torch_output = torch_model(self.torch_input_tensor)
-        print(f"Torch output type: {type(self.torch_output)}")
-        print(f"length of torch output: {len(self.torch_output)}")
-        print(f"type of torch output[0]: {type(self.torch_output[0])}")
-        print(f"length of torch output[0]: {len(self.torch_output[0])}")
-        print(f"type of torch output[0][0]: {type(self.torch_output[0][0])}")
-        print(f"length of torch output[0][0]: {len(self.torch_output[0][0])}")
+        # Torch output - use no_grad to ensure no gradients are computed
+        with torch.no_grad():
+            self.torch_output = torch_model(self.torch_input_tensor)
+        # exit(0)
 
         # Preprocess model parameters
         parameters = preprocess_model_parameters(
@@ -77,7 +73,7 @@ class HeadTestInfra:
         # Rebuild TTNN input (since buffers may be freed across passes)
         tt_host_tensor = ttnn.from_torch(
             self.torch_input_tensor.permute(0, 2, 3, 1),
-            dtype=ttnn.bfloat8_b,
+            dtype=ttnn.bfloat16,
             device=self.device,
             mesh_mapper=self.inputs_mesh_mapper,
         )
@@ -92,7 +88,8 @@ class HeadTestInfra:
     def _create_input_tensor(self):
         shape = (2, 160, 128, 128)
         logger.info(f"Generating synthetic input tensor of shape {shape}")
-        return torch.randn(shape, dtype=torch.float32)
+        # Explicitly set requires_grad=False to ensure no gradients are tracked
+        return torch.randn(shape, dtype=torch.float32, requires_grad=False)
 
     @classmethod
     def get_mesh_mappers(cls, device):
@@ -208,8 +205,8 @@ class HeadTestInfra:
 
 model_config = {
     "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
-    "WEIGHTS_DTYPE": ttnn.bfloat8_b,
-    "ACTIVATIONS_DTYPE": ttnn.bfloat8_b,
+    "WEIGHTS_DTYPE": ttnn.bfloat16,
+    "ACTIVATIONS_DTYPE": ttnn.bfloat16,
 }
 
 

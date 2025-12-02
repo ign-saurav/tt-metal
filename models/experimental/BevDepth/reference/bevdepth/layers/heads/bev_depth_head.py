@@ -187,7 +187,13 @@ class BEVDepthHead(CenterHead):
             x = res_layer(x)
             if i in self.trunk.out_indices:
                 trunk_outs.append(x)
+        for i in range(len(trunk_outs)):
+            print(f"Reference Trunk output {i}: {trunk_outs[i].shape}")
+            print(f"Reference Trunk output {i}: {trunk_outs[i].reshape(-1)[:10]}")
         fpn_output = self.neck(trunk_outs)
+        for i in range(len(fpn_output)):
+            print(f"Reference Neck output {i}: {fpn_output[i].shape}")
+            print(f"Reference Neck output {i}: {fpn_output[i].reshape(-1)[:10]}")
         ret_values = super().forward(fpn_output)
         return ret_values
 

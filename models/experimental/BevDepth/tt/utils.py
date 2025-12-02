@@ -376,7 +376,7 @@ class TTConvTranspose2D:
         conv_config = ttnn.Conv2dConfig(
             weights_dtype=ttnn.bfloat8_b,
             shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            deallocate_activation=True,
+            deallocate_activation=True,  # false and dump to DDR
             enable_act_double_buffer=False,
             output_layout=ttnn.TILE_LAYOUT,
             act_block_h_override=32,
