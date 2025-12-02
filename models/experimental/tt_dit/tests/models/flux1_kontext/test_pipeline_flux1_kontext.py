@@ -52,7 +52,7 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
 @pytest.mark.parametrize(
     "traced",
     [
-        # pytest.param(True, id="traced"),
+        pytest.param(True, id="traced"),
         pytest.param(False, id="not_traced"),
     ],
 )

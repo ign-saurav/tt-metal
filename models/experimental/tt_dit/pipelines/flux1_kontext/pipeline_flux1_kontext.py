@@ -318,7 +318,7 @@ class Flux1KontextPipeline:
 
         # warmup for safe tracing.
         logger.info("warming up for tracing...")
-        self.run_single_prompt(prompt="", negative_prompt="", num_inference_steps=1, seed=0, traced=False)
+        self.run_single_prompt(image=torch.randn(1, 3, 1024, 1024), prompt="", negative_prompt="", num_inference_steps=1, seed=0, traced=False)
         self.synchronize_devices()
 
     @staticmethod
@@ -627,13 +627,11 @@ class Flux1KontextPipeline:
                     self._scheduler.config.get("max_shift", 1.15),
                 ),
             )
-            print(f"{latents.shape=} {spatial_seq_length=}{self._submesh_devices=}")
             self.image_ids = image_ids
             self.original_latents_shape = list(latents.shape)
             if image_ids is None:
                 self.original_latents_shape[1] = self.original_latents_shape[1] // self._submesh_devices[0].shape[sp_axis]
             if image_ids is not None:
-                print(f"{image_latents.shape=}")
                 latents = torch.cat([latents, image_latents], dim=1)
 
             guidance = (
@@ -687,9 +685,6 @@ class Flux1KontextPipeline:
 
                 shard_latents_dims = [None, None]
                 shard_latents_dims[sp_axis] = 1  # height of latents
-                # if not self.image_ids:
-                # self.original_latents_shape = list(latents.shape)
-                # self.original_latents_shape[1] = self.original_latents_shape[1] // submesh_device.shape[sp_axis]
                 tt_initial_latents = ttnn.from_torch(
                     latents,
                     layout=ttnn.TILE_LAYOUT,
@@ -701,24 +696,7 @@ class Flux1KontextPipeline:
                         dims=tuple(shard_latents_dims),
                     ),
                 )
-                print(f"{tt_initial_latents.shape=}")
                 tt_latents_seq_length_list.append(tt_initial_latents.shape[1])
-
-                # if image_latents is not None:
-                #     shard_latents_dims = [None, None]
-                #     shard_latents_dims[sp_axis] = 1  # height of latents
-                #     tt_initial_img_latents = ttnn.from_torch(
-                #         image_latents,
-                #         layout=ttnn.TILE_LAYOUT,
-                #         dtype=ttnn.bfloat16,
-                #         device=submesh_device if not traced else None,
-                #         mesh_mapper=ttnn.ShardTensor2dMesh(
-                #             submesh_device,
-                #             tuple(submesh_device.shape),
-                #             dims=tuple(shard_latents_dims),
-                #         ),
-                #     )
-                #     print(f"{tt_initial_img_latents.shape=}")
 
                 tt_guidance = (
                     ttnn.from_torch(
@@ -772,8 +750,6 @@ class Flux1KontextPipeline:
                 if traced:
                     if self._traces is None:
                         tt_initial_latents = tt_initial_latents.to(submesh_device)
-                        # if image_latents is not None:
-                        #     tt_initial_img_latents = tt_initial_img_latents.to(submesh_device)
                         tt_prompt_embeds = tt_prompt_embeds.to(submesh_device)
                         tt_pooled_prompt_embeds = tt_pooled_prompt_embeds.to(submesh_device)
                         tt_spatial_rope_cos = tt_spatial_rope_cos.to(submesh_device)
@@ -785,8 +761,6 @@ class Flux1KontextPipeline:
                             tt_guidance = tt_guidance.to(submesh_device)
                     else:
                         ttnn.copy_host_to_device_tensor(tt_initial_latents, self._traces[i].spatial_input)
-                        # if image_latents is not None:
-                        #     ttnn.copy_host_to_device_tensor(tt_initial_img_latents, self._traces[i].spatial_input)
                         ttnn.copy_host_to_device_tensor(tt_prompt_embeds, self._traces[i].prompt_input)
                         ttnn.copy_host_to_device_tensor(tt_pooled_prompt_embeds, self._traces[i].pooled_input)
                         ttnn.copy_host_to_device_tensor(tt_spatial_rope_cos, self._traces[i].spatial_rope_cos)
@@ -795,8 +769,6 @@ class Flux1KontextPipeline:
                         ttnn.copy_host_to_device_tensor(tt_prompt_rope_sin, self._traces[i].prompt_rope_sin)
 
                         tt_initial_latents = self._traces[i].spatial_input
-                        # if image_latents is not None:
-                        #     tt_initial_img_latents = self._traces[i].spatial_input
                         tt_prompt_embeds = self._traces[i].prompt_input
                         tt_pooled_prompt_embeds = self._traces[i].pooled_input
                         tt_spatial_rope_cos = self._traces[i].spatial_rope_cos
@@ -811,8 +783,6 @@ class Flux1KontextPipeline:
                 tt_prompt_embeds_list.append(tt_prompt_embeds)
                 tt_pooled_prompt_embeds_list.append(tt_pooled_prompt_embeds)
                 tt_latents_step_list.append(tt_initial_latents)
-                # if image_latents is not None:
-                #     tt_img_latents_step_list.append(tt_initial_img_latents)
                 tt_guidance_list.append(tt_guidance)
                 tt_spatial_rope_cos_list.append(tt_spatial_rope_cos)
                 tt_spatial_rope_sin_list.append(tt_spatial_rope_sin)
@@ -981,9 +951,6 @@ class Flux1KontextPipeline:
                 timestep_device = timestep[submesh_id].to(submesh_device)
                 sigma_difference_device = sigma_difference[submesh_id].to(submesh_device)
                 latents_model_input = latents[submesh_id]
-                # if len(img_latents):
-                #     latents_model_input = ttnn.concat([latents[submesh_id], img_latents[submesh_id]], dim=1)
-                print(f"In step:{latents_model_input.shape=}")
                 trace_id = ttnn.begin_trace_capture(submesh_device, cq_id=0)
                 pred = self._step_inner(
                     cfg_enabled=cfg_enabled,
@@ -998,7 +965,6 @@ class Flux1KontextPipeline:
                     prompt_rope_cos=prompt_rope_cos[submesh_id],
                     prompt_rope_sin=prompt_rope_sin[submesh_id],
                     spatial_sequence_length=spatial_sequence_length,
-                    # spatial_sequence_length=latents_model_input.shape[1],
                     prompt_sequence_length=prompt_sequence_length,
                     submesh_index=submesh_id,
                     latents_seq_length=latents_seq_length[submesh_id],
@@ -1039,8 +1005,6 @@ class Flux1KontextPipeline:
         else:
             for submesh_id, submesh_device in enumerate(self._submesh_devices):
                 latents_model_input = latents[submesh_id]
-                # if len(img_latents):
-                #     latents_model_input = ttnn.concat([latents[submesh_id], img_latents[submesh_id]], dim=1)
                 noise_pred = self._step_inner(
                     cfg_enabled=cfg_enabled,
                     # latent=latents[submesh_id],
@@ -1116,6 +1080,9 @@ class Flux1KontextPipeline:
                 spatial_latents = latents[submesh_id][:, self.latents_seq_length:]
                 ttnn.add_(randn_latents, sigma_difference_device)
                 latents[submesh_id] = ttnn.concat([randn_latents, spatial_latents], dim=1)
+                if traced:
+                    ttnn.copy(latents[submesh_id], self._traces[submesh_id].spatial_input)
+                    latents[submesh_id] = self._traces[submesh_id].spatial_input
             else:
                 ttnn.add_(latents[submesh_id], sigma_difference_device)
 
