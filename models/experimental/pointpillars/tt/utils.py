@@ -368,8 +368,8 @@ def split_conv_transpose2d_and_run(
         "batch_size": 1,
         "input_height": input_height,
         "input_width": input_width,
-        "kernel_size": (kernel_size, kernel_size),
-        "stride": (stride, stride),
+        "kernel_size": kernel_size,
+        "stride": stride,
         "padding": (padding, padding),
         "output_padding": (output_padding, output_padding),
         "dilation": (1, 1),
@@ -400,7 +400,7 @@ def split_conv_transpose2d_and_run(
                 return_weights_and_bias=return_weights_and_bias,
                 dtype=conv_output_dtype,
             )
-            results = ttnn.to_memory_config(results, ttnn.DRAM_MEMORY_CONFIG)
+            # results = ttnn.to_memory_config(results, ttnn.DRAM_MEMORY_CONFIG)
             hidden_states_slice.deallocate(True)
 
             if return_weights_and_bias:
@@ -422,16 +422,10 @@ def split_conv_transpose2d_and_run(
                 else:
                     out_channel_slice_output = in_channel_slice_output
             else:
-                # out_channel_slice_output = ttnn.add(
-                #     out_channel_slice_output,
-                #     in_channel_slice_output,
-                #     output_tensor=out_channel_slice_output,
-                #     # use_legacy=True,  # until fix for https://github.com/tenstorrent/tt-metal/issues/22307
-                # )
                 out_channel_slice_output = ttnn.add(
                     out_channel_slice_output,
                     in_channel_slice_output,
-                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    # memory_config=ttnn.DRAM_MEMORY_CONFIG,
                     dtype=ttnn.bfloat16,
                 )
                 in_channel_slice_output.deallocate(True)
@@ -453,3 +447,96 @@ def split_conv_transpose2d_and_run(
     if return_weights_and_bias:
         return output, device_weights, device_bias
     return output
+
+
+class TtPointPillarsConvTranspose2DSplit(LightweightModule):
+    def __init__(
+        self,
+        conv_transpose,
+        conv_transpose_pth,
+        device=None,
+        weights_dtype=ttnn.bfloat16,
+        shard_layout=None,
+        is_dealloc_act=False,
+        return_dims=False,
+        memory_config=None,
+        math_fidelity=ttnn.MathFidelity.LoFi,
+        math_approx_mode=False,
+        conv_in_channel_split_factor=2,
+        conv_out_channel_split_factor=2,
+    ):
+        super().__init__()
+        self.conv_transpose = conv_transpose
+        self.device = device
+        self.in_channels = conv_transpose.in_channels
+        self.out_channels = conv_transpose.out_channels
+        self.kernel_size = conv_transpose.kernel_size
+        self.stride = conv_transpose.stride
+        self.padding = conv_transpose.padding
+        self.output_padding = conv_transpose.output_padding
+        self.conv_in_channel_split_factor = conv_in_channel_split_factor
+        self.conv_out_channel_split_factor = conv_out_channel_split_factor
+
+        self.compute_config = ttnn.init_device_compute_kernel_config(
+            device.arch(),
+            math_fidelity=math_fidelity,
+            fp32_dest_acc_en=False,
+            packer_l1_acc=False,
+            math_approx_mode=math_approx_mode,
+        )
+
+        self.conv_config = ttnn.Conv2dConfig(
+            weights_dtype=ttnn.bfloat16,
+            shard_layout=shard_layout,
+            deallocate_activation=is_dealloc_act,
+            enable_act_double_buffer=False,
+            reshard_if_not_optimal=True,
+            activation=None,
+        )
+
+        conv_weights, conv_bias = prepare_split_conv_transpose2d_weights_bias(
+            in_channels=self.in_channels,
+            out_channels=self.out_channels,
+            conv_in_channel_split_factor=self.conv_in_channel_split_factor,  # Split 128 into 2x64
+            conv_out_channel_split_factor=self.conv_out_channel_split_factor,  # Split 128 into 2x64
+            torch_weight_tensor=conv_transpose_pth.weight,
+            torch_bias_tensor=conv_transpose_pth.bias,
+        )
+        if conv_transpose_pth.bias is not None:
+            self.bias = conv_bias
+        else:
+            self.bias = None
+
+        self.weight = conv_weights
+        self.memory_config = memory_config
+
+    def forward(self, x, shape=None):
+        if shape is not None:
+            batch_size = shape[0]
+            input_height = shape[1]
+            input_width = shape[2]
+        else:
+            batch_size = x.shape[0]
+            input_height = x.shape[1]
+            input_width = x.shape[2]
+        output = split_conv_transpose2d_and_run(
+            hidden_states=x,
+            conv_weight=self.weight,
+            conv_bias=self.bias,
+            device=self.device,
+            in_channels=self.conv_transpose.in_channels,
+            input_height=input_height,
+            input_width=input_width,
+            out_channels=self.conv_transpose.out_channels,
+            conv_in_channel_split_factor=self.conv_in_channel_split_factor,
+            conv_out_channel_split_factor=self.conv_out_channel_split_factor,
+            compute_config=self.compute_config,
+            conv_config=self.conv_config,
+            conv_output_dtype=ttnn.bfloat16,
+            kernel_size=self.conv_transpose.kernel_size,
+            padding=0,
+            output_padding=0,
+            stride=self.conv_transpose.stride,
+        )
+
+        return output
