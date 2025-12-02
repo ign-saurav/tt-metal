@@ -85,7 +85,14 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
     }
     with init_empty_weights():
         config._name_or_path = "models/experimental/miniCPMo/reference"
-        tt_model = TTMiniCPMO(config, device, parameters, vpm_state_dict, patch_size, num_patches_per_side).eval()
+        tt_model = TTMiniCPMO(
+            config,
+            device,
+            parameters=parameters,
+            patch_size=patch_size,
+            num_patches_per_side=num_patches_per_side,
+            state_dict=vpm_state_dict,
+        ).eval()
 
     load_checkpoint_and_dispatch(
         tt_model,

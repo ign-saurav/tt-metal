@@ -9,6 +9,7 @@ from models.experimental.miniCPMo.reference.configuration_minicpm import MiniCPM
 
 from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from models.experimental.miniCPMo.reference.tokenization_minicpmo_fast import MiniCPMOTokenizerFast
+from models.experimental.miniCPMo.tt.tt_modeling_minicpmo import TTMiniCPMO
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
@@ -55,51 +56,36 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
 
     msgs = [{"role": "user", "content": [task_prompt, audio_input]}]
 
-    res = model.chat(
-        msgs=msgs,
-        tokenizer=tokenizer,
-        sampling=True,
-        max_new_tokens=128,
-        use_tts_template=False,
-        generate_audio=False,
-        # temperature=0.3,
-        # output_audio_path='result_audio_understanding.wav',
+    # res = model.chat(
+    #     msgs=msgs,
+    #     tokenizer=tokenizer,
+    #     sampling=True,
+    #     max_new_tokens=128,
+    #     use_tts_template=False,
+    #     generate_audio=False,
+    #     # temperature=0.3,
+    #     # output_audio_path='result_audio_understanding.wav',
+    # )
+    # print(res)
+
+    proj_layer_state_dict = model.audio_projection_layer.state_dict()
+    apm_state_dict = model.apm.state_dict()
+
+    state_dict = {
+        "apm": apm_state_dict,
+        "audio_projection_layer": proj_layer_state_dict,
+    }
+
+    with init_empty_weights():
+        config._name_or_path = "models/experimental/miniCPMo/reference"
+        tt_model = TTMiniCPMO(config, state_dict=state_dict, tt_device=device).eval()
+
+    load_checkpoint_and_dispatch(
+        tt_model,
+        local_checkpoint_path,
+        device_map="auto",
+        dtype=torch.bfloat16,
     )
-    print(res)
+    tt_res = tt_model.chat(image=None, msgs=msgs, tokenizer=tokenizer)
 
-    # apm = model.apm
-    # apm_state_dict = apm.state_dict()
-    # print(f"APM state dict has {len(apm_state_dict)} parameters")
-    # embeddings_model = model.vpm.embeddings
-    # emb_parameters = preprocess_model_parameters(
-    #     initialize_model=lambda: embeddings_model,
-    #     custom_preprocessor=create_siglip_vision_embedding_preprocessor(device, weight_dtype),
-    #     device=device,
-    # )
-    # patch_size = embeddings_model.patch_size
-    # num_patches_per_side = embeddings_model.num_patches_per_side
-
-    # resampler = model.resampler
-    # resampler_parameters = preprocess_model_parameters(
-    #     initialize_model=lambda: resampler,
-    #     custom_preprocessor=create_resampler_preprocessor(device, weight_dtype),
-    #     device=device,
-    # )
-
-    # parameters = {
-    #     "embeddings": emb_parameters,
-    #     "resampler": resampler_parameters,
-    # }
-    # with init_empty_weights():
-    #     config._name_or_path = "models/experimental/miniCPMo/reference"
-    #     tt_model = TTMiniCPMO(config, device, parameters, vpm_state_dict, patch_size, num_patches_per_side).eval()
-
-    # load_checkpoint_and_dispatch(
-    #     tt_model,
-    #     local_checkpoint_path,
-    #     device_map="auto",
-    #     dtype=torch.bfloat16,
-    # )
-    # tt_res = tt_model.chat(image=None, msgs=msgs, tokenizer=tokenizer)
-
-    # print(tt_res)
+    print(tt_res)
