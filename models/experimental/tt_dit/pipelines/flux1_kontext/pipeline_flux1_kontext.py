@@ -308,6 +308,14 @@ class Flux1KontextPipeline:
 
         # warmup for safe tracing.
         logger.info("warming up for tracing...")
+        self.run_single_prompt(
+            image=torch.randn(1, 3, 1024, 1024),
+            prompt="",
+            negative_prompt="",
+            num_inference_steps=1,
+            seed=0,
+            traced=False,
+        )
         self.run_single_prompt(prompt="", negative_prompt="", num_inference_steps=1, seed=0, traced=False)
         self.synchronize_devices()
 
@@ -697,17 +705,9 @@ class Flux1KontextPipeline:
 
                 if guidance is not None:
                     if (self._parallel_config.cfg_parallel.factor > 1) and cfg_enabled:
-                        guidance_tensor = (
-                            guidance[
-                                i
-                                * prompt_count
-                                * num_images_per_prompt : (i + 1)
-                                * prompt_count
-                                * num_images_per_prompt
-                            ]
-                            .unsqueeze(0)
-                            .unsqueeze(-1)
-                        )
+                        guidance_tensor = guidance[
+                            i * prompt_count * num_images_per_prompt : (i + 1) * prompt_count * num_images_per_prompt
+                        ].unsqueeze(-1)
                     else:
                         guidance_tensor = guidance.unsqueeze(-1)
                     tt_guidance = ttnn.from_torch(
@@ -1103,6 +1103,9 @@ class Flux1KontextPipeline:
                 spatial_latents = latents[submesh_id][:, self.latents_seq_length :]
                 ttnn.add_(randn_latents, sigma_difference_device)
                 latents[submesh_id] = ttnn.concat([randn_latents, spatial_latents], dim=1)
+                if traced:
+                    ttnn.copy(latents[submesh_id], self._traces[submesh_id].spatial_input)
+                    latents[submesh_id] = self._traces[submesh_id].spatial_input
             else:
                 ttnn.add_(latents[submesh_id], sigma_difference_device)
 
