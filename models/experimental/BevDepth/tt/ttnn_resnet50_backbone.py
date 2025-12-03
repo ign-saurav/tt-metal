@@ -208,6 +208,12 @@ class Bottleneck:
             activations_dtype=self.model_config["ACTIVATIONS_DTYPE"],
             **config,
         )
+        # Convert sharded to interleaved before reshape (required for reshape)
+        if out.is_sharded():
+            out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
+        # Convert sharded to interleaved before reshape (required for reshape)
+        if out.is_sharded():
+            out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
         if len(out.shape) == 3:
             out = ttnn.reshape(out, (batch_size, height, width, self.conv1_weight_torch.shape[0]))
 
@@ -236,6 +242,9 @@ class Bottleneck:
             activations_dtype=self.model_config["ACTIVATIONS_DTYPE"],
             **config,
         )
+        # Convert sharded to interleaved before reshape (required for reshape)
+        if out.is_sharded():
+            out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
         if len(out.shape) == 3:
             out = ttnn.reshape(out, (batch_size, out_height, out_width, self.conv2_weight_torch.shape[0]))
 
@@ -261,9 +270,11 @@ class Bottleneck:
             activations_dtype=self.model_config["ACTIVATIONS_DTYPE"],
             **config,
         )
+        # Convert sharded to interleaved before reshape (required for reshape)
+        if out.is_sharded():
+            out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
         if len(out.shape) == 3:
             out = ttnn.to_memory_config(out, ttnn.DRAM_MEMORY_CONFIG)
-
             out = ttnn.reshape(out, (batch_size, out_height, out_width, self.conv3_weight_torch.shape[0]))
 
         if self.downsample:
@@ -289,6 +300,9 @@ class Bottleneck:
                 activations_dtype=self.model_config["ACTIVATIONS_DTYPE"],
                 **config,
             )
+            # Convert sharded to interleaved before reshape (required for reshape)
+            if identity.is_sharded():
+                identity = ttnn.sharded_to_interleaved(identity, ttnn.DRAM_MEMORY_CONFIG)
             # Reshape identity if needed
             if len(identity.shape) == 3:
                 identity = ttnn.reshape(
@@ -451,6 +465,9 @@ class ResNet50_BEVDepth:
         height = (height + 2 * 3 - 7) // 2 + 1  # (input_h + 2*padding - kernel_h) // stride_h + 1
         width = (width + 2 * 3 - 7) // 2 + 1  # (input_w + 2*padding - kernel_w) // stride_w + 1
 
+        # Convert sharded to interleaved before reshape (required for reshape)
+        if x.is_sharded():
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
         # Reshape if needed (ttnn_conv2d might return different shape)
         if len(x.shape) == 3:
             x = ttnn.reshape(x, (batch_size, height, width, 64))
@@ -460,6 +477,9 @@ class ResNet50_BEVDepth:
             features["conv1_output"] = x
 
         # Reshape for maxpool - demo passes directly but we need to reshape for our format
+        # Ensure x is not sharded before reshape
+        if x.is_sharded():
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
         pool_input = ttnn.reshape(x, (batch_size, 1, height * width, 64))
 
         # MaxPool: 3x3, stride 2
@@ -478,6 +498,9 @@ class ResNet50_BEVDepth:
         height = height // 2
         width = width // 2
 
+        # Convert sharded to interleaved before reshape (required for reshape)
+        if x.is_sharded():
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
         x = ttnn.reshape(x, (batch_size, height, width, 64))
 
         # Store layer1 input if requested
