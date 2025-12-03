@@ -3,9 +3,6 @@
 import torch
 import torch.nn as nn
 
-# from pointpillars.ops.voxel_op import hard_voxelize
-
-
 import torch
 
 
@@ -114,21 +111,6 @@ class _Voxelization(torch.autograd.Function):
             num_points_per_voxel: [M] int32 tensor. Only returned when
                 max_points != -1.
         """
-
-        # voxels = points.new_zeros(
-        #     size=(max_voxels, max_points, points.size(1)))
-        # coors = points.new_zeros(size=(max_voxels, 3), dtype=torch.int)
-        # num_points_per_voxel = points.new_zeros(
-        #     size=(max_voxels, ), dtype=torch.int)
-        # voxel_num = hard_voxelize(points, voxels, coors,
-        #                             num_points_per_voxel, voxel_size,
-        #                             coors_range, max_points, max_voxels, 3,
-        #                             deterministic)
-        # # select the valid voxels
-        # voxels_out = voxels[:voxel_num]
-        # coors_out = coors[:voxel_num].flip(-1) # (z, y, x) -> (x, y, z)
-        # num_points_per_voxel_out = num_points_per_voxel[:voxel_num]
-
         voxels_out, coors_out, num_points_per_voxel_out = hard_voxelize_pytorch(
             points, voxel_size, coors_range, max_points, max_voxels
         )
