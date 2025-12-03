@@ -22,4 +22,4 @@ from .process import (
     bbox3d2corners_camera,
     points_camera2image,
 )
-from .vis_o3d import vis_pc, vis_img_3d
+from .vis_o3d import vis_img_3d

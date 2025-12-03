@@ -209,12 +209,7 @@ class PointPillarsDemo:
         with torch.no_grad():
             tt_cls, tt_reg, tt_dir = self.ttnn_model.forward(batched_pts=[pc_torch])
 
-        # Convert TTNN outputs to PyTorch and permute from NHWC to NCHW
-        cls_pred = tt2torch_tensor(tt_cls).permute(0, 3, 1, 2)
-        reg_pred = tt2torch_tensor(tt_reg).permute(0, 3, 1, 2)
-        dir_pred = tt2torch_tensor(tt_dir).permute(0, 3, 1, 2)
-
-        return cls_pred, reg_pred, dir_pred
+        return tt_cls, tt_reg, tt_dir
 
     def visualize_results(
         self,
@@ -347,6 +342,22 @@ class PointPillarsDemo:
 
         start_time = time.time()
         tt_cls, tt_reg, tt_dir = self.run_ttnn_inference(pc_torch)
+        tt_cls = (
+            tt2torch_tensor(tt_cls)
+            .reshape(pt_cls.shape[0], pt_cls.shape[2], pt_cls.shape[3], pt_cls.shape[1])
+            .permute(0, 3, 1, 2)
+        )
+        tt_reg = (
+            tt2torch_tensor(tt_reg)
+            .reshape(pt_reg.shape[0], pt_reg.shape[2], pt_reg.shape[3], pt_reg.shape[1])
+            .permute(0, 3, 1, 2)
+        )
+        tt_dir = (
+            tt2torch_tensor(tt_dir)
+            .reshape(pt_dir.shape[0], pt_dir.shape[2], pt_dir.shape[3], pt_dir.shape[1])
+            .permute(0, 3, 1, 2)
+        )
+
         tt_inference_time = time.time() - start_time
         logger.info(f"TTNN inference time: {tt_inference_time * 1000:.2f} ms")
 
@@ -381,7 +392,7 @@ Example usage:
     )
     parser.add_argument(
         "--ckpt",
-        default="models/experimental/pointpillars/reference/model/epoch_160.pth",
+        default="models/experimental/pointpillars/resources/epoch_160.pth",
         help="Path to checkpoint file",
     )
     parser.add_argument("--pc_path", required=True, help="Path to point cloud file (.bin)")
