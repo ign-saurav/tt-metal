@@ -375,33 +375,93 @@ def test_depthnet_pcc(device, batch_size, height, width, depth_channels):
     num_sweeps = 1
     num_cameras = 1  # Single camera for testing
 
+    # Capture intermediate outputs and inputs from reference model using hooks
+    ref_intermediate_outputs = {}
+    ref_intermediate_inputs = {}
+
+    def make_hook(name, capture_input=False):
+        def hook(module, input, output):
+            # Store output, converting to CPU and detaching
+            if isinstance(output, torch.Tensor):
+                ref_intermediate_outputs[name] = output.detach().cpu().clone()
+            else:
+                ref_intermediate_outputs[name] = output
+
+            # Also capture input if requested (for block1, block2, block3)
+            if capture_input and len(input) > 0:
+                if isinstance(input[0], torch.Tensor):
+                    ref_intermediate_inputs[name] = input[0].detach().cpu().clone()
+
+        return hook
+
+    # Register hooks for intermediate layers
+    hooks = []
+
+    # Hook into reduce_conv (Sequential: Conv2d -> BN -> ReLU)
+    if hasattr(reference_depthnet, "reduce_conv"):
+        # Hook after the Sequential (after BN and ReLU)
+        hooks.append(reference_depthnet.reduce_conv.register_forward_hook(make_hook("reduce_conv")))
+
+    # Hook into context_se (SELayer)
+    if hasattr(reference_depthnet, "context_se"):
+        hooks.append(reference_depthnet.context_se.register_forward_hook(make_hook("context_se")))
+
+    # Hook into context_conv (Conv2d)
+    if hasattr(reference_depthnet, "context_conv"):
+        hooks.append(reference_depthnet.context_conv.register_forward_hook(make_hook("context_conv")))
+
+    # Hook into depth_se (SELayer)
+    if hasattr(reference_depthnet, "depth_se"):
+        hooks.append(reference_depthnet.depth_se.register_forward_hook(make_hook("depth_se")))
+
+    # Hook into depth_conv Sequential layers
+    if hasattr(reference_depthnet, "depth_conv"):
+        depth_conv = reference_depthnet.depth_conv
+        # Hook into BasicBlocks (indices 0, 1, 2) - capture both input and output
+        for i in range(3):
+            if len(depth_conv) > i:
+                block = depth_conv[i]
+                hooks.append(block.register_forward_hook(make_hook(f"block{i+1}", capture_input=True)))
+        # Hook into ASPP (index 3) - capture both input and output
+        if len(depth_conv) > 3:
+            hooks.append(depth_conv[3].register_forward_hook(make_hook("aspp", capture_input=True)))
+        # Hook into DCN (index 4) - capture both input and output
+        if len(depth_conv) > 4:
+            hooks.append(depth_conv[4].register_forward_hook(make_hook("dcn", capture_input=True)))
+        # Hook into final conv (index 5) - capture both input and output
+        if len(depth_conv) > 5:
+            hooks.append(depth_conv[5].register_forward_hook(make_hook("final_depth_conv", capture_input=True)))
+
+    mats_dict = {
+        "intrin_mats": torch.eye(4)
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
+        "ida_mats": torch.eye(4)
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
+        "sensor2ego_mats": torch.eye(4)
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .unsqueeze(0)
+        .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
+        "bda_mat": torch.eye(4).unsqueeze(0).repeat(batch_size, 1, 1),
+    }
+
     with torch.no_grad():
         try:
-            ref_output = reference_depthnet(
-                torch_input,
-                mats_dict={
-                    "intrin_mats": torch.eye(4)
-                    .unsqueeze(0)
-                    .unsqueeze(0)
-                    .unsqueeze(0)
-                    .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
-                    "ida_mats": torch.eye(4)
-                    .unsqueeze(0)
-                    .unsqueeze(0)
-                    .unsqueeze(0)
-                    .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
-                    "sensor2ego_mats": torch.eye(4)
-                    .unsqueeze(0)
-                    .unsqueeze(0)
-                    .unsqueeze(0)
-                    .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
-                    "bda_mat": torch.eye(4).unsqueeze(0).repeat(batch_size, 1, 1),
-                },
-            )
+            ref_output = reference_depthnet(torch_input, mats_dict=mats_dict)
         except Exception as e:
             logger.warning(f"Reference model failed with camera params: {e}")
             pytest.skip("Reference model requires camera parameters")
             return
+        finally:
+            # Remove hooks
+            for hook in hooks:
+                hook.remove()
 
     # Prepare TTNN parameters
     # Use mid_channels=512 to match checkpoint (from base_exp.py: depth_net_conf)
@@ -417,6 +477,15 @@ def test_depthnet_pcc(device, batch_size, height, width, depth_channels):
         "ACTIVATIONS_DTYPE": ttnn.bfloat16,
         "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
         "ENABLE_STEP_PCC": True,  # Enable step-by-step PCC logging
+        "USE_PYTORCH_FALLBACK_BASICBLOCK": False,  # Set to False to test TTNN implementations
+        "USE_PYTORCH_FALLBACK_ASPP": False,  # Disable PyTorch fallback - debug TTNN ASPP implementation
+        "USE_PYTORCH_FALLBACK_ASPP_DILATED_CONV": True,  # Use PyTorch fallback for dilated convs (x2, x3, x4) -
+        "USE_PYTORCH_FALLBACK_ASPP_UPSAMPLE": True,  # Use PyTorch fallback for bilinear upsampling (x5) - avoids L1 OOM
+        "USE_PYTORCH_FALLBACK_DCN": False,  # Disable PyTorch fallback - debug TTNN DCN implementation
+        "USE_PYTORCH_FALLBACK_FINAL_CONV": False,  # Disable PyTorch fallback - debug TTNN final_depth_conv implementation
+        "DEBUG_BLOCK1": False,  # Disable detailed debugging for block1 (already working)
+        "DEBUG_ASPP": False,  # Disable detailed debugging for ASPP
+        "TEST_BLOCK1_ONLY": False,  # Set to True to test only block1 (skip block2, block3)
     }
 
     ttnn_depthnet = DepthNet_TTNN(
@@ -429,6 +498,25 @@ def test_depthnet_pcc(device, batch_size, height, width, depth_channels):
         model_config=model_config,
     )
 
+    # Store reference intermediate outputs and inputs for step-by-step PCC computation
+    ttnn_depthnet.step_pcc_ref_outputs = ref_intermediate_outputs
+    ttnn_depthnet.step_pcc_ref_inputs = ref_intermediate_inputs
+
+    # Store reference layer instances for direct use (for debugging even when fallback is disabled)
+    if hasattr(reference_depthnet, "depth_conv"):
+        depth_conv = reference_depthnet.depth_conv
+        # Store reference BasicBlock instances (always store for debugging)
+        ttnn_depthnet.ref_block1 = depth_conv[0] if len(depth_conv) > 0 else None
+        ttnn_depthnet.ref_block2 = depth_conv[1] if len(depth_conv) > 1 else None
+        ttnn_depthnet.ref_block3 = depth_conv[2] if len(depth_conv) > 2 else None
+        logger.info("Stored reference BasicBlock instances for debugging")
+
+        # Store reference ASPP, DCN, and final conv instances for direct use
+        ttnn_depthnet.ref_aspp = depth_conv[3] if len(depth_conv) > 3 else None
+        ttnn_depthnet.ref_dcn = depth_conv[4] if len(depth_conv) > 4 else None
+        ttnn_depthnet.ref_final_conv = depth_conv[5] if len(depth_conv) > 5 else None
+        logger.info("Stored reference ASPP, DCN, and final conv instances for debugging")
+
     # Convert input to TTNN format (B, H, W, C)
     torch_input_hwc = torch_input.permute(0, 2, 3, 1).contiguous()
     ttnn_input = ttnn.from_torch(
@@ -440,8 +528,8 @@ def test_depthnet_pcc(device, batch_size, height, width, depth_channels):
     )
     ttnn_input = ttnn.to_layout(ttnn_input, ttnn.TILE_LAYOUT)
 
-    # TTNN forward
-    ttnn_output = ttnn_depthnet(ttnn_input, batch_size=batch_size)
+    # TTNN forward (with mats_dict for consistency with reference)
+    ttnn_output = ttnn_depthnet(ttnn_input, batch_size=batch_size, mats_dict=mats_dict)
 
     # Compare outputs
     ttnn_output_torch = ttnn.to_torch(ttnn_output)
