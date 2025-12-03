@@ -29,7 +29,7 @@ class TtPillarEncoder:
             parameters["conv"],
             device=device,
             activation=None,
-            shard_layout=self.shard_layout,
+            shard_layout=None,  # Disable sharding to free L1 for other ops
             deallocate_activation=True,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
@@ -108,7 +108,7 @@ class TtPillarEncoder:
 
         features_tt = self.conv1d(features_tt)
 
-        # Apply ReLU
+        # Apply ReLU (keep in DRAM - tensor is ~25MB)
         features_tt = ttnn.to_memory_config(features_tt, ttnn.DRAM_MEMORY_CONFIG)
         features_tt = ttnn.relu(features_tt, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
@@ -146,7 +146,7 @@ class TtPillarEncoder:
                 dtype=ttnn.int32,
                 device=self.device,
                 layout=ttnn.ROW_MAJOR_LAYOUT,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                memory_config=ttnn.L1_MEMORY_CONFIG,  # Small tensor, fits in L1
             )
 
             cur_features_tt = ttnn.from_torch(
@@ -154,7 +154,7 @@ class TtPillarEncoder:
                 dtype=ttnn.bfloat16,
                 device=self.device,
                 layout=ttnn.ROW_MAJOR_LAYOUT,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                memory_config=ttnn.L1_MEMORY_CONFIG,  # Small tensor, fits in L1
             )
 
             # Perform scatter (returns new tensor, not in-place)
@@ -167,7 +167,9 @@ class TtPillarEncoder:
             batched_canvas.append(canvas)
 
         batched_canvas = ttnn.stack(batched_canvas, dim=0)
-        batched_canvas = ttnn.to_memory_config(batched_canvas, ttnn.DRAM_MEMORY_CONFIG)
+        batched_canvas = ttnn.to_memory_config(
+            batched_canvas, ttnn.DRAM_MEMORY_CONFIG
+        )  # Output ~27MB, too large for L1
         # ttnn.deallocate(canvas)
         ttnn.deallocate(flat_indices_tt)
         ttnn.deallocate(cur_features_tt)
