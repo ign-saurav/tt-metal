@@ -34,20 +34,6 @@ PREFERRED_KONTEXT_RESOLUTIONS = [
 ]
 
 
-# Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
-def retrieve_latents(
-    encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
-):
-    if hasattr(encoder_output, "latent_dist") and sample_mode == "sample":
-        return encoder_output.latent_dist.sample(generator)
-    elif hasattr(encoder_output, "latent_dist") and sample_mode == "argmax":
-        return encoder_output.latent_dist.mode()
-    elif hasattr(encoder_output, "latents"):
-        return encoder_output.latents
-    else:
-        raise AttributeError("Could not access latents of provided encoder_output")
-
-
 @dataclass
 class PipelineTrace:
     tid: int
@@ -97,43 +83,24 @@ class Flux1KontextPipeline:
         ]
 
         # Hacky submesh reshapes and assignment to parallelize encoders and VAE
-        encoder_device = self._submesh_devices[0]
-        # self.original_encoder_submesh_shape = tuple(encoder_device.shape)
-        self.desired_encoder_submesh_shape = tuple(encoder_device.shape)
-
-        if encoder_device.shape[1] != 4:
-            cfg_shape = tuple(encoder_device.shape)
-            assert cfg_shape[0] * cfg_shape[1] == 4, f"Cannot reshape {cfg_shape} to a 1x4 mesh"
-            logger.info(f"Reshaping submesh device 0 from {cfg_shape} to (1, 4) for CLIP")
-            self.desired_encoder_submesh_shape = (1, 4)
         self.encoder_submesh_idx = 0  # Use submesh 0 for encoder
+        encoder_device = self._submesh_devices[self.encoder_submesh_idx]
 
-        vae_submesh_idx = 1
+        self.vae_submesh_idx = 1
         if len(self._submesh_devices) == 1:
             vae_submesh_idx = 0  # Only one sub mesh device is present
-
-        vae_device = self._submesh_devices[vae_submesh_idx]
-        # self.original_vae_submesh_shape = tuple(vae_device.shape)
-        self.desired_vae_submesh_shape = tuple(vae_device.shape)
-        if vae_device.shape[1] != 4:
-            cfg_shape = tuple(vae_device.shape)
-            assert cfg_shape[0] * cfg_shape[1] == 4, f"Cannot reshape {cfg_shape} to a 1x4 mesh"
-            logger.info(f"Reshaping submesh device 0 from {cfg_shape} to (1, 4) for VAE")
-            self.desired_vae_submesh_shape = (1, 4)
-        vae_device = self._submesh_devices[vae_submesh_idx]
+        vae_device = self._submesh_devices[self.vae_submesh_idx]
 
         # Create encoder parallel config
         encoder_parallel_config = EncoderParallelConfig(
             tensor_parallel=ParallelFactor(factor=4, mesh_axis=1)  # 1x4 submesh, parallel on axis 1
         )
-
         self.encoder_parallel_config = encoder_parallel_config
         self.encoder_device = encoder_device
 
         vae_parallel_config = VAEParallelConfig(tensor_parallel=ParallelFactor(factor=4, mesh_axis=1))
         self.vae_parallel_config = vae_parallel_config
         self.vae_device = vae_device
-        self.vae_submesh_idx = vae_submesh_idx
 
         logger.info("loading models...")
         self._tokenizer_1 = CLIPTokenizer.from_pretrained(checkpoint_name, subfolder="tokenizer")
@@ -161,6 +128,7 @@ class Flux1KontextPipeline:
             )
         else:
             padding_config = None
+
         self.transformers = []
         for i, submesh_device in enumerate(self._submesh_devices):
             tt_transformer = Flux1Transformer(
@@ -213,13 +181,6 @@ class Flux1KontextPipeline:
         # by the patch size. So the vae scale factor is multiplied by the patch size to account for this
         self._image_processor = VaeImageProcessor(vae_scale_factor=self._vae_scale_factor * 2)
         self.default_sample_size = 128
-
-        # HACK: reshape submesh device 0 to 1D
-        if self.desired_encoder_submesh_shape != tuple(self.encoder_device.shape):
-            self.encoder_device.reshape(ttnn.MeshShape(*self.desired_encoder_submesh_shape))
-
-        if self.desired_vae_submesh_shape != tuple(self.vae_device.shape):
-            self.vae_device.reshape(ttnn.MeshShape(*self.desired_vae_submesh_shape))
 
         logger.info("creating TT-NN CLIP text encoder...")
 
@@ -316,7 +277,6 @@ class Flux1KontextPipeline:
             seed=0,
             traced=False,
         )
-        self.run_single_prompt(prompt="", negative_prompt="", num_inference_steps=1, seed=0, traced=False)
         self.synchronize_devices()
 
     @staticmethod
