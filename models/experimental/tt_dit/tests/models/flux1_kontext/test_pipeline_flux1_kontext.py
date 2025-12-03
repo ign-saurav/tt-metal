@@ -36,13 +36,13 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
     [
         [(1, 4), (1, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],  # Fully functional
         [(2, 4), (1, 0), (2, 0), (4, 1), ttnn.Topology.Linear, 1],
-        [(2, 4), (2, 1), (2, 1), (2, 0), ttnn.Topology.Linear, 1],
+        [(2, 4), (2, 1), (2, 0), (2, 1), ttnn.Topology.Linear, 1],
         [(2, 4), (2, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],  # Fully functional
     ],
     ids=[
         "1x4sp0tp1",
         "2x4sp0tp1",
-        "2x4cfg1sp1tp0",
+        "2x4cfg1sp0tp1",
         "2x4cfg0sp0tp1",
     ],
     indirect=["mesh_device"],
