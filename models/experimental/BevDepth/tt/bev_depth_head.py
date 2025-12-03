@@ -4,9 +4,7 @@ from dataclasses import dataclass
 
 from models.experimental.BevDepth.tt.utils import TTConv2D, TTConvTranspose2D
 
-from models.experimental.BevDepth.reference.bevdepth.exps.nuscenes.mv.bev_depth_lss_r50_256x704_128x128_24e_2key import (
-    BEVDepthLightningModel,
-)
+from models.experimental.BevDepth.tests.bev_depth_neck import SECONDFPN
 
 
 @dataclass
@@ -424,11 +422,9 @@ class TtBEVDepthHead:
         # self.neck_params = parameters.get("neck", {})
         # self.neck = TtSECONDFPN(self.neck_params, model_config, layer_optimisations)
         # Load BEVDepthLightningModel and use head.neck from it
-        torch_model = BEVDepthLightningModel()
-        if checkpoint_path is not None:
-            torch_model.load_checkpoint(checkpoint_path)
-        torch_model = torch_model.model.head
-        self.neck = torch_model.neck.eval()
+        self.neck = SECONDFPN()
+        self.neck.load_checkpoint("../reference/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth")
+        self.neck = self.neck.eval()
         # Initialize shared_conv as TTConv2D
         shared_conv_params = parameters.get("shared_conv", {})
         self.shared_conv = TTConv2D(
@@ -493,7 +489,7 @@ class TtBEVDepthHead:
             neck_output = self.neck(neck_inputs)
 
         # neck_output is a list with one tensor [out] in NCHW format
-        x = neck_output[0]
+        x = neck_output
         print(f"Neck output: {x.shape}")
         print(f"Neck output: {x.reshape(-1)[:10]}")
 
