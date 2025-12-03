@@ -27,6 +27,8 @@ def ttnn_conv2d(
     packer_l1_acc=False,
     enable_act_double_buffer=False,
     enable_weights_double_buffer=False,
+    slice_config=None,
+    act_block_h_override=32,  # Default to 32, but allow per-conv override
 ):
     """
     Wrapper for ttnn.conv2d with common optimizations.
@@ -50,14 +52,22 @@ def ttnn_conv2d(
             dtype=weights_dtype,
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
+    # Handle act_block_h_override: None means auto (0), otherwise use the provided value
+    act_block_h_val = 0 if act_block_h_override is None else act_block_h_override
+
     conv_config = ttnn.Conv2dConfig(
         weights_dtype=weights_dtype,
         activation=activation,
         shard_layout=shard_layout if shard_layout else ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
         deallocate_activation=deallocate_activation,
-        reallocate_halo_output=reallocate_halo_output,
+        reallocate_halo_output=reallocate_halo_output
+        if deallocate_activation
+        else False,  # Only useful with deallocate_activation
         enable_act_double_buffer=enable_act_double_buffer,
         enable_weights_double_buffer=enable_weights_double_buffer,
+        config_tensors_in_dram=True,  # Keep tensors in DRAM to reduce L1 usage
+        act_block_h_override=act_block_h_val,  # 0 = auto (use maximum), >0 = override (must be multiple of 32)
+        # Smaller values = smaller CBs but lower performance. With DRAM slicing, auto (0) might work better
     )
 
     compute_config = ttnn.init_device_compute_kernel_config(
@@ -82,6 +92,7 @@ def ttnn_conv2d(
         conv_config=conv_config,
         compute_config=compute_config,
         dtype=activations_dtype,
+        slice_config=slice_config,
     )
 
     return output[0]

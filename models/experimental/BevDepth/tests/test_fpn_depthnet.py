@@ -416,6 +416,7 @@ def test_depthnet_pcc(device, batch_size, height, width, depth_channels):
         "WEIGHTS_DTYPE": ttnn.bfloat16,
         "ACTIVATIONS_DTYPE": ttnn.bfloat16,
         "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
+        "ENABLE_STEP_PCC": True,  # Enable step-by-step PCC logging
     }
 
     ttnn_depthnet = DepthNet_TTNN(
