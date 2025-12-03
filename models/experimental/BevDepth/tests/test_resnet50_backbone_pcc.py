@@ -221,6 +221,35 @@ def prepare_ttnn_parameters(state_dict, device):
     return params
 
 
+def replace_bn_with_identity(module):
+    for name, child in list(module.named_children()):
+        if isinstance(child, torch.nn.BatchNorm2d):
+            setattr(module, name, torch.nn.Identity())
+        else:
+            replace_bn_with_identity(child)
+
+
+def enable_conv_bias(module):
+    for name, child in list(module.named_children()):
+        if isinstance(child, torch.nn.Conv2d) and child.bias is None:
+            # Replace with conv that has bias
+            new_conv = torch.nn.Conv2d(
+                child.in_channels,
+                child.out_channels,
+                child.kernel_size,
+                child.stride,
+                child.padding,
+                child.dilation,
+                child.groups,
+                bias=True,
+            )
+            # Copy weights
+            new_conv.weight.data = child.weight.data.clone()
+            setattr(module, name, new_conv)
+        else:
+            enable_conv_bias(child)
+
+
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
 @pytest.mark.parametrize("batch_size", [1])
 @pytest.mark.parametrize("height, width", [(256, 640)])
@@ -251,38 +280,38 @@ def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
         )
 
     # Enable bias for all conv layers in bottleneck blocks
-    def enable_conv_bias(module):
-        for name, child in list(module.named_children()):
-            if isinstance(child, torch.nn.Conv2d) and child.bias is None:
-                # Replace with conv that has bias
-                new_conv = torch.nn.Conv2d(
-                    child.in_channels,
-                    child.out_channels,
-                    child.kernel_size,
-                    child.stride,
-                    child.padding,
-                    child.dilation,
-                    child.groups,
-                    bias=True,
-                )
-                # Copy weights
-                new_conv.weight.data = child.weight.data.clone()
-                setattr(module, name, new_conv)
-            else:
-                enable_conv_bias(child)
+    # def enable_conv_bias(module):
+    #     for name, child in list(module.named_children()):
+    #         if isinstance(child, torch.nn.Conv2d) and child.bias is None:
+    #             # Replace with conv that has bias
+    #             new_conv = torch.nn.Conv2d(
+    #                 child.in_channels,
+    #                 child.out_channels,
+    #                 child.kernel_size,
+    #                 child.stride,
+    #                 child.padding,
+    #                 child.dilation,
+    #                 child.groups,
+    #                 bias=True,
+    #             )
+    #             # Copy weights
+    #             new_conv.weight.data = child.weight.data.clone()
+    #             setattr(module, name, new_conv)
+    #         else:
+    #             enable_conv_bias(child)
 
     enable_conv_bias(reference_model)
 
     # Now load the fused weights (including biases)
     reference_model.load_state_dict(backbone_state, strict=False)
 
-    # Replace batch norm with identity since weights are fused
-    def replace_bn_with_identity(module):
-        for name, child in list(module.named_children()):
-            if isinstance(child, torch.nn.BatchNorm2d):
-                setattr(module, name, torch.nn.Identity())
-            else:
-                replace_bn_with_identity(child)
+    # # Replace batch norm with identity since weights are fused
+    # def replace_bn_with_identity(module):
+    #     for name, child in list(module.named_children()):
+    #         if isinstance(child, torch.nn.BatchNorm2d):
+    #             setattr(module, name, torch.nn.Identity())
+    #         else:
+    #             replace_bn_with_identity(child)
 
     replace_bn_with_identity(reference_model)
     reference_model.eval()
