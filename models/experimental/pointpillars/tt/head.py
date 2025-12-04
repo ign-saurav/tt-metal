@@ -1,5 +1,13 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
+# SPDX-License-Identifier: Apache-2.0
+
 import ttnn
-from models.experimental.pointpillars.tt.utils import TtPointPillarsConv2D
+from models.tt_cnn.tt.builder import (
+    Conv2dConfiguration,
+    TtConv2d,
+    HeightShardedStrategyConfiguration,
+)
 
 
 class TtHead:
@@ -10,61 +18,97 @@ class TtHead:
         n_classes,
         parameters,
         device,
-        shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-        deallocate_activation=True,
+        batch_size=1,
+        input_height=248,
+        input_width=216,
         dtype=ttnn.bfloat16,
-        math_fidelity=ttnn.MathFidelity.HiFi4,
     ):
-        self.device = device
-        self.n_anchors = n_anchors
-        self.n_classes = n_classes
-        # Initialize three parallel 1x1 convolution branches
-        self.conv_cls = TtPointPillarsConv2D(
-            conv=parameters["conv_cls"]["conv_args"],
-            conv_pth=parameters["conv_cls"],
-            device=device,
-            activation=None,  # No activation for detection heads
-            activation_dtype=dtype,
-            weights_dtype=dtype,
-            shard_layout=shard_layout,
-            is_dealloc_act=False,
-            math_fidelity=math_fidelity,
+        self.dtype = dtype
+
+        self.conv_cls = TtConv2d(
+            self._create_conv_config(
+                parameters=parameters["conv_cls"],
+                batch_size=batch_size,
+                input_height=input_height,
+                input_width=input_width,
+                in_channels=in_channel,
+                out_channels=n_anchors * n_classes,
+            ),
+            device,
         )
 
-        self.conv_reg = TtPointPillarsConv2D(
-            conv=parameters["conv_reg"]["conv_args"],
-            conv_pth=parameters["conv_reg"],
-            device=device,
-            activation=None,
-            activation_dtype=dtype,
-            weights_dtype=dtype,
-            shard_layout=shard_layout,
-            is_dealloc_act=False,
-            math_fidelity=math_fidelity,
+        self.conv_reg = TtConv2d(
+            self._create_conv_config(
+                parameters=parameters["conv_reg"],
+                batch_size=batch_size,
+                input_height=input_height,
+                input_width=input_width,
+                in_channels=in_channel,
+                out_channels=n_anchors * 7,
+            ),
+            device,
         )
 
-        self.conv_dir_cls = TtPointPillarsConv2D(
-            conv=parameters["conv_dir_cls"]["conv_args"],
-            conv_pth=parameters["conv_dir_cls"],
-            device=device,
+        self.conv_dir_cls = TtConv2d(
+            self._create_conv_config(
+                parameters=parameters["conv_dir_cls"],
+                batch_size=batch_size,
+                input_height=input_height,
+                input_width=input_width,
+                in_channels=in_channel,
+                out_channels=n_anchors * 2,
+            ),
+            device,
+        )
+
+    def _create_conv_config(
+        self,
+        parameters,
+        batch_size,
+        input_height,
+        input_width,
+        in_channels,
+        out_channels,
+    ):
+        weight = parameters.weight
+        if isinstance(weight, ttnn.Tensor):
+            weight = ttnn.from_torch(ttnn.to_torch(weight), dtype=ttnn.float32)
+
+        bias = None
+        if hasattr(parameters, "bias") and parameters.bias is not None:
+            bias_torch = ttnn.to_torch(parameters.bias).reshape(1, 1, 1, -1)
+            bias = ttnn.from_torch(bias_torch, dtype=ttnn.float32)
+
+        return Conv2dConfiguration(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            batch_size=batch_size,
+            kernel_size=(1, 1),
+            stride=(1, 1),
+            padding=(0, 0),
+            weight=weight,
+            bias=bias,
             activation=None,
-            activation_dtype=dtype,
-            weights_dtype=dtype,
-            shard_layout=shard_layout,
-            is_dealloc_act=deallocate_activation,
-            math_fidelity=math_fidelity,
+            activation_dtype=self.dtype,
+            weights_dtype=self.dtype,
+            output_dtype=self.dtype,
+            sharding_strategy=HeightShardedStrategyConfiguration(reshard_if_not_optimal=True),
+            math_fidelity=ttnn.MathFidelity.HiFi4,
+            fp32_dest_acc_en=True,
+            deallocate_activation=False,
+            enable_act_double_buffer=False,
         )
 
     def forward(self, x):
-        """
-        x: ttnn tensor (bs, 384, 248, 216) in NHWC format
-        return: tuple of ttnn tensors
-            bbox_cls_pred: (bs, n_anchors*n_classes, 248, 216)
-            bbox_pred: (bs, n_anchors*7, 248, 216)
-            bbox_dir_cls_pred: (bs, n_anchors*2, 248, 216)
-        """
         bbox_cls_pred = self.conv_cls(x)
+        bbox_cls_pred = ttnn.to_memory_config(bbox_cls_pred, ttnn.DRAM_MEMORY_CONFIG)
+
         bbox_pred = self.conv_reg(x)
+        bbox_pred = ttnn.to_memory_config(bbox_pred, ttnn.DRAM_MEMORY_CONFIG)
+
         bbox_dir_cls_pred = self.conv_dir_cls(x)
+        bbox_dir_cls_pred = ttnn.to_memory_config(bbox_dir_cls_pred, ttnn.DRAM_MEMORY_CONFIG)
 
         return bbox_cls_pred, bbox_pred, bbox_dir_cls_pred

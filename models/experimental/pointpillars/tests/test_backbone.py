@@ -2,9 +2,6 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Test for Backbone using tt_cnn builder pattern.
-"""
 
 import pytest
 import torch
@@ -25,21 +22,18 @@ import ttnn
         (64, [64, 128, 256], [3, 5, 5], [2, 2, 2]),
     ],
 )
-def test_backbone_builder(device, in_channel, out_channels, layer_nums, layer_strides, reset_seeds):
+def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, reset_seeds):
     """Test TtBackbone against PyTorch reference."""
     torch.manual_seed(0)
 
-    # Create reference model
     torch_model = Backbone(in_channel, out_channels, layer_nums, layer_strides)
 
-    # Load pretrained weights from .pth file (optional)
     try:
         checkpoint = torch.load(
             "epoch_160.pth",
             map_location="cpu",
         )
 
-        # Extract Backbone weights from the full model checkpoint
         if "state_dict" in checkpoint:
             state_dict = checkpoint["state_dict"]
         elif "model" in checkpoint:
@@ -47,7 +41,6 @@ def test_backbone_builder(device, in_channel, out_channels, layer_nums, layer_st
         else:
             state_dict = checkpoint
 
-        # Filter only Backbone weights
         backbone_state_dict = {}
         prefix = "backbone."
         for key, value in state_dict.items():
@@ -55,7 +48,6 @@ def test_backbone_builder(device, in_channel, out_channels, layer_nums, layer_st
                 new_key = key.replace(prefix, "")
                 backbone_state_dict[new_key] = value
 
-        # Load the filtered weights into your model
         torch_model.load_state_dict(backbone_state_dict)
     except FileNotFoundError:
         logger.warning("Checkpoint file not found, using random weights")
@@ -63,23 +55,19 @@ def test_backbone_builder(device, in_channel, out_channels, layer_nums, layer_st
     torch_model = torch_model.to(dtype=torch.bfloat16)
     torch_model.eval()
 
-    # Create input tensor with shape [1, 64, 496, 432]
     batch_size = 1
     height = 496
     width = 432
     torch_input = torch.randn(batch_size, in_channel, height, width, dtype=torch.bfloat16)
 
-    # Run PyTorch model
     torch_output = torch_model(torch_input)
 
-    # Preprocess model parameters
     parameters = preprocess_model_parameters(
         initialize_model=lambda: torch_model,
         custom_preprocessor=create_custom_mesh_preprocessor(mesh_mapper=None),
         device=device,
     )
 
-    # Convert input to TTNN format (NHWC layout)
     ttnn_input = ttnn.from_torch(
         torch_input.permute(0, 2, 3, 1),  # Convert NCHW to NHWC
         dtype=ttnn.bfloat16,
@@ -88,7 +76,6 @@ def test_backbone_builder(device, in_channel, out_channels, layer_nums, layer_st
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
     )
 
-    # Create TTNN model using builder
     tt_model = TtBackbone(
         in_channel=in_channel,
         out_channels=out_channels,
@@ -100,19 +87,16 @@ def test_backbone_builder(device, in_channel, out_channels, layer_nums, layer_st
         input_height=height,
         input_width=width,
     )
-
     # Run TTNN model
     tt_output = tt_model.forward(ttnn_input)
 
-    # Compare outputs for each block
     all_passing = True
     for i, (torch_out, tt_out) in enumerate(zip(torch_output, tt_output)):
-        # Convert TTNN output back to PyTorch format
         tt_out_torch = tt2torch_tensor(tt_out)
         tt_out_torch = tt_out_torch.reshape(
             torch_out.shape[0], torch_out.shape[2], torch_out.shape[3], torch_out.shape[1]
         )
-        # Convert from NHWC to NCHW
+
         tt_out_torch = tt_out_torch.permute(0, 3, 1, 2)
 
         passing, pcc = comp_pcc(torch_out, tt_out_torch, 0.99)
@@ -121,5 +105,5 @@ def test_backbone_builder(device, in_channel, out_channels, layer_nums, layer_st
             all_passing = False
             logger.warning(f"Block {i} PCC check failed: {pcc}")
 
-    assert all_passing, "Backbone builder test failed - PCC < 0.99"
-    logger.info("Backbone builder test passed!")
+    assert all_passing, "Backbone test failed - PCC < 0.99"
+    logger.info("Backbone test passed!")
