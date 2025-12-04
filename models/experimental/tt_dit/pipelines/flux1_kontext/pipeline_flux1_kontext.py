@@ -88,7 +88,7 @@ class Flux1KontextPipeline:
 
         self.vae_submesh_idx = 1
         if len(self._submesh_devices) == 1:
-            vae_submesh_idx = 0  # Only one sub mesh device is present
+            self.vae_submesh_idx = 0  # Only one sub mesh device is present
         vae_device = self._submesh_devices[self.vae_submesh_idx]
 
         # Create encoder parallel config
@@ -274,6 +274,7 @@ class Flux1KontextPipeline:
             prompt="",
             negative_prompt="",
             num_inference_steps=1,
+            cfg_scale=1.6,
             seed=0,
             traced=False,
         )
@@ -596,8 +597,6 @@ class Flux1KontextPipeline:
             tt_prompt_embeds_list = []
             tt_pooled_prompt_embeds_list = []
             tt_latents_step_list = []
-            tt_img_latents_step_list = []
-            tt_latents_seq_length_list = []
             tt_guidance_list = []
             tt_spatial_rope_cos_list = []
             tt_spatial_rope_sin_list = []
@@ -645,23 +644,6 @@ class Flux1KontextPipeline:
                         dims=tuple(shard_latents_dims),
                     ),
                 )
-                print(f"{tt_initial_latents.shape=}")
-                tt_latents_seq_length_list.append(tt_initial_latents.shape[1])
-
-                # if image_latents is not None:
-                #     shard_latents_dims = [None, None]
-                #     shard_latents_dims[sp_axis] = 1  # height of latents
-                #     tt_initial_img_latents = ttnn.from_torch(
-                #         image_latents,
-                #         layout=ttnn.TILE_LAYOUT,
-                #         dtype=ttnn.bfloat16,
-                #         device=submesh_device if not traced else None,
-                #         mesh_mapper=ttnn.ShardTensor2dMesh(
-                #             submesh_device,
-                #             tuple(submesh_device.shape),
-                #             dims=tuple(shard_latents_dims),
-                #         ),
-                #     )
 
                 if guidance is not None:
                     if (self._parallel_config.cfg_parallel.factor > 1) and cfg_enabled:
@@ -720,8 +702,6 @@ class Flux1KontextPipeline:
                 if traced:
                     if self._traces is None:
                         tt_initial_latents = tt_initial_latents.to(submesh_device)
-                        # if image_latents is not None:
-                        #     tt_initial_img_latents = tt_initial_img_latents.to(submesh_device)
                         tt_prompt_embeds = tt_prompt_embeds.to(submesh_device)
                         tt_pooled_prompt_embeds = tt_pooled_prompt_embeds.to(submesh_device)
                         tt_spatial_rope_cos = tt_spatial_rope_cos.to(submesh_device)
@@ -733,8 +713,6 @@ class Flux1KontextPipeline:
                             tt_guidance = tt_guidance.to(submesh_device)
                     else:
                         ttnn.copy_host_to_device_tensor(tt_initial_latents, self._traces[i].spatial_input)
-                        # if image_latents is not None:
-                        #     ttnn.copy_host_to_device_tensor(tt_initial_img_latents, self._traces[i].spatial_input)
                         ttnn.copy_host_to_device_tensor(tt_prompt_embeds, self._traces[i].prompt_input)
                         ttnn.copy_host_to_device_tensor(tt_pooled_prompt_embeds, self._traces[i].pooled_input)
                         ttnn.copy_host_to_device_tensor(tt_spatial_rope_cos, self._traces[i].spatial_rope_cos)
@@ -743,8 +721,6 @@ class Flux1KontextPipeline:
                         ttnn.copy_host_to_device_tensor(tt_prompt_rope_sin, self._traces[i].prompt_rope_sin)
 
                         tt_initial_latents = self._traces[i].spatial_input
-                        # if image_latents is not None:
-                        #     tt_initial_img_latents = self._traces[i].spatial_input
                         tt_prompt_embeds = self._traces[i].prompt_input
                         tt_pooled_prompt_embeds = self._traces[i].pooled_input
                         tt_spatial_rope_cos = self._traces[i].spatial_rope_cos
@@ -759,8 +735,6 @@ class Flux1KontextPipeline:
                 tt_prompt_embeds_list.append(tt_prompt_embeds)
                 tt_pooled_prompt_embeds_list.append(tt_pooled_prompt_embeds)
                 tt_latents_step_list.append(tt_initial_latents)
-                # if image_latents is not None:
-                #     tt_img_latents_step_list.append(tt_initial_img_latents)
                 tt_guidance_list.append(tt_guidance)
                 tt_spatial_rope_cos_list.append(tt_spatial_rope_cos)
                 tt_spatial_rope_sin_list.append(tt_spatial_rope_sin)
@@ -805,8 +779,6 @@ class Flux1KontextPipeline:
                     tt_latents_step_list = self._step(
                         timestep=tt_timestep_list,
                         latents=tt_latents_step_list,
-                        img_latents=tt_img_latents_step_list,
-                        latents_seq_length=tt_latents_seq_length_list,
                         cfg_enabled=cfg_enabled,
                         prompt_embeds=tt_prompt_embeds_list,
                         pooled_prompt_embeds=tt_pooled_prompt_embeds_list,
@@ -878,13 +850,11 @@ class Flux1KontextPipeline:
         spatial_sequence_length: int,
         prompt_sequence_length: int,
         submesh_index: int,
-        latents_seq_length: int,
     ) -> ttnn.Tensor:
         if cfg_enabled and not self._parallel_config.cfg_parallel.factor > 1:
             latents_model_input = ttnn.concat([latent, latent])
         else:
             latents_model_input = latent
-        print(f"In step inner:{latents_model_input.shape=}")
         noise_pred = self.transformers[submesh_index].forward(
             spatial=latents_model_input,
             prompt=prompt,
@@ -896,9 +866,16 @@ class Flux1KontextPipeline:
             spatial_sequence_length=spatial_sequence_length,
             prompt_sequence_length=prompt_sequence_length,
         )
-        print(f"{noise_pred.shape=} {self.latents_seq_length=}")
 
         if self.image_ids is not None:
+            if tuple(self._submesh_devices[submesh_index].shape)[0] > 1:
+                # Collects shards from all 8 devices along mesh_axis=0 in 2x4 mesh
+                # self.synchronize_devices()
+                noise_pred = ttnn.all_gather(
+                    noise_pred,
+                    dim=1,
+                    cluster_axis=self._parallel_config.sequence_parallel.mesh_axis,  # axis=0 for sequence parallel
+                )
             noise_pred = noise_pred[:, : self.latents_seq_length]
         return noise_pred
 
@@ -907,9 +884,7 @@ class Flux1KontextPipeline:
         *,
         cfg_enabled: bool,
         cfg_scale: float,
-        latents: list[ttnn.Tensor],  # device tensor
-        img_latents: list[ttnn.Tensor],  # device tensor
-        latents_seq_length: list[int],
+        latents: list[ttnn.Tensor],  # device tensor\
         timestep: list[ttnn.Tensor],  # host tensor
         pooled_prompt_embeds: list[ttnn.Tensor],  # device tensor
         prompt_embeds: list[ttnn.Tensor],  # device tensor
@@ -928,15 +903,10 @@ class Flux1KontextPipeline:
             for submesh_id, submesh_device in enumerate(self._submesh_devices):
                 timestep_device = timestep[submesh_id].to(submesh_device)
                 sigma_difference_device = sigma_difference[submesh_id].to(submesh_device)
-                latents_model_input = latents[submesh_id]
-                # if len(img_latents):
-                #     latents_model_input = ttnn.concat([latents[submesh_id], img_latents[submesh_id]], dim=1)
-                print(f"In step:{latents_model_input.shape=}")
                 trace_id = ttnn.begin_trace_capture(submesh_device, cq_id=0)
                 pred = self._step_inner(
                     cfg_enabled=cfg_enabled,
-                    # latent=latents[submesh_id],
-                    latent=latents_model_input,
+                    latent=latents[submesh_id],
                     prompt=prompt_embeds[submesh_id],
                     pooled=pooled_prompt_embeds[submesh_id],
                     timestep=timestep_device,
@@ -946,10 +916,8 @@ class Flux1KontextPipeline:
                     prompt_rope_cos=prompt_rope_cos[submesh_id],
                     prompt_rope_sin=prompt_rope_sin[submesh_id],
                     spatial_sequence_length=spatial_sequence_length,
-                    # spatial_sequence_length=latents_model_input.shape[1],
                     prompt_sequence_length=prompt_sequence_length,
                     submesh_index=submesh_id,
-                    latents_seq_length=latents_seq_length[submesh_id],
                 )
                 ttnn.end_trace_capture(submesh_device, trace_id, cq_id=0)
 
@@ -958,8 +926,7 @@ class Flux1KontextPipeline:
 
                 self._traces.append(
                     PipelineTrace(
-                        # spatial_input=latents[submesh_id],
-                        spatial_input=latents_model_input,
+                        spatial_input=latents[submesh_id],
                         prompt_input=prompt_embeds[submesh_id],
                         pooled_input=pooled_prompt_embeds[submesh_id],
                         timestep_input=timestep_device,
@@ -987,13 +954,9 @@ class Flux1KontextPipeline:
                 noise_pred_list.append(self._traces[submesh_id].latents_output)
         else:
             for submesh_id, submesh_device in enumerate(self._submesh_devices):
-                latents_model_input = latents[submesh_id]
-                # if len(img_latents):
-                #     latents_model_input = ttnn.concat([latents[submesh_id], img_latents[submesh_id]], dim=1)
                 noise_pred = self._step_inner(
                     cfg_enabled=cfg_enabled,
-                    # latent=latents[submesh_id],
-                    latent=latents_model_input,
+                    latent=latents[submesh_id],
                     prompt=prompt_embeds[submesh_id],
                     pooled=pooled_prompt_embeds[submesh_id],
                     timestep=timestep[submesh_id],
@@ -1003,10 +966,8 @@ class Flux1KontextPipeline:
                     prompt_rope_cos=prompt_rope_cos[submesh_id],
                     prompt_rope_sin=prompt_rope_sin[submesh_id],
                     spatial_sequence_length=spatial_sequence_length,
-                    # spatial_sequence_length=latents_model_input.shape[1],
                     prompt_sequence_length=prompt_sequence_length,
                     submesh_index=submesh_id,
-                    latents_seq_length=latents_seq_length[submesh_id],
                 )
                 noise_pred_list.append(noise_pred)
                 sigma_difference_device_list.append(sigma_difference[submesh_id])
@@ -1059,10 +1020,33 @@ class Flux1KontextPipeline:
             sigma_difference_device = sigma_difference_device_list[submesh_id]
             ttnn.multiply_(sigma_difference_device, noise_pred_list[submesh_id])
             if self.image_ids is not None:
+                if tuple(submesh_device.shape)[0] > 1:
+                    # Collects shards from all 8 devices along mesh_axis=0 in 2x4 mesh
+                    ttnn.synchronize_device(submesh_device)  # Helps with accurate time profiling.
+                    latents[submesh_id] = ttnn.all_gather(
+                        latents[submesh_id],
+                        dim=1,
+                        cluster_axis=self._parallel_config.sequence_parallel.mesh_axis,  # axis=0 for sequence parallel
+                    )
                 randn_latents = latents[submesh_id][:, : self.latents_seq_length]
                 spatial_latents = latents[submesh_id][:, self.latents_seq_length :]
                 ttnn.add_(randn_latents, sigma_difference_device)
                 latents[submesh_id] = ttnn.concat([randn_latents, spatial_latents], dim=1)
+                if tuple(submesh_device.shape)[0] > 1:
+                    torch_latents = ttnn.to_torch(ttnn.get_device_tensors(latents[submesh_id])[0])
+                    shard_latents_dims = [None, None]
+                    shard_latents_dims[self._parallel_config.sequence_parallel.mesh_axis] = 1  # height of latents
+                    latents[submesh_id] = ttnn.from_torch(
+                        torch_latents,
+                        layout=ttnn.TILE_LAYOUT,
+                        dtype=ttnn.bfloat16,
+                        device=submesh_device,  # if not traced else None,
+                        mesh_mapper=ttnn.ShardTensor2dMesh(
+                            submesh_device,
+                            tuple(submesh_device.shape),
+                            dims=tuple(shard_latents_dims),
+                        ),
+                    )
                 if traced:
                     ttnn.copy(latents[submesh_id], self._traces[submesh_id].spatial_input)
                     latents[submesh_id] = self._traces[submesh_id].spatial_input
