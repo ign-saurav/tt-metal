@@ -66,7 +66,7 @@ diffusers==0.35.1
 accelerate==1.7.0
 ftfy==6.1.1
 gitpython==3.1.41
-einops==0.6.1
+einops==0.7.0
 # Pin to this because evaluate 0.4.0 will download the latest multiprocess as a
 # transitive dep, which uses dill >=0.3.7, however many packages require
 # dill < 0.3.7
@@ -106,5 +106,6 @@ mmcv-full==1.7.2 #Required for UniAD model
 
 # CPU-only torch for x86_64 to avoid installing CUDA dependencies on dev machines
 --extra-index-url https://download.pytorch.org/whl/cpu
+vector-quantize-pytorch==1.14.6
 torch==2.7.1 ; platform_machine == 'x86_64'
 torchvision==0.22.1 ; platform_machine == 'x86_64'
