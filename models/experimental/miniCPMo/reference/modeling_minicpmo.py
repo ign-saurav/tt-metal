@@ -1963,8 +1963,45 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
                 yield res
 
     def decode_mel_to_audio(self, mel_spec, output_path=""):
+        # Validate mel_spec before decoding
+        if torch.isnan(mel_spec).any() or torch.isinf(mel_spec).any():
+            nan_count = torch.isnan(mel_spec).sum().item()
+            inf_count = torch.isinf(mel_spec).sum().item()
+            logger.error(
+                f"Mel spectrogram contains invalid values before vocos decode: {nan_count} NaN, {inf_count} Inf"
+            )
+            # Replace NaN and Inf with zeros
+            mel_spec = torch.nan_to_num(mel_spec, nan=0.0, posinf=0.0, neginf=0.0)
+            logger.warning("Replaced NaN/Inf values with zeros before vocos decode")
+
+        # Check for extremely large values that might cause issues
+        if mel_spec.abs().max() > 1e6:
+            logger.warning(
+                f"Mel spectrogram contains very large values: max={mel_spec.abs().max()}. Clamping to reasonable range"
+            )
+            mel_spec = torch.clamp(mel_spec, -100.0, 100.0)
+
         with torch.inference_mode():
-            wav_numpy = self.vocos.decode(mel_spec.float()).cpu().squeeze()
+            try:
+                wav_numpy = self.vocos.decode(mel_spec.float()).cpu().squeeze()
+                # Validate output audio
+                if torch.isnan(wav_numpy).any() or torch.isinf(wav_numpy).any():
+                    logger.error("Generated audio contains NaN/Inf values")
+                    wav_numpy = torch.nan_to_num(wav_numpy, nan=0.0, posinf=0.0, neginf=0.0)
+            except AssertionError as e:
+                logger.error(f"Vocos decode failed with assertion error: {e}")
+                logger.error(
+                    f"Mel spec stats: shape={mel_spec.shape}, min={mel_spec.min()}, max={mel_spec.max()}, mean={mel_spec.mean()}, std={mel_spec.std()}"
+                )
+                # Return silence as fallback
+                wav_numpy = torch.zeros(mel_spec.shape[-1] * 256, dtype=torch.float32)  # Approximate length
+                logger.warning("Returning silence due to vocos decode failure")
+            except Exception as e:
+                logger.error(f"Vocos decode failed with error: {e}")
+                logger.error(
+                    f"Mel spec stats: shape={mel_spec.shape}, min={mel_spec.min()}, max={mel_spec.max()}, mean={mel_spec.mean()}, std={mel_spec.std()}"
+                )
+                raise
             sr = 24000
         if output_path:
             sf.write(output_path, wav_numpy.numpy(), samplerate=sr)
@@ -2906,20 +2943,25 @@ class ConditionalChatTTS(PreTrainedModel):
                     past_key_values[i][1][:, :, : position_ids[:, 0], :].clone(),
                 )
             )
+        # Convert list of tuples to DynamicCache object (required by newer transformers versions)
+        past_key_values_cache = DynamicCache.from_legacy_cache(past_key_values_for_prefill)
 
         # Model forward
         outputs_prefill: BaseModelOutputWithPast = self.model(
             attention_mask=None,  # because for text, it is standard causal attention mask, do nothing
             position_ids=position_ids,  # position_ids denotes the position of new text tokens in the sequence
-            past_key_values=past_key_values_for_prefill,  # `past_key_values` will be updated by the model
+            past_key_values=past_key_values_cache,  # `past_key_values` will be updated by the model
             inputs_embeds=inputs_embeds,  # contains text and language model embedding
             use_cache=True,
             output_attentions=False,
             cache_position=position_ids,  # which new positions will use this cache, basically the same as position_ids
         )
 
-        # Get model updated KV Cache
+        # Get model updated KV Cache and convert back to list of tuples format
         past_key_values_for_prefill_updated = outputs_prefill.past_key_values
+        # Convert Cache object back to list of tuples for compatibility with existing code
+        if past_key_values_for_prefill_updated is not None and isinstance(past_key_values_for_prefill_updated, Cache):
+            past_key_values_for_prefill_updated = past_key_values_for_prefill_updated.to_legacy_cache()
 
         # Update generated KV Cache to input `past_key_values`
         for layer_idx in range(len(past_key_values)):
@@ -2983,17 +3025,23 @@ class ConditionalChatTTS(PreTrainedModel):
             streaming_text_chunk_size=self.streaming_text_chunk_size,
         )  # [1, 1, 1, past_key_values_length + input_len]
 
+        # Convert list of tuples to DynamicCache object (required by newer transformers versions)
+        past_key_values_cache = DynamicCache.from_legacy_cache(past_key_values)
+
         # Model forward
         outputs: BaseModelOutputWithPast = self.model(
             attention_mask=causal_mask,
             position_ids=position_ids,
-            past_key_values=past_key_values,
+            past_key_values=past_key_values_cache,
             inputs_embeds=inputs_embeds,
             use_cache=True,
             output_attentions=False,
             cache_position=cache_position,
         )
+        # Convert Cache object back to list of tuples for compatibility
         past_key_values = outputs.past_key_values
+        if past_key_values is not None and isinstance(past_key_values, Cache):
+            past_key_values = past_key_values.to_legacy_cache()
         return past_key_values
 
     @torch.inference_mode()
@@ -3110,11 +3158,14 @@ class ConditionalChatTTS(PreTrainedModel):
                 streaming_text_chunk_size=self.streaming_text_chunk_size,
             )
 
+            # Convert list of tuples to DynamicCache object (required by newer transformers versions)
+            past_key_values_cache = DynamicCache.from_legacy_cache(past_key_values)
+
             # Model forward
             outputs: BaseModelOutputWithPast = self.model(
                 attention_mask=causal_mask,
                 position_ids=position_ids,
-                past_key_values=past_key_values,
+                past_key_values=past_key_values_cache,
                 inputs_embeds=inputs_embeds,
                 use_cache=True,
                 output_attentions=False,
@@ -3127,7 +3178,10 @@ class ConditionalChatTTS(PreTrainedModel):
             del causal_mask
 
             hidden_states = outputs.last_hidden_state
+            # Convert Cache object back to list of tuples for compatibility
             past_key_values = outputs.past_key_values
+            if past_key_values is not None and isinstance(past_key_values, Cache):
+                past_key_values = past_key_values.to_legacy_cache()
 
             with P.cached():
                 logits = torch.empty(
