@@ -4,6 +4,9 @@
 import torch
 import ttnn
 import pytest
+import gc
+import os
+import urllib.request
 from loguru import logger
 from models.common.utility_functions import comp_pcc
 from models.experimental.BevDepth.tt.ttnn_resnet50_backbone import ResNet50_BEVDepth
@@ -11,9 +14,6 @@ from models.experimental.BevDepth.tt.ttnn_resnet50_backbone import ResNet50_BEVD
 
 def download_bevdepth_weights():
     """Download BEVDepth pretrained weights"""
-    import urllib.request
-    import os
-
     url = "https://github.com/Megvii-BaseDetection/BEVDepth/releases/download/v0.0.2/bev_depth_lss_r50_256x704_128x128_24e_2key.pth"
     weights_path = "/tmp/bevdepth_weights.pth"
 
@@ -29,56 +29,56 @@ def load_reference_backbone():
     """Load reference ResNet50 backbone from torchvision"""
     from torchvision.models import resnet50
 
-    model = resnet50(pretrained=False)
-    return model
+    return resnet50(pretrained=False)
 
 
 def extract_backbone_state_dict(checkpoint_path):
     """Extract backbone weights from BEVDepth checkpoint"""
-    import gc
-
     logger.info(f"Loading checkpoint from {checkpoint_path}...")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
+    state_dict = checkpoint.get("state_dict", checkpoint)
     if "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
         del checkpoint
         gc.collect()
-    else:
-        state_dict = checkpoint
 
     # Extract only img_backbone weights
-    backbone_state = {}
-    for key, value in state_dict.items():
-        if key.startswith("model.backbone.img_backbone."):
-            new_key = key.replace("model.backbone.img_backbone.", "")
-            backbone_state[new_key] = value
+    backbone_state = {
+        key.replace("model.backbone.img_backbone.", ""): value
+        for key, value in state_dict.items()
+        if key.startswith("model.backbone.img_backbone.")
+    }
 
-    # Free the full state_dict to save memory
     del state_dict
     gc.collect()
-
     logger.info(f"Extracted {len(backbone_state)} backbone parameters")
-
     return backbone_state
 
 
 def fuse_conv_bn_weights(conv_weight, bn_weight, bn_bias, bn_mean, bn_var, eps=1e-5):
-    """
-    Fuse BatchNorm parameters into conv weights for inference.
-    """
-    # Calculate scale factor from BN
+    """Fuse BatchNorm parameters into conv weights for inference."""
     std = torch.sqrt(bn_var + eps)
     scale = bn_weight / std
-
-    # Fuse into conv weight: multiply each output channel by its scale
-    # conv_weight shape: (out_channels, in_channels, kH, kW)
     fused_weight = conv_weight * scale.view(-1, 1, 1, 1)
-
-    # Fuse into bias
     fused_bias = bn_bias - (bn_weight * bn_mean / std)
-
     return fused_weight, fused_bias
+
+
+def _fuse_block_conv_bn(state_dict, block_prefix, conv_idx, fused_state):
+    """Helper to fuse conv and BN for a single conv layer in a block."""
+    conv_key = f"{block_prefix}conv{conv_idx}.weight"
+    bn_key = f"{block_prefix}bn{conv_idx}.weight"
+
+    if conv_key in state_dict and bn_key in state_dict:
+        fused_weight, fused_bias = fuse_conv_bn_weights(
+            state_dict[conv_key],
+            state_dict[bn_key],
+            state_dict[f"{block_prefix}bn{conv_idx}.bias"],
+            state_dict[f"{block_prefix}bn{conv_idx}.running_mean"],
+            state_dict[f"{block_prefix}bn{conv_idx}.running_var"],
+        )
+        fused_state[conv_key] = fused_weight
+        fused_state[f"{block_prefix}conv{conv_idx}.bias"] = fused_bias
 
 
 def fuse_batchnorm_into_conv(state_dict):
@@ -101,41 +101,29 @@ def fuse_batchnorm_into_conv(state_dict):
     for layer_idx in range(1, 5):
         layer_name = f"layer{layer_idx}"
         block_idx = 0
+
         while True:
             block_prefix = f"{layer_name}.{block_idx}."
-
-            # Check if this block exists
             if f"{block_prefix}conv1.weight" not in state_dict:
                 break
 
             # Fuse bn1, bn2, bn3 for each conv in the block
             for conv_idx in range(1, 4):
-                conv_key = f"{block_prefix}conv{conv_idx}.weight"
-                bn_key = f"{block_prefix}bn{conv_idx}.weight"
-
-                if conv_key in state_dict and bn_key in state_dict:
-                    fused_weight, fused_bias = fuse_conv_bn_weights(
-                        state_dict[conv_key],
-                        state_dict[bn_key],
-                        state_dict[f"{block_prefix}bn{conv_idx}.bias"],
-                        state_dict[f"{block_prefix}bn{conv_idx}.running_mean"],
-                        state_dict[f"{block_prefix}bn{conv_idx}.running_var"],
-                    )
-                    fused_state[conv_key] = fused_weight
-                    fused_state[f"{block_prefix}conv{conv_idx}.bias"] = fused_bias
+                _fuse_block_conv_bn(state_dict, block_prefix, conv_idx, fused_state)
 
             # Fuse downsample BN if exists
-            if f"{block_prefix}downsample.0.weight" in state_dict:
-                if f"{block_prefix}downsample.1.weight" in state_dict:
-                    fused_weight, fused_bias = fuse_conv_bn_weights(
-                        state_dict[f"{block_prefix}downsample.0.weight"],
-                        state_dict[f"{block_prefix}downsample.1.weight"],
-                        state_dict[f"{block_prefix}downsample.1.bias"],
-                        state_dict[f"{block_prefix}downsample.1.running_mean"],
-                        state_dict[f"{block_prefix}downsample.1.running_var"],
-                    )
-                    fused_state[f"{block_prefix}downsample.0.weight"] = fused_weight
-                    fused_state[f"{block_prefix}downsample.0.bias"] = fused_bias
+            downsample_conv_key = f"{block_prefix}downsample.0.weight"
+            downsample_bn_key = f"{block_prefix}downsample.1.weight"
+            if downsample_conv_key in state_dict and downsample_bn_key in state_dict:
+                fused_weight, fused_bias = fuse_conv_bn_weights(
+                    state_dict[downsample_conv_key],
+                    state_dict[downsample_bn_key],
+                    state_dict[f"{block_prefix}downsample.1.bias"],
+                    state_dict[f"{block_prefix}downsample.1.running_mean"],
+                    state_dict[f"{block_prefix}downsample.1.running_var"],
+                )
+                fused_state[downsample_conv_key] = fused_weight
+                fused_state[f"{block_prefix}downsample.0.bias"] = fused_bias
 
             block_idx += 1
 
@@ -148,70 +136,58 @@ def fuse_batchnorm_into_conv(state_dict):
     return fused_state
 
 
-def prepare_ttnn_parameters(state_dict, device):
-    """Keep weights as PyTorch tensors - convert during conv2d call"""
+def _create_conv_params(state_dict, prefix, conv_name=""):
+    """Helper to create conv parameters from state dict."""
 
     class Parameters:
         pass
 
     params = Parameters()
+    if conv_name:
+        weight_key = f"{prefix}{conv_name}.weight"
+        bias_key = f"{prefix}{conv_name}.bias"
+    else:
+        # For downsample where prefix already includes the full path
+        weight_key = f"{prefix}.weight"
+        bias_key = f"{prefix}.bias"
 
-    params.conv1 = Parameters()
-    params.conv1.weight = state_dict["conv1.weight"].to(torch.bfloat16)
-    params.conv1.bias = state_dict.get("conv1.bias", None)
-    if params.conv1.bias is not None:
-        params.conv1.bias = params.conv1.bias.to(torch.bfloat16)
+    params.weight = state_dict[weight_key].to(torch.bfloat16)
+    params.bias = state_dict.get(bias_key, None)
+    if params.bias is not None:
+        params.bias = params.bias.to(torch.bfloat16)
 
-    # Layers - keep as PyTorch tensors
+    return params
+
+
+def prepare_ttnn_parameters(state_dict, device):
+    """Prepare TTNN parameters from fused state dict"""
+
+    class Parameters:
+        pass
+
+    params = Parameters()
+    params.conv1 = _create_conv_params(state_dict, "", "conv1")
+
+    # Process layers
     for layer_idx in range(1, 5):
         layer_name = f"layer{layer_idx}"
         layer_params = []
-
         block_idx = 0
+
         while True:
             block_prefix = f"{layer_name}.{block_idx}."
             if not any(k.startswith(block_prefix) for k in state_dict.keys()):
                 break
 
             block_params = Parameters()
+            block_params.conv1 = _create_conv_params(state_dict, block_prefix, "conv1")
+            block_params.conv2 = _create_conv_params(state_dict, block_prefix, "conv2")
+            block_params.conv3 = _create_conv_params(state_dict, block_prefix, "conv3")
 
-            # All weights as PyTorch tensors - load fused biases from state_dict
-            block_params.conv1 = Parameters()
-            block_params.conv1.weight = state_dict[f"{block_prefix}conv1.weight"].to(torch.bfloat16)
-            # Load fused bias if it exists (from batch norm fusion)
-            conv1_bias_key = f"{block_prefix}conv1.bias"
-            if conv1_bias_key in state_dict:
-                block_params.conv1.bias = state_dict[conv1_bias_key].to(torch.bfloat16)
-            else:
-                block_params.conv1.bias = None
-
-            block_params.conv2 = Parameters()
-            block_params.conv2.weight = state_dict[f"{block_prefix}conv2.weight"].to(torch.bfloat16)
-            # Load fused bias if it exists
-            conv2_bias_key = f"{block_prefix}conv2.bias"
-            if conv2_bias_key in state_dict:
-                block_params.conv2.bias = state_dict[conv2_bias_key].to(torch.bfloat16)
-            else:
-                block_params.conv2.bias = None
-
-            block_params.conv3 = Parameters()
-            block_params.conv3.weight = state_dict[f"{block_prefix}conv3.weight"].to(torch.bfloat16)
-            # Load fused bias if it exists
-            conv3_bias_key = f"{block_prefix}conv3.bias"
-            if conv3_bias_key in state_dict:
-                block_params.conv3.bias = state_dict[conv3_bias_key].to(torch.bfloat16)
-            else:
-                block_params.conv3.bias = None
-
-            if f"{block_prefix}downsample.0.weight" in state_dict:
-                block_params.downsample = [Parameters()]
-                block_params.downsample[0].weight = state_dict[f"{block_prefix}downsample.0.weight"].to(torch.bfloat16)
-                # Load fused bias if it exists
-                downsample_bias_key = f"{block_prefix}downsample.0.bias"
-                if downsample_bias_key in state_dict:
-                    block_params.downsample[0].bias = state_dict[downsample_bias_key].to(torch.bfloat16)
-                else:
-                    block_params.downsample[0].bias = None
+            # Handle downsample
+            downsample_key = f"{block_prefix}downsample.0.weight"
+            if downsample_key in state_dict:
+                block_params.downsample = [_create_conv_params(state_dict, f"{block_prefix}downsample.0", "")]
 
             layer_params.append(block_params)
             block_idx += 1
@@ -222,6 +198,7 @@ def prepare_ttnn_parameters(state_dict, device):
 
 
 def replace_bn_with_identity(module):
+    """Replace all BatchNorm2d layers with Identity"""
     for name, child in list(module.named_children()):
         if isinstance(child, torch.nn.BatchNorm2d):
             setattr(module, name, torch.nn.Identity())
@@ -230,9 +207,9 @@ def replace_bn_with_identity(module):
 
 
 def enable_conv_bias(module):
+    """Enable bias for all Conv2d layers that don't have it"""
     for name, child in list(module.named_children()):
         if isinstance(child, torch.nn.Conv2d) and child.bias is None:
-            # Replace with conv that has bias
             new_conv = torch.nn.Conv2d(
                 child.in_channels,
                 child.out_channels,
@@ -243,31 +220,18 @@ def enable_conv_bias(module):
                 child.groups,
                 bias=True,
             )
-            # Copy weights
             new_conv.weight.data = child.weight.data.clone()
             setattr(module, name, new_conv)
         else:
             enable_conv_bias(child)
 
 
-@pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-@pytest.mark.parametrize("batch_size", [1])
-@pytest.mark.parametrize("height, width", [(256, 640)])
-def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
-    """Test TTNN ResNet50 against BEVDepth reference model"""
-
-    # Download and load weights
-    weights_path = download_bevdepth_weights()
-    backbone_state = extract_backbone_state_dict(weights_path)
-    backbone_state = fuse_batchnorm_into_conv(backbone_state)
-
-    # Load reference model
+def _prepare_reference_model(backbone_state):
+    """Prepare reference model with fused weights"""
     reference_model = load_reference_backbone()
 
-    # Enable bias for conv1 and all conv layers since we're loading fused weights
-    # ResNet50 from torchvision has bias=False by default, but fused weights include bias
+    # Enable bias for conv1
     if reference_model.conv1.bias is None:
-        # Replace conv1 with a version that has bias
         reference_model.conv1 = torch.nn.Conv2d(
             reference_model.conv1.in_channels,
             reference_model.conv1.out_channels,
@@ -276,45 +240,28 @@ def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
             reference_model.conv1.padding,
             reference_model.conv1.dilation,
             reference_model.conv1.groups,
-            bias=True,  # Enable bias for fused weights
+            bias=True,
         )
 
-    # Enable bias for all conv layers in bottleneck blocks
-    # def enable_conv_bias(module):
-    #     for name, child in list(module.named_children()):
-    #         if isinstance(child, torch.nn.Conv2d) and child.bias is None:
-    #             # Replace with conv that has bias
-    #             new_conv = torch.nn.Conv2d(
-    #                 child.in_channels,
-    #                 child.out_channels,
-    #                 child.kernel_size,
-    #                 child.stride,
-    #                 child.padding,
-    #                 child.dilation,
-    #                 child.groups,
-    #                 bias=True,
-    #             )
-    #             # Copy weights
-    #             new_conv.weight.data = child.weight.data.clone()
-    #             setattr(module, name, new_conv)
-    #         else:
-    #             enable_conv_bias(child)
-
     enable_conv_bias(reference_model)
-
-    # Now load the fused weights (including biases)
     reference_model.load_state_dict(backbone_state, strict=False)
-
-    # # Replace batch norm with identity since weights are fused
-    # def replace_bn_with_identity(module):
-    #     for name, child in list(module.named_children()):
-    #         if isinstance(child, torch.nn.BatchNorm2d):
-    #             setattr(module, name, torch.nn.Identity())
-    #         else:
-    #             replace_bn_with_identity(child)
-
     replace_bn_with_identity(reference_model)
     reference_model.eval()
+    return reference_model
+
+
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
+@pytest.mark.parametrize("batch_size", [1])
+@pytest.mark.parametrize("height, width", [(256, 640)])
+def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
+    """Test TTNN ResNet50 against BEVDepth reference model"""
+    # Download and load weights
+    weights_path = download_bevdepth_weights()
+    backbone_state = extract_backbone_state_dict(weights_path)
+    backbone_state = fuse_batchnorm_into_conv(backbone_state)
+
+    # Prepare reference model
+    reference_model = _prepare_reference_model(backbone_state)
 
     # Prepare TTNN model
     model_config = {
@@ -324,48 +271,35 @@ def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
     }
 
     ttnn_params = prepare_ttnn_parameters(backbone_state, device)
-
     ttnn_model = ResNet50_BEVDepth(
         device=device,
         parameters=ttnn_params,
         batch_size=batch_size,
         model_config=model_config,
         return_intermediate=True,
-        return_block_outputs=True,  # Return block-level outputs for debugging
+        return_block_outputs=False,
     )
 
-    # Create input - TTNN conv2d expects (B, H, W, C) format
+    # Create input
     torch_input = torch.randn(batch_size, 3, height, width)
-    # Reshape to (B, H, W, C) for TTNN
     torch_input_reshaped = torch_input.permute(0, 2, 3, 1).contiguous()
 
-    # Use DRAM for input to avoid L1 memory exhaustion
     ttnn_input = ttnn.from_torch(
         torch_input_reshaped,
         dtype=ttnn.bfloat16,
-        layout=ttnn.ROW_MAJOR_LAYOUT,  # Start with ROW_MAJOR for host->device transfer
+        layout=ttnn.ROW_MAJOR_LAYOUT,
         device=device,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,  # Use DRAM instead of L1 to avoid memory issues
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
     )
-    # Convert to TILE_LAYOUT after moving to device
     ttnn_input = ttnn.to_layout(ttnn_input, ttnn.TILE_LAYOUT)
 
-    # Reference forward (batch norm is replaced with Identity, so bn1 does nothing)
+    # Reference forward
     with torch.no_grad():
         x = reference_model.conv1(torch_input)
-        x = reference_model.bn1(x)  # Now Identity, does nothing
+        x = reference_model.bn1(x)  # Identity after replacement
         x = reference_model.relu(x)
-        ref_conv1_output = x.clone()  # Save conv1 output (before maxpool) for comparison
         x = reference_model.maxpool(x)
-        ref_layer1_input = x.clone()  # Save input to layer1 for comparison
-
-        # Get layer1 block outputs for detailed comparison
-        ref_layer1_blocks = []
-        for i, block in enumerate(reference_model.layer1):
-            x = block(x)
-            ref_layer1_blocks.append(x.clone())
-        ref_layer1 = x
-
+        ref_layer1 = reference_model.layer1(x)
         ref_layer2 = reference_model.layer2(ref_layer1)
         ref_layer3 = reference_model.layer3(ref_layer2)
         ref_layer4 = reference_model.layer4(ref_layer3)
@@ -374,8 +308,6 @@ def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
     ttnn_features = ttnn_model(ttnn_input, input_height=height, input_width=width)
 
     # Compare outputs
-    pcc_results = {}
-
     layers = {
         "layer1": ref_layer1,
         "layer2": ref_layer2,
@@ -383,18 +315,14 @@ def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
         "layer4": ref_layer4,
     }
 
+    pcc_results = {}
     for layer_name, ref_output in layers.items():
         ttnn_output = ttnn.to_torch(ttnn_features[layer_name])
-
-        # TTNN output is (B, H, W, C), reference is (B, C, H, W)
-        # Permute TTNN output to match reference format
         ttnn_output = ttnn_output.permute(0, 3, 1, 2).contiguous()
 
         pcc_result = comp_pcc(ref_output, ttnn_output)
-        # comp_pcc returns (bool, float), extract the float value
         pcc_value = pcc_result[1] if isinstance(pcc_result, tuple) else pcc_result
         pcc_results[layer_name] = pcc_value
-
         logger.info(f"{layer_name}: PCC = {pcc_value:.6f}")
 
     # Assert PCC thresholds
@@ -405,10 +333,7 @@ def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
 
 
 if __name__ == "__main__":
-    device = ttnn.open_device(
-        device_id=0,
-        l1_small_size=32768,  # Increase L1_SMALL allocation
-    )
+    device = ttnn.open_device(device_id=0, l1_small_size=32768)
 
     try:
         results = test_resnet50_bevdepth_pcc(device, batch_size=1, height=256, width=640)

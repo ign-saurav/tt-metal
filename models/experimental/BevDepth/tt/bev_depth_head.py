@@ -460,11 +460,11 @@ class TtBEVDepthHead:
         # This matches the reference neck config: in_channels=[160, 160, 320, 640]
         trunk_outputs = self.trunk(x, device)
         x0, x1, x2, x3 = trunk_outputs
-        print(f"Trunk outputs shapes: x0: {x0.shape}, x1: {x1.shape}, x2: {x2.shape}, x3: {x3.shape}")
-        print(f"x0: {ttnn.to_torch(x0).permute(0, 3, 1, 2).reshape(-1)[:10]}")
-        print(f"x1: {ttnn.to_torch(x1).permute(0, 3, 1, 2).reshape(-1)[:10]}")
-        print(f"x2: {ttnn.to_torch(x2).permute(0, 3, 1, 2).reshape(-1)[:10]}")
-        print(f"x3: {ttnn.to_torch(x3).permute(0, 3, 1, 2).reshape(-1)[:10]}")
+        # print(f"Trunk outputs shapes: x0: {x0.shape}, x1: {x1.shape}, x2: {x2.shape}, x3: {x3.shape}")
+        # print(f"x0: {ttnn.to_torch(x0).permute(0, 3, 1, 2).reshape(-1)[:10]}")
+        # print(f"x1: {ttnn.to_torch(x1).permute(0, 3, 1, 2).reshape(-1)[:10]}")
+        # print(f"x2: {ttnn.to_torch(x2).permute(0, 3, 1, 2).reshape(-1)[:10]}")
+        # print(f"x3: {ttnn.to_torch(x3).permute(0, 3, 1, 2).reshape(-1)[:10]}")
 
         # Convert TTNN tensors to PyTorch for reference neck
         # Reference neck expects NCHW format, TTNN uses NHWC

@@ -23,6 +23,8 @@ traffic_cone    0.462   0.516   0.355   nan     nan     nan
 barrier 0.512   0.491   0.275   0.200   nan     nan
 """
 # from bevdepth.exps.base_cli import run_cli
+import os
+import torch
 from models.experimental.BevDepth.reference.bevdepth.exps.nuscenes.base_exp import (
     BEVDepthLightningModel as BaseBEVDepthLightningModel,
 )
@@ -38,53 +40,50 @@ class BEVDepthLightningModel(BaseBEVDepthLightningModel):
         self.head_conf["train_cfg"]["code_weights"] = [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
         self.model = BaseBEVDepth(self.backbone_conf, self.head_conf, is_train_depth=True)
 
+    def load_checkpoint(self, checkpoint_path=None, map_location="cpu", verbose=True):
+        """
+        Load weights from a checkpoint file into the model.
 
-def get_bevdepth_model(**kwargs):
-    """
-    Instantiates the BEVDepthLightningModel and returns the underlying self.model.
+        Args:
+            checkpoint_path (str, optional): Path to the checkpoint file. If None, uses the default
+                checkpoint path relative to this file (bev_depth_lss_r50_256x704_128x128_24e_2key.pth).
+            map_location (str or device): Device to load the checkpoint on. Default: "cpu".
+            verbose (bool): Whether to print loading information. Default: True.
 
-    Args:
-        **kwargs: Keyword arguments for the BEVDepthLightningModel.
-    Returns:
-        BaseBEVDepth: The instantiated model.
-    """
-    lightning_model = BEVDepthLightningModel(**kwargs)
-    return lightning_model.model
+        Returns:
+            dict: Dictionary containing:
+                - 'success' (bool): Whether loading was successful
+                - 'missing_keys' (list): List of missing keys
+                - 'unexpected_keys' (list): List of unexpected keys
+                - 'error' (str, optional): Error message if loading failed
 
+        Raises:
+            FileNotFoundError: If checkpoint file doesn't exist.
+        """
+        # Use default checkpoint path if not provided
+        if checkpoint_path is None:
+            file_dir = os.path.dirname(__file__)
+            # Go up: mv -> nuscenes -> exps -> bevdepth -> reference
+            for _ in range(4):
+                file_dir = os.path.dirname(file_dir)
+            checkpoint_path = os.path.join(file_dir, "checkpoints", "bev_depth_lss_r50_256x704_128x128_24e_2key.pth")
 
-if __name__ == "__main__":
-    import torch
-    import os
+        if verbose:
+            print("=" * 50)
+            print("Loading weights from checkpoint...")
+            print("=" * 50)
+            print(f"Checkpoint path: {checkpoint_path}")
 
-    # Get model structure
-    model = get_bevdepth_model()
-    print("=" * 50)
-    print("Model Structure:")
-    print("=" * 50)
-    print(model)
+        if not os.path.exists(checkpoint_path):
+            error_msg = f"Checkpoint file not found at: {checkpoint_path}"
+            if verbose:
+                print(f"✗ {error_msg}")
+                print("Please ensure the checkpoint file exists.")
+            return {"success": False, "missing_keys": [], "unexpected_keys": [], "error": error_msg}
 
-    # Load real weights from checkpoint
-    # Checkpoint is at: .../BevDepth/reference/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth
-    # File is at: .../BevDepth/reference/bevdepth/exps/nuscenes/mv/
-    # Need to go up 4 levels to reach 'reference' directory
-    file_dir = os.path.dirname(__file__)
-    # Go up: mv -> nuscenes -> exps -> bevdepth -> reference
-    for _ in range(4):
-        file_dir = os.path.dirname(file_dir)
-    checkpoint_path = os.path.join(file_dir, "checkpoints", "bev_depth_lss_r50_256x704_128x128_24e_2key.pth")
-
-    print("\n" + "=" * 50)
-    print("Loading weights from checkpoint...")
-    print("=" * 50)
-    print(f"Checkpoint path: {checkpoint_path}")
-
-    if not os.path.exists(checkpoint_path):
-        print(f"✗ Checkpoint file not found at: {checkpoint_path}")
-        print("Please ensure the checkpoint file exists.")
-    else:
         try:
             # Load checkpoint
-            checkpoint = torch.load(checkpoint_path, map_location="cpu")
+            checkpoint = torch.load(checkpoint_path, map_location=map_location)
 
             # Handle different checkpoint formats
             if isinstance(checkpoint, dict):
@@ -125,7 +124,7 @@ if __name__ == "__main__":
                     else:
                         filtered_state_dict[key] = value
 
-                if dcn_keys_info:
+                if verbose and dcn_keys_info:
                     print(
                         f"\n⚠ Warning: Checkpoint contains DCN (Deformable Convolution) layers, but no DCN implementation is available."
                     )
@@ -142,135 +141,174 @@ if __name__ == "__main__":
             else:
                 # We have DCN support (torchvision or MMCV), so keep all keys including conv_offset
                 state_dict_to_load = state_dict
-                if _TORCHVISION_DCN_AVAILABLE:
-                    if _MMCV_DCN_AVAILABLE:
-                        print(
-                            f"\nℹ Using torchvision's DCN implementation (primary option, no compiled extensions needed)"
-                        )
-                    else:
-                        print(f"\nℹ Using torchvision's DCN implementation (MMCV extensions not available)")
-                    print(f"   All DCN weights including conv_offset will be loaded correctly.")
-                elif _MMCV_DCN_AVAILABLE:
-                    print(f"\nℹ Using MMCV's DCN implementation (torchvision not available)")
-                    print(f"   All DCN weights including conv_offset will be loaded correctly.")
+                if verbose:
+                    if _TORCHVISION_DCN_AVAILABLE:
+                        if _MMCV_DCN_AVAILABLE:
+                            print(
+                                f"\nℹ Using torchvision's DCN implementation (primary option, no compiled extensions needed)"
+                            )
+                        else:
+                            print(f"\nℹ Using torchvision's DCN implementation (MMCV extensions not available)")
+                        print(f"   All DCN weights including conv_offset will be loaded correctly.")
+                    elif _MMCV_DCN_AVAILABLE:
+                        print(f"\nℹ Using MMCV's DCN implementation (torchvision not available)")
+                        print(f"   All DCN weights including conv_offset will be loaded correctly.")
 
             # Load weights into model
-            missing_keys, unexpected_keys = model.load_state_dict(state_dict_to_load, strict=False)
+            missing_keys, unexpected_keys = self.model.load_state_dict(state_dict_to_load, strict=False)
 
-            print(f"✓ Weights loaded successfully!")
-            if missing_keys:
-                print(f"\n⚠ Missing keys ({len(missing_keys)}):")
-                for key in list(missing_keys)[:10]:  # Show first 10
-                    print(f"  - {key}")
-                if len(missing_keys) > 10:
-                    print(f"  ... and {len(missing_keys) - 10} more")
+            if verbose:
+                print(f"✓ Weights loaded successfully!")
+                if missing_keys:
+                    print(f"\n⚠ Missing keys ({len(missing_keys)}):")
+                    for key in list(missing_keys)[:10]:  # Show first 10
+                        print(f"  - {key}")
+                    if len(missing_keys) > 10:
+                        print(f"  ... and {len(missing_keys) - 10} more")
 
-            if unexpected_keys:
-                print(f"\n⚠ Unexpected keys ({len(unexpected_keys)}):")
-                for key in list(unexpected_keys)[:10]:  # Show first 10
-                    print(f"  - {key}")
-                if len(unexpected_keys) > 10:
-                    print(f"  ... and {len(unexpected_keys) - 10} more")
+                if unexpected_keys:
+                    print(f"\n⚠ Unexpected keys ({len(unexpected_keys)}):")
+                    for key in list(unexpected_keys)[:10]:  # Show first 10
+                        print(f"  - {key}")
+                    if len(unexpected_keys) > 10:
+                        print(f"  ... and {len(unexpected_keys) - 10} more")
 
-            # Set model to evaluation mode
-            model.eval()
-
-            print("\n" + "=" * 50)
-            print("Testing forward pass with loaded weights...")
-            print("=" * 50)
-
-            # Create dummy inputs matching BEVDepth's expected format
-            batch_size = 1
-            num_sweeps = 2  # For 2-key model
-            num_cameras = 6  # Typical for nuScenes (6 cameras)
-            img_h, img_w = 256, 704
-
-            # 1. Images
-            imgs = torch.randn(batch_size, num_sweeps, num_cameras, 3, img_h, img_w)
-
-            # 2. Transformation matrices (mats_dict)
-            mats_dict = {
-                # Sensor to ego transformation (camera to vehicle coordinates)
-                "sensor2ego_mats": torch.eye(4)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
-                # Intrinsic camera parameters
-                "intrin_mats": torch.eye(4)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
-                # Image data augmentation matrix
-                "ida_mats": torch.eye(4)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
-                # Sensor to sensor transformation (for temporal alignment)
-                "sensor2sensor_mats": torch.eye(4)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .unsqueeze(0)
-                .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
-                # Bird's eye view data augmentation
-                "bda_mat": torch.eye(4).unsqueeze(0).repeat(batch_size, 1, 1),
+            return {
+                "success": True,
+                "missing_keys": list(missing_keys),
+                "unexpected_keys": list(unexpected_keys),
             }
 
-            print(f"Input shapes:")
-            print(f"  imgs: {imgs.shape}")
-            for key, val in mats_dict.items():
-                print(f"  {key}: {val.shape}")
-
-            # Run forward pass
-            with torch.no_grad():
-                try:
-                    output = model(imgs, mats_dict)
-                    print("\n✓ Forward pass successful!")
-
-                    # Print output structure
-                    if isinstance(output, list):
-                        print(f"\nOutput: List with {len(output)} elements")
-                        for i, task_output in enumerate(output):
-                            print(f"\n  Task {i}:")
-                            if isinstance(task_output, list):
-                                for j, item in enumerate(task_output):
-                                    if isinstance(item, dict):
-                                        print(f"    Item {j} (dict):")
-                                        for key, val in item.items():
-                                            if isinstance(val, torch.Tensor):
-                                                print(f"      {key}: {val.shape}")
-                                    elif isinstance(item, torch.Tensor):
-                                        print(f"    Item {j} (tensor): {item.shape}")
-                            elif isinstance(task_output, dict):
-                                print(f"    Dict with keys: {task_output.keys()}")
-                                for key, val in task_output.items():
-                                    if isinstance(val, torch.Tensor):
-                                        print(f"      {key}: {val.shape}")
-                    elif isinstance(output, dict):
-                        print(f"\nOutput: Dict with keys: {output.keys()}")
-                        for key, val in output.items():
-                            if isinstance(val, torch.Tensor):
-                                print(f"  {key}: {val.shape}")
-                    else:
-                        print(f"\nOutput type: {type(output)}")
-
-                    print("\n" + "=" * 50)
-                    print("✓ Model with real weights works correctly!")
-                    print("=" * 50)
-
-                except Exception as e:
-                    print(f"\n✗ Forward pass failed: {e}")
-                    import traceback
-
-                    traceback.print_exc()
-
         except Exception as e:
-            print(f"\n✗ Failed to load weights: {e}")
-            import traceback
+            error_msg = f"Failed to load weights: {e}"
+            if verbose:
+                print(f"\n✗ {error_msg}")
+                import traceback
 
-            traceback.print_exc()
+                traceback.print_exc()
+            return {"success": False, "missing_keys": [], "unexpected_keys": [], "error": error_msg}
+
+
+def get_bevdepth_model(**kwargs):
+    """
+    Instantiates the BEVDepthLightningModel and returns the underlying self.model.
+
+    Args:
+        **kwargs: Keyword arguments for the BEVDepthLightningModel.
+    Returns:
+        BaseBEVDepth: The instantiated model.
+    """
+    lightning_model = BEVDepthLightningModel(**kwargs)
+    return lightning_model.model
+
+
+if __name__ == "__main__":
+    # Create lightning model instance
+    lightning_model = BEVDepthLightningModel()
+    model = lightning_model.model
+
+    print("=" * 50)
+    print("Model Structure:")
+    print("=" * 50)
+    print(model)
+
+    # Load weights using the clean method
+    load_result = lightning_model.load_checkpoint()
+
+    if load_result["success"]:
+        # Set model to evaluation mode
+        model.eval()
+
+        print("\n" + "=" * 50)
+        print("Testing forward pass with loaded weights...")
+        print("=" * 50)
+
+        # Create dummy inputs matching BEVDepth's expected format
+        batch_size = 1
+        num_sweeps = 2  # For 2-key model
+        num_cameras = 6  # Typical for nuScenes (6 cameras)
+        img_h, img_w = 256, 704
+
+        # 1. Images
+        imgs = torch.randn(batch_size, num_sweeps, num_cameras, 3, img_h, img_w)
+
+        # 2. Transformation matrices (mats_dict)
+        mats_dict = {
+            # Sensor to ego transformation (camera to vehicle coordinates)
+            "sensor2ego_mats": torch.eye(4)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
+            # Intrinsic camera parameters
+            "intrin_mats": torch.eye(4)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
+            # Image data augmentation matrix
+            "ida_mats": torch.eye(4)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
+            # Sensor to sensor transformation (for temporal alignment)
+            "sensor2sensor_mats": torch.eye(4)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .unsqueeze(0)
+            .repeat(batch_size, num_sweeps, num_cameras, 1, 1),
+            # Bird's eye view data augmentation
+            "bda_mat": torch.eye(4).unsqueeze(0).repeat(batch_size, 1, 1),
+        }
+
+        print(f"Input shapes:")
+        print(f"  imgs: {imgs.shape}")
+        for key, val in mats_dict.items():
+            print(f"  {key}: {val.shape}")
+
+        # Run forward pass
+        with torch.no_grad():
+            try:
+                output = model(imgs, mats_dict)
+                print("\n✓ Forward pass successful!")
+
+                # Print output structure
+                if isinstance(output, list):
+                    print(f"\nOutput: List with {len(output)} elements")
+                    for i, task_output in enumerate(output):
+                        print(f"\n  Task {i}:")
+                        if isinstance(task_output, list):
+                            for j, item in enumerate(task_output):
+                                if isinstance(item, dict):
+                                    print(f"    Item {j} (dict):")
+                                    for key, val in item.items():
+                                        if isinstance(val, torch.Tensor):
+                                            print(f"      {key}: {val.shape}")
+                                elif isinstance(item, torch.Tensor):
+                                    print(f"    Item {j} (tensor): {item.shape}")
+                        elif isinstance(task_output, dict):
+                            print(f"    Dict with keys: {task_output.keys()}")
+                            for key, val in task_output.items():
+                                if isinstance(val, torch.Tensor):
+                                    print(f"      {key}: {val.shape}")
+                elif isinstance(output, dict):
+                    print(f"\nOutput: Dict with keys: {output.keys()}")
+                    for key, val in output.items():
+                        if isinstance(val, torch.Tensor):
+                            print(f"  {key}: {val.shape}")
+                else:
+                    print(f"\nOutput type: {type(output)}")
+
+                print("\n" + "=" * 50)
+                print("✓ Model with real weights works correctly!")
+                print("=" * 50)
+
+            except Exception as e:
+                print(f"\n✗ Forward pass failed: {e}")
+                import traceback
+
+                traceback.print_exc()
 # if __name__ == '__main__':
 #     run_cli(BEVDepthLightningModel,
 #             'bev_depth_lss_r50_256x704_128x128_24e_2key')
