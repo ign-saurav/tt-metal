@@ -3178,6 +3178,8 @@ class ConditionalChatTTS(PreTrainedModel):
             del causal_mask
 
             hidden_states = outputs.last_hidden_state
+
+            return hidden_states
             # Convert Cache object back to list of tuples for compatibility
             past_key_values = outputs.past_key_values
             if past_key_values is not None and isinstance(past_key_values, Cache):
