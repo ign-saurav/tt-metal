@@ -18,15 +18,19 @@ class FFN(nn.Module):
 
     Args:
         embed_dims (int): The feature dimension. Default: 256
+        feedforward_channels (int): The hidden dimension of FFN. Default: 512
     """
 
-    def __init__(self, embed_dims=256):
+    def __init__(self, embed_dims=256, feedforward_channels=512, **kwargs):
         super(FFN, self).__init__()
         self.embed_dims = embed_dims
+        self.feedforward_channels = feedforward_channels
         self.activate = nn.ReLU(inplace=True)
         self.layers = nn.Sequential(
-            nn.Sequential(nn.Linear(self.embed_dims, 512), nn.ReLU(inplace=True), nn.Dropout(p=0.1)),
-            nn.Linear(512, self.embed_dims),
+            nn.Sequential(
+                nn.Linear(self.embed_dims, self.feedforward_channels), nn.ReLU(inplace=True), nn.Dropout(p=0.1)
+            ),
+            nn.Linear(self.feedforward_channels, self.embed_dims),
             nn.Dropout(p=0.1),
         )
 
@@ -269,12 +273,10 @@ class MyCustomBaseTransformerLayer(nn.Module):
         # Execute operations in order
         for layer in self.operation_order:
             if layer == "self_attn":
-                temp_key = temp_value = query
+                # For TemporalSelfAttention, don't pass key/value as it creates its own
                 query = self.attentions[attn_index](
                     query,
-                    temp_key,
-                    temp_value,
-                    identity if self.pre_norm else None,
+                    identity=identity if self.pre_norm else None,
                     query_pos=query_pos,
                     key_pos=query_pos,
                     attn_mask=attn_masks[attn_index],

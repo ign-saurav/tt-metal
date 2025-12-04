@@ -18,12 +18,20 @@ class TtFFN:
         self.params = params
 
         # Extract weights and biases from params
-        # Assuming params structure: params.layers[0][0] (first linear), params.layers[1] (second linear)
+        # Assuming params structure: params.layers["0"]["0"] (first linear), params.layers["1"] (second linear)
         if hasattr(params, "layers"):
-            self.linear1_weight = params.layers[0][0].weight
-            self.linear1_bias = params.layers[0][0].bias
-            self.linear2_weight = params.layers[1].weight
-            self.linear2_bias = params.layers[1].bias
+            # Try string keys first (from preprocessor)
+            if hasattr(params.layers, "0") or "0" in dir(params.layers):
+                self.linear1_weight = params.layers["0"]["0"].weight
+                self.linear1_bias = params.layers["0"]["0"].bias
+                self.linear2_weight = params.layers["1"].weight
+                self.linear2_bias = params.layers["1"].bias
+            else:
+                # Try integer keys
+                self.linear1_weight = params.layers[0][0].weight
+                self.linear1_bias = params.layers[0][0].bias
+                self.linear2_weight = params.layers[1].weight
+                self.linear2_bias = params.layers[1].bias
         else:
             # Alternative structure
             self.linear1_weight = params.linear1.weight

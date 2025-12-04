@@ -231,12 +231,10 @@ class TtCustomBaseTransformerLayer:
         # Execute operations in order
         for layer in self.operation_order:
             if layer == "self_attn":
-                temp_key = temp_value = query
+                # For TemporalSelfAttention, don't pass key/value as it creates its own
                 query = self.attentions[attn_index](
                     query,
-                    temp_key,
-                    temp_value,
-                    identity if self.pre_norm else None,
+                    identity=identity if self.pre_norm else None,
                     query_pos=query_pos,
                     key_pos=query_pos,
                     attn_mask=attn_masks[attn_index],
