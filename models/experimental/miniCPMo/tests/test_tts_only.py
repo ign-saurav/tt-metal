@@ -84,7 +84,6 @@ def test_mini_cpm_o_tts_only(device, input_dtype, weight_dtype):
         1 + model.tts.use_speaker_embedding * model.tts.num_spk_embs + model.tts.streaming_text_reserved_len + 1
     )
     dtype = model.tts.emb_text.weight.dtype
-    device = model.tts.device
 
     past_key_values = [
         (
@@ -94,7 +93,7 @@ def test_mini_cpm_o_tts_only(device, input_dtype, weight_dtype):
                 condition_length - 1,
                 model.tts.config.hidden_size // model.tts.config.num_attention_heads,
                 dtype=dtype,
-                device=device,
+                device=model.tts.device,
             ),
             torch.zeros(
                 1,
@@ -102,13 +101,13 @@ def test_mini_cpm_o_tts_only(device, input_dtype, weight_dtype):
                 condition_length - 1,
                 model.tts.config.hidden_size // model.tts.config.num_attention_heads,
                 dtype=dtype,
-                device=device,
+                device=model.tts.device,
             ),
         )
         for _ in range(model.tts.config.num_hidden_layers)
     ]
 
-    audio_input_ids = torch.zeros(1, condition_length, model.tts.num_vq, dtype=torch.long, device=device)
+    audio_input_ids = torch.zeros(1, condition_length, model.tts.num_vq, dtype=torch.long, device=model.tts.device)
 
     # Create dummy speaker embeddings (required when use_speaker_embedding=True)
     # Shape: [batch_size, num_spk_embs, llm_hidden_size]
@@ -133,7 +132,7 @@ def test_mini_cpm_o_tts_only(device, input_dtype, weight_dtype):
 
         if end - begin > 0:
             text_input_ids = tts_input_ids[:, begin:end]
-            position_ids = torch.arange(begin, end, dtype=torch.long, device=device).unsqueeze(0)
+            position_ids = torch.arange(begin, end, dtype=torch.long, device=model.tts.device).unsqueeze(0)
 
             # Prefill text with speaker embeddings
             if chunk_idx == 0 and model.tts.use_speaker_embedding:
@@ -150,22 +149,84 @@ def test_mini_cpm_o_tts_only(device, input_dtype, weight_dtype):
                     past_key_values=past_key_values,
                 )
 
-    # Generate audio tokens
-    outputs = model.tts.generate(
+    # Generate audio tokens using reference PyTorch implementation
+    logger.info("Running reference PyTorch generate...")
+    outputs_ref = model.tts.generate(
         input_ids=audio_input_ids,
         past_key_values=past_key_values,
         streaming_tts_text_mask=streaming_tts_text_mask,
         max_new_token=output_chunk_size,
-        temperature=torch.tensor([0.1, 0.3, 0.1, 0.3], dtype=torch.float, device=device),
-        eos_token=torch.tensor([625], dtype=torch.long, device=device),
+        temperature=torch.tensor([0.1, 0.3, 0.1, 0.3], dtype=torch.float, device=model.tts.device),
+        eos_token=torch.tensor([625], dtype=torch.long, device=model.tts.device),
         logits_warpers=logits_warpers,
         logits_processors=logits_processors,
     )
 
-    # Decode audio codes to mel spectrograms
-    mel_spec = model.tts.decode_to_mel_specs([outputs.new_ids[0]])
+    # logger.info(f"Reference generate completed. Generated {outputs_ref.new_ids.shape[1]} tokens")
+    # logger.info(f"Generated audio codes shape: {outputs_ref.new_ids.shape}")
+    # logger.info(f"Generated audio codes stats: min={outputs_ref.new_ids.min()}, max={outputs_ref.new_ids.max()}")
 
-    # Convert mel spectrograms to audio waveform
-    wav, sr = model.decode_mel_to_audio(mel_spec, output_path="result_audio_tts_test.wav")
+    # Compare with TTNN implementation if available
+    from models.experimental.miniCPMo.tt.ttnn_chattts_decoder import TtnnChatTTSDecoder
+    from models.experimental.miniCPMo.tt.common import torch_to_ttnn, ttnn_to_torch, get_activations_memory_config
 
-    print(f"TTS audio generated successfully! Audio shape: {wav.shape}, Sample rate: {sr}")
+    logger.info("Setting up TTNN ChatTTS Decoder for comparison...")
+
+    # Initialize TTNN decoder with same config
+    ttnn_decoder = TtnnChatTTSDecoder(
+        device=device,
+        llm_dim=model.embed_dim,
+        hidden_size=model.tts.config.hidden_size,
+        num_attention_heads=model.tts.config.num_attention_heads,
+        num_hidden_layers=model.tts.config.num_hidden_layers,
+        intermediate_size=model.tts.config.intermediate_size,
+        num_text_tokens=model.tts.emb_text.num_embeddings,
+        num_audio_tokens=model.tts.num_audio_tokens,
+        num_vq=model.tts.num_vq,
+        num_spk_embs=model.tts.num_spk_embs,
+        max_position_embeddings=model.tts.config.max_position_embeddings,
+    )
+
+    # Load weights from reference model
+    logger.info("Loading weights into TTNN decoder...")
+    tts_state_dict = model.tts.state_dict()
+    ttnn_decoder.load_weights(tts_state_dict)
+
+    # Prepare inputs for first generation step (audio_bos case)
+    # This mimics what happens in the first step of generate()
+    condition_length = (
+        1 + model.tts.use_speaker_embedding * model.tts.num_spk_embs + model.tts.streaming_text_reserved_len + 1
+    )
+
+    # Get the audio_bos token embedding (first step of generation)
+    audio_bos_token_id = model.tts.audio_bos_token_id
+    audio_bos_input_ids = torch.tensor([[audio_bos_token_id]], dtype=torch.long, device=model.tts.device)
+    inputs_embeds_ref = model.tts.emb_text(audio_bos_input_ids)  # [1, 1, hidden_size]
+
+    logger.info(f"Input embeddings shape for comparison: {inputs_embeds_ref.shape}")
+
+    # Convert to TTNN format
+    inputs_embeds_ttnn = torch_to_ttnn(
+        inputs_embeds_ref,
+        device,
+        memory_config=get_activations_memory_config(),
+    )
+
+    # Run TTNN forward pass
+    logger.info("Running TTNN decoder forward pass...")
+    hidden_states_ttnn = ttnn_decoder.forward(
+        inputs_embeds=inputs_embeds_ttnn,
+        attention_mask=None,  # Causal mask handled internally
+        position_ids=None,
+    )
+
+    # Get logits from TTNN
+    logits_ttnn_list = ttnn_decoder.get_logits(hidden_states_ttnn)
+
+    # Convert back to torch
+    hidden_states_ttnn_torch = ttnn_to_torch(hidden_states_ttnn)
+    logits_ttnn_torch = [ttnn_to_torch(logit) for logit in logits_ttnn_list]
+
+    import pdb
+
+    pdb.set_trace()
