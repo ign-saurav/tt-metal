@@ -2,6 +2,10 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+"""
+Test for Backbone using tt_cnn builder pattern.
+"""
+
 import pytest
 import torch
 from loguru import logger
@@ -21,7 +25,8 @@ import ttnn
         (64, [64, 128, 256], [3, 5, 5], [2, 2, 2]),
     ],
 )
-def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, reset_seeds):
+def test_backbone_builder(device, in_channel, out_channels, layer_nums, layer_strides, reset_seeds):
+    """Test TtBackbone against PyTorch reference."""
     torch.manual_seed(0)
 
     # Create reference model
@@ -29,7 +34,10 @@ def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, r
 
     # Load pretrained weights from .pth file (optional)
     try:
-        checkpoint = torch.load("epoch_160.pth", map_location="cpu")
+        checkpoint = torch.load(
+            "epoch_160.pth",
+            map_location="cpu",
+        )
 
         # Extract Backbone weights from the full model checkpoint
         if "state_dict" in checkpoint:
@@ -41,7 +49,7 @@ def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, r
 
         # Filter only Backbone weights
         backbone_state_dict = {}
-        prefix = "backbone."  # Adjust this based on your model's structure
+        prefix = "backbone."
         for key, value in state_dict.items():
             if key.startswith(prefix):
                 new_key = key.replace(prefix, "")
@@ -51,6 +59,7 @@ def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, r
         torch_model.load_state_dict(backbone_state_dict)
     except FileNotFoundError:
         logger.warning("Checkpoint file not found, using random weights")
+
     torch_model = torch_model.to(dtype=torch.bfloat16)
     torch_model.eval()
 
@@ -79,7 +88,7 @@ def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, r
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
     )
 
-    # Create TTNN model
+    # Create TTNN model using builder
     tt_model = TtBackbone(
         in_channel=in_channel,
         out_channels=out_channels,
@@ -87,12 +96,16 @@ def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, r
         layer_strides=layer_strides,
         parameters=parameters["backbone"],
         device=device,
+        batch_size=batch_size,
+        input_height=height,
+        input_width=width,
     )
 
     # Run TTNN model
     tt_output = tt_model.forward(ttnn_input)
 
     # Compare outputs for each block
+    all_passing = True
     for i, (torch_out, tt_out) in enumerate(zip(torch_output, tt_output)):
         # Convert TTNN output back to PyTorch format
         tt_out_torch = tt2torch_tensor(tt_out)
@@ -104,6 +117,9 @@ def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, r
 
         passing, pcc = comp_pcc(torch_out, tt_out_torch, 0.99)
         logger.info(f"Block {i} PCC: {pcc}")
-        # assert passing, f"Block {i} PCC check failed: {pcc}"
+        if not passing:
+            all_passing = False
+            logger.warning(f"Block {i} PCC check failed: {pcc}")
 
-    logger.info("Backbone test passed!")
+    assert all_passing, "Backbone builder test failed - PCC < 0.99"
+    logger.info("Backbone builder test passed!")
