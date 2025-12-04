@@ -245,6 +245,10 @@ class TtCustomBaseTransformerLayer:
                 identity = query
 
             elif layer == "norm":
+                # Ensure tensor has TILE layout for layer_norm
+                if query.layout != ttnn.TILE_LAYOUT:
+                    query = ttnn.to_layout(query, ttnn.TILE_LAYOUT)
+
                 query = ttnn.layer_norm(
                     query,
                     weight=self.params.norms[f"norm{norm_index}"].weight,
