@@ -433,7 +433,7 @@ class QwenMiniCPMPipeline:
         return result
 
 
-@pytest.mark.parametrize("mesh_device", [(1)], indirect=True)
+@pytest.mark.parametrize("mesh_device", [(1, 2)], indirect=True)
 def test_qwen_llm(mesh_device):
     """PCC Test 1: Qwen LLM with MiniCPM weights"""
 

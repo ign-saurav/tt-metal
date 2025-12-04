@@ -38,6 +38,13 @@ from models.tt_transformers.tt.load_checkpoints import (
 PERFORMANCE_DECODER_CONFIG_FILENAME = "performance_decoder_config.json"
 ACCURACY_DECODER_CONFIG_FILENAME = "accuracy_decoder_config.json"
 
+from enum import auto
+
+
+class CheckpointType(Enum):
+    Meta = auto()
+    HuggingFace = auto()
+
 
 class TensorGroup(Enum):
     FF1_FF3 = "ff1_3"
@@ -2299,17 +2306,17 @@ class ModelArgs:
         logger.info(f"Model name: {self.model_name}")
         logger.info(f"Base model name: {self.base_model_name}")
 
-            try:
-                # Try to load tokenizer from the original model path
-                # If there is no Processor, it will return Tokenizer (useful for multimodal models)
-                tokenizer = AutoTokenizer.from_pretrained(
-                    self.TOKENIZER_PATH,
-                    local_files_only=os.getenv("CI") == "true",
-                    trust_remote_code=self.trust_remote_code_hf,
-                )
-                logger.info(f"Successfully loaded tokenizer from {self.TOKENIZER_PATH}")
-            except Exception as e:
-                logger.warning(f"Failed to load tokenizer from {self.TOKENIZER_PATH}: {e}")
+        try:
+            # Try to load tokenizer from the original model path
+            # If there is no Processor, it will return Tokenizer (useful for multimodal models)
+            tokenizer = AutoTokenizer.from_pretrained(
+                self.TOKENIZER_PATH,
+                local_files_only=os.getenv("CI") == "true",
+                trust_remote_code=self.trust_remote_code_hf,
+            )
+            logger.info(f"Successfully loaded tokenizer from {self.TOKENIZER_PATH}")
+        except Exception as e:
+            logger.warning(f"Failed to load tokenizer from {self.TOKENIZER_PATH}: {e}")
 
             # Try to use base model tokenizer as fallback
             fallback_tokenizer_path = base_model_tokenizer_mapping.get(self.base_model_name)
