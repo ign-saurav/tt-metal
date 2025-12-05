@@ -72,12 +72,12 @@ class TtHead:
     ):
         weight = parameters.weight
         if isinstance(weight, ttnn.Tensor):
-            weight = ttnn.from_torch(ttnn.to_torch(weight), dtype=ttnn.float32)
+            weight = ttnn.from_torch(ttnn.to_torch(weight), dtype=ttnn.bfloat16)
 
         bias = None
         if hasattr(parameters, "bias") and parameters.bias is not None:
             bias_torch = ttnn.to_torch(parameters.bias).reshape(1, 1, 1, -1)
-            bias = ttnn.from_torch(bias_torch, dtype=ttnn.float32)
+            bias = ttnn.from_torch(bias_torch, dtype=ttnn.bfloat16)
 
         return Conv2dConfiguration(
             input_height=input_height,
