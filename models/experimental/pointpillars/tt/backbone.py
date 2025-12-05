@@ -26,12 +26,14 @@ class TtBackbone:
     ):
         self.device = device
         self.dtype = dtype
+        self.batch_size = batch_size
 
         current_height = input_height
         current_width = input_width
         current_channels = in_channel
 
         self.multi_blocks = []
+        self.output_shapes = []
 
         for i, stride in enumerate(layer_strides):
             block_convs = []
@@ -67,6 +69,7 @@ class TtBackbone:
                 block_convs.append(TtConv2d(conv_config, device))
 
             self.multi_blocks.append(block_convs)
+            self.output_shapes.append((batch_size, current_height, current_width, block_out_channels))
 
     def _create_conv_config(
         self,
@@ -81,12 +84,12 @@ class TtBackbone:
     ):
         weight = parameters.weight
         if isinstance(weight, ttnn.Tensor):
-            weight = ttnn.from_torch(ttnn.to_torch(weight), dtype=ttnn.float32)
+            weight = ttnn.from_torch(ttnn.to_torch(weight), dtype=ttnn.bfloat16)
 
         bias = None
         if hasattr(parameters, "bias") and parameters.bias is not None:
             bias_torch = ttnn.to_torch(parameters.bias).reshape(1, 1, 1, -1)
-            bias = ttnn.from_torch(bias_torch, dtype=ttnn.float32)
+            bias = ttnn.from_torch(bias_torch, dtype=ttnn.bfloat16)
 
         math_fidelity = ttnn.MathFidelity.HiFi4 if block_idx == 2 else ttnn.MathFidelity.HiFi2
 
@@ -118,9 +121,10 @@ class TtBackbone:
         return: list[]. Default: [(1, 248, 216, 64), (1, 124, 108, 128), (1, 62, 54, 256)]
         """
         outs = []
-        for block_convs in self.multi_blocks:
+        for i, block_convs in enumerate(self.multi_blocks):
             for conv in block_convs:
                 x = conv(x)
                 x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+            x = ttnn.reshape(x, self.output_shapes[i])
             outs.append(x)
         return outs

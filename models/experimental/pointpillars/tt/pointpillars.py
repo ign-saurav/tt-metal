@@ -48,6 +48,9 @@ class TtPointPillars:
             layer_strides=[2, 2, 2],
             parameters=parameters["backbone"],
             device=device,
+            batch_size=1,
+            input_height=496,
+            input_width=432,
             dtype=dtype,
         )
 
@@ -66,6 +69,9 @@ class TtPointPillars:
             n_classes=nclasses,
             parameters=parameters["head"],
             device=device,
+            batch_size=1,
+            input_height=248,
+            input_width=216,
             dtype=dtype,
         )
 

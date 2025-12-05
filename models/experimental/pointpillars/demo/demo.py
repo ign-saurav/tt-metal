@@ -392,7 +392,7 @@ Example usage:
     )
     parser.add_argument(
         "--ckpt",
-        default="models/experimental/pointpillars/resources/epoch_160.pth",
+        default="epoch_160.pth",
         help="Path to checkpoint file",
     )
     parser.add_argument("--pc_path", required=True, help="Path to point cloud file (.bin)")
