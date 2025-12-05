@@ -1027,25 +1027,17 @@ class Flux1KontextPipeline:
                         latents[submesh_id],
                         dim=1,
                         cluster_axis=self._parallel_config.sequence_parallel.mesh_axis,  # axis=0 for sequence parallel
+                        topology=self._ccl_managers[submesh_id].topology,
                     )
                 randn_latents = latents[submesh_id][:, : self.latents_seq_length]
                 spatial_latents = latents[submesh_id][:, self.latents_seq_length :]
                 ttnn.add_(randn_latents, sigma_difference_device)
                 latents[submesh_id] = ttnn.concat([randn_latents, spatial_latents], dim=1)
                 if tuple(submesh_device.shape)[0] > 1:
-                    torch_latents = ttnn.to_torch(ttnn.get_device_tensors(latents[submesh_id])[0])
-                    shard_latents_dims = [None, None]
-                    shard_latents_dims[self._parallel_config.sequence_parallel.mesh_axis] = 1  # height of latents
-                    latents[submesh_id] = ttnn.from_torch(
-                        torch_latents,
-                        layout=ttnn.TILE_LAYOUT,
-                        dtype=ttnn.bfloat16,
-                        device=submesh_device,  # if not traced else None,
-                        mesh_mapper=ttnn.ShardTensor2dMesh(
-                            submesh_device,
-                            tuple(submesh_device.shape),
-                            dims=tuple(shard_latents_dims),
-                        ),
+                    latents[submesh_id] = ttnn.mesh_partition(
+                        latents[submesh_id],
+                        dim=1,
+                        cluster_axis=self._parallel_config.sequence_parallel.mesh_axis,
                     )
                 if traced:
                     ttnn.copy(latents[submesh_id], self._traces[submesh_id].spatial_input)
