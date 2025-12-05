@@ -1,4 +1,4 @@
-# 🧩 MobileNetV3
+# 🧩 PointPillars
 
 ![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
 ![Supported Device](https://img.shields.io/badge/device-Wormhole%20(n150)-blue)
@@ -82,7 +82,7 @@ python models/experimental/pointpillars/demo/demo.py \
 ### Custom Images
 You can place your image(s),pointcloud file under:
 ```
-models/experimental/mobileNetV3/resources/
+models/experimental/pointpillars/resources/
 ```
 Then re-run either the demo:
 
