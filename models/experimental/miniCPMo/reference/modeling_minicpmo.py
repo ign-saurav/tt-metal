@@ -38,11 +38,7 @@ from huggingface_hub import hf_hub_download
 from PIL import Image
 from torch.nn.utils.parametrizations import weight_norm
 from tqdm import tqdm
-
-# from transformers import AutoImageProcessor
-
-from .processing_minicpmo import MiniCPMOProcessor
-from .image_processing_minicpmv import MiniCPMVImageProcessor
+from transformers import AutoProcessor
 from transformers import BertTokenizerFast
 from transformers import LlamaConfig
 from transformers import LlamaModel
@@ -60,9 +56,20 @@ from transformers.cache_utils import StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_outputs import ModelOutput
 from transformers.models.whisper.modeling_whisper import ACT2FN
+
+# from transformers.models.whisper.modeling_whisper import WHISPER_ATTENTION_CLASSES
 from transformers.models.whisper.modeling_whisper import WhisperAttention
+
+# from transformers.models.whisper.modeling_whisper import WhisperFlashAttention2
+# from transformers.models.whisper.modeling_whisper import WhisperSdpaAttention
 from transformers.models.whisper.modeling_whisper import WhisperConfig
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
+
+WHISPER_ATTENTION_CLASSES = {
+    "eager": WhisperAttention,
+    "flash_attention_2": WhisperAttention,  # WhisperFlashAttention2,
+    "sdpa": WhisperAttention,  # SdpaAttention,
+}
 
 try:
     from vector_quantize_pytorch import GroupedResidualFSQ
@@ -99,10 +106,7 @@ class MiniCPMOPreTrainedModel(Qwen2PreTrainedModel):
 class MiniCPMO(MiniCPMOPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
-        # gets killed without meta
-        # with torch.device("meta"):
         self.llm = Qwen2ForCausalLM(config)
-        print("QWEN INITIALIZED")
         self.llm.prepare_inputs_for_generation = types.MethodType(prepare_inputs_for_generation, self.llm)  # patch llm
 
         self.embed_dim = self.llm.config.hidden_size
@@ -126,52 +130,7 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
             assert _tts_deps, "please make sure vector_quantize_pytorch and vocos are installed."
             self.tts = self.init_tts_module()
 
-        # Load processor directly from local files to avoid cache resolution
-        # Get the local path from config or use a default
-        local_path = getattr(self.config, "_name_or_path", None)
-        if local_path is None or not os.path.isdir(local_path):
-            # Fallback: try to construct path relative to this file
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            local_path = current_dir
-
-        # Load image processor config directly from JSON file
-        preprocessor_config_path = os.path.join(local_path, "preprocessor_config.json")
-        with open(preprocessor_config_path, "r") as f:
-            image_processor_config = json.load(f)
-        # Filter out non-constructor parameters (auto_map, processor_class, image_processor_type)
-        constructor_params = {
-            k: v
-            for k, v in image_processor_config.items()
-            if k not in ["auto_map", "processor_class", "image_processor_type"]
-        }
-        # Instantiate image processor directly with config parameters
-        image_processor = MiniCPMVImageProcessor(**constructor_params)
-
-        # Load tokenizer from local files using from_pretrained to get config (chat_template, etc.)
-        # Using local path with local_files_only=True won't trigger cache resolution
-        from .tokenization_minicpmo_fast import MiniCPMOTokenizerFast
-
-        tokenizer = MiniCPMOTokenizerFast.from_pretrained(local_path, local_files_only=True)
-
-        # Load feature extractor (WhisperFeatureExtractor) for audio processing
-        # Even if audio is not initialized, the processor still requires it
-        # Load directly from local whisper_preprocessor_config.json file
-        from transformers import WhisperFeatureExtractor
-
-        whisper_config_path = os.path.join(local_path, "whisper_preprocessor_config.json")
-        with open(whisper_config_path, "r") as f:
-            whisper_config = json.load(f)
-        # Filter out non-constructor parameters
-        whisper_constructor_params = {
-            k: v for k, v in whisper_config.items() if k not in ["processor_class", "feature_extractor_type"]
-        }
-        # Instantiate feature extractor directly with config parameters
-        feature_extractor = WhisperFeatureExtractor(**whisper_constructor_params)
-
-        # Instantiate processor directly
-        self.processor = MiniCPMOProcessor(
-            image_processor=image_processor, feature_extractor=feature_extractor, tokenizer=tokenizer
-        )
+        self.processor = AutoProcessor.from_pretrained(self.config._name_or_path, trust_remote_code=True)
 
         self.terminators = ["<|im_end|>", "<|endoftext|>"]
 
@@ -910,8 +869,8 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
             processor: if None, use the default processor
             max_new_tokens: the maximum length of the generation
             min_new_tokens: the minimum length of the generation
-            sampling: whether to use sampling decoding or beam search decoding
-            max_inp_length: the maximum length of input
+            sampling: eam search decoding
+            max_inp_length: the maximum length of inpwhether to use sampling decoding or but
             stream: whether to return generator, only used when tts is not required
             chunk_input: whether to split audio into 1s chunks
             omni_input: determine whether it is omni mode
@@ -944,41 +903,7 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
 
         if processor is None:
             if self.processor is None:
-                # Processor should already be initialized in __init__, but if not, create it here
-                # Use the same logic as in __init__ to avoid cache resolution
-                local_path = getattr(self.config, "_name_or_path", None)
-                if local_path is None or not os.path.isdir(local_path):
-                    current_dir = os.path.dirname(os.path.abspath(__file__))
-                    local_path = current_dir
-
-                preprocessor_config_path = os.path.join(local_path, "preprocessor_config.json")
-                with open(preprocessor_config_path, "r") as f:
-                    image_processor_config = json.load(f)
-                constructor_params = {
-                    k: v
-                    for k, v in image_processor_config.items()
-                    if k not in ["auto_map", "processor_class", "image_processor_type"]
-                }
-                image_processor = MiniCPMVImageProcessor(**constructor_params)
-
-                from .tokenization_minicpmo_fast import MiniCPMOTokenizerFast
-
-                tokenizer = MiniCPMOTokenizerFast.from_pretrained(local_path, local_files_only=True)
-
-                # Load feature extractor directly from local file
-                from transformers import WhisperFeatureExtractor
-
-                whisper_config_path = os.path.join(local_path, "whisper_preprocessor_config.json")
-                with open(whisper_config_path, "r") as f:
-                    whisper_config = json.load(f)
-                whisper_constructor_params = {
-                    k: v for k, v in whisper_config.items() if k not in ["processor_class", "feature_extractor_type"]
-                }
-                feature_extractor = WhisperFeatureExtractor(**whisper_constructor_params)
-
-                self.processor = MiniCPMOProcessor(
-                    image_processor=image_processor, feature_extractor=feature_extractor, tokenizer=tokenizer
-                )
+                self.processor = AutoProcessor.from_pretrained(self.config._name_or_path, trust_remote_code=True)
             processor = self.processor
 
         assert (
@@ -1424,14 +1349,43 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
         return spk_embeds
 
     def _generate_mel_spec(self, inputs, outputs, text, output_chunk_size=25, tts_max_new_tokens=2048):
+        print("=" * 60)
+        print("[DEBUG _generate_mel_spec] START")
+        print("=" * 60)
+
+        # Save inputs and outputs for debugging
+        import torch
+
+        print(f"[DEBUG] Saving inputs and outputs to /home/ubuntu/")
+        torch.save(dict(inputs), "/home/ubuntu/_generate_mel_spec_inputs.pt")
+        torch.save(
+            {k: getattr(outputs, k) for k in ["sequences", "hidden_states", "past_key_values"]},
+            "/home/ubuntu/_generate_mel_spec_outputs.pt",
+        )
+        torch.save(text, "/home/ubuntu/_generate_mel_spec_answer.pt")
+        print(f"[DEBUG] Saved! spk_bounds={inputs['spk_bounds']}")
+
         spk_embeds = self._get_last_spk_embeds(inputs, outputs)
+        print(f"[DEBUG] spk_embeds shape: {spk_embeds.shape}, dtype: {spk_embeds.dtype}")
+        print(f"[DEBUG] spk_embeds min/max: {spk_embeds.min().item():.6f}, {spk_embeds.max().item():.6f}")
+        print(f"[DEBUG] spk_embeds[0,:5]: {spk_embeds[0,:5].tolist()}")
 
         text = text.split("<|tts_bos|>")[-1]
         gen_text = text.split("<|tts_eos|>")[0]
+        print(f"[DEBUG] gen_text: '{gen_text[:100]}...'")
+
         tts_text, tts_token_lens = self.prepare_tts_text(gen_text)
+        print(f"[DEBUG] tts_text: '{tts_text[:100]}...'")
+        print(f"[DEBUG] tts_token_lens: {tts_token_lens}")
+
         tts_inputs = self.tts_processor.text_tokenizer.encode(tts_text, add_special_tokens=False)
         tts_input_ids = torch.Tensor(tts_inputs).unsqueeze(0).to(self.device, dtype=torch.long)
+        print(f"[DEBUG] tts_input_ids shape: {tts_input_ids.shape}")
+        print(f"[DEBUG] tts_input_ids[:, :20]: {tts_input_ids[:, :20].tolist()}")
+
         streaming_tts_text_mask = self._build_streaming_mask(tts_token_lens).to(device=self.tts.device)
+        print(f"[DEBUG] streaming_tts_text_mask shape: {streaming_tts_text_mask.shape}")
+        print(f"[DEBUG] streaming_tts_text_mask[:30]: {streaming_tts_text_mask[:30].tolist()}")
 
         logits_warpers, logits_processors = gen_logits(
             num_code=626, top_P=self.tts.top_p, top_K=self.tts.top_k, repetition_penalty=self.tts.repetition_penalty
@@ -1492,6 +1446,10 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
             if end - begin > 0:
                 text_input_ids = tts_input_ids[:, begin:end]
                 position_ids = torch.arange(begin, end, dtype=torch.long, device=self.tts.device).unsqueeze(0)
+                print(f"[DEBUG] chunk_idx={chunk_idx}, begin={begin}, end={end}")
+                print(
+                    f"[DEBUG] text_input_ids shape: {text_input_ids.shape}, values: {text_input_ids[0, :10].tolist()}"
+                )
 
                 if begin == 0:
                     past_key_values = self.tts.prefill_text(
@@ -1505,6 +1463,47 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
                         input_ids=text_input_ids, position_ids=position_ids, past_key_values=past_key_values
                     )
 
+                print(f"[DEBUG] After prefill_text chunk_idx={chunk_idx}:")
+                print(f"[DEBUG]   pkv[0][0] shape: {past_key_values[0][0].shape}")
+                print(f"[DEBUG]   pkv[0][0] all_zeros: {(past_key_values[0][0] == 0).all().item()}")
+                print(
+                    f"[DEBUG]   pkv[0][0] min/max: {past_key_values[0][0].min().item():.6f}, {past_key_values[0][0].max().item():.6f}"
+                )
+                print(f"[DEBUG]   pkv[0][0][0,0,0,:5]: {past_key_values[0][0][0,0,0,:5].tolist()}")
+
+            # Print TTS weights for comparison (only on first chunk)
+            if chunk_idx == 0:
+                print("[DEBUG] === TTS MODEL WEIGHTS COMPARISON ===")
+                print(f"[DEBUG] emb_text.weight[0,:5]: {self.tts.emb_text.weight[0,:5].tolist()}")
+                print(f"[DEBUG] emb_text.weight.sum(): {self.tts.emb_text.weight.sum().item():.6f}")
+                print(f"[DEBUG] emb_code[0].weight[0,:5]: {self.tts.emb_code[0].weight[0,:5].tolist()}")
+                print(f"[DEBUG] emb_code[0].weight.sum(): {self.tts.emb_code[0].weight.sum().item():.6f}")
+                print(f"[DEBUG] head_code[0].weight[0,:5]: {self.tts.head_code[0].weight[0,:5].tolist()}")
+                print(f"[DEBUG] head_code[0].weight.sum(): {self.tts.head_code[0].weight.sum().item():.6f}")
+                print(f"[DEBUG] model.embed_tokens.weight[0,:5]: {self.tts.model.embed_tokens.weight[0,:5].tolist()}")
+                print(f"[DEBUG] model.embed_tokens.weight.sum(): {self.tts.model.embed_tokens.weight.sum().item():.6f}")
+                print(
+                    f"[DEBUG] model.layers[0].self_attn.q_proj.weight[0,:5]: {self.tts.model.layers[0].self_attn.q_proj.weight[0,:5].tolist()}"
+                )
+                print(
+                    f"[DEBUG] model.layers[0].self_attn.q_proj.weight.sum(): {self.tts.model.layers[0].self_attn.q_proj.weight.sum().item():.6f}"
+                )
+                print(f"[DEBUG] projector.linear1.weight[0,:5]: {self.tts.projector.linear1.weight[0,:5].tolist()}")
+                print(f"[DEBUG] projector.linear1.weight.sum(): {self.tts.projector.linear1.weight.sum().item():.6f}")
+                print("[DEBUG] === END WEIGHTS COMPARISON ===")
+                # Reset ALL random seeds for reproducible TTS generation
+                import random
+                import numpy as np
+
+                print("[DEBUG] Resetting ALL seeds to 42 for TTS generation")
+                random.seed(42)
+                np.random.seed(42)
+                torch.manual_seed(42)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(42)
+                torch.backends.cudnn.deterministic = True
+                torch.backends.cudnn.benchmark = False
+
             outputs = self.tts.generate(
                 input_ids=audio_input_ids,
                 past_key_values=past_key_values,
@@ -1516,6 +1515,15 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
                 logits_warpers=logits_warpers,
                 logits_processors=logits_processors,
             )
+            print(f"[DEBUG] After generate chunk_idx={chunk_idx}:")
+            print(f"[DEBUG]   outputs.audio_input_ids shape: {outputs.audio_input_ids.shape}")
+            print(
+                f"[DEBUG]   outputs.audio_input_ids min/max: {outputs.audio_input_ids.min().item()}, {outputs.audio_input_ids.max().item()}"
+            )
+            print(f"[DEBUG]   outputs.new_ids shape: {outputs.new_ids.shape}")
+            print(f"[DEBUG]   outputs.new_ids[0,:5,:]: {outputs.new_ids[0,:5,:].tolist()}")
+            print(f"[DEBUG]   outputs.finished: {outputs.finished}")
+
             audio_input_ids = outputs.audio_input_ids
             past_key_values = outputs.past_key_values
 
@@ -1525,7 +1533,8 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
                 break
 
         if not eos_lab:
-            logger.debug("eos_lab False, Generation continue.")
+            print("[DEBUG] eos_lab False, continuing generation in while loop...")
+            gen_iter = 0
             while True:
                 outputs = self.tts.generate(
                     input_ids=audio_input_ids,
@@ -1539,17 +1548,38 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
                     logits_processors=logits_processors,
                 )
 
+                print(f"[DEBUG] While loop iter={gen_iter}:")
+                print(f"[DEBUG]   outputs.new_ids shape: {outputs.new_ids.shape}")
+                print(
+                    f"[DEBUG]   outputs.audio_input_ids min/max: {outputs.audio_input_ids.min().item()}, {outputs.audio_input_ids.max().item()}"
+                )
+                print(f"[DEBUG]   outputs.finished: {outputs.finished}")
+
                 audio_input_ids = outputs.audio_input_ids
                 past_key_values = outputs.past_key_values
+                gen_iter += 1
 
                 if outputs.finished:
-                    logger.debug("Generation finished.")
+                    print("[DEBUG] Generation finished (EOS detected).")
                     break
                 if outputs.new_ids.shape[1] > tts_max_new_tokens:
-                    logger.debug(f"Generation length > {tts_max_new_tokens}, stopped.")
+                    print(f"[DEBUG] Generation length > {tts_max_new_tokens}, stopped.")
                     break
 
+        print(f"[DEBUG] Final outputs.new_ids shape: {outputs.new_ids.shape}")
+        print(f"[DEBUG] Final outputs.new_ids min/max: {outputs.new_ids.min().item()}, {outputs.new_ids.max().item()}")
+
+        # Save the generated audio tokens for use in local test
+        torch.save(outputs.new_ids, "/home/ubuntu/_tts_generated_audio_tokens.pt")
+        print(f"[DEBUG] Saved audio tokens to /home/ubuntu/_tts_generated_audio_tokens.pt")
+
         mel_spec = self.tts.decode_to_mel_specs(outputs.new_ids)
+        print(f"[DEBUG] mel_spec shape: {mel_spec.shape}")
+        print(f"[DEBUG] mel_spec min/max: {mel_spec.min().item():.6f}, {mel_spec.max().item():.6f}")
+        print(f"[DEBUG] mel_spec mean/std: {mel_spec.mean().item():.6f}, {mel_spec.std().item():.6f}")
+        print("=" * 60)
+        print("[DEBUG _generate_mel_spec] END")
+        print("=" * 60)
         return mel_spec
 
     def _linear_overlap_add2_wav(self, frames: List[torch.Tensor], overlap: int):
@@ -1963,45 +1993,8 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
                 yield res
 
     def decode_mel_to_audio(self, mel_spec, output_path=""):
-        # Validate mel_spec before decoding
-        if torch.isnan(mel_spec).any() or torch.isinf(mel_spec).any():
-            nan_count = torch.isnan(mel_spec).sum().item()
-            inf_count = torch.isinf(mel_spec).sum().item()
-            logger.error(
-                f"Mel spectrogram contains invalid values before vocos decode: {nan_count} NaN, {inf_count} Inf"
-            )
-            # Replace NaN and Inf with zeros
-            mel_spec = torch.nan_to_num(mel_spec, nan=0.0, posinf=0.0, neginf=0.0)
-            logger.warning("Replaced NaN/Inf values with zeros before vocos decode")
-
-        # Check for extremely large values that might cause issues
-        if mel_spec.abs().max() > 1e6:
-            logger.warning(
-                f"Mel spectrogram contains very large values: max={mel_spec.abs().max()}. Clamping to reasonable range"
-            )
-            mel_spec = torch.clamp(mel_spec, -100.0, 100.0)
-
         with torch.inference_mode():
-            try:
-                wav_numpy = self.vocos.decode(mel_spec.float()).cpu().squeeze()
-                # Validate output audio
-                if torch.isnan(wav_numpy).any() or torch.isinf(wav_numpy).any():
-                    logger.error("Generated audio contains NaN/Inf values")
-                    wav_numpy = torch.nan_to_num(wav_numpy, nan=0.0, posinf=0.0, neginf=0.0)
-            except AssertionError as e:
-                logger.error(f"Vocos decode failed with assertion error: {e}")
-                logger.error(
-                    f"Mel spec stats: shape={mel_spec.shape}, min={mel_spec.min()}, max={mel_spec.max()}, mean={mel_spec.mean()}, std={mel_spec.std()}"
-                )
-                # Return silence as fallback
-                wav_numpy = torch.zeros(mel_spec.shape[-1] * 256, dtype=torch.float32)  # Approximate length
-                logger.warning("Returning silence due to vocos decode failure")
-            except Exception as e:
-                logger.error(f"Vocos decode failed with error: {e}")
-                logger.error(
-                    f"Mel spec stats: shape={mel_spec.shape}, min={mel_spec.min()}, max={mel_spec.max()}, mean={mel_spec.mean()}, std={mel_spec.std()}"
-                )
-                raise
+            wav_numpy = self.vocos.decode(mel_spec.float()).cpu().squeeze()
             sr = 24000
         if output_path:
             sf.write(output_path, wav_numpy.numpy(), samplerate=sr)
@@ -2014,9 +2007,7 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
     def __init__(self, config: WhisperConfig, layer_idx: int = None):
         super().__init__()
         self.embed_dim = config.d_model
-        #  import ERR
-        #  unused as of now
-        self.self_attn = WhisperAttention(
+        self.self_attn = WHISPER_ATTENTION_CLASSES[config._attn_implementation](
             embed_dim=self.embed_dim,
             num_heads=config.encoder_attention_heads,
             dropout=config.attention_dropout,
@@ -2943,25 +2934,20 @@ class ConditionalChatTTS(PreTrainedModel):
                     past_key_values[i][1][:, :, : position_ids[:, 0], :].clone(),
                 )
             )
-        # Convert list of tuples to DynamicCache object (required by newer transformers versions)
-        past_key_values_cache = DynamicCache.from_legacy_cache(past_key_values_for_prefill)
 
         # Model forward
         outputs_prefill: BaseModelOutputWithPast = self.model(
             attention_mask=None,  # because for text, it is standard causal attention mask, do nothing
             position_ids=position_ids,  # position_ids denotes the position of new text tokens in the sequence
-            past_key_values=past_key_values_cache,  # `past_key_values` will be updated by the model
+            past_key_values=past_key_values_for_prefill,  # `past_key_values` will be updated by the model
             inputs_embeds=inputs_embeds,  # contains text and language model embedding
             use_cache=True,
             output_attentions=False,
             cache_position=position_ids,  # which new positions will use this cache, basically the same as position_ids
         )
 
-        # Get model updated KV Cache and convert back to list of tuples format
+        # Get model updated KV Cache
         past_key_values_for_prefill_updated = outputs_prefill.past_key_values
-        # Convert Cache object back to list of tuples for compatibility with existing code
-        if past_key_values_for_prefill_updated is not None and isinstance(past_key_values_for_prefill_updated, Cache):
-            past_key_values_for_prefill_updated = past_key_values_for_prefill_updated.to_legacy_cache()
 
         # Update generated KV Cache to input `past_key_values`
         for layer_idx in range(len(past_key_values)):
@@ -3025,23 +3011,17 @@ class ConditionalChatTTS(PreTrainedModel):
             streaming_text_chunk_size=self.streaming_text_chunk_size,
         )  # [1, 1, 1, past_key_values_length + input_len]
 
-        # Convert list of tuples to DynamicCache object (required by newer transformers versions)
-        past_key_values_cache = DynamicCache.from_legacy_cache(past_key_values)
-
         # Model forward
         outputs: BaseModelOutputWithPast = self.model(
             attention_mask=causal_mask,
             position_ids=position_ids,
-            past_key_values=past_key_values_cache,
+            past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=True,
             output_attentions=False,
             cache_position=cache_position,
         )
-        # Convert Cache object back to list of tuples for compatibility
         past_key_values = outputs.past_key_values
-        if past_key_values is not None and isinstance(past_key_values, Cache):
-            past_key_values = past_key_values.to_legacy_cache()
         return past_key_values
 
     @torch.inference_mode()
@@ -3158,14 +3138,11 @@ class ConditionalChatTTS(PreTrainedModel):
                 streaming_text_chunk_size=self.streaming_text_chunk_size,
             )
 
-            # Convert list of tuples to DynamicCache object (required by newer transformers versions)
-            past_key_values_cache = DynamicCache.from_legacy_cache(past_key_values)
-
             # Model forward
             outputs: BaseModelOutputWithPast = self.model(
                 attention_mask=causal_mask,
                 position_ids=position_ids,
-                past_key_values=past_key_values_cache,
+                past_key_values=past_key_values,
                 inputs_embeds=inputs_embeds,
                 use_cache=True,
                 output_attentions=False,
@@ -3178,12 +3155,7 @@ class ConditionalChatTTS(PreTrainedModel):
             del causal_mask
 
             hidden_states = outputs.last_hidden_state
-
-            return hidden_states
-            # Convert Cache object back to list of tuples for compatibility
             past_key_values = outputs.past_key_values
-            if past_key_values is not None and isinstance(past_key_values, Cache):
-                past_key_values = past_key_values.to_legacy_cache()
 
             with P.cached():
                 logits = torch.empty(
@@ -3238,8 +3210,19 @@ class ConditionalChatTTS(PreTrainedModel):
 
             scores = F.softmax(logits, dim=-1)
 
-            del logits
-            idx_next = torch.multinomial(scores, num_samples=1)  # .to(finish.device)
+            # DEBUG: Print logits/scores before sampling
+            print(f"[DEBUG] iter {i}: logits.sum()={logits.sum().item():.6f}, scores[:4, :5]={scores[:4, :5].tolist()}")
+
+            # Use greedy decoding (argmax) for deterministic output
+            USE_GREEDY = True
+            if USE_GREEDY:
+                idx_next = scores.argmax(dim=-1, keepdim=True)
+            else:
+                del logits
+                idx_next = torch.multinomial(scores, num_samples=1)  # .to(finish.device)
+
+            # DEBUG: Print sampled tokens
+            print(f"[DEBUG] iter {i}: idx_next={idx_next.view(-1).tolist()}")
 
             del scores
 
