@@ -25,6 +25,7 @@ def run_pointpillars_e2e(
     batch_size_per_device,
     model_location_generator=None,
 ):
+    torch.manual_seed(0)
     num_devices = device.get_num_devices()
     batch_size = batch_size_per_device * num_devices
 
