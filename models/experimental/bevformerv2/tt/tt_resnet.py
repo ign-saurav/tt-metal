@@ -4,8 +4,8 @@
 import ttnn
 from ttnn import UnaryWithParam, UnaryOpType
 
-from models.tt_cnn.tt.builder import TtConv2d
-from models.experimental.bevformerv2.tt.utils import create_conv2d_configuration
+from models.tt_cnn.tt.builder import TtConv2d, TtMaxPool2d
+from models.experimental.bevformerv2.tt.utils import create_conv2d_configuration, create_maxpool2d_configuration
 from models.experimental.bevformerv2.tt.tt_bottleneck import TtBottleneck, get_bottleneck_optimisation
 from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
 
@@ -27,7 +27,6 @@ class TtResNet50_MMD_C345:
         model_configs: BevFormerV2ModelConfig | None = None,
     ):
         self.device = device
-        self.maxpool_args = conv_args.maxpool
 
         # ------------------------
         # Stem
@@ -42,6 +41,17 @@ class TtResNet50_MMD_C345:
             layer_path="stem.conv1",
         )
         self.conv1 = TtConv2d(conv1_config, device)
+
+        # ------------------------
+        # MaxPool (after stem conv1)
+        # ------------------------
+        # Get channels from conv1 output (out_channels)
+        conv1_channels = conv1_config.out_channels
+        maxpool_config = create_maxpool2d_configuration(
+            conv_args.maxpool,
+            channels=conv1_channels,
+        )
+        self.maxpool = TtMaxPool2d(maxpool_config, device)
 
         # ------------------------
         # Layer 1 (3 blocks)
@@ -205,8 +215,8 @@ class TtResNet50_MMD_C345:
         x = self.conv1(x)
         x = ttnn.sharded_to_interleaved(x)
 
-        # MaxPool (handle batch splitting if required)
-        x = self._apply_maxpool(x)
+        # MaxPool using TtMaxPool2d
+        x = self.maxpool(x)
 
         # Layer1
         x = self.layer1_0(x)
@@ -246,62 +256,3 @@ class TtResNet50_MMD_C345:
         ttnn.deallocate(x)
 
         return outputs  # [C3, C4, C5]
-
-    def _apply_maxpool(self, x):
-        args = self.maxpool_args
-
-        if args.batch_size > 1:
-            current_batch_size = args.batch_size
-            split_point = current_batch_size // 2
-            x0 = ttnn.slice(
-                x,
-                [0, 0, 0, 0],
-                [1, 1, split_point * args.input_height * args.input_width, x.shape[3]],
-            )
-            x1 = ttnn.slice(
-                x,
-                [0, 0, split_point * args.input_height * args.input_width, 0],
-                [1, 1, current_batch_size * args.input_height * args.input_width, x.shape[3]],
-            )
-            x0 = ttnn.max_pool2d(
-                input_tensor=x0,
-                batch_size=split_point,
-                input_h=args.input_height,
-                input_w=args.input_width,
-                channels=x.shape[3],
-                kernel_size=[3, 3],
-                stride=[2, 2],
-                padding=[1, 1],
-                dilation=[1, 1],
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                ceil_mode=False,
-            )
-            x1 = ttnn.max_pool2d(
-                input_tensor=x1,
-                batch_size=current_batch_size - split_point,
-                input_h=args.input_height,
-                input_w=args.input_width,
-                channels=x.shape[3],
-                kernel_size=[3, 3],
-                stride=[2, 2],
-                padding=[1, 1],
-                dilation=[1, 1],
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                ceil_mode=False,
-            )
-            x = ttnn.concat((x0, x1), dim=2, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        else:
-            x = ttnn.max_pool2d(
-                input_tensor=x,
-                batch_size=args.batch_size,
-                input_h=args.input_height,
-                input_w=args.input_width,
-                channels=x.shape[3],
-                kernel_size=[3, 3],
-                stride=[2, 2],
-                padding=[1, 1],
-                dilation=[1, 1],
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                ceil_mode=False,
-            )
-        return x

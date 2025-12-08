@@ -9,6 +9,7 @@ from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
     HeightShardedStrategyConfiguration,
     L1FullSliceStrategyConfiguration,
+    MaxPool2dConfiguration,
 )
 
 from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
@@ -144,5 +145,67 @@ def create_conv2d_configuration(
         packer_l1_acc=packer_l1_acc,
         enable_act_double_buffer=enable_act_double_buffer,
         deallocate_activation=dealloc_act,
+        **kwargs,
+    )
+
+
+def create_maxpool2d_configuration(
+    maxpool_args,
+    channels: int,
+    **kwargs,
+) -> MaxPool2dConfiguration:
+    """Create a MaxPool2dConfiguration from maxpool_args, compatible with TtMaxPool2d."""
+    # Extract maxpool parameters - handle both dict and object access
+    if isinstance(maxpool_args, dict):
+        input_height = maxpool_args.get("input_height")
+        input_width = maxpool_args.get("input_width")
+        batch_size = maxpool_args.get("batch_size")
+        kernel_size = maxpool_args.get("kernel_size", 3)
+        stride = maxpool_args.get("stride", 2)
+        padding = maxpool_args.get("padding", 1)
+        dilation = maxpool_args.get("dilation", 1)
+        ceil_mode = maxpool_args.get("ceil_mode", False)
+    else:
+        # maxpool_args is an object with attributes
+        input_height = maxpool_args.input_height
+        input_width = maxpool_args.input_width
+        batch_size = maxpool_args.batch_size
+        kernel_size = getattr(maxpool_args, "kernel_size", 3)
+        stride = getattr(maxpool_args, "stride", 2)
+        padding = getattr(maxpool_args, "padding", 1)
+        dilation = getattr(maxpool_args, "dilation", 1)
+        ceil_mode = getattr(maxpool_args, "ceil_mode", False)
+
+    # Convert to tuples - handle both int and tuple/list inputs
+    if isinstance(kernel_size, (int, float)):
+        kernel_size = (kernel_size, kernel_size)
+    elif not isinstance(kernel_size, tuple):
+        kernel_size = tuple(kernel_size)
+
+    if isinstance(stride, (int, float)):
+        stride = (stride, stride)
+    elif not isinstance(stride, tuple):
+        stride = tuple(stride)
+
+    if isinstance(padding, (int, float)):
+        padding = (padding, padding)
+    elif not isinstance(padding, tuple):
+        padding = tuple(padding)
+
+    if isinstance(dilation, (int, float)):
+        dilation = (dilation, dilation)
+    elif not isinstance(dilation, tuple):
+        dilation = tuple(dilation)
+
+    return MaxPool2dConfiguration(
+        input_height=input_height,
+        input_width=input_width,
+        channels=channels,
+        batch_size=batch_size,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+        ceil_mode=ceil_mode,
         **kwargs,
     )
