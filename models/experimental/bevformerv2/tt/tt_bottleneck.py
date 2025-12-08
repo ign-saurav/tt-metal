@@ -6,7 +6,8 @@ import ttnn
 from dataclasses import dataclass
 from typing import Optional
 
-from models.experimental.bevformerv2.tt.utils import TTConv2D
+from models.tt_cnn.tt.builder import TtConv2d
+from models.experimental.bevformerv2.tt.utils import create_conv2d_configuration
 from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
 
 
@@ -51,7 +52,7 @@ bottleneck_layer_optimisations = {
     ),
     "layer4": BottleneckOptimizer(
         conv1={},
-        conv2={"act_block_h": 32},
+        conv2={"is_blk": True, "activation_dtype": ttnn.bfloat8_b},
         conv3={"is_blk": True},
         downsample={
             "is_blk": True,
@@ -102,7 +103,7 @@ class TtBottleneck:
 
         # conv1
         conv1_opts = layer_optimisations.conv1.copy()
-        self.conv1 = TTConv2D(
+        conv1_config = create_conv2d_configuration(
             conv_args.conv1,
             conv_pth.conv1,
             device=device,
@@ -111,10 +112,11 @@ class TtBottleneck:
             layer_path=f"{block_path}.conv1" if block_path else None,
             **conv1_opts,
         )
+        self.conv1 = TtConv2d(conv1_config, device)
 
         # conv2
         conv2_opts = layer_optimisations.conv2.copy()
-        self.conv2 = TTConv2D(
+        conv2_config = create_conv2d_configuration(
             conv_args.conv2,
             conv_pth.conv2,
             device=device,
@@ -123,10 +125,11 @@ class TtBottleneck:
             layer_path=f"{block_path}.conv2" if block_path else None,
             **conv2_opts,
         )
+        self.conv2 = TtConv2d(conv2_config, device)
 
         # conv3
         conv3_opts = layer_optimisations.conv3.copy()
-        self.conv3 = TTConv2D(
+        conv3_config = create_conv2d_configuration(
             conv_args.conv3,
             conv_pth.conv3,
             device=device,
@@ -135,10 +138,11 @@ class TtBottleneck:
             layer_path=f"{block_path}.conv3" if block_path else None,
             **conv3_opts,
         )
+        self.conv3 = TtConv2d(conv3_config, device)
 
         if is_downsample:
             downsample_opts = layer_optimisations.downsample.copy()
-            self.downsample = TTConv2D(
+            downsample_config = create_conv2d_configuration(
                 conv_args.downsample[0],
                 conv_pth.downsample,
                 device=device,
@@ -147,20 +151,21 @@ class TtBottleneck:
                 layer_path=f"{block_path}.downsample" if block_path else None,
                 **downsample_opts,
             )
+            self.downsample = TtConv2d(downsample_config, device)
 
     def __call__(self, x_identity):
-        x, out_ht, out_wdth = self.conv1(x_identity)
+        x = self.conv1(x_identity)
         if self.activation_dtype == ttnn.bfloat8_b:
             x_identity = ttnn.to_memory_config(x_identity, ttnn.DRAM_MEMORY_CONFIG, dtype=ttnn.bfloat8_b)
             x_identity = ttnn.add(x_identity, 0.0, dtype=ttnn.bfloat8_b)
 
         x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-        x, out_ht, out_wdth = self.conv2(x)
-        x, out_ht, out_wdth = self.conv3(x)
+        x = self.conv2(x)
+        x = self.conv3(x)
         x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
 
         if self.is_downsample:
-            x_identity, _, _ = self.downsample(x_identity)
+            x_identity = self.downsample(x_identity)
         x_identity = ttnn.to_memory_config(x_identity, ttnn.DRAM_MEMORY_CONFIG)
 
         x = ttnn.add(x, x_identity)

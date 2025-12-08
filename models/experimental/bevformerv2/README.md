@@ -47,7 +47,7 @@ models/
         │   ├── tt_resnet.py             # TT-NN ResNet-50 implementation
         │   ├── tt_fpn.py                # TT-NN FPN implementation
         │   ├── tt_bottleneck.py         # TT-NN ResNet bottleneck block
-        │   ├── utils.py                 # TT-NN utility functions (TTConv2D, etc.)
+        │   ├── utils.py                 # TT-NN utility functions (create_conv2d_configuration, etc.)
         │   └── model_configs.py         # Configuration helpers for BEVFormerV2
         ├── common.py                    # Weight loading and common utilities
         ├── README.md

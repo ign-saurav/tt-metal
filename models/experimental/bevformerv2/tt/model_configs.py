@@ -84,7 +84,7 @@ class BevFormerV2ModelConfig:
         self.layer_overrides[layer_path].update(overrides)
 
     # --------------------------------------------------------------------- #
-    # Query helpers used by TTConv2D
+    # Query helpers used by create_conv2d_configuration
     # --------------------------------------------------------------------- #
 
     def get_effective_conv_settings(self, layer_path: Optional[str]) -> BevFormerV2ConvDefaults:

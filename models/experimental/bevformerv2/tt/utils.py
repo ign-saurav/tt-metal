@@ -3,120 +3,146 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
+from models.tt_cnn.tt.builder import (
+    AutoShardedStrategyConfiguration,
+    BlockShardedStrategyConfiguration,
+    Conv2dConfiguration,
+    HeightShardedStrategyConfiguration,
+    L1FullSliceStrategyConfiguration,
+)
 
 from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
 
 
-class TTConv2D:
-    def __init__(
-        self,
-        conv,
-        conv_pth,
-        device=None,
-        activation=None,
-        activation_dtype=ttnn.bfloat16,
-        weights_dtype=ttnn.bfloat8_b,
-        shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-        is_blk=False,
-        dealloc_act=False,
-        act_block_h=None,
-        *,
-        # Optional configuration object and logical path for this conv layer.
-        model_configs: BevFormerV2ModelConfig | None = None,
-        layer_path: str | None = None,
-    ):
-        # Apply high‑level configuration (if provided) before constructing TTNN configs.
-        if model_configs is not None:
-            settings = model_configs.get_effective_conv_settings(layer_path)
-            # Config object supplies defaults; explicit arguments still win.
-            if activation_dtype is ttnn.bfloat16:
-                activation_dtype = settings.activation_dtype
-            if weights_dtype is ttnn.bfloat8_b:
-                weights_dtype = settings.weights_dtype
-            if shard_layout is ttnn.TensorMemoryLayout.HEIGHT_SHARDED:
-                shard_layout = settings.shard_layout
-            if act_block_h is None:
-                act_block_h = settings.act_block_h
-            if dealloc_act is False:
-                dealloc_act = settings.deallocate_activation
+def create_conv2d_configuration(
+    conv_args,
+    conv_pth,
+    device,
+    activation=None,
+    activation_dtype=ttnn.bfloat16,
+    weights_dtype=ttnn.bfloat8_b,
+    shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+    is_blk=False,
+    dealloc_act=False,
+    act_block_h=None,
+    model_configs: BevFormerV2ModelConfig | None = None,
+    layer_path: str | None = None,
+    **kwargs,
+) -> Conv2dConfiguration:
+    """Create a Conv2dConfiguration from conv_args and conv_pth, compatible with TtConv2d."""
+    # Apply high-level configuration (if provided) before constructing TTNN configs.
+    if model_configs is not None:
+        settings = model_configs.get_effective_conv_settings(layer_path)
+        # Config object supplies defaults; explicit arguments still win.
+        if activation_dtype is ttnn.bfloat16:
+            activation_dtype = settings.activation_dtype
+        if weights_dtype is ttnn.bfloat8_b:
+            weights_dtype = settings.weights_dtype
+        if shard_layout is ttnn.TensorMemoryLayout.HEIGHT_SHARDED:
+            shard_layout = settings.shard_layout
+        if act_block_h is None:
+            act_block_h = settings.act_block_h
+        if dealloc_act is False:
+            dealloc_act = settings.deallocate_activation
 
-        if is_blk:
-            shard_layout = ttnn.TensorMemoryLayout.BLOCK_SHARDED
-        self.conv = conv
-        self.device = device
-        self.in_channels = conv.in_channels
-        self.out_channels = conv.out_channels
-        self.kernel_size = conv.kernel_size
-        self.padding = conv.padding
-        self.stride = conv.stride
-        self.groups = conv.groups
-        self.activation_dtype = activation_dtype
+    if is_blk:
+        shard_layout = ttnn.TensorMemoryLayout.BLOCK_SHARDED
 
-        # If we have a config object, reuse its settings for low-level kernel config;
-        # otherwise fall back to the original hard-coded values.
-        if model_configs is not None:
-            settings = model_configs.get_effective_conv_settings(layer_path)
-            math_fidelity = settings.math_fidelity
-            fp32_dest_acc_en = settings.fp32_dest_acc_en
-            packer_l1_acc = settings.packer_l1_acc
-            math_approx_mode = settings.math_approx_mode
-            enable_act_double_buffer = settings.enable_act_double_buffer
-            reshard_if_not_optimal = settings.reshard_if_not_optimal
-        else:
-            math_fidelity = ttnn.MathFidelity.HiFi4
-            fp32_dest_acc_en = True
-            packer_l1_acc = True
-            math_approx_mode = False
-            enable_act_double_buffer = False
-            reshard_if_not_optimal = True
-
-        self.compute_config = ttnn.init_device_compute_kernel_config(
-            device.arch(),
-            math_fidelity=math_fidelity,
-            fp32_dest_acc_en=fp32_dest_acc_en,
-            packer_l1_acc=packer_l1_acc,
-            math_approx_mode=math_approx_mode,
-        )
-        self.conv_config = ttnn.Conv2dConfig(
-            weights_dtype=weights_dtype,
-            shard_layout=shard_layout,
-            deallocate_activation=dealloc_act,
-            enable_act_double_buffer=enable_act_double_buffer,
-            reshard_if_not_optimal=reshard_if_not_optimal,
-            activation=activation,
-        )
+    # Determine sharding strategy
+    if shard_layout == ttnn.TensorMemoryLayout.BLOCK_SHARDED:
+        sharding_strategy = BlockShardedStrategyConfiguration()
+    elif shard_layout == ttnn.TensorMemoryLayout.HEIGHT_SHARDED:
         if act_block_h is not None:
-            self.conv_config.act_block_h_override = act_block_h
-        if conv_pth.bias is not None:
-            self.bias = conv_pth.bias
+            sharding_strategy = HeightShardedStrategyConfiguration(act_block_h_override=act_block_h)
         else:
-            self.bias = None
+            sharding_strategy = HeightShardedStrategyConfiguration()
+    else:
+        sharding_strategy = AutoShardedStrategyConfiguration()
 
-        self.weight = conv_pth.weight
+    # Get compute config settings
+    if model_configs is not None:
+        settings = model_configs.get_effective_conv_settings(layer_path)
+        math_fidelity = settings.math_fidelity
+        fp32_dest_acc_en = settings.fp32_dest_acc_en
+        packer_l1_acc = settings.packer_l1_acc
+        enable_act_double_buffer = settings.enable_act_double_buffer
+    else:
+        math_fidelity = ttnn.MathFidelity.HiFi4
+        fp32_dest_acc_en = True
+        packer_l1_acc = True
+        enable_act_double_buffer = False
 
-    def __call__(self, x):
-        input_height = self.conv.input_height
-        input_width = self.conv.input_width
-        batch_size = self.conv.batch_size
-        [x, [output_height, output_width], [self.weight, self.bias]] = ttnn.conv2d(
-            input_tensor=x,
-            weight_tensor=self.weight,
-            bias_tensor=self.bias,
-            device=self.device,
-            in_channels=self.in_channels,
-            out_channels=self.out_channels,
-            input_height=input_height,
-            input_width=input_width,
-            batch_size=batch_size,
-            kernel_size=self.kernel_size,
-            stride=self.stride,
-            padding=self.padding,
-            conv_config=self.conv_config,
-            slice_config=ttnn.Conv2dL1FullSliceConfig,
-            groups=self.groups,
-            compute_config=self.compute_config,
-            return_output_dim=True,
-            return_weights_and_bias=True,
-            dtype=self.activation_dtype,
-        )
-        return x, output_height, output_width
+    # Extract conv parameters - handle both dict and object access
+    if isinstance(conv_args, dict):
+        # conv_args is already a dict with conv parameters
+        conv = conv_args
+    elif hasattr(conv_args, "conv"):
+        # conv_args is an object with a .conv attribute (e.g., FPN case)
+        conv = conv_args.conv
+    else:
+        # conv_args is the conv object itself
+        conv = conv_args
+
+    # Extract weight and bias from conv_pth (handles both dict and attribute access)
+    if isinstance(conv_pth, dict):
+        weight = conv_pth.get("weight", conv_pth)
+        bias = conv_pth.get("bias", None)
+    elif hasattr(conv_pth, "weight"):
+        weight = conv_pth.weight
+        bias = getattr(conv_pth, "bias", None)
+    else:
+        # conv_pth might be the weight tensor itself
+        weight = conv_pth
+        bias = None
+
+    # Extract conv parameters - handle both dict and object access
+    if isinstance(conv, dict):
+        input_height = conv.get("input_height")
+        input_width = conv.get("input_width")
+        in_channels = conv.get("in_channels")
+        out_channels = conv.get("out_channels")
+        batch_size = conv.get("batch_size")
+        kernel_size = conv.get("kernel_size")
+        stride = conv.get("stride")
+        padding = conv.get("padding")
+        dilation = conv.get("dilation", (1, 1))
+        groups = conv.get("groups", 1)
+    else:
+        # conv is an object with attributes
+        input_height = conv.input_height
+        input_width = conv.input_width
+        in_channels = conv.in_channels
+        out_channels = conv.out_channels
+        batch_size = conv.batch_size
+        kernel_size = conv.kernel_size
+        stride = conv.stride
+        padding = conv.padding
+        dilation = getattr(conv, "dilation", (1, 1))
+        groups = getattr(conv, "groups", 1)
+
+    return Conv2dConfiguration(
+        input_height=input_height,
+        input_width=input_width,
+        in_channels=in_channels,
+        out_channels=out_channels,
+        batch_size=batch_size,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+        groups=groups,
+        weight=weight,
+        bias=bias,
+        activation=activation,
+        activation_dtype=activation_dtype,
+        weights_dtype=weights_dtype,
+        output_dtype=activation_dtype,
+        sharding_strategy=sharding_strategy,
+        slice_strategy=L1FullSliceStrategyConfiguration(),
+        math_fidelity=math_fidelity,
+        fp32_dest_acc_en=fp32_dest_acc_en,
+        packer_l1_acc=packer_l1_acc,
+        enable_act_double_buffer=enable_act_double_buffer,
+        deallocate_activation=dealloc_act,
+        **kwargs,
+    )

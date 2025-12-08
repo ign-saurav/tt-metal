@@ -4,7 +4,8 @@
 import ttnn
 from ttnn import UnaryWithParam, UnaryOpType
 
-from models.experimental.bevformerv2.tt.utils import TTConv2D
+from models.tt_cnn.tt.builder import TtConv2d
+from models.experimental.bevformerv2.tt.utils import create_conv2d_configuration
 from models.experimental.bevformerv2.tt.tt_bottleneck import TtBottleneck, get_bottleneck_optimisation
 from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
 
@@ -31,7 +32,7 @@ class TtResNet50_MMD_C345:
         # ------------------------
         # Stem
         # ------------------------
-        self.conv1 = TTConv2D(
+        conv1_config = create_conv2d_configuration(
             conv_args.conv1,
             conv_pth.conv1,
             device=device,
@@ -40,6 +41,7 @@ class TtResNet50_MMD_C345:
             model_configs=model_configs,
             layer_path="stem.conv1",
         )
+        self.conv1 = TtConv2d(conv1_config, device)
 
         # ------------------------
         # Layer 1 (3 blocks)
@@ -200,7 +202,7 @@ class TtResNet50_MMD_C345:
         outputs = []
 
         # Stem: conv1
-        x, out_ht, out_wdth = self.conv1(x)
+        x = self.conv1(x)
         x = ttnn.sharded_to_interleaved(x)
 
         # MaxPool (handle batch splitting if required)
