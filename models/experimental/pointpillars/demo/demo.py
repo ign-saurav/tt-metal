@@ -27,7 +27,7 @@ from loguru import logger
 from typing import Dict, List, Optional, Tuple
 
 from ttnn.model_preprocessing import preprocess_model_parameters
-from models.experimental.pointpillars.tt.pointpillars import TtPointPillars
+from models.experimental.pointpillars.tt.pointpillars import TtPointPillars, PointPillarsPreprocessor
 from models.experimental.pointpillars.reference.model.pointpillars import PointPillars
 from models.experimental.pointpillars.tt.custom_preprocessor import create_custom_mesh_preprocessor
 from models.common.utility_functions import tt2torch_tensor
@@ -134,8 +134,18 @@ class PointPillarsDemo:
             device=self.device,
         )
 
-        self.ttnn_model = TtPointPillars(
-            nclasses=self.nclasses,
+        # self.ttnn_model = TtPointPillars(
+        #     nclasses=self.nclasses,
+        #     voxel_size=self.voxel_size,
+        #     point_cloud_range=self.point_cloud_range,
+        #     max_num_points=self.max_num_points,
+        #     max_voxels=self.max_voxels,
+        #     parameters=parameters,
+        #     device=self.device,
+        # )
+
+        # Create preprocessor
+        self.preprocessor = PointPillarsPreprocessor(
             voxel_size=self.voxel_size,
             point_cloud_range=self.point_cloud_range,
             max_num_points=self.max_num_points,
@@ -143,6 +153,14 @@ class PointPillarsDemo:
             parameters=parameters,
             device=self.device,
         )
+
+        # Create TTNN model
+        self.tt_model = TtPointPillars(
+            nclasses=self.nclasses,
+            parameters=parameters,
+            device=self.device,
+        )
+
         logger.info("TTNN model loaded successfully")
 
     def post_process(
@@ -207,7 +225,8 @@ class PointPillarsDemo:
             Tuple of (cls_pred, reg_pred, dir_pred) tensors converted back to PyTorch
         """
         with torch.no_grad():
-            tt_cls, tt_reg, tt_dir = self.ttnn_model.forward(batched_pts=[pc_torch])
+            pillar_features = self.preprocessor.forward(batched_pts=[pc_torch])
+            tt_cls, tt_reg, tt_dir = self.tt_model.forward(pillar_features)
 
         return tt_cls, tt_reg, tt_dir
 

@@ -20,8 +20,8 @@ class TtBackbone:
         parameters,
         device,
         batch_size=1,
-        input_height=496,
-        input_width=432,
+        input_height=1,
+        input_width=432 * 496,
         dtype=ttnn.bfloat16,
     ):
         self.device = device
@@ -83,15 +83,16 @@ class TtBackbone:
         block_idx,
     ):
         weight = parameters.weight
-        if isinstance(weight, ttnn.Tensor):
-            weight = ttnn.from_torch(ttnn.to_torch(weight), dtype=ttnn.bfloat16)
 
         bias = None
         if hasattr(parameters, "bias") and parameters.bias is not None:
-            bias_torch = ttnn.to_torch(parameters.bias).reshape(1, 1, 1, -1)
-            bias = ttnn.from_torch(bias_torch, dtype=ttnn.bfloat16)
+            bias = parameters.bias
 
         math_fidelity = ttnn.MathFidelity.HiFi4 if block_idx == 2 else ttnn.MathFidelity.HiFi2
+
+        # Reduce act_block_h_override for memory-intensive layers
+        # Smaller values use less L1 memory but may be slower
+        act_block_h = 32 if out_channels >= 128 else 64
 
         return Conv2dConfiguration(
             input_height=input_height,
@@ -108,11 +109,16 @@ class TtBackbone:
             activation_dtype=self.dtype,
             weights_dtype=self.dtype,
             output_dtype=self.dtype,
-            sharding_strategy=HeightShardedStrategyConfiguration(reshard_if_not_optimal=True),
+            sharding_strategy=HeightShardedStrategyConfiguration(
+                reshard_if_not_optimal=True, act_block_h_override=act_block_h  # Add this override
+            ),
             math_fidelity=math_fidelity,
             fp32_dest_acc_en=True,
             deallocate_activation=True,
             enable_act_double_buffer=False,
+            # Add these memory optimizations
+            enable_weights_double_buffer=False,
+            reallocate_halo_output=True,
         )
 
     def forward(self, x):

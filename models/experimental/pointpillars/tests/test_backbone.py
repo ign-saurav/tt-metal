@@ -69,7 +69,7 @@ def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, r
     )
 
     ttnn_input = ttnn.from_torch(
-        torch_input.permute(0, 2, 3, 1),  # Convert NCHW to NHWC
+        torch_input.permute(0, 2, 3, 1).reshape(batch_size, 1, height * width, in_channel),  # Convert NCHW to NHWC
         dtype=ttnn.bfloat16,
         device=device,
         layout=ttnn.ROW_MAJOR_LAYOUT,

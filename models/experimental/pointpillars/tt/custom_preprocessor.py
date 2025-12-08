@@ -217,25 +217,23 @@ def _extract_head(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
 
     # Process conv_cls
     parameters["conv_cls"] = {}
-    parameters["conv_cls"]["weight"] = ttnn.from_torch(model.conv_cls.weight, dtype=dtype, mesh_mapper=mesh_mapper)
+    parameters["conv_cls"]["weight"] = ttnn.from_torch(model.conv_cls.weight, dtype=dtype)
     bias = model.conv_cls.bias.reshape((1, 1, 1, -1))
-    parameters["conv_cls"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
+    parameters["conv_cls"]["bias"] = ttnn.from_torch(bias, dtype=dtype)
     parameters["conv_cls"]["conv_args"] = infer_module_args(model.conv_cls)
 
     # Process conv_reg
     parameters["conv_reg"] = {}
-    parameters["conv_reg"]["weight"] = ttnn.from_torch(model.conv_reg.weight, dtype=dtype, mesh_mapper=mesh_mapper)
+    parameters["conv_reg"]["weight"] = ttnn.from_torch(model.conv_reg.weight, dtype=dtype)
     bias = model.conv_reg.bias.reshape((1, 1, 1, -1))
-    parameters["conv_reg"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
+    parameters["conv_reg"]["bias"] = ttnn.from_torch(bias, dtype=dtype)
     parameters["conv_reg"]["conv_args"] = infer_module_args(model.conv_reg)
 
     # Process conv_dir_cls
     parameters["conv_dir_cls"] = {}
-    parameters["conv_dir_cls"]["weight"] = ttnn.from_torch(
-        model.conv_dir_cls.weight, dtype=dtype, mesh_mapper=mesh_mapper
-    )
+    parameters["conv_dir_cls"]["weight"] = ttnn.from_torch(model.conv_dir_cls.weight, dtype=dtype)
     bias = model.conv_dir_cls.bias.reshape((1, 1, 1, -1))
-    parameters["conv_dir_cls"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
+    parameters["conv_dir_cls"]["bias"] = ttnn.from_torch(bias, dtype=dtype)
     parameters["conv_dir_cls"]["conv_args"] = infer_module_args(model.conv_dir_cls)
 
     return parameters

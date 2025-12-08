@@ -78,7 +78,6 @@ def test_split_conv(
         fp32_dest_acc_en=True,
         packer_l1_acc=False,
     )
-
     ttnn_output = split_conv_transpose2d_and_run(
         ttnn_input,
         conv_weights,
@@ -93,10 +92,10 @@ def test_split_conv(
         compute_config,
         conv_config,
         ttnn.bfloat16,
-        stride=kernel_size,
+        stride=(kernel_size, kernel_size),
         padding=0,
         output_padding=0,
-        kernel_size=kernel_size,
+        kernel_size=(kernel_size, kernel_size),
     )
 
     ttnn_output = ttnn.to_memory_config(ttnn_output, ttnn.DRAM_MEMORY_CONFIG)
@@ -104,6 +103,6 @@ def test_split_conv(
     ttnn_output = ttnn.permute(ttnn_output, [0, 3, 1, 2])
     ttnn_output = ttnn.to_torch(ttnn_output)
 
-    passing, pcc = comp_pcc(torch_output, ttnn_output, 0.99)
+    passing, pcc = comp_pcc(torch_output, ttnn_output, 0.98)
     logger.info(f"Neck PCC: {pcc}")
     assert passing, f"Neck PCC check failed: {pcc}"

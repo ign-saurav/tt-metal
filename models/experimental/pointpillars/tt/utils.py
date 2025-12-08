@@ -255,7 +255,7 @@ class TtPointPillarsConvTranspose2D(LightweightModule):
             input_height = x.shape[1]
             input_width = x.shape[2]
 
-        [x, [_out_height, _out_width], [self.weight, self.bias]] = ttnn.conv_transpose2d(
+        [x, [_out_height, _out_width]] = ttnn.conv_transpose2d(
             input_tensor=x,
             weight_tensor=self.weight,
             bias_tensor=self.bias,
@@ -274,7 +274,7 @@ class TtPointPillarsConvTranspose2D(LightweightModule):
             conv_config=self.conv_config,
             compute_config=self.compute_config,
             return_output_dim=True,
-            return_weights_and_bias=True,
+            return_weights_and_bias=False,
             dtype=self.activation_dtype,
             memory_config=self.memory_config,
             mirror_kernel=True,
