@@ -2943,25 +2943,19 @@ class ConditionalChatTTS(PreTrainedModel):
                     past_key_values[i][1][:, :, : position_ids[:, 0], :].clone(),
                 )
             )
-        # Convert list of tuples to DynamicCache object (required by newer transformers versions)
-        past_key_values_cache = DynamicCache.from_legacy_cache(past_key_values_for_prefill)
-
         # Model forward
         outputs_prefill: BaseModelOutputWithPast = self.model(
             attention_mask=None,  # because for text, it is standard causal attention mask, do nothing
             position_ids=position_ids,  # position_ids denotes the position of new text tokens in the sequence
-            past_key_values=past_key_values_cache,  # `past_key_values` will be updated by the model
+            past_key_values=past_key_values_for_prefill,  # `past_key_values` will be updated by the model
             inputs_embeds=inputs_embeds,  # contains text and language model embedding
             use_cache=True,
             output_attentions=False,
             cache_position=position_ids,  # which new positions will use this cache, basically the same as position_ids
         )
 
-        # Get model updated KV Cache and convert back to list of tuples format
+        # Get model updated KV Cache
         past_key_values_for_prefill_updated = outputs_prefill.past_key_values
-        # Convert Cache object back to list of tuples for compatibility with existing code
-        if past_key_values_for_prefill_updated is not None and isinstance(past_key_values_for_prefill_updated, Cache):
-            past_key_values_for_prefill_updated = past_key_values_for_prefill_updated.to_legacy_cache()
 
         # Update generated KV Cache to input `past_key_values`
         for layer_idx in range(len(past_key_values)):
@@ -3025,24 +3019,17 @@ class ConditionalChatTTS(PreTrainedModel):
             streaming_text_chunk_size=self.streaming_text_chunk_size,
         )  # [1, 1, 1, past_key_values_length + input_len]
 
-        # Convert list of tuples to DynamicCache object (required by newer transformers versions)
-        past_key_values_cache = DynamicCache.from_legacy_cache(past_key_values)
-
         # Model forward
         outputs: BaseModelOutputWithPast = self.model(
             attention_mask=causal_mask,
             position_ids=position_ids,
-            past_key_values=past_key_values_cache,
+            past_key_values=past_key_values,
             inputs_embeds=inputs_embeds,
             use_cache=True,
             output_attentions=False,
             cache_position=cache_position,
         )
-        # Convert Cache object back to list of tuples for compatibility
-        past_key_values = outputs.past_key_values
-        if past_key_values is not None and isinstance(past_key_values, Cache):
-            past_key_values = past_key_values.to_legacy_cache()
-        return past_key_values
+        return outputs.past_key_values
 
     @torch.inference_mode()
     def generate(
@@ -3158,14 +3145,11 @@ class ConditionalChatTTS(PreTrainedModel):
                 streaming_text_chunk_size=self.streaming_text_chunk_size,
             )
 
-            # Convert list of tuples to DynamicCache object (required by newer transformers versions)
-            past_key_values_cache = DynamicCache.from_legacy_cache(past_key_values)
-
             # Model forward
             outputs: BaseModelOutputWithPast = self.model(
                 attention_mask=causal_mask,
                 position_ids=position_ids,
-                past_key_values=past_key_values_cache,
+                past_key_values=past_key_values,
                 inputs_embeds=inputs_embeds,
                 use_cache=True,
                 output_attentions=False,
@@ -3178,12 +3162,7 @@ class ConditionalChatTTS(PreTrainedModel):
             del causal_mask
 
             hidden_states = outputs.last_hidden_state
-
-            return hidden_states
-            # Convert Cache object back to list of tuples for compatibility
             past_key_values = outputs.past_key_values
-            if past_key_values is not None and isinstance(past_key_values, Cache):
-                past_key_values = past_key_values.to_legacy_cache()
 
             with P.cached():
                 logits = torch.empty(
