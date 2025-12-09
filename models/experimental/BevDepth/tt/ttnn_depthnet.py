@@ -109,6 +109,8 @@ class SELayer_TTNN:
         )
 
         # Reshape if needed
+        if x_se.is_sharded():
+            x_se = ttnn.sharded_to_interleaved(x_se, ttnn.DRAM_MEMORY_CONFIG)
         if len(x_se.shape) == 3:
             x_se = ttnn.reshape(x_se, (batch_size, height, width, channels))
         elif len(x_se.shape) == 4 and (x_se.shape[0] == 1 or x_se.shape[1] == 1):
@@ -457,6 +459,9 @@ class BasicBlock_TTNN:
                 shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
                 packer_l1_acc=False,
             )
+            # Convert sharded to interleaved if needed (must be done BEFORE reshape)
+            if out_conv1.is_sharded():
+                out_conv1 = ttnn.sharded_to_interleaved(out_conv1, ttnn.DRAM_MEMORY_CONFIG)
             if len(out_conv1.shape) == 3:
                 out_conv1 = ttnn.reshape(out_conv1, (batch_size, height, width, self.out_channels))
 
@@ -516,6 +521,10 @@ class BasicBlock_TTNN:
                 packer_l1_acc=False,
             )
 
+        # Convert sharded to interleaved if needed (must be done BEFORE reshape)
+        if out.is_sharded():
+            out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
+
         if len(out.shape) == 3:
             out = ttnn.reshape(out, (batch_size, height, width, self.out_channels))
 
@@ -549,6 +558,10 @@ class BasicBlock_TTNN:
             shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
             packer_l1_acc=False,
         )
+
+        # Convert sharded to interleaved if needed (must be done BEFORE reshape)
+        if out_conv2.is_sharded():
+            out_conv2 = ttnn.sharded_to_interleaved(out_conv2, ttnn.DRAM_MEMORY_CONFIG)
 
         if len(out_conv2.shape) == 3:
             out_conv2 = ttnn.reshape(out_conv2, (batch_size, height, width, self.out_channels))
@@ -1476,7 +1489,7 @@ class DepthNet_TTNN:
         in_channels=512,
         mid_channels=256,
         context_channels=512,
-        depth_channels=118,
+        depth_channels=112,  # len(torch.arange(2.0, 58.0, 0.5)) from d_bound
         model_config=None,
     ):
         self.device = device
@@ -1789,6 +1802,12 @@ class DepthNet_TTNN:
             packer_l1_acc=False,
         )
 
+        # Convert sharded to interleaved if needed (must be done BEFORE reshape)
+        if out_slice1.is_sharded():
+            out_slice1 = ttnn.sharded_to_interleaved(out_slice1, ttnn.DRAM_MEMORY_CONFIG)
+        if out_slice2.is_sharded():
+            out_slice2 = ttnn.sharded_to_interleaved(out_slice2, ttnn.DRAM_MEMORY_CONFIG)
+
         # Reshape outputs if needed
         if len(out_slice1.shape) == 3:
             out_slice1 = ttnn.reshape(out_slice1, (batch_size, height, width, self.mid_channels))
@@ -1909,6 +1928,10 @@ class DepthNet_TTNN:
             packer_l1_acc=False,
         )
 
+        # Convert sharded to interleaved if needed (must be done BEFORE reshape)
+        if context.is_sharded():
+            context = ttnn.sharded_to_interleaved(context, ttnn.DRAM_MEMORY_CONFIG)
+
         # Reshape flattened tensor to [batch, height, width, channels]
         if len(context.shape) == 4 and context.shape[0] == 1 and context.shape[1] == 1:
             context = ttnn.reshape(context, (batch_size, height, width, self.context_channels))
@@ -1933,10 +1956,6 @@ class DepthNet_TTNN:
         else:
             logger.error(f"Unexpected context tensor shape after conv2d: {context.shape}")
             raise RuntimeError(f"Cannot reshape unexpected context conv2d output shape: {context.shape}")
-
-        # Convert sharded to interleaved if needed
-        if context.is_sharded():
-            context = ttnn.sharded_to_interleaved(context, ttnn.DRAM_MEMORY_CONFIG)
 
         self._log_step_pcc("context_conv", context)
 
@@ -2141,6 +2160,10 @@ class DepthNet_TTNN:
                     packer_l1_acc=False,
                 )
 
+                # Convert sharded to interleaved if needed (must be done BEFORE reshape)
+                if depth.is_sharded():
+                    depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
+
                 if len(depth.shape) == 3:
                     depth = ttnn.reshape(depth, (batch_size, height, width, self.mid_channels))
 
@@ -2216,6 +2239,10 @@ class DepthNet_TTNN:
                 shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
                 packer_l1_acc=False,
             )
+
+        # Convert sharded to interleaved if needed (must be done BEFORE reshape)
+        if depth.is_sharded():
+            depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
 
         if len(depth.shape) == 3:
             depth = ttnn.reshape(depth, (batch_size, height, width, self.depth_channels))
@@ -2312,7 +2339,7 @@ def fuse_conv_bn_weights_unified(conv_weight, conv_bias, bn_weight, bn_bias, bn_
     return fused_weight, fused_bias
 
 
-def prepare_depthnet_parameters(state_dict, in_channels=512, mid_channels=256, depth_channels=118):
+def prepare_depthnet_parameters(state_dict, in_channels=512, mid_channels=256, depth_channels=112):
     class Parameters:
         pass
 

@@ -91,7 +91,7 @@ class TtBaseLSSFPN:
             in_channels=self.model_config.get("depthnet_in_channels", 512),
             mid_channels=self.model_config.get("depthnet_mid_channels", 256),
             context_channels=self.model_config.get("depthnet_context_channels", 512),
-            depth_channels=self.model_config.get("depthnet_depth_channels", 118),
+            depth_channels=self.model_config.get("depthnet_depth_channels", 112),
             model_config=self.model_config,
         )
 
@@ -377,10 +377,8 @@ class TtBaseLSSFPN:
                 ret_feature_list.append(feature_map)
 
         if is_return_depth:
-            # Aggregate features from all sweeps (simple mean for now)
-            feature_map = torch.stack(ret_feature_list, dim=0).mean(dim=0)
-            return feature_map.contiguous(), key_frame_res[1]
+            # Concatenate features from all sweeps along channel dimension (matching reference)
+            return torch.cat(ret_feature_list, 1), key_frame_res[1]
 
-        # Aggregate features from all sweeps (simple mean for now)
-        feature_map = torch.stack(ret_feature_list, dim=0).mean(dim=0)
-        return feature_map.contiguous()
+        # Concatenate features from all sweeps along channel dimension (matching reference)
+        return torch.cat(ret_feature_list, 1)

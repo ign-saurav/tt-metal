@@ -67,7 +67,7 @@ def extract_fpn_depthnet_state_dict(checkpoint_path):
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
     # Debug: Check checkpoint structure
-    logger.info(f"Checkpoint keys: {list(checkpoint.keys())}")
+    # logger.info(f"Checkpoint keys: {list(checkpoint.keys())}")
 
     if "state_dict" in checkpoint:
         state_dict = checkpoint["state_dict"]
@@ -109,7 +109,7 @@ def extract_fpn_depthnet_state_dict(checkpoint_path):
         for key, value in state_dict.items():
             if pattern in key:
                 fpn_depthnet_state[key] = value
-                logger.debug(f"Matched {key} with pattern {pattern}")
+                # logger.debug(f"Matched {key} with pattern {pattern}")
 
     del state_dict
     gc.collect()

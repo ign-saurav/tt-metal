@@ -425,7 +425,9 @@ class TtBEVDepthHead:
         # self.neck = TtSECONDFPN(self.neck_params, model_config, layer_optimisations)
         # Load BEVDepthLightningModel and use head.neck from it
         self.neck = SECONDFPN()
-        self.neck.load_checkpoint("../reference/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth")
+        self.neck.load_checkpoint(
+            "models/experimental/BevDepth/reference/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth"
+        )
         self.neck = self.neck.eval()
         # Initialize shared_conv as TTConv2D
         shared_conv_params = parameters.get("shared_conv", {})
