@@ -49,7 +49,6 @@ class SELayer_TTNN:
         """
         from models.experimental.BevDepth.tt.utils import ttnn_conv2d
 
-        # Ensure x_se is in correct format
         if x_se.is_sharded():
             x_se = ttnn.sharded_to_interleaved(x_se, ttnn.DRAM_MEMORY_CONFIG)
         if x_se.layout != ttnn.TILE_LAYOUT:
@@ -80,6 +79,8 @@ class SELayer_TTNN:
         )
 
         # Reshape if needed
+        if x_se.is_sharded():
+            x_se = ttnn.sharded_to_interleaved(x_se, ttnn.DRAM_MEMORY_CONFIG)
         if len(x_se.shape) == 3:
             x_se = ttnn.reshape(x_se, (batch_size, height, width, channels))
         elif len(x_se.shape) == 4 and (x_se.shape[0] == 1 or x_se.shape[1] == 1):
@@ -99,7 +100,7 @@ class SELayer_TTNN:
             kernel_size=(1, 1),
             stride=(1, 1),
             padding=(0, 0),
-            activation=None,  # No activation before sigmoid
+            activation=None,
             math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
             weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
             activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
@@ -193,19 +194,6 @@ class BasicBlock_TTNN:
 
                     logger.info("Created reference BasicBlock with unfused weights for PyTorch fallback")
                     self.use_ref_block = True
-
-                    # Debug logging (outside try block to avoid masking real errors)
-                    try:
-                        if parameters.norm1_weight is not None and parameters.norm1_mean is not None:
-                            logger.debug(
-                                f"  BN1: weight_norm={parameters.norm1_weight.norm().item():.6f}, mean_norm={parameters.norm1_mean.norm().item():.6f}"
-                            )
-                        if parameters.norm2_weight is not None and parameters.norm2_mean is not None:
-                            logger.debug(
-                                f"  BN2: weight_norm={parameters.norm2_weight.norm().item():.6f}, mean_norm={parameters.norm2_mean.norm().item():.6f}"
-                            )
-                    except Exception as log_e:
-                        logger.debug(f"Could not log BN norms: {log_e}")
                 except Exception as e:
                     logger.warning(f"Failed to create reference BasicBlock: {e}, will use fused weights with F.conv2d")
                     self.use_ref_block = False
@@ -246,38 +234,18 @@ class BasicBlock_TTNN:
                     ref_inputs = {}
                 ref_input = ref_inputs.get(self.block_name)
 
-            logger.debug(f"Using reference BasicBlock: input shape={x_torch.shape}, dtype={x_torch.dtype}")
-            # Compare input with reference if available (for debugging)
-            if ref_input is not None:
-                from models.common.utility_functions import comp_pcc
+            # Use reference input if available
+            test_with_ref_input = ref_input is not None
+            input_to_use = ref_input if test_with_ref_input else x_torch.float()
 
-                # Ensure same format: ref_input is [B, C, H, W]
-                input_pcc = comp_pcc(ref_input, x_torch.float())
-                input_pcc_val = input_pcc[1] if isinstance(input_pcc, tuple) else input_pcc
-                logger.info(f"  [{self.block_name}] Input PCC vs reference: {input_pcc_val:.6f}")
-                logger.info(
-                    f"  Input mean: TTNN={x_torch.float().mean().item():.6f}, Ref={ref_input.mean().item():.6f}"
-                )
-                logger.info(f"  Input std: TTNN={x_torch.float().std().item():.6f}, Ref={ref_input.std().item():.6f}")
-                # Use reference input to test if BasicBlock itself is correct
-                test_with_ref_input = True
-            else:
-                test_with_ref_input = False
-
-            # Use reference input if available to isolate BasicBlock issues
-            input_to_use = ref_input if (ref_input is not None and test_with_ref_input) else x_torch.float()
-
-            # Prefer reference model's actual BasicBlock instance over created one
+            # Prefer reference model's actual BasicBlock instance
             if ref_block_instance is not None:
-                logger.info(f"  [{self.block_name}] Using reference model's actual BasicBlock instance")
                 with torch.no_grad():
                     out_torch = ref_block_instance(input_to_use)
             elif hasattr(self, "use_ref_block") and self.use_ref_block:
-                logger.info(f"  [{self.block_name}] Using created reference BasicBlock")
                 with torch.no_grad():
                     out_torch = self.ref_block(input_to_use)
             else:
-                logger.warning("Reference BasicBlock not available, using F.conv2d with fused weights")
                 # Fallback: use F.conv2d with fused weights
                 import torch.nn.functional as F
 
@@ -321,10 +289,6 @@ class BasicBlock_TTNN:
                 out = F.relu(out)
 
                 out_torch = out
-
-            logger.debug(
-                f"Reference BasicBlock output: shape={out_torch.shape}, dtype={out_torch.dtype}, mean={out_torch.mean().item():.6f}, std={out_torch.std().item():.6f}"
-            )
 
             # Convert back to TTNN format [B, C, H, W] -> [B, H, W, C]
             out_torch = out_torch.permute(0, 2, 3, 1)
@@ -379,19 +343,10 @@ class BasicBlock_TTNN:
                     conv1_weight_ttnn = conv1_weight_ttnn.float()
 
                     conv1_bias_ttnn = self.params.conv1_bias
-                    logger.debug(
-                        f"[{self.block_name}] conv1_bias from params: type={type(conv1_bias_ttnn)}, is_none={conv1_bias_ttnn is None}"
-                    )
                     if conv1_bias_ttnn is not None:
                         if isinstance(conv1_bias_ttnn, ttnn.Tensor):
                             conv1_bias_ttnn = ttnn.to_torch(conv1_bias_ttnn)
                         conv1_bias_ttnn = conv1_bias_ttnn.float()
-                        logger.debug(
-                            f"[{self.block_name}] conv1_bias after conversion: shape={conv1_bias_ttnn.shape}, "
-                            f"norm={conv1_bias_ttnn.norm().item():.6f}, dtype={conv1_bias_ttnn.dtype}"
-                        )
-                    else:
-                        logger.warning(f"[{self.block_name}] conv1_bias is None!")
 
                     # Get reference weights and compute what fused weights should be
                     ref_conv1_weight = ref_block.conv1.weight.data.float()
@@ -1707,8 +1662,9 @@ class DepthNet_TTNN:
 
         # Compute MLP input following reference implementation
         intrins = intrin_mats[..., :3, :3]  # [B, 1, num_cams, 3, 3]
+        actual_batch_size = intrins.shape[0]  # Use actual batch size from mats, not passed batch_size
         num_cams = intrins.shape[2]
-        bda = bda_mat.view(batch_size, 1, 1, 4, 4).repeat(1, 1, num_cams, 1, 1)
+        bda = bda_mat.view(actual_batch_size, 1, 1, 4, 4).repeat(1, 1, num_cams, 1, 1)
 
         mlp_input = torch.cat(
             [
@@ -1732,7 +1688,7 @@ class DepthNet_TTNN:
                     ],
                     dim=-1,
                 ),
-                sensor2ego_mats.view(batch_size, 1, num_cams, -1),  # [B, 1, num_cams, 12] (3x4 matrix)
+                sensor2ego_mats.view(actual_batch_size, 1, num_cams, -1),  # [B, 1, num_cams, 12] (3x4 matrix)
             ],
             -1,
         )  # [B, 1, num_cams, 27] (15 from stack + 12 from sensor2ego)
@@ -1749,41 +1705,30 @@ class DepthNet_TTNN:
                 mlp_input = mlp_input * self.mlp_bn.weight
             if self.mlp_bn.bias is not None:
                 mlp_input = mlp_input + self.mlp_bn.bias
-            mlp_input = mlp_input.reshape(batch_size, 1, num_cams, -1)  # [B, 1, num_cams, 27]
+            mlp_input = mlp_input.reshape(actual_batch_size, 1, num_cams, -1)  # [B, 1, num_cams, 27]
 
         # Compute MLP outputs
         mlp_input_flat = mlp_input.reshape(-1, mlp_input.shape[-1])  # [B*num_cams, 27]
         if self.depth_mlp is not None:
             depth_se_mlp = self.depth_mlp(mlp_input_flat)  # [B*num_cams, mid_channels]
-            depth_se_mlp = depth_se_mlp.view(batch_size, 1, num_cams, -1)  # [B, 1, num_cams, mid_channels]
+            depth_se_mlp = depth_se_mlp.view(actual_batch_size, 1, num_cams, -1)  # [B, 1, num_cams, mid_channels]
         else:
             depth_se_mlp = None
 
         if self.context_mlp is not None:
             context_se_mlp = self.context_mlp(mlp_input_flat)  # [B*num_cams, mid_channels]
-            context_se_mlp = context_se_mlp.view(batch_size, 1, num_cams, -1)  # [B, 1, num_cams, mid_channels]
+            context_se_mlp = context_se_mlp.view(actual_batch_size, 1, num_cams, -1)  # [B, 1, num_cams, mid_channels]
         else:
             context_se_mlp = None
 
-        # Input from test should already be in TILE_LAYOUT and DRAM_MEMORY_CONFIG
-        # Only convert if absolutely necessary (if sharded)
-        # Avoid unnecessary memory config/layout conversions that might create unallocated tensors
         if x.is_sharded():
             # Convert sharded to interleaved DRAM
             x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
-        # Otherwise, assume input is already in the correct state (DRAM, INTERLEAVED, TILE_LAYOUT)
-        # and proceed directly to conv2d
 
-        # Reduce conv - ensure input is in DRAM to force DRAM slicing path
-        # This avoids L1 OOM errors for large tensors
         if x.is_sharded():
             x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
         elif x.is_allocated() and x.memory_config().buffer_type != ttnn.BufferType.DRAM:
             x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-
-        # Reduce conv: Use channel slicing to avoid L1 OOM (512->512 is too large)
-        # Split into 2 channel slices: 2x (256->512) operations, then sum
-        logger.debug(f"Before reduce_conv: x.shape={x.shape}")
 
         num_slices = 2
         channels_per_slice = self.in_channels // num_slices  # 256
@@ -1881,14 +1826,7 @@ class DepthNet_TTNN:
             x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
         if x.layout != ttnn.TILE_LAYOUT:
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-        logger.debug(
-            f"After reduce_conv: x.shape={x.shape}, x.is_allocated()={x.is_allocated()}, x.is_sharded()={x.is_sharded()}"
-        )
 
-        # ttnn.conv2d returns flattened tensor: [1, 1, batch*height*width, channels] or [1, batch*height*width, channels]
-        # However, channel slicing produces [batch, height, width, channels] directly, so check shape first
-        # We need to reshape it to [batch, height, width, channels] if it's flattened
-        # Convert sharded to interleaved DRAM if needed
         if x.is_sharded():
             x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
 
@@ -1924,10 +1862,14 @@ class DepthNet_TTNN:
 
         # Apply SELayer if available
         if self.context_se is not None and context_se_mlp is not None:
-            # Broadcast context_se_mlp from [B, 1, num_cams, mid_channels] to [B, H, W, mid_channels]
-            # For single camera, we can just expand: [B, 1, 1, mid_channels] -> [B, H, W, mid_channels]
-            context_se_torch = context_se_mlp[:, 0, 0, :]  # [B, mid_channels] for first camera
-            context_se_torch = context_se_torch.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, mid_channels]
+            # context_se_mlp has shape [actual_batch_size, 1, num_cams, mid_channels]
+            # We need to expand it to [batch_size, H, W, mid_channels] where batch_size = actual_batch_size * num_cams
+            # Reshape: [actual_B, 1, num_cams, C] -> [actual_B * num_cams, C] -> [batch_size, 1, 1, C] -> expand
+            actual_B = context_se_mlp.shape[0]
+            num_cams_mlp = context_se_mlp.shape[2]
+            context_se_flat = context_se_mlp[:, 0, :, :]  # [actual_B, num_cams, C]
+            context_se_flat = context_se_flat.reshape(actual_B * num_cams_mlp, -1)  # [actual_B * num_cams, C]
+            context_se_torch = context_se_flat.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, C]
             context_se_torch = context_se_torch.expand(batch_size, height, width, self.mid_channels)
 
             # Convert to TTNN tensor
@@ -1996,53 +1938,26 @@ class DepthNet_TTNN:
         if context.is_sharded():
             context = ttnn.sharded_to_interleaved(context, ttnn.DRAM_MEMORY_CONFIG)
 
-        # Log PCC after context_conv
         self._log_step_pcc("context_conv", context)
 
         # Depth branch: Apply SELayer before depth_conv
-        # Verify x is allocated before passing to SELayer/block1
-        logger.debug(
-            f"Before depth SELayer/block1: x.shape={x.shape}, x.is_allocated()={x.is_allocated()}, x.is_sharded()={x.is_sharded()}, expected_channels={self.mid_channels}"
-        )
-
-        # Verify shape is correct (should be mid_channels after reduce_conv)
         if x.shape[-1] != self.mid_channels:
-            logger.error(
-                f"Tensor x has wrong shape before depth SELayer/block1! Expected channels={self.mid_channels}, got {x.shape[-1]}"
-            )
-            logger.error(f"Full shape: {x.shape}. This suggests reduce_conv did not update x correctly.")
-            raise RuntimeError(
-                f"Tensor x has wrong shape before depth SELayer/block1. Expected channels={self.mid_channels}, got {x.shape[-1]}. "
-                f"Full shape: {x.shape}. This indicates reduce_conv did not update the tensor correctly."
-            )
+            raise RuntimeError(f"Wrong shape before depth SELayer: expected {self.mid_channels}, got {x.shape[-1]}")
 
-        if not x.is_allocated():
-            logger.error(
-                f"Tensor x is not allocated before depth SELayer/block1 - shape: {x.shape}, sharded: {x.is_sharded()}"
-            )
-            # Try to fix by converting sharded to interleaved if sharded
-            if x.is_sharded():
-                x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
-                logger.debug(
-                    f"After sharded_to_interleaved before depth SELayer/block1: x.shape={x.shape}, x.is_allocated()={x.is_allocated()}"
-                )
-            else:
-                # Not sharded and not allocated - this shouldn't happen
-                raise RuntimeError(
-                    f"Tensor x is not allocated and not sharded before depth SELayer/block1. "
-                    f"Shape: {x.shape}, Expected channels: {self.mid_channels}. "
-                    f"This indicates a bug in the processing pipeline."
-                )
-
-        # Ensure x is in TILE_LAYOUT before passing to SELayer/block1
+        if not x.is_allocated() and x.is_sharded():
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
         if x.layout != ttnn.TILE_LAYOUT:
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
 
         # Apply SELayer if available
         if self.depth_se is not None and depth_se_mlp is not None:
-            # Broadcast depth_se_mlp from [B, 1, num_cams, mid_channels] to [B, H, W, mid_channels]
-            depth_se_torch = depth_se_mlp[:, 0, 0, :]  # [B, mid_channels] for first camera
-            depth_se_torch = depth_se_torch.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, mid_channels]
+            # depth_se_mlp has shape [actual_batch_size, 1, num_cams, mid_channels]
+            # Reshape: [actual_B, 1, num_cams, C] -> [actual_B * num_cams, C] -> expand
+            actual_B = depth_se_mlp.shape[0]
+            num_cams_mlp = depth_se_mlp.shape[2]
+            depth_se_flat = depth_se_mlp[:, 0, :, :]  # [actual_B, num_cams, C]
+            depth_se_flat = depth_se_flat.reshape(actual_B * num_cams_mlp, -1)  # [actual_B * num_cams, C]
+            depth_se_torch = depth_se_flat.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, C]
             depth_se_torch = depth_se_torch.expand(batch_size, height, width, self.mid_channels)
 
             # Convert to TTNN tensor
@@ -2532,10 +2447,6 @@ def prepare_depthnet_parameters(state_dict, in_channels=512, mid_channels=256, d
         conv1_bias = state_dict.get(f"{prefix}depth_conv.{i}.conv1.bias", None)
         if conv1_bias is not None:
             conv1_bias = conv1_bias.float()
-        # Debug: Log original conv1 bias for first block
-        if i == 0:
-            conv1_bias_norm = conv1_bias.norm().item() if conv1_bias is not None else 0.0
-            logger.debug(f"Block {i} original conv1_bias: is_none={conv1_bias is None}, norm={conv1_bias_norm:.6f}")
 
         # Load BN1 parameters - checkpoint uses "bn1" not "norm1"
         # Try both formats: "bn1" (checkpoint format) and "norm1" (PyTorch model format)

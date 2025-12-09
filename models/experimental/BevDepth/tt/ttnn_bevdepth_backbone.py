@@ -78,9 +78,9 @@ class TtBaseLSSFPN:
         self.img_neck = SECONDFPN_TTNN(
             device=device,
             parameters=neck_parameters,
-            in_channels=self.model_config.get("neck_in_channels", [256, 512, 128]),
-            out_channels=self.model_config.get("neck_out_channels", [128, 128, 128]),
-            upsample_strides=self.model_config.get("neck_upsample_strides", [4, 2, 1]),
+            in_channels=self.model_config.get("neck_in_channels", [256, 512, 1024, 2048]),
+            out_channels=self.model_config.get("neck_out_channels", [128, 128, 128, 128]),
+            upsample_strides=self.model_config.get("neck_upsample_strides", [0.25, 0.5, 1, 2]),
             model_config=self.model_config,
         )
 
@@ -203,38 +203,31 @@ class TtBaseLSSFPN:
 
             # Get backbone features
             features = self.img_backbone(img_ttnn, input_height=imH, input_width=imW)
-            # Extract features for neck: layer1, layer2, layer3
-            neck_inputs = [
-                features.get("layer1"),
-                features.get("layer2"),
-                features.get("layer3"),
-            ]
 
-            # Convert to PyTorch for neck processing
-            neck_inputs_torch = []
-            for feat in neck_inputs:
+            # Convert features to TTNN format for neck, deallocating each immediately
+            layer_names = ["layer1", "layer2", "layer3", "layer4"]
+            neck_inputs_ttnn = []
+            for layer_name in layer_names:
+                feat = features.get(layer_name)
                 if feat is not None:
+                    # Convert to PyTorch (copies data off device)
                     feat_torch = ttnn.to_torch(feat)
-                    # Convert from NHWC to NCHW
-                    if len(feat_torch.shape) == 4:
-                        feat_torch = feat_torch.permute(0, 3, 1, 2)
-                    neck_inputs_torch.append(feat_torch)
+                    # Deallocate original immediately to free memory
+                    ttnn.deallocate(feat, force=True)
 
-            # Process through neck (convert to TTNN format)
-            if neck_inputs_torch:
-                # Convert to TTNN format for neck
-                neck_inputs_ttnn = []
-                for feat_torch in neck_inputs_torch:
-                    feat_nhwc = feat_torch.permute(0, 2, 3, 1)  # NCHW -> NHWC
+                    # Features are in NHWC, convert to TTNN for neck
                     feat_ttnn = ttnn.from_torch(
-                        feat_nhwc,
+                        feat_torch,
                         dtype=self.model_config["ACTIVATIONS_DTYPE"],
                         layout=ttnn.ROW_MAJOR_LAYOUT,
+                        device=self.device,
+                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
                     )
-                    feat_ttnn = ttnn.to_device(feat_ttnn, self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
+                    feat_ttnn = ttnn.to_layout(feat_ttnn, ttnn.TILE_LAYOUT)
                     neck_inputs_ttnn.append(feat_ttnn)
 
-                # Process through neck
+            # Process through neck
+            if neck_inputs_ttnn:
                 neck_output = self.img_neck(neck_inputs_ttnn, batch_size=1)
 
                 # Convert back to PyTorch

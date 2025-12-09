@@ -522,6 +522,9 @@ class ResNet50_BEVDepth:
         if self.return_block_outputs:
             features.update(block_outputs)
 
+        # x1 = ttnn.clone(x)
+        # ttnn.deallocate(x, force=True)
+
         # Layer2
         for i, block in enumerate(self.layer2):
             x, height, width = block(x, self.device, batch_size, height, width)
