@@ -389,11 +389,13 @@ def prepare_depthnet_parameters():
     checkpoint_path = download_bevdepth_weights()
     depthnet_state = extract_depthnet_state_dict(checkpoint_path)
 
+    # depth_channels = len(torch.arange(2.0, 58.0, 0.5)) = 112
+    # This must match d_bound in lss_conf
     return prepare_depthnet_parameters(
         depthnet_state,
         in_channels=512,
         mid_channels=512,
-        depth_channels=118,
+        depth_channels=112,
     )
 
 
@@ -518,7 +520,8 @@ model_config = {
     "depthnet_in_channels": 512,
     "depthnet_mid_channels": 512,
     "depthnet_context_channels": 80,
-    "depthnet_depth_channels": 118,
+    # depth_channels = len(torch.arange(2.0, 58.0, 0.5)) = 112 (from d_bound in lss_conf)
+    "depthnet_depth_channels": 112,
 }
 
 
