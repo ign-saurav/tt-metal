@@ -362,16 +362,23 @@ def prepare_backbone_parameters():
 
 
 def prepare_neck_parameters():
-    """Prepare parameters for SECONDFPN neck."""
+    """Prepare parameters for SECONDFPN neck (4 levels matching reference base_exp.py)."""
     logger.info("Preparing neck parameters...")
     from models.experimental.BevDepth.tt.ttnn_secondfpn import prepare_secondfpn_parameters
 
     checkpoint_path = download_bevdepth_weights()
     neck_state = extract_neck_state_dict(checkpoint_path)
 
-    in_channels = [256, 512, 128]
-    out_channels = [128, 128, 128]
-    return prepare_secondfpn_parameters(neck_state, in_channels=in_channels, out_channels=out_channels)
+    # Match reference base_exp.py: 4 levels from ResNet50 outputs
+    in_channels = [256, 512, 1024, 2048]
+    out_channels = [128, 128, 128, 128]
+    upsample_strides = [0.25, 0.5, 1, 2]
+    return prepare_secondfpn_parameters(
+        neck_state,
+        in_channels=in_channels,
+        out_channels=out_channels,
+        upsample_strides=upsample_strides,
+    )
 
 
 def prepare_depthnet_parameters():
@@ -499,13 +506,15 @@ class BackboneTestInfra:
 
 
 model_config = {
-    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
+    "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
     "WEIGHTS_DTYPE": ttnn.bfloat16,
     "ACTIVATIONS_DTYPE": ttnn.bfloat16,
     "batch_size": 1,
-    "neck_in_channels": [256, 512, 128],
-    "neck_out_channels": [128, 128, 128],
-    "neck_upsample_strides": [4, 2, 1],
+    # Match reference base_exp.py config
+    "neck_in_channels": [256, 512, 1024, 2048],
+    "neck_out_channels": [128, 128, 128, 128],
+    "neck_upsample_strides": [0.25, 0.5, 1, 2],
+    "use_torch_conv_transpose": True,  # Use PyTorch fallback for conv_transpose2d
     "depthnet_in_channels": 512,
     "depthnet_mid_channels": 512,
     "depthnet_context_channels": 80,
