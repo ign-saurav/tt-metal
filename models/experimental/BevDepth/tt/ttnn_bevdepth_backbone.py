@@ -74,7 +74,8 @@ class TtBaseLSSFPN:
             return_block_outputs=False,
         )
 
-        # Neck: SECONDFPN
+        # Neck: SECONDFPN - store parameters for creating fresh instances per image
+        self._neck_params = neck_parameters
         self.img_neck = SECONDFPN_TTNN(
             device=device,
             parameters=neck_parameters,
@@ -82,6 +83,7 @@ class TtBaseLSSFPN:
             out_channels=self.model_config.get("neck_out_channels", [128, 128, 128, 128]),
             upsample_strides=self.model_config.get("neck_upsample_strides", [0.25, 0.5, 1, 2]),
             model_config=self.model_config,
+            use_torch_conv_transpose=self.model_config.get("use_torch_conv_transpose", False),
         )
 
         # DepthNet: Depth estimation network
@@ -226,9 +228,18 @@ class TtBaseLSSFPN:
                     feat_ttnn = ttnn.to_layout(feat_ttnn, ttnn.TILE_LAYOUT)
                     neck_inputs_ttnn.append(feat_ttnn)
 
-            # Process through neck
+            # Process through neck - create fresh instance to avoid stale device state
             if neck_inputs_ttnn:
-                neck_output = self.img_neck(neck_inputs_ttnn, batch_size=1)
+                fresh_neck = SECONDFPN_TTNN(
+                    device=self.device,
+                    parameters=self._neck_params,
+                    in_channels=self.model_config.get("neck_in_channels", [256, 512, 1024, 2048]),
+                    out_channels=self.model_config.get("neck_out_channels", [128, 128, 128, 128]),
+                    upsample_strides=self.model_config.get("neck_upsample_strides", [0.25, 0.5, 1, 2]),
+                    model_config=self.model_config,
+                    use_torch_conv_transpose=self.model_config.get("use_torch_conv_transpose", False),
+                )
+                neck_output = fresh_neck(neck_inputs_ttnn, batch_size=1)
 
                 # Convert back to PyTorch
                 if isinstance(neck_output, list):

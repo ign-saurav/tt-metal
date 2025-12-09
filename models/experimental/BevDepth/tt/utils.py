@@ -26,6 +26,7 @@ def ttnn_conv2d(
     reallocate_halo_output=False,
     shard_layout=None,
     packer_l1_acc=False,
+    fp32_dest_acc_en=True,
     enable_act_double_buffer=False,
     enable_weights_double_buffer=False,
     slice_config=None,
@@ -74,6 +75,7 @@ def ttnn_conv2d(
     compute_config = ttnn.init_device_compute_kernel_config(
         device.arch(),
         math_fidelity=math_fidelity,
+        fp32_dest_acc_en=fp32_dest_acc_en,
         packer_l1_acc=packer_l1_acc,
     )
 

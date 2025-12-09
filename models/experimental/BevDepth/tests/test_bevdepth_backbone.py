@@ -502,6 +502,7 @@ class BackboneTestInfra:
         logger.info(f"PCC: {pcc_value:.6f}")
 
         # Assert PCC threshold
+        # Fix the pcc as it should be > 0.99
         assert pcc_value > 0.99, f"PCC {pcc_value:.6f} is below threshold 0.99"
 
         return pcc_value
@@ -516,7 +517,7 @@ model_config = {
     "neck_in_channels": [256, 512, 1024, 2048],
     "neck_out_channels": [128, 128, 128, 128],
     "neck_upsample_strides": [0.25, 0.5, 1, 2],
-    "use_torch_conv_transpose": True,  # Use PyTorch fallback for conv_transpose2d
+    "use_torch_conv_transpose": False,  # Use pure TTNN for conv_transpose2d
     "depthnet_in_channels": 512,
     "depthnet_mid_channels": 512,
     "depthnet_context_channels": 80,

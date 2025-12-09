@@ -1,10 +1,11 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+import torch
 import ttnn
 
 from models.experimental.BevDepth.tt.ttnn_bevdepth_backbone import TtBaseLSSFPN
-from models.experimental.BevDepth.tt.ttnn_bevdepth_head import TtBEVDepthHead
+from models.experimental.BevDepth.tt.ttnn_bevdepth_head import TtBEVDepthHead, head_optimisations
 
 
 class TtBEVDepth:
@@ -53,7 +54,6 @@ class TtBEVDepth:
             "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
         }
 
-        # Initialize backbone
         self.backbone = TtBaseLSSFPN(
             device=device,
             backbone_parameters=backbone_parameters,
@@ -63,11 +63,15 @@ class TtBEVDepth:
             model_config=self.model_config,
         )
 
-        # Initialize head
+        head_model_config = {
+            "MATH_FIDELITY": self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            "ACTIVATIONS_DTYPE": self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            "WEIGHTS_DTYPE": self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+        }
         self.head = TtBEVDepthHead(
             parameters=head_parameters,
-            model_config=self.model_config,
-            checkpoint_path=None,
+            model_config=head_model_config,
+            layer_optimisations=head_optimisations,
         )
 
     def __call__(self, x, mats_dict, timestamps=None):
@@ -87,18 +91,16 @@ class TtBEVDepth:
         Returns:
             preds: Detection predictions
         """
-        # Forward through backbone to get BEV features
         bev_feature = self.backbone(x, mats_dict, timestamps, is_return_depth=False)
 
-        # Convert BEV feature to TTNN format for head
-        # BEV feature is in NCHW format
-        bev_feature_ttnn = ttnn.from_torch(
-            bev_feature.permute(0, 2, 3, 1),  # NCHW -> NHWC
-            dtype=self.model_config["ACTIVATIONS_DTYPE"],
-            layout=ttnn.ROW_MAJOR_LAYOUT,
-        )
-        bev_feature_ttnn = ttnn.to_device(bev_feature_ttnn, self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
+        if isinstance(bev_feature, torch.Tensor):
+            bev_feature_ttnn = ttnn.from_torch(
+                bev_feature.permute(0, 2, 3, 1),
+                dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            )
+            bev_feature_ttnn = ttnn.to_device(bev_feature_ttnn, self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
+        else:
+            bev_feature_ttnn = bev_feature
 
-        # Forward through head
         preds = self.head(bev_feature_ttnn, device=self.device)
         return preds
