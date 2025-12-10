@@ -220,7 +220,7 @@ class HeadTestInfra:
 
 
 model_config = {
-    "MATH_FIDELITY": ttnn.MathFidelity.LoFi,
+    "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
     "WEIGHTS_DTYPE": ttnn.bfloat16,
     "ACTIVATIONS_DTYPE": ttnn.bfloat16,
 }

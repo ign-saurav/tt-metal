@@ -123,8 +123,8 @@ class TTConv2D:
         is_reshape=False,
         enable_act_double_buffer=False,
         enable_weights_double_buffer=False,
-        fp32_dest_acc_en=False,
-        packer_l1_acc=False,
+        fp32_dest_acc_en=True,
+        packer_l1_acc=True,
         math_approx_mode=False,
         input_channels_alignment=32,
         reshard_if_not_optimal=False,
@@ -277,16 +277,16 @@ class TTSplitConvTranspose2D:
         is_reshape=False,
         enable_act_double_buffer=False,
         enable_weights_double_buffer=False,
-        fp32_dest_acc_en=False,
-        packer_l1_acc=False,
+        fp32_dest_acc_en=True,
+        packer_l1_acc=True,
         math_approx_mode=False,
         input_channels_alignment=32,
         reshard_if_not_optimal=False,
         dtype=None,
         weights_dtype=None,
         math_fidelity=None,
-        split_in=1,  # Number of input channel splits
-        split_out=1,  # Number of output channel splits
+        split_in=1,
+        split_out=1,
     ) -> None:
         if isinstance(kernel_size, int):
             self.kernel_size = (kernel_size, kernel_size)

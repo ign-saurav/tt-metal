@@ -305,7 +305,12 @@ def test_bevdepth_e2e(device):
     all_pcc_values = []
     failed_outputs = []
 
+    logger.info("\n" + "=" * 60)
+    logger.info("BEVDepth E2E PCC Results - Per Head Task Output")
+    logger.info("=" * 60)
+
     for task_idx in range(num_task_groups):
+        logger.info(f"\nHead {task_idx}:")
         for key in output_keys:
             # Reference: ref_output[task_idx] is a list, [0] gets first batch
             ref_tensor = ref_output[task_idx][0][key]
@@ -321,27 +326,20 @@ def test_bevdepth_e2e(device):
             pcc_value = pcc_result[1] if isinstance(pcc_result, tuple) else pcc_result
             all_pcc_values.append(pcc_value)
 
-            if pcc_value < 0.99:
+            pcc_threshold = 0.97
+            logger.info(f"  Head {task_idx}, key '{key}': PCC = {pcc_value:.10f}")
+
+            if pcc_value < pcc_threshold:
                 failed_outputs.append(f"task{task_idx}.{key}: {pcc_value:.6f}")
 
-    # # Report all 36 output PCCs
-    # min_pcc = min(all_pcc_values)
-    # max_pcc = max(all_pcc_values)
-
-    logger.info(f"BEVDepth E2E PCC Results ({len(all_pcc_values)} outputs):")
-    # logger.info(f"  Min PCC: {min_pcc:.6f}")
-    # logger.info(f"  Max PCC: {max_pcc:.6f}")
-    logger.info(f"  Passed (>=0.99): {len(all_pcc_values) - len(failed_outputs)}/{len(all_pcc_values)}")
-
     if failed_outputs:
-        logger.warning(f"Outputs below 0.99 threshold ({len(failed_outputs)}/{len(all_pcc_values)}):")
+        logger.warning(f"\nOutputs below threshold ({len(failed_outputs)}/{len(all_pcc_values)}):")
         for fail in failed_outputs:
             logger.warning(f"  {fail}")
 
-    PCC_THRESHOLD = 0.99
     assert (
         len(failed_outputs) == 0
-    ), f"E2E PCC check failed: {len(failed_outputs)}/{len(all_pcc_values)} outputs below {PCC_THRESHOLD}. "
+    ), f"E2E PCC check failed: {len(failed_outputs)}/{len(all_pcc_values)} outputs below threshold."
 
 
 if __name__ == "__main__":

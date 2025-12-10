@@ -17,7 +17,8 @@ class SECONDFPN_TTNN:
         out_channels=[128, 128, 128, 128],
         upsample_strides=[0.25, 0.5, 1, 2],
         model_config=None,
-        use_torch_conv_transpose=False,  # Flag to use PyTorch fallback for conv_transpose2d
+        use_torch_conv_transpose=False,
+        use_torch_conv2d_fallback=True,
     ):
         self.device = device
         self.in_channels = in_channels
@@ -25,6 +26,7 @@ class SECONDFPN_TTNN:
         self.upsample_strides = upsample_strides
         self.num_levels = len(in_channels)
         self.use_torch_conv_transpose = use_torch_conv_transpose
+        self.use_torch_conv2d_fallback = use_torch_conv2d_fallback
 
         self.model_config = model_config or {
             "WEIGHTS_DTYPE": ttnn.bfloat16,
@@ -33,7 +35,11 @@ class SECONDFPN_TTNN:
         }
 
         self.deblocks = parameters.deblocks
-        logger.info(f"SECONDFPN init: {self.num_levels} levels, use_torch_conv_transpose={use_torch_conv_transpose}")
+        logger.info(
+            f"SECONDFPN init: {self.num_levels} levels, "
+            f"use_torch_conv_transpose={use_torch_conv_transpose}, "
+            f"use_torch_conv2d_fallback={use_torch_conv2d_fallback}"
+        )
 
     def __call__(self, x, batch_size=1):
         ups = []
@@ -200,7 +206,9 @@ class SECONDFPN_TTNN:
                         target_height = conv_out_height
                         target_width = conv_out_width
 
-                    use_pytorch_conv2d = kernel_size[0] == conv_stride and kernel_size[1] == conv_stride
+                    # kernel==stride case has precision issues in TTNN, use PyTorch fallback if enabled
+                    kernel_equals_stride = kernel_size[0] == conv_stride and kernel_size[1] == conv_stride
+                    use_pytorch_conv2d = kernel_equals_stride and self.use_torch_conv2d_fallback
 
                     if use_pytorch_conv2d:
                         if isinstance(feat, ttnn.Tensor):
@@ -239,7 +247,7 @@ class SECONDFPN_TTNN:
                         conv_out_height = out.shape[2]
                         conv_out_width = out.shape[3]
                     else:
-                        feat, [out_h, out_w], [ret_w, ret_b] = ttnn.conv2d(
+                        result = ttnn.conv2d(
                             input_tensor=feat,
                             weight_tensor=weight_tensor,
                             bias_tensor=bias_tensor,
@@ -255,11 +263,12 @@ class SECONDFPN_TTNN:
                             conv_config=conv_config,
                             compute_config=compute_config,
                             return_output_dim=True,
-                            return_weights_and_bias=True,
+                            return_weights_and_bias=False,
                             dtype=self.model_config["ACTIVATIONS_DTYPE"],
                         )
-                        conv_out_height = out_h
-                        conv_out_width = out_w
+                        feat = result[0]
+                        conv_out_height = result[1][0]
+                        conv_out_width = result[1][1]
 
                         if feat.is_sharded():
                             feat = ttnn.sharded_to_interleaved(feat, ttnn.DRAM_MEMORY_CONFIG)
