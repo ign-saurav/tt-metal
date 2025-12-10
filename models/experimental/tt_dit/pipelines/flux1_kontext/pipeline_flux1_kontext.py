@@ -539,9 +539,9 @@ class Flux1KontextPipeline:
                 _, prompt_sequence_length, _ = prompt_embeds.shape
                 text_ids = torch.zeros([prompt_sequence_length, 3])
 
+            self.img_to_img = image is not None
             with timer.time_section("input_image_preprocessing") if timer else nullcontext():
                 logger.info("preprocessing image prompt...")
-
                 if image is not None and not (
                     isinstance(image, torch.Tensor) and image.size(1) == self._latent_channels
                 ):
@@ -568,32 +568,24 @@ class Flux1KontextPipeline:
                     width,
                     torch.Generator().manual_seed(seed),
                 )
-                if image_ids is not None:
-                    latent_ids = torch.cat([latent_ids, image_ids], dim=0)  # dim 0 is sequence dimension
+
+            self.output_latents_seq_length = latents.shape[1]
+            if image_ids is not None:
+                latents = torch.cat([latents, image_latents], dim=1)
+                latent_ids = torch.cat([latent_ids, image_ids], dim=0)  # dim 0 is sequence dimension
+            spatial_seq_length = latents.shape[1]
 
             logger.info("preparing timesteps...")
-            spatial_seq_length = latents.shape[1]
-            self.latents_seq_length = latents.shape[1]
-            if image_ids is not None:
-                spatial_seq_length += image_latents.shape[1]
             self._scheduler.set_timesteps(
                 sigmas=np.linspace(1.0, 1 / num_inference_steps, num_inference_steps),
                 mu=_calculate_shift(
-                    latents.shape[1],
+                    self.output_latents_seq_length,
                     self._scheduler.config.get("base_image_seq_len", 256),
                     self._scheduler.config.get("max_image_seq_len", 4096),
                     self._scheduler.config.get("base_shift", 0.5),
                     self._scheduler.config.get("max_shift", 1.15),
                 ),
             )
-            self.image_ids = image_ids
-            self.original_latents_shape = list(latents.shape)
-            if image_ids is None:
-                self.original_latents_shape[1] = (
-                    self.original_latents_shape[1] // self._submesh_devices[0].shape[sp_axis]
-                )
-            if image_ids is not None:
-                latents = torch.cat([latents, image_latents], dim=1)
 
             guidance = (
                 torch.full([prompt_count * num_images_per_prompt], fill_value=guidance_scale)
@@ -761,14 +753,9 @@ class Flux1KontextPipeline:
 
                     tt_timestep_list = []
                     tt_sigma_difference_list = []
-                    for submesh_device in self._submesh_devices:
-                        timestep_shape = [prompt_count * num_images_per_prompt, 1]
-                        # When cfg_parallel > 1, each submesh handles one prompt (negative or positive)
-                        # So we don't multiply by 2 in that case
-                        if cfg_enabled and not self._parallel_config.cfg_parallel.factor > 1:
-                            timestep_shape[0] *= 2
+                    for i, submesh_device in enumerate(self._submesh_devices):
                         tt_timestep = ttnn.full(
-                            timestep_shape,
+                            [tt_pooled_prompt_embeds_list[i].shape[0], 1],
                             fill_value=t,
                             layout=ttnn.TILE_LAYOUT,
                             dtype=ttnn.float32,
@@ -777,8 +764,7 @@ class Flux1KontextPipeline:
                         tt_timestep_list.append(tt_timestep)
 
                         tt_sigma_difference = ttnn.full(
-                            # tt_initial_latents.shape,
-                            self.original_latents_shape,
+                            [tt_pooled_prompt_embeds_list[i].shape[0], 1],
                             fill_value=sigma_difference,
                             layout=ttnn.TILE_LAYOUT,
                             dtype=ttnn.bfloat16,
@@ -820,8 +806,11 @@ class Flux1KontextPipeline:
                 )
 
                 torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
-                if self.image_ids is not None:
-                    torch_latents = torch_latents[:, : self.latents_seq_length]
+
+                # We need to slice the output latents since TTNN persistant buffer is created for combined latents
+                if self.img_to_img:
+                    torch_latents = torch_latents[:, : self.output_latents_seq_length]
+
                 torch_latents = (torch_latents / self._latents_scaling) + self._latents_shift
                 torch_latents = _unpack_latents(torch_latents, height, width, self._vae_scale_factor)
 
@@ -879,16 +868,15 @@ class Flux1KontextPipeline:
             prompt_sequence_length=prompt_sequence_length,
         )
 
-        if self.image_ids is not None:
+        if self.img_to_img:
             if tuple(self._submesh_devices[submesh_index].shape)[0] > 1:
                 # Collects shards from all 8 devices along mesh_axis=0 in 2x4 mesh
-                # self.synchronize_devices()
                 noise_pred = ttnn.all_gather(
                     noise_pred,
                     dim=1,
                     cluster_axis=self._parallel_config.sequence_parallel.mesh_axis,  # axis=0 for sequence parallel
                 )
-            noise_pred = noise_pred[:, : self.latents_seq_length]
+            noise_pred = noise_pred[:, : self.output_latents_seq_length]
         return noise_pred
 
     def _step(
@@ -1031,7 +1019,7 @@ class Flux1KontextPipeline:
             ttnn.synchronize_device(submesh_device)  # Helps with accurate time profiling.
             sigma_difference_device = sigma_difference_device_list[submesh_id]
             ttnn.multiply_(sigma_difference_device, noise_pred_list[submesh_id])
-            if self.image_ids is not None:
+            if self.img_to_img:
                 if tuple(submesh_device.shape)[0] > 1:
                     # Collects shards from all 8 devices along mesh_axis=0 in 2x4 mesh
                     ttnn.synchronize_device(submesh_device)  # Helps with accurate time profiling.
@@ -1041,8 +1029,8 @@ class Flux1KontextPipeline:
                         cluster_axis=self._parallel_config.sequence_parallel.mesh_axis,  # axis=0 for sequence parallel
                         topology=self._ccl_managers[submesh_id].topology,
                     )
-                randn_latents = latents[submesh_id][:, : self.latents_seq_length]
-                spatial_latents = latents[submesh_id][:, self.latents_seq_length :]
+                randn_latents = latents[submesh_id][:, : self.output_latents_seq_length]
+                spatial_latents = latents[submesh_id][:, self.output_latents_seq_length :]
                 ttnn.add_(randn_latents, sigma_difference_device)
                 latents[submesh_id] = ttnn.concat([randn_latents, spatial_latents], dim=1)
                 if tuple(submesh_device.shape)[0] > 1:
