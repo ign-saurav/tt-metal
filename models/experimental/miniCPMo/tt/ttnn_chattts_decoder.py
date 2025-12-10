@@ -333,7 +333,9 @@ class TtnnChatTTSDecoder:
         inputs_embeds: ttnn.Tensor,
         attention_mask: Optional[ttnn.Tensor] = None,
         position_ids: Optional[ttnn.Tensor] = None,
-    ) -> ttnn.Tensor:
+        past_key_values: Optional[List[tuple]] = None,
+        use_cache: bool = False,
+    ) -> tuple:
         """
         Forward pass of ChatTTS decoder.
 
@@ -341,9 +343,11 @@ class TtnnChatTTSDecoder:
             inputs_embeds: Input embeddings [batch_size, seq_len, hidden_size]
             attention_mask: Attention mask [batch_size, 1, seq_len, seq_len]
             position_ids: Position IDs [batch_size, seq_len]
+            past_key_values: List of (key, value) tuples for each layer
+            use_cache: Whether to return key/value states for caching
 
         Returns:
-            last_hidden_state: Output hidden states [batch_size, seq_len, hidden_size]
+            tuple: (last_hidden_state, past_key_values) where past_key_values is list of (k,v) per layer if use_cache
         """
         batch_size, seq_len, hidden_size = inputs_embeds.shape
         logger.info(
@@ -351,12 +355,18 @@ class TtnnChatTTSDecoder:
         )
 
         hidden_states = inputs_embeds
+        new_past_key_values = [] if use_cache else None
 
         # Apply transformer layers
         for layer_idx, layer_weights in enumerate(self.layers):
             logger.debug(f"[TTNN ChatTTS Decoder] Processing layer {layer_idx}/{self.num_hidden_layers}")
 
-            hidden_states = self._transformer_layer(hidden_states, layer_weights, attention_mask, position_ids)
+            past_key_value = past_key_values[layer_idx] if past_key_values is not None else None
+            hidden_states, new_past_key_value = self._transformer_layer(
+                hidden_states, layer_weights, attention_mask, position_ids, past_key_value, use_cache
+            )
+            if use_cache:
+                new_past_key_values.append(new_past_key_value)
 
         # Final RMS norm
         logger.debug("[TTNN ChatTTS Decoder] Applying final RMS norm")
@@ -368,7 +378,7 @@ class TtnnChatTTSDecoder:
         )
 
         logger.info(f"[TTNN ChatTTS Decoder] Forward pass completed: output shape={hidden_states.shape}")
-        return hidden_states
+        return hidden_states, new_past_key_values
 
     def _transformer_layer(
         self,
@@ -376,7 +386,9 @@ class TtnnChatTTSDecoder:
         layer_weights: dict,
         attention_mask: Optional[ttnn.Tensor] = None,
         position_ids: Optional[ttnn.Tensor] = None,
-    ) -> ttnn.Tensor:
+        past_key_value: Optional[tuple] = None,
+        use_cache: bool = False,
+    ) -> tuple:
         """
         Process one transformer layer.
 
@@ -385,6 +397,9 @@ class TtnnChatTTSDecoder:
         2. Self-attention + residual
         3. RMSNorm (post-attention)
         4. MLP + residual
+
+        Returns:
+            tuple: (hidden_states, past_key_value)
         """
         logger.debug("[TTNN ChatTTS Decoder] Transformer layer: Input RMS norm")
         residual = hidden_states
@@ -399,7 +414,9 @@ class TtnnChatTTSDecoder:
 
         # 2. Self-attention
         logger.debug("[TTNN ChatTTS Decoder] Transformer layer: Self-attention")
-        attn_output = self._self_attention(hidden_states, layer_weights["self_attn"], attention_mask)
+        attn_output, new_past_key_value = self._self_attention(
+            hidden_states, layer_weights["self_attn"], attention_mask, past_key_value, use_cache
+        )
 
         # 3. Residual connection
         hidden_states = ttnn.add(attn_output, residual, memory_config=get_activations_memory_config())
@@ -422,16 +439,150 @@ class TtnnChatTTSDecoder:
         hidden_states = ttnn.add(mlp_output, residual, memory_config=get_activations_memory_config())
 
         logger.debug("[TTNN ChatTTS Decoder] Transformer layer: Completed")
-        return hidden_states
+        return hidden_states, new_past_key_value
+
+    # def _self_attention(
+    #     self,
+    #     hidden_states: ttnn.Tensor,
+    #     attn_weights: dict,
+    #     attention_mask: Optional[ttnn.Tensor] = None,
+    #     past_key_value: Optional[tuple] = None,
+    #     use_cache: bool = False,
+    # ) -> tuple:
+    #     """
+    #     Self-attention mechanism with optional KV caching.
+
+    #     Returns:
+    #         tuple: (attn_output, past_key_value) where past_key_value is (key, value) if use_cache else None
+    #     """
+    #     batch_size, seq_len, _ = hidden_states.shape
+    #     logger.debug(f"[TTNN ChatTTS Decoder] Self-attention: batch_size={batch_size}, seq_len={seq_len}")
+
+    #     # Reshape to 4D for ttnn.linear
+    #     hidden_states_4d = ttnn.unsqueeze(hidden_states, dim=1)  # [B, 1, S, H]
+
+    #     # Query projection
+    #     logger.debug("[TTNN ChatTTS Decoder] Self-attention: Q projection")
+    #     query = ttnn.linear(
+    #         hidden_states_4d,
+    #         attn_weights["q_proj"]["weight"],
+    #         bias=None,
+    #         compute_kernel_config=self.compute_kernel_config_hifi4,
+    #         memory_config=get_activations_memory_config(),
+    #     )
+
+    #     # Key projection
+    #     key = ttnn.linear(
+    #         hidden_states_4d,
+    #         attn_weights["k_proj"]["weight"],
+    #         bias=None,
+    #         compute_kernel_config=self.compute_kernel_config_hifi4,
+    #         memory_config=get_activations_memory_config(),
+    #     )
+
+    #     # Value projection
+    #     value = ttnn.linear(
+    #         hidden_states_4d,
+    #         attn_weights["v_proj"]["weight"],
+    #         bias=None,
+    #         compute_kernel_config=self.compute_kernel_config_hifi4,
+    #         memory_config=get_activations_memory_config(),
+    #     )
+
+    #     # Squeeze back to 3D
+    #     query = ttnn.squeeze(query, dim=1)  # [B, S, H]
+    #     key = ttnn.squeeze(key, dim=1)  # [B, S, H]
+    #     value = ttnn.squeeze(value, dim=1)  # [B, S, H]
+
+    #     # Reshape for multi-head attention
+    #     logger.debug(f"[TTNN ChatTTS Decoder] Self-attention: Reshaping for {self.num_attention_heads} heads")
+    #     query = self._reshape_for_attention(query, self.num_attention_heads)
+    #     key = self._reshape_for_attention(key, self.num_attention_heads)
+    #     value = self._reshape_for_attention(value, self.num_attention_heads)
+
+    #     # KV caching: concatenate with past key/value if provided
+    #     if past_key_value is not None:
+    #         past_key, past_value = past_key_value
+    #         # Convert from torch tensor to ttnn if needed
+    #         if not isinstance(past_key, ttnn.Tensor):
+    #             past_key = torch_to_ttnn(past_key, self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    #         if not isinstance(past_value, ttnn.Tensor):
+    #             past_value = torch_to_ttnn(past_value, self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    #         key = ttnn.concat([past_key, key], dim=2)
+    #         value = ttnn.concat([past_value, value], dim=2)
+
+    #     # Store current key/value for next iteration if caching
+    #     new_past_key_value = (key, value) if use_cache else None
+
+    #     # SDPA requires all inputs to be in DRAM
+    #     query = ttnn.to_memory_config(query, ttnn.DRAM_MEMORY_CONFIG)
+    #     key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
+    #     value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
+
+    #     # Scaled dot-product attention
+    #     logger.debug("[TTNN ChatTTS Decoder] Self-attention: Scaled dot-product attention")
+    #     # attn_output = ttnn.transformer.scaled_dot_product_attention(
+    #     #     query,
+    #     #     key,
+    #     #     value,
+    #     #     attn_mask=attention_mask,
+    #     #     is_causal=True,  # Causal attention for autoregressive generation
+    #     #     scale=1.0 / (self.head_dim**0.5),
+    #     #     compute_kernel_config=self.compute_kernel_config_sdpa,
+    #     #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    #     # )
+    #     program_config = ttnn.SDPAProgramConfig(
+    #         compute_with_storage_grid_size=self.device.compute_with_storage_grid_size(),
+    #         q_chunk_size=self.num_attention_heads,  # Not used in decode
+    #         k_chunk_size=128,  # Must be multiple of 32
+    #         exp_approx_mode=False,
+    #     )
+    #     import pdb; pdb.set_trace()
+    #     attn_output = ttnn.transformer.scaled_dot_product_attention_decode(
+    #         query,
+    #         key,
+    #         value,
+    #         is_causal=True,
+    #         cur_pos=[seq_len - 1],
+    #         scale=1.0 / (self.head_dim**0.5),
+    #         program_config=program_config,
+    #         compute_kernel_config=self.compute_kernel_config_sdpa,
+    #         memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    #     )
+    #     # Reshape back from attention format
+    #     attn_output = self._reshape_from_attention(attn_output, seq_len)
+
+    #     # Output projection (reshape to 4D for ttnn.linear)
+    #     logger.debug("[TTNN ChatTTS Decoder] Self-attention: Output projection")
+    #     attn_output_4d = ttnn.unsqueeze(attn_output, dim=1)  # [B, 1, S, H]
+
+    #     attn_output = ttnn.linear(
+    #         attn_output_4d,
+    #         attn_weights["o_proj"]["weight"],
+    #         bias=None,
+    #         compute_kernel_config=self.compute_kernel_config_hifi4,
+    #         memory_config=get_activations_memory_config(),
+    #     )
+
+    #     # Squeeze back to 3D
+    #     attn_output = ttnn.squeeze(attn_output, dim=1)  # [B, S, H]
+
+    #     logger.debug(f"[TTNN ChatTTS Decoder] Self-attention: Completed, output_shape={attn_output.shape}")
+    #     return attn_output, new_past_key_value
 
     def _self_attention(
         self,
         hidden_states: ttnn.Tensor,
         attn_weights: dict,
         attention_mask: Optional[ttnn.Tensor] = None,
-    ) -> ttnn.Tensor:
+        past_key_value: Optional[tuple] = None,
+        use_cache: bool = False,
+    ) -> tuple:
         """
-        Self-attention mechanism.
+        Self-attention mechanism with optional KV caching for decode mode.
+
+        Returns:
+            tuple: (attn_output, past_key_value) where past_key_value is (key, value) if use_cache else None
         """
         batch_size, seq_len, _ = hidden_states.shape
         logger.debug(f"[TTNN ChatTTS Decoder] Self-attention: batch_size={batch_size}, seq_len={seq_len}")
@@ -439,8 +590,7 @@ class TtnnChatTTSDecoder:
         # Reshape to 4D for ttnn.linear
         hidden_states_4d = ttnn.unsqueeze(hidden_states, dim=1)  # [B, 1, S, H]
 
-        # Query projection
-        logger.debug("[TTNN ChatTTS Decoder] Self-attention: Q projection")
+        # Project Q, K, V separately
         query = ttnn.linear(
             hidden_states_4d,
             attn_weights["q_proj"]["weight"],
@@ -449,7 +599,6 @@ class TtnnChatTTSDecoder:
             memory_config=get_activations_memory_config(),
         )
 
-        # Key projection
         key = ttnn.linear(
             hidden_states_4d,
             attn_weights["k_proj"]["weight"],
@@ -458,7 +607,6 @@ class TtnnChatTTSDecoder:
             memory_config=get_activations_memory_config(),
         )
 
-        # Value projection
         value = ttnn.linear(
             hidden_states_4d,
             attn_weights["v_proj"]["weight"],
@@ -472,32 +620,90 @@ class TtnnChatTTSDecoder:
         key = ttnn.squeeze(key, dim=1)  # [B, S, H]
         value = ttnn.squeeze(value, dim=1)  # [B, S, H]
 
-        # Reshape for multi-head attention
-        logger.debug(f"[TTNN ChatTTS Decoder] Self-attention: Reshaping for {self.num_attention_heads} heads")
-        query = self._reshape_for_attention(query, self.num_attention_heads)
-        key = self._reshape_for_attention(key, self.num_attention_heads)
-        value = self._reshape_for_attention(value, self.num_attention_heads)
+        # Concatenate QKV for proper reshaping
+        xqkv_fused = ttnn.concat([query, key, value], dim=-1)
+        ttnn.deallocate(query)
+        ttnn.deallocate(key)
+        ttnn.deallocate(value)
+
+        # Reshape to 4D format expected by nlp_create_qkv_heads_decode
+        xqkv_fused = ttnn.reshape(xqkv_fused, (1, 1, batch_size, xqkv_fused.shape[-1]))
+
+        # Reshape using dedicated decode operation that handles layouts correctly
+        query, key, value = ttnn.experimental.nlp_create_qkv_heads_decode(
+            xqkv_fused,
+            num_heads=self.num_attention_heads,
+            num_kv_heads=self.num_attention_heads,
+            memory_config=ttnn.L1_HEIGHT_SHARDED_MEMORY_CONFIG,
+        )
+        ttnn.deallocate(xqkv_fused)
+
+        # KV caching: concatenate with past key/value if provided
+        if past_key_value is not None:
+            past_key, past_value = past_key_value
+            # Convert from torch tensor to ttnn if needed
+            if not isinstance(past_key, ttnn.Tensor):
+                past_key = torch_to_ttnn(
+                    past_key.permute(0, 2, 1, 3),
+                    self.device,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    layout=ttnn.TILE_LAYOUT,
+                )
+            if not isinstance(past_value, ttnn.Tensor):
+                past_value = torch_to_ttnn(
+                    past_value.permute(0, 2, 1, 3),
+                    self.device,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    layout=ttnn.TILE_LAYOUT,
+                )
+
+            # Convert new K/V to interleaved to match cache format
+            key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
+            value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
+
+            # Concatenate with past tensors
+            key = ttnn.concat([past_key, key], dim=1)
+            value = ttnn.concat([past_value, value], dim=1)
+
+            # CRITICAL: Permute to SDPA decode format [batch, heads, seq, dim]
+            key = ttnn.permute(key, (0, 2, 1, 3))
+            value = ttnn.permute(value, (0, 2, 1, 3))
+
+        # Store current key/value for next iteration if caching
+        new_past_key_value = (key, value) if use_cache else None
 
         # SDPA requires all inputs to be in DRAM
         query = ttnn.to_memory_config(query, ttnn.DRAM_MEMORY_CONFIG)
         key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
         value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
 
-        # Scaled dot-product attention
-        logger.debug("[TTNN ChatTTS Decoder] Self-attention: Scaled dot-product attention")
-        attn_output = ttnn.transformer.scaled_dot_product_attention(
+        # Scaled dot-product attention for decode mode
+        logger.debug("[TTNN ChatTTS Decoder] Self-attention: Scaled dot-product attention decode")
+        program_config = ttnn.SDPAProgramConfig(
+            compute_with_storage_grid_size=self.device.compute_with_storage_grid_size(),
+            q_chunk_size=self.num_attention_heads,  # Not used in decode
+            k_chunk_size=32,  # Minimum valid chunk size (multiple of 32)
+            exp_approx_mode=False,
+        )
+
+        attn_output = ttnn.transformer.scaled_dot_product_attention_decode(
             query,
             key,
             value,
-            attn_mask=attention_mask,
-            is_causal=True,  # Causal attention for autoregressive generation
+            is_causal=True,
+            cur_pos=[seq_len - 1],
             scale=1.0 / (self.head_dim**0.5),
+            program_config=program_config,
             compute_kernel_config=self.compute_kernel_config_sdpa,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
-        # Reshape back from attention format
-        attn_output = self._reshape_from_attention(attn_output, seq_len)
+        # Reshape back from attention format using dedicated decode operation
+        attn_output = ttnn.experimental.nlp_concat_heads_decode(
+            attn_output,
+            num_heads=self.num_attention_heads,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
 
         # Output projection (reshape to 4D for ttnn.linear)
         logger.debug("[TTNN ChatTTS Decoder] Self-attention: Output projection")
@@ -515,7 +721,7 @@ class TtnnChatTTSDecoder:
         attn_output = ttnn.squeeze(attn_output, dim=1)  # [B, S, H]
 
         logger.debug(f"[TTNN ChatTTS Decoder] Self-attention: Completed, output_shape={attn_output.shape}")
-        return attn_output
+        return attn_output, new_past_key_value
 
     def _mlp(self, hidden_states: ttnn.Tensor, mlp_weights: dict) -> ttnn.Tensor:
         """
