@@ -4,9 +4,9 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext
-from dataclasses import dataclass
-
+from contextlib import nullcontext, contextmanager
+from dataclasses import dataclass, field
+import time
 import numpy as np
 import torch
 import tqdm
@@ -32,6 +32,55 @@ from typing import Optional, Union, List
 PREFERRED_KONTEXT_RESOLUTIONS = [
     (1024, 1024),
 ]
+
+
+@dataclass
+class TimingData:
+    clip_encoding_time: float = 0.0
+    t5_encoding_time: float = 0.0
+    total_encoding_time: float = 0.0
+    denoising_step_times: List[float] = field(default_factory=list)
+    vae_encoding_time: float = 0.0
+    vae_decoding_time: float = 0.0
+    total_time: float = 0.0
+
+
+class TimingCollector:
+    def __init__(self):
+        self.timings: Dict[str, float] = {}
+        self.step_timings: Dict[str, List[float]] = {}
+
+    @contextmanager
+    def time_section(self, name: str):
+        start = time.time()
+        yield
+        end = time.time()
+        self.timings[name] = end - start
+
+    @contextmanager
+    def time_step(self, name: str):
+        start = time.time()
+        yield
+        end = time.time()
+        if name not in self.step_timings:
+            self.step_timings[name] = []
+        self.step_timings[name].append(end - start)
+
+    def get_timing_data(self) -> TimingData:
+        return TimingData(
+            clip_encoding_time=self.timings.get("clip_encoding", 0.0),
+            t5_encoding_time=self.timings.get("t5_encoding", 0.0),
+            total_encoding_time=self.timings.get("total_encoding", 0.0),
+            denoising_step_times=self.step_timings.get("denoising_step", []),
+            vae_encoding_time=self.timings.get("vae_encoding", 0.0),
+            vae_decoding_time=self.timings.get("vae_decoding", 0.0),
+            total_time=self.timings.get("total", 0.0),
+        )
+
+    def reset(self):
+        self.timings = {}
+        self.step_timings = {}
+        return self
 
 
 @dataclass
@@ -394,7 +443,9 @@ class Flux1KontextPipeline:
         if image is not None:
             image = image.to(dtype=torch.float32)
             if image.shape[1] != self._latent_channels:
-                image_latents = self._encode_vae_image(image=image)
+                timer = self.timing_collector
+                with timer.time_section("vae_encoding") if timer else nullcontext():
+                    image_latents = self._encode_vae_image(image=image)
             else:
                 image_latents = image
             if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
