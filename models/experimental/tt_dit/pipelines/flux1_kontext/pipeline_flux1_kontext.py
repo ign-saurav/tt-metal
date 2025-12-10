@@ -165,8 +165,8 @@ class Flux1KontextPipeline:
 
         assert isinstance(self._tokenizer_1, CLIPTokenizer)
         assert isinstance(self._tokenizer_2, T5TokenizerFast)
-        assert isinstance(self._text_encoder_1, CLIPTextModel)
-        assert isinstance(self._text_encoder_2, T5EncoderModel)
+        assert isinstance(torch_text_encoder_1, CLIPTextModel)
+        assert isinstance(torch_text_encoder_2, T5EncoderModel)
         assert isinstance(self._scheduler, FlowMatchEulerDiscreteScheduler)
         assert isinstance(self._torch_vae, AutoencoderKL)
         assert isinstance(torch_transformer, FluxTransformer2DModel)
@@ -569,6 +569,7 @@ class Flux1KontextPipeline:
                     torch.Generator().manual_seed(seed),
                 )
 
+            self.output_latents_shape = latents.shape
             self.output_latents_seq_length = latents.shape[1]
             if image_ids is not None:
                 latents = torch.cat([latents, image_latents], dim=1)
@@ -764,7 +765,7 @@ class Flux1KontextPipeline:
                         tt_timestep_list.append(tt_timestep)
 
                         tt_sigma_difference = ttnn.full(
-                            [tt_pooled_prompt_embeds_list[i].shape[0], 1],
+                            self.output_latents_shape,
                             fill_value=sigma_difference,
                             layout=ttnn.TILE_LAYOUT,
                             dtype=ttnn.bfloat16,
@@ -868,14 +869,15 @@ class Flux1KontextPipeline:
             prompt_sequence_length=prompt_sequence_length,
         )
 
+        if tuple(self._submesh_devices[submesh_index].shape)[0] > 1:
+            # Collects shards from all 8 devices along mesh_axis=0 in 2x4 mesh
+            noise_pred = ttnn.all_gather(
+                noise_pred,
+                dim=1,
+                cluster_axis=self._parallel_config.sequence_parallel.mesh_axis,  # axis=0 for sequence parallel
+            )
+
         if self.img_to_img:
-            if tuple(self._submesh_devices[submesh_index].shape)[0] > 1:
-                # Collects shards from all 8 devices along mesh_axis=0 in 2x4 mesh
-                noise_pred = ttnn.all_gather(
-                    noise_pred,
-                    dim=1,
-                    cluster_axis=self._parallel_config.sequence_parallel.mesh_axis,  # axis=0 for sequence parallel
-                )
             noise_pred = noise_pred[:, : self.output_latents_seq_length]
         return noise_pred
 
@@ -1019,31 +1021,37 @@ class Flux1KontextPipeline:
             ttnn.synchronize_device(submesh_device)  # Helps with accurate time profiling.
             sigma_difference_device = sigma_difference_device_list[submesh_id]
             ttnn.multiply_(sigma_difference_device, noise_pred_list[submesh_id])
+
+            if tuple(submesh_device.shape)[0] > 1:
+                # Collects shards from all 8 devices along mesh_axis=0 in 2x4 mesh
+                ttnn.synchronize_device(submesh_device)  # Helps with accurate time profiling.
+                latents[submesh_id] = ttnn.all_gather(
+                    latents[submesh_id],
+                    dim=1,
+                    cluster_axis=self._parallel_config.sequence_parallel.mesh_axis,  # axis=0 for sequence parallel
+                    topology=self._ccl_managers[submesh_id].topology,
+                )
+
             if self.img_to_img:
-                if tuple(submesh_device.shape)[0] > 1:
-                    # Collects shards from all 8 devices along mesh_axis=0 in 2x4 mesh
-                    ttnn.synchronize_device(submesh_device)  # Helps with accurate time profiling.
-                    latents[submesh_id] = ttnn.all_gather(
-                        latents[submesh_id],
-                        dim=1,
-                        cluster_axis=self._parallel_config.sequence_parallel.mesh_axis,  # axis=0 for sequence parallel
-                        topology=self._ccl_managers[submesh_id].topology,
-                    )
                 randn_latents = latents[submesh_id][:, : self.output_latents_seq_length]
                 spatial_latents = latents[submesh_id][:, self.output_latents_seq_length :]
                 ttnn.add_(randn_latents, sigma_difference_device)
                 latents[submesh_id] = ttnn.concat([randn_latents, spatial_latents], dim=1)
-                if tuple(submesh_device.shape)[0] > 1:
-                    latents[submesh_id] = ttnn.mesh_partition(
-                        latents[submesh_id],
-                        dim=1,
-                        cluster_axis=self._parallel_config.sequence_parallel.mesh_axis,
-                    )
-                if traced:
-                    ttnn.copy(latents[submesh_id], self._traces[submesh_id].spatial_input)
-                    latents[submesh_id] = self._traces[submesh_id].spatial_input
             else:
                 ttnn.add_(latents[submesh_id], sigma_difference_device)
+
+            # Undo the gather operation
+            if tuple(submesh_device.shape)[0] > 1:
+                latents[submesh_id] = ttnn.mesh_partition(
+                    latents[submesh_id],
+                    dim=1,
+                    cluster_axis=self._parallel_config.sequence_parallel.mesh_axis,
+                )
+
+            # Copy the updated latents tensor to presistant buffer
+            if traced:
+                ttnn.copy(latents[submesh_id], self._traces[submesh_id].spatial_input)
+                latents[submesh_id] = self._traces[submesh_id].spatial_input
 
         return latents
 
