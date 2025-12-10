@@ -72,6 +72,7 @@ class Generator:
         For bringup, make this class general to any backend implementation, as long as it takes torch tensors and returns torch tensors.
 
         """
+
         self.model = model
         self.model_args = model_args
         self.mesh_device = mesh_device

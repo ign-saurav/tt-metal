@@ -580,7 +580,9 @@ class UnifiedMiniCPMPipeline:
         logger.info(f"Calling prefill_forward_text for warmup at {warmup_start:.3f}")
 
         logits = self.qwen_generator.prefill_forward_text(
-            input_tokens_prefill_pt,  # Prefill warmup for all users, in case some users have different seqlens than others
+            input_tokens_prefill_pt[0].unsqueeze(
+                0
+            ),  # Prefill warmup for all users, in case some users have different seqlens than others
             page_table=self.page_table,
             kv_cache=self.tt_kv_cache,
             prompt_lens=decoding_pos,
@@ -595,7 +597,7 @@ class UnifiedMiniCPMPipeline:
         logger.info("Starting prefill...")
         print("Starting main prefill...")
         logits = self.qwen_generator.prefill_forward_text(
-            input_tokens_prefill_pt,
+            input_tokens_prefill_pt[0].unsqueeze(0),
             page_table=self.page_table,
             kv_cache=self.tt_kv_cache,
             prompt_lens=decoding_pos,

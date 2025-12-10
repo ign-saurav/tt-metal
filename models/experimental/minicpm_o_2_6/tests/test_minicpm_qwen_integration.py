@@ -11,10 +11,10 @@ import torch
 import ttnn
 from loguru import logger
 
-from tt.ttnn_qwen_minicpm_wrapper import MiniCPMQwenModel
-from tt.weight_generator import generate_qwen_weights
-from reference.multimodal_qwen import MultimodalQwen2Model
-from tt.test_utils import compute_pcc, validate_pcc
+from models.experimental.minicpm_o_2_6.tt.ttnn_qwen_minicpm_wrapper import MiniCPMQwenModel
+from models.experimental.minicpm_o_2_6.tt.weight_generator import generate_qwen_weights
+from models.experimental.minicpm_o_2_6.reference.multimodal_qwen import MultimodalQwen2Model
+from models.experimental.minicpm_o_2_6.tt.test_utils import compute_pcc, validate_pcc
 
 
 def test_minicpm_qwen_text_only(device):
