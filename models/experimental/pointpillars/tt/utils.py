@@ -244,6 +244,7 @@ class TtPointPillarsConvTranspose2D(LightweightModule):
         self.return_dims = return_dims
         self.reshape_output = reshape_output
         self.memory_config = memory_config
+        self._weights_prepared = False
 
     def forward(self, x, shape=None):
         if shape is not None:
@@ -255,30 +256,59 @@ class TtPointPillarsConvTranspose2D(LightweightModule):
             input_height = x.shape[1]
             input_width = x.shape[2]
 
-        [x, [_out_height, _out_width]] = ttnn.conv_transpose2d(
-            input_tensor=x,
-            weight_tensor=self.weight,
-            bias_tensor=self.bias,
-            in_channels=self.conv_transpose.in_channels,
-            out_channels=self.conv_transpose.out_channels,
-            device=self.device,
-            kernel_size=self.conv_transpose.kernel_size,
-            stride=self.conv_transpose.stride,
-            padding=self.conv_transpose.padding,
-            output_padding=self.conv_transpose.output_padding,
-            dilation=self.conv_transpose.dilation,
-            groups=self.conv_transpose.groups,
-            batch_size=batch_size,
-            input_height=input_height,
-            input_width=input_width,
-            conv_config=self.conv_config,
-            compute_config=self.compute_config,
-            return_output_dim=True,
-            return_weights_and_bias=False,
-            dtype=self.activation_dtype,
-            memory_config=self.memory_config,
-            mirror_kernel=True,
-        )
+        if not self._weights_prepared:
+            # First call: prepare weights on device and store them
+            [x, [_out_height, _out_width], [self.weight, self.bias]] = ttnn.conv_transpose2d(
+                input_tensor=x,
+                weight_tensor=self.weight,
+                bias_tensor=self.bias,
+                in_channels=self.conv_transpose.in_channels,
+                out_channels=self.conv_transpose.out_channels,
+                device=self.device,
+                kernel_size=self.conv_transpose.kernel_size,
+                stride=self.conv_transpose.stride,
+                padding=self.conv_transpose.padding,
+                output_padding=self.conv_transpose.output_padding,
+                dilation=self.conv_transpose.dilation,
+                groups=self.conv_transpose.groups,
+                batch_size=batch_size,
+                input_height=input_height,
+                input_width=input_width,
+                conv_config=self.conv_config,
+                compute_config=self.compute_config,
+                return_output_dim=True,
+                return_weights_and_bias=True,
+                dtype=self.activation_dtype,
+                memory_config=self.memory_config,
+                mirror_kernel=True,
+            )
+            self._weights_prepared = True
+        else:
+            # Subsequent calls: use prepared weights, no write operation
+            [x, [_out_height, _out_width]] = ttnn.conv_transpose2d(
+                input_tensor=x,
+                weight_tensor=self.weight,
+                bias_tensor=self.bias,
+                in_channels=self.conv_transpose.in_channels,
+                out_channels=self.conv_transpose.out_channels,
+                device=self.device,
+                kernel_size=self.conv_transpose.kernel_size,
+                stride=self.conv_transpose.stride,
+                padding=self.conv_transpose.padding,
+                output_padding=self.conv_transpose.output_padding,
+                dilation=self.conv_transpose.dilation,
+                groups=self.conv_transpose.groups,
+                batch_size=batch_size,
+                input_height=input_height,
+                input_width=input_width,
+                conv_config=self.conv_config,
+                compute_config=self.compute_config,
+                return_output_dim=True,
+                return_weights_and_bias=False,
+                dtype=self.activation_dtype,
+                memory_config=self.memory_config,
+                mirror_kernel=True,
+            )
 
         shape = (batch_size, _out_height, _out_width, x.shape[-1])
         if self.reshape_output:
@@ -380,12 +410,12 @@ def split_conv_transpose2d_and_run(
     }
 
     outputs = []
-    device_weights = []
+    # Pre-initialize device_weights to match conv_weight structure: [in_channel_slice][out_channel_slice]
+    device_weights = [[] for _ in range(conv_in_channel_split_factor)]
     device_bias = []
     # First loop goes over output channel slices and saves outputs in a list
     for out_channel_slice_id in range(conv_out_channel_split_factor):
         out_channel_slice_output = None
-        device_weights.append([])
         # Second loop goes over input channel slices and accumulates the outputs
         for in_channel_slice_id in range(conv_in_channel_split_factor):
             hidden_states_slice = hidden_states[
@@ -509,6 +539,7 @@ class TtPointPillarsConvTranspose2DSplit(LightweightModule):
 
         self.weight = conv_weights
         self.memory_config = memory_config
+        self._weights_prepared = False  # Track if weights have been prepared on device
 
     def forward(self, x, shape=None):
         if shape is not None:
@@ -519,24 +550,51 @@ class TtPointPillarsConvTranspose2DSplit(LightweightModule):
             batch_size = x.shape[0]
             input_height = x.shape[1]
             input_width = x.shape[2]
-        output = split_conv_transpose2d_and_run(
-            hidden_states=x,
-            conv_weight=self.weight,
-            conv_bias=self.bias,
-            device=self.device,
-            in_channels=self.conv_transpose.in_channels,
-            input_height=input_height,
-            input_width=input_width,
-            out_channels=self.conv_transpose.out_channels,
-            conv_in_channel_split_factor=self.conv_in_channel_split_factor,
-            conv_out_channel_split_factor=self.conv_out_channel_split_factor,
-            compute_config=self.compute_config,
-            conv_config=self.conv_config,
-            conv_output_dtype=ttnn.bfloat16,
-            kernel_size=self.conv_transpose.kernel_size,
-            padding=0,
-            output_padding=0,
-            stride=self.conv_transpose.stride,
-        )
+
+        if not self._weights_prepared:
+            # First call: prepare weights on device and store them
+            output, self.weight, self.bias = split_conv_transpose2d_and_run(
+                hidden_states=x,
+                conv_weight=self.weight,
+                conv_bias=self.bias,
+                device=self.device,
+                in_channels=self.conv_transpose.in_channels,
+                input_height=input_height,
+                input_width=input_width,
+                out_channels=self.conv_transpose.out_channels,
+                conv_in_channel_split_factor=self.conv_in_channel_split_factor,
+                conv_out_channel_split_factor=self.conv_out_channel_split_factor,
+                compute_config=self.compute_config,
+                conv_config=self.conv_config,
+                conv_output_dtype=ttnn.bfloat16,
+                kernel_size=self.conv_transpose.kernel_size,
+                padding=0,
+                output_padding=0,
+                stride=self.conv_transpose.stride,
+                return_weights_and_bias=True,
+            )
+            self._weights_prepared = True
+        else:
+            # Subsequent calls: use prepared weights, no write operation
+            output = split_conv_transpose2d_and_run(
+                hidden_states=x,
+                conv_weight=self.weight,
+                conv_bias=self.bias,
+                device=self.device,
+                in_channels=self.conv_transpose.in_channels,
+                input_height=input_height,
+                input_width=input_width,
+                out_channels=self.conv_transpose.out_channels,
+                conv_in_channel_split_factor=self.conv_in_channel_split_factor,
+                conv_out_channel_split_factor=self.conv_out_channel_split_factor,
+                compute_config=self.compute_config,
+                conv_config=self.conv_config,
+                conv_output_dtype=ttnn.bfloat16,
+                kernel_size=self.conv_transpose.kernel_size,
+                padding=0,
+                output_padding=0,
+                stride=self.conv_transpose.stride,
+                return_weights_and_bias=False,
+            )
 
         return output

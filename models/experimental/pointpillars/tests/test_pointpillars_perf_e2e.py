@@ -128,8 +128,14 @@ def run_pointpillars_e2e(
         # The pipeline handles transfers, so we just run the model
         return tt_model.forward(l1_input_tensor)
 
-    # Configure pipeline
-    config = PipelineConfig(use_trace=False, num_command_queues=2, all_transfers_on_separate_command_queue=False)
+    # Warmup pass to prepare conv_transpose2d weights on device BEFORE trace capture
+    warmup_input = ttnn.to_device(host_input_tensor, device, memory_config=input_l1_mem_config)
+    _ = tt_model.forward(warmup_input)
+    ttnn.deallocate(warmup_input)
+    logger.info("Warmup pass complete - weights prepared on device")
+
+    # Configure pipeline with trace enabled (weights are now prepared, no writes during trace)
+    config = PipelineConfig(use_trace=True, num_command_queues=2, all_transfers_on_separate_command_queue=False)
 
     pipe = create_pipeline_from_config(
         config,
