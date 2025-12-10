@@ -18,7 +18,7 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
 
 @pytest.mark.parametrize(
     "no_prompt",
-    [{"1": True, "0": False}.get(os.environ.get("NO_PROMPT"), True)],
+    [{"1": True, "0": False}.get(os.environ.get("NO_PROMPT"), False)],
 )
 @pytest.mark.parametrize(
     "device_params",
@@ -26,23 +26,23 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
     indirect=True,
 )
 @pytest.mark.parametrize(
-    ("model_variant", "width", "height", "guidance_scale", "true_cfg_scale", "num_inference_steps"),
+    ("width", "height", "guidance_scale", "true_cfg_scale", "num_inference_steps"),
     [
-        ("dev", 1024, 1024, 2.5, 1.6, 28),
+        (1024, 1024, 2.5, 3.5, 28),
     ],
 )
 @pytest.mark.parametrize(
     "mesh_device, cfg, sp, tp, topology, num_links",
     [
-        [(1, 4), (1, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],  # Fully functional
+        [(1, 4), (1, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
         [(2, 4), (1, 0), (2, 0), (4, 1), ttnn.Topology.Linear, 1],
-        [(2, 4), (2, 1), (2, 0), (2, 1), ttnn.Topology.Linear, 1],
-        [(2, 4), (2, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],  # Fully functional
+        # [(2, 4), (2, 1), (2, 0), (2, 1), ttnn.Topology.Linear, 1], # TODO: support sub-mesh (2, 2)
+        [(2, 4), (2, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
     ],
     ids=[
         "1x4sp0tp1",
         "2x4sp0tp1",
-        "2x4cfg1sp0tp1",
+        # "2x4cfg1sp0tp1",
         "2x4cfg0sp0tp1",
     ],
     indirect=["mesh_device"],
@@ -71,7 +71,6 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
 def test_flux1_pipeline(
     *,
     mesh_device: ttnn.MeshDevice,
-    model_variant: str,
     width: int,
     height: int,
     guidance_scale: float,
@@ -104,7 +103,7 @@ def test_flux1_pipeline(
     timing_collector = TimingCollector()
 
     pipeline = Flux1KontextPipeline.create_pipeline(
-        checkpoint_name=model_location_generator(f"black-forest-labs/FLUX.1-Kontext-{model_variant}"),
+        checkpoint_name=model_location_generator("black-forest-labs/FLUX.1-Kontext-dev"),
         mesh_device=mesh_device,
         cfg_config=cfg,
         sp_config=sp,
@@ -120,14 +119,14 @@ def test_flux1_pipeline(
     pipeline.timing_collector = timing_collector
 
     input_image = load_image(
-        "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/cat.png"
-    )
+        "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/yarn-art-pikachu.png"
+    ).convert("RGB")
     prompts = [
-        "Add a hat to the cat",
+        "Make Pikachu hold a sign that says 'TTNN is awesome', yarn art style, detailed, vibrant colors",
     ]
     negative_prompts = [""] * len(prompts)
 
-    filename_prefix = f"flux_{model_variant}_{width}_{height}"
+    filename_prefix = f"flux_1_kontext_dev_{width}_{height}"
     if use_torch_t5_text_encoder:
         filename_prefix += "_t5cpu"
     if use_torch_clip_text_encoder:

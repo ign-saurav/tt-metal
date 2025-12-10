@@ -60,7 +60,7 @@ class Flux1KontextPipeline:
         mesh_device: ttnn.MeshDevice,
         use_torch_t5_text_encoder: bool = False,
         use_torch_clip_text_encoder: bool = False,
-        use_torch_vae_encoder: bool = True,
+        use_torch_vae_encoder: bool = False,
         parallel_config: DiTParallelConfig,
         topology: ttnn.Topology,
         num_links: int,
@@ -82,7 +82,6 @@ class Flux1KontextPipeline:
             for submesh_device in self._submesh_devices
         ]
 
-        # Hacky submesh reshapes and assignment to parallelize encoders and VAE
         self.encoder_submesh_idx = 0  # Use submesh 0 for encoder
         encoder_device = self._submesh_devices[self.encoder_submesh_idx]
 
@@ -92,22 +91,19 @@ class Flux1KontextPipeline:
         vae_device = self._submesh_devices[self.vae_submesh_idx]
 
         # Create encoder parallel config
-        encoder_parallel_config = EncoderParallelConfig(
-            tensor_parallel=ParallelFactor(factor=4, mesh_axis=1)  # 1x4 submesh, parallel on axis 1
-        )
+        encoder_parallel_config = EncoderParallelConfig(tensor_parallel=parallel_config.tensor_parallel)
         self.encoder_parallel_config = encoder_parallel_config
         self.encoder_device = encoder_device
 
-        vae_parallel_config = VAEParallelConfig(tensor_parallel=ParallelFactor(factor=4, mesh_axis=1))
+        vae_parallel_config = VAEParallelConfig(tensor_parallel=parallel_config.tensor_parallel)
         self.vae_parallel_config = vae_parallel_config
         self.vae_device = vae_device
 
         logger.info("loading models...")
         self._tokenizer_1 = CLIPTokenizer.from_pretrained(checkpoint_name, subfolder="tokenizer")
-        self._t5_tokenizer = T5TokenizerFast.from_pretrained(checkpoint_name, subfolder="tokenizer_2")
+        self._tokenizer_2 = T5TokenizerFast.from_pretrained(checkpoint_name, subfolder="tokenizer_2")
         torch_text_encoder_1 = CLIPTextModel.from_pretrained(checkpoint_name, subfolder="text_encoder")
-        torch_text_encoder_1.eval()
-        torch_t5_text_encoder = T5EncoderModel.from_pretrained(checkpoint_name, subfolder="text_encoder_2")
+        torch_text_encoder_2 = T5EncoderModel.from_pretrained(checkpoint_name, subfolder="text_encoder_2")
         self._scheduler = FlowMatchEulerDiscreteScheduler.from_pretrained(checkpoint_name, subfolder="scheduler")
         self._torch_vae = AutoencoderKL.from_pretrained(checkpoint_name, subfolder="vae")
 
@@ -117,6 +113,14 @@ class Flux1KontextPipeline:
             torch_dtype=torch.bfloat16,  # bfloat16 is the native datatype of the model
         )
         torch_transformer.eval()
+
+        assert isinstance(self._tokenizer_1, CLIPTokenizer)
+        assert isinstance(self._tokenizer_2, T5TokenizerFast)
+        assert isinstance(self._text_encoder_1, CLIPTextModel)
+        assert isinstance(self._text_encoder_2, T5EncoderModel)
+        assert isinstance(self._scheduler, FlowMatchEulerDiscreteScheduler)
+        assert isinstance(self._torch_vae, AutoencoderKL)
+        assert isinstance(torch_transformer, FluxTransformer2DModel)
 
         logger.info("creating TT-NN transformer...")
 
@@ -182,11 +186,10 @@ class Flux1KontextPipeline:
         self._image_processor = VaeImageProcessor(vae_scale_factor=self._vae_scale_factor * 2)
         self.default_sample_size = 128
 
-        logger.info("creating TT-NN CLIP text encoder...")
-
         if use_torch_clip_text_encoder:
-            self._text_encoder_1 = torch_text_encoder_1
+            self._text_encoder_1 = torch_text_encoder_1.eval()
         else:
+            logger.info("creating TT-NN CLIP text encoder...")
             clip_config_1 = CLIPConfig(
                 vocab_size=torch_text_encoder_1.config.vocab_size,
                 embed_dim=torch_text_encoder_1.config.hidden_size,
@@ -210,24 +213,23 @@ class Flux1KontextPipeline:
             self._text_encoder_1.load_torch_state_dict(torch_text_encoder_1.state_dict())
 
         if use_torch_t5_text_encoder:
-            self._t5_text_encoder = torch_t5_text_encoder
+            self._text_encoder_2 = torch_text_encoder_2.eval()
         else:
-            logger.info("creating TT-NN text encoder...")
-
+            logger.info("creating TT-NN T5 text encoder...")
             t5_config = T5Config(
-                vocab_size=torch_t5_text_encoder.config.vocab_size,
-                embed_dim=torch_t5_text_encoder.config.d_model,
-                ff_dim=torch_t5_text_encoder.config.d_ff,
-                kv_dim=torch_t5_text_encoder.config.d_kv,
-                num_heads=torch_t5_text_encoder.config.num_heads,
-                num_hidden_layers=torch_t5_text_encoder.config.num_layers,
+                vocab_size=torch_text_encoder_2.config.vocab_size,
+                embed_dim=torch_text_encoder_2.config.d_model,
+                ff_dim=torch_text_encoder_2.config.d_ff,
+                kv_dim=torch_text_encoder_2.config.d_kv,
+                num_heads=torch_text_encoder_2.config.num_heads,
+                num_hidden_layers=torch_text_encoder_2.config.num_layers,
                 max_prompt_length=self.T5_SEQUENCE_LENGTH,
-                layer_norm_eps=torch_t5_text_encoder.config.layer_norm_epsilon,
-                relative_attention_num_buckets=torch_t5_text_encoder.config.relative_attention_num_buckets,
-                relative_attention_max_distance=torch_t5_text_encoder.config.relative_attention_max_distance,
+                layer_norm_eps=torch_text_encoder_2.config.layer_norm_epsilon,
+                relative_attention_num_buckets=torch_text_encoder_2.config.relative_attention_num_buckets,
+                relative_attention_max_distance=torch_text_encoder_2.config.relative_attention_max_distance,
             )
 
-            self._t5_text_encoder = T5Encoder(
+            self._text_encoder_2 = T5Encoder(
                 config=t5_config,
                 mesh_device=self.encoder_device,
                 ccl_manager=self._ccl_managers[self.encoder_submesh_idx],
@@ -235,15 +237,15 @@ class Flux1KontextPipeline:
             )
 
             if not cache.initialize_from_cache(
-                self._t5_text_encoder,
-                torch_t5_text_encoder,
+                self._text_encoder_2,
+                torch_text_encoder_2,
                 model_name,
                 "t5_text_encoder",
                 encoder_parallel_config,
                 tuple(self.encoder_device.shape),
             ):
                 logger.info(f"Loading T5 text encoder weights from PyTorch state dict")
-                self._t5_text_encoder.load_torch_state_dict(torch_t5_text_encoder.state_dict())
+                self._text_encoder_2.load_torch_state_dict(torch_text_encoder_2.state_dict())
 
         self._traces = None
 
@@ -289,7 +291,7 @@ class Flux1KontextPipeline:
         cfg_config=None,
         use_torch_t5_text_encoder=False,
         use_torch_clip_text_encoder=False,
-        use_torch_vae_encoder=True,
+        use_torch_vae_encoder=False,
         num_links=None,
         topology=ttnn.Topology.Linear,
     ):
@@ -311,13 +313,6 @@ class Flux1KontextPipeline:
             sequence_parallel=ParallelFactor(factor=sp_factor, mesh_axis=sp_axis),
         )
 
-        submesh_shape = list(mesh_device.shape)
-        submesh_shape[cfg_axis] //= cfg_factor
-
-        logger.info(f"Mesh device shape: {mesh_device.shape}")
-        logger.info(f"Submesh shape: {submesh_shape}")
-        logger.info(f"Parallel config: {dit_parallel_config}")
-
         pipeline = Flux1KontextPipeline(
             checkpoint_name=checkpoint_name,
             mesh_device=mesh_device,
@@ -337,12 +332,12 @@ class Flux1KontextPipeline:
         image=None,
         width: int = 1024,
         height: int = 1024,
-        prompt: str,
-        negative_prompt: str = "",
+        prompt: str = "",
+        negative_prompt: Optional[str] = None,
         cfg_scale=1.0,
         guidance_scale=3.5,
-        num_inference_steps: int,
-        seed: int,
+        num_inference_steps: int = 28,
+        seed: Optional[int] = None,
         traced: bool = True,
     ):
         return self(
@@ -351,8 +346,8 @@ class Flux1KontextPipeline:
             height=height,
             prompt_1=[prompt],
             prompt_2=[prompt],
-            negative_prompt_1=[negative_prompt],
-            negative_prompt_2=[negative_prompt],
+            negative_prompt_1=[negative_prompt] if negative_prompt else None,
+            negative_prompt_2=[negative_prompt] if negative_prompt else None,
             cfg_scale=cfg_scale,
             guidance_scale=guidance_scale,
             num_inference_steps=num_inference_steps,
@@ -360,49 +355,26 @@ class Flux1KontextPipeline:
             traced=traced,
         )
 
-    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
-        if isinstance(generator, list):
-            encoded_images = list()
-            if self.use_torch_vae_encoder:
-                for i in range(image.shape[0]):
-                    encoded_images.append(self._vae_encoder(image[i : i + 1]))
-            else:
-                tt_images = ttnn.from_torch(
-                    image.permute(0, 2, 3, 1),
-                    layout=ttnn.TILE_LAYOUT,
-                    dtype=ttnn.bfloat16,
-                    device=self.vae_device,
-                    mesh_mapper=ttnn.ReplicateTensorToMesh(self.vae_device),
-                )
-                for i in range(tt_images.shape[0]):
-                    encoded_image = self._vae_encoder(tt_images[i : i + 1])
-                    encoded_image = ttnn.to_torch(ttnn.get_device_tensors(encoded_image)[0]).permute(0, 3, 1, 2)
-                    encoded_images.append(encoded_image)
-
-            image_latents = list()
-            for image in range(encoded_images):
-                encoded_image, _ = torch.chunk(image, 2, dim=1)
-                image_latents.append(encoded_image)
-            image_latents = torch.cat(image_latents, dim=0)
+    def _encode_vae_image(self, image: torch.Tensor):
+        if self.use_torch_vae_encoder:
+            encoded_image = self._vae_encoder(image)
         else:
-            if self.use_torch_vae_encoder:
-                encoded_image = self._vae_encoder(image)
-            else:
-                tt_image = ttnn.from_torch(
-                    image.permute(0, 2, 3, 1),
-                    layout=ttnn.TILE_LAYOUT,
-                    dtype=ttnn.bfloat16,
-                    device=self.vae_device,
-                    mesh_mapper=ttnn.ReplicateTensorToMesh(self.vae_device),
-                )
-                encoded_image = self._vae_encoder(tt_image)
-                encoded_image = ttnn.to_torch(ttnn.get_device_tensors(encoded_image)[0]).permute(0, 3, 1, 2)
-            image_latents, _ = torch.chunk(encoded_image, 2, dim=1)
+            tt_image = ttnn.from_torch(
+                image.permute(0, 2, 3, 1),
+                layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.bfloat16,
+                device=self.vae_device,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(self.vae_device),
+            )
+            encoded_image = self._vae_encoder(tt_image)
+            encoded_image = ttnn.to_torch(ttnn.get_device_tensors(encoded_image)[0]).permute(0, 3, 1, 2)
+        image_latents, _ = torch.chunk(encoded_image, 2, dim=1)
 
         image_latents = (image_latents - self._torch_vae.config.shift_factor) * self._torch_vae.config.scaling_factor
 
         return image_latents
 
+    # adapted from https://github.com/huggingface/diffusers/blob/v0.35.0/src/diffusers/pipelines/flux/pipeline_flux_kontext.py
     def prepare_latents(
         self,
         image: Optional[torch.Tensor],
@@ -410,16 +382,8 @@ class Flux1KontextPipeline:
         num_channels_latents: int,
         height: int,
         width: int,
-        dtype: torch.dtype,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
-        latents: Optional[torch.Tensor] = None,
     ):
-        if isinstance(generator, list) and len(generator) != batch_size:
-            raise ValueError(
-                f"You have passed a list of generators of length {len(generator)}, but requested an effective batch"
-                f" size of {batch_size}. Make sure the batch size matches the length of the generators."
-            )
-
         # VAE applies 8x compression on images but we must also account for packing which requires
         # latent height and width to be divisible by 2.
         height = 2 * (int(height) // (self._vae_scale_factor * 2))
@@ -428,9 +392,9 @@ class Flux1KontextPipeline:
 
         image_latents = image_ids = None
         if image is not None:
-            image = image.to(dtype=dtype)
+            image = image.to(dtype=torch.float32)
             if image.shape[1] != self._latent_channels:
-                image_latents = self._encode_vae_image(image=image, generator=generator)
+                image_latents = self._encode_vae_image(image=image)
             else:
                 image_latents = image
             if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
@@ -454,11 +418,13 @@ class Flux1KontextPipeline:
 
         latent_ids = _latent_image_ids(height // 2, width // 2)
 
-        if latents is None:
-            latents = torch.randn(shape, generator=generator, dtype=dtype)
-            latents = _pack_latents(latents, batch_size, num_channels_latents, height, width)
+        if isinstance(generator, list):  # support for batched prompts with different seeds
+            shape = (1,) + shape[1:]
+            latents = [torch.randn(shape, generator=generator[i], dtype=torch.float32) for i in range(batch_size)]
+            latents = torch.cat(latents, dim=0)
         else:
-            latents = latents.to(dtype=dtype)
+            latents = torch.randn(shape, generator=generator, dtype=torch.float32)
+            latents = _pack_latents(latents, batch_size, num_channels_latents, height, width)
 
         return latents, image_latents, latent_ids, image_ids
 
@@ -543,17 +509,13 @@ class Flux1KontextPipeline:
 
             with timer.time_section("preparing_latents") if timer else nullcontext():
                 logger.info("preparing_latents...")
-                if seed is not None:
-                    torch.manual_seed(seed)
                 latents, image_latents, latent_ids, image_ids = self.prepare_latents(
                     image,
-                    1 * num_images_per_prompt,
+                    prompt_count * num_images_per_prompt,
                     self._num_channels_latents,
                     height,
                     width,
-                    torch.float32,
-                    None,
-                    None,
+                    torch.Generator().manual_seed(seed),
                 )
                 if image_ids is not None:
                     latent_ids = torch.cat([latent_ids, image_ids], dim=0)  # dim 0 is sequence dimension
@@ -764,7 +726,6 @@ class Flux1KontextPipeline:
                         tt_timestep_list.append(tt_timestep)
 
                         tt_sigma_difference = ttnn.full(
-                            # [1, 1],
                             # tt_initial_latents.shape,
                             self.original_latents_shape,
                             fill_value=sigma_difference,
@@ -1061,18 +1022,18 @@ class Flux1KontextPipeline:
             # We only use the pooled prompt output from the CLIPTextModel
             _, pooled_prompt_embeds = _get_clip_prompt_embeds(
                 prompts=prompt_1,
-                num_images_per_prompt=num_images_per_prompt,
-                tokenizer=self._tokenizer_1,
                 text_encoder=self._text_encoder_1,
+                tokenizer=self._tokenizer_1,
                 sequence_length=tokenizer_max_length,
+                num_images_per_prompt=num_images_per_prompt,
                 mesh_device=self.encoder_device,
             )
 
         with timer.time_section("t5_encoding") if timer else nullcontext():
             prompt_embeds = _get_t5_prompt_embeds(
                 prompts=prompt_2,
-                text_encoder=self._t5_text_encoder,
-                tokenizer=self._t5_tokenizer,
+                text_encoder=self._text_encoder_2,
+                tokenizer=self._tokenizer_2,
                 sequence_length=self.T5_SEQUENCE_LENGTH,
                 empty_sequence_length=self.T5_SEQUENCE_LENGTH,
                 num_images_per_prompt=num_images_per_prompt,
@@ -1187,9 +1148,6 @@ def _get_t5_prompt_embeds(
     mesh_device: ttnn.MeshDevice | None = None,
     embedding_dim: int,
 ) -> torch.Tensor:
-    if text_encoder is None:
-        return torch.zeros([len(prompts) * num_images_per_prompt, empty_sequence_length, embedding_dim])
-
     tokens = tokenizer(
         prompts,
         return_tensors="pt",
