@@ -60,10 +60,10 @@ def test_mini_cpm_o_tts_only(device, input_dtype, weight_dtype):
     outputs = model.tts.model(
         attention_mask=causal_mask,
         position_ids=position_ids,
-        # past_key_values=past_key_values,
-        past_key_values=None,
+        past_key_values=past_key_values,
+        # past_key_values=None,
         inputs_embeds=inputs_embeds,
-        use_cache=False,
+        use_cache=True,
         output_attentions=False,
         # cache_position=cache_position,
     )
@@ -105,6 +105,8 @@ def test_mini_cpm_o_tts_only(device, input_dtype, weight_dtype):
         inputs_embeds=inputs_embeds_ttnn,
         attention_mask=None,  # Causal mask handled internally
         position_ids=None,
+        past_key_values=past_key_values,
+        use_cache=True,
     )
 
     tt_output = tt2torch_tensor(hidden_states_ttnn)

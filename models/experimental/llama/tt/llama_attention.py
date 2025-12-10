@@ -207,6 +207,9 @@ class TtLlamaAttention(nn.Module):
         # get positions_ids values if it is None
         seq_length = q_len
         past_key_values_length = 0
+        import pdb
+
+        pdb.set_trace()
         if position_ids is None:
             position_ids = torch.arange(
                 past_key_values_length,
