@@ -1,3 +1,11 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+#
+# SPDX-License-Identifier: MIT
+
+# Based on PointPillars implementation from https://github.com/zhulf0804/PointPillars
+# Original implementation by zhulf0804 under MIT license
+
+
 import cv2
 
 COLORS = [[1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 0]]

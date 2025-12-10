@@ -1,3 +1,10 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+#
+# SPDX-License-Identifier: MIT
+
+# Based on PointPillars implementation from https://github.com/zhulf0804/PointPillars
+# Original implementation by zhulf0804 under MIT license
+
 from .io import read_pickle, write_pickle, read_points, write_points, read_calib, read_label, write_label
 from .process import (
     bbox_camera2lidar,
