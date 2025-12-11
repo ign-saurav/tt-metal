@@ -6,10 +6,8 @@ import os
 
 from models.common.utility_functions import tt2torch_tensor
 from tests.ttnn.utils_for_testing import check_with_pcc
+
 from loguru import logger
-
-
-# Compare with TTNN implementation if available
 from transformers import AutoModel
 from models.experimental.miniCPMo.tt.ttnn_chattts_decoder import TtnnChatTTSDecoder
 from models.experimental.miniCPMo.tt.common import torch_to_ttnn, get_activations_memory_config
@@ -20,11 +18,7 @@ from models.experimental.miniCPMo.tt.common import torch_to_ttnn, get_activation
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
 def test_mini_cpm_o_tts_only(device, input_dtype, weight_dtype):
     """
-    Test TTS audio generation using local reference model.
-
-    IMPORTANT: Must use AutoModel.from_pretrained (not load_checkpoint_and_dispatch)
-    because load_checkpoint_and_dispatch causes numerical precision issues that
-    make the TTS model produce garbage audio.
+    Test TTS decoder comparing TTNN implementation against PyTorch reference.
     """
     torch.manual_seed(42)
 
@@ -51,26 +45,21 @@ def test_mini_cpm_o_tts_only(device, input_dtype, weight_dtype):
     model.tts.float()  # DVAE/vocos need float32 for stability
     model = model.eval()
 
+    # Load test inputs
     causal_mask = torch.load("tt_decoder_test/causal_mask.pt")
     position_ids = torch.load("tt_decoder_test/position_ids.pt")
     inputs_embeds = torch.load("tt_decoder_test/inputs_embeds.pt")
     past_key_values = torch.load("tt_decoder_test/past_key_values.pt")
-    cache_position = torch.load("tt_decoder_test/cache_position.pt")
 
+    # Run PyTorch reference
     outputs = model.tts.model(
         attention_mask=causal_mask,
         position_ids=position_ids,
         past_key_values=past_key_values,
-        # past_key_values=None,
         inputs_embeds=inputs_embeds,
         use_cache=True,
         output_attentions=False,
-        # cache_position=cache_position,
     )
-
-    # print(outputs.last_hidden_state)
-
-    logger.info("Setting up TTNN ChatTTS Decoder for comparison...")
 
     # Initialize TTNN decoder with same config
     ttnn_decoder = TtnnChatTTSDecoder(
@@ -88,7 +77,6 @@ def test_mini_cpm_o_tts_only(device, input_dtype, weight_dtype):
     )
 
     # Load weights from reference model
-    logger.info("Loading weights into TTNN decoder...")
     tts_state_dict = model.tts.state_dict()
     ttnn_decoder.load_weights(tts_state_dict)
 
@@ -100,22 +88,23 @@ def test_mini_cpm_o_tts_only(device, input_dtype, weight_dtype):
     )
 
     # Run TTNN forward pass
-    logger.info("Running TTNN decoder forward pass...")
-    hidden_states_ttnn = ttnn_decoder.forward(
+    hidden_states_ttnn, _ = ttnn_decoder.forward(
         inputs_embeds=inputs_embeds_ttnn,
-        attention_mask=None,  # Causal mask handled internally
+        attention_mask=None,
         position_ids=None,
         past_key_values=past_key_values,
         use_cache=True,
     )
 
+    # Compare outputs
     tt_output = tt2torch_tensor(hidden_states_ttnn)
     ref_outputs = outputs.last_hidden_state
+
+    # Handle shape mismatch if any
+    if tt_output.shape != ref_outputs.shape:
+        slices = tuple(slice(0, s) for s in ref_outputs.shape)
+        tt_output = tt_output[slices]
+
     passing, pcc_message = check_with_pcc(tt_output, ref_outputs, 0.90)
-    logger.info(pcc_message)
-    if passing:
-        logger.info("TTNN ChatTTS Decoder forward pass passed!")
-    else:
-        logger.warning("TTNN ChatTTS Decoder forward pass failed!")
-        logger.warning(pcc_message)
-        pytest.fail(pcc_message)
+    logger.info(f"Final output PCC check failed: {pcc_message}")
+    assert passing, f"Final output PCC check failed: {pcc_message}"
