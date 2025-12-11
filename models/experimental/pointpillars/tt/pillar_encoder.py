@@ -116,7 +116,15 @@ class TtPillarEncoder:
         features_tt = ttnn.permute(features_tt, (0, 2, 1))
         features_tt = ttnn.max(features_tt, dim=-1)
 
-        pooling_features = ttnn.to_torch(features_tt)
+        # Handle multi-device: use mesh_composer to aggregate tensor from all devices
+        num_devices = self.device.get_num_devices() if hasattr(self.device, "get_num_devices") else 1
+        if num_devices > 1:
+            # Data is replicated, so all devices have same result - concatenate and take first portion
+            mesh_composer = ttnn.ConcatMeshToTensor(self.device, dim=0)
+            pooling_features = ttnn.to_torch(features_tt, mesh_composer=mesh_composer)
+            pooling_features = pooling_features[:num_pillars]  # Take only first device's result
+        else:
+            pooling_features = ttnn.to_torch(features_tt)
         ttnn.deallocate(features_tt)
         pooling_features = pooling_features.reshape(-1, 64)
 
