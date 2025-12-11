@@ -1,32 +1,186 @@
-# ----------------------------------------------------------------------------#
-# Usage: $ python demo.py 0 ../resources/nuScenes/results.json "vis_out"
-# ----------------------------------------------------------------------------#
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+import json
 import os
 from argparse import ArgumentParser
 
 import cv2
-import matplotlib.cm as cm
 import matplotlib.pyplot as plt
-import mmcv
 import numpy as np
-from nuscenes.utils.data_classes import Box, LidarPointCloud
+import torch
+from PIL import Image
 from pyquaternion import Quaternion
-from mmengine import load as mmengine_load
+from loguru import logger
 
-from models.experimental.BevDepth.reference.bevdepth.datasets.nusc_det_dataset import map_name_from_general_to_detection
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+RESOURCES_DIR = os.path.join(SCRIPT_DIR, "..", "resources", "nuScenes")
+
+IMG_KEYS = ["CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_BACK_RIGHT", "CAM_BACK", "CAM_BACK_LEFT"]
+
+SHOW_CLASSES = [
+    "car",
+    "truck",
+    "construction_vehicle",
+    "bus",
+    "trailer",
+    "barrier",
+    "motorcycle",
+    "bicycle",
+    "pedestrian",
+    "traffic_cone",
+]
 
 
 def parse_args():
-    parser = ArgumentParser(add_help=False)
-    parser.add_argument("idx", type=int, help="Index of the dataset to be visualized.")
-    parser.add_argument("result_path", help="Path of the result json file.")
-    parser.add_argument("target_path", help="Target path to save the visualization result.")
+    parser = ArgumentParser(description="BEVDepth Demo - Torch and TTNN visualization")
+    parser.add_argument(
+        "--mode", choices=["torch", "ttnn", "both", "precomputed"], default="both", help="Inference mode"
+    )
+    parser.add_argument("--output", default="bevdepth_demo_output.png", help="Output visualization path")
+    parser.add_argument("--threshold", type=float, default=0.3, help="Detection score threshold")
+    parser.add_argument("--show-range", type=float, default=60.0, help="Show range in meters")
+    return parser.parse_args()
 
-    args = parser.parse_args()
-    return args
+
+def download_bevdepth_weights():
+    import urllib.request
+
+    url = "https://github.com/Megvii-BaseDetection/BEVDepth/releases/download/v0.0.2/bev_depth_lss_r50_256x704_128x128_24e_2key.pth"
+    weights_path = "/tmp/bevdepth_weights.pth"
+
+    if not os.path.exists(weights_path):
+        logger.info(f"Downloading weights from {url}")
+        urllib.request.urlretrieve(url, weights_path)
+        logger.info(f"Downloaded weights to {weights_path}")
+
+    return weights_path
+
+
+def load_infos():
+    import pickle
+
+    infos_path = os.path.join(RESOURCES_DIR, "infos.pkl")
+    with open(infos_path, "rb") as f:
+        infos = pickle.load(f)
+    return infos
+
+
+def load_images_and_mats(info):
+    img_mean = np.array([123.675, 116.28, 103.53], np.float32)
+    img_std = np.array([58.395, 57.12, 57.375], np.float32)
+
+    sweep_imgs = []
+    sweep_sensor2ego_mats = []
+    sweep_intrin_mats = []
+    sweep_ida_mats = []
+    sweep_sensor2sensor_mats = []
+
+    cam_info = info["cam_infos"]
+
+    # Using 256x640 for TTNN compatibility (official BEVDepth uses 256x704)
+    ida_aug_conf = {
+        "H": 900,
+        "W": 1600,
+        "final_dim": [256, 640],
+        "bot_pct_lim": [0.0, 0.0],
+        "resize_lim": [0.386, 0.55],
+        "rot_lim": [0.0, 0.0],
+        "rand_flip": False,
+    }
+
+    H, W = ida_aug_conf["H"], ida_aug_conf["W"]
+    fH, fW = ida_aug_conf["final_dim"]
+    resize = max(fH / H, fW / W)
+    resize_dims = (int(W * resize), int(H * resize))
+    newW, newH = resize_dims
+    crop_h = int((1 - np.mean(ida_aug_conf["bot_pct_lim"])) * newH) - fH
+    crop_w = int(max(0, newW - fW) / 2)
+    crop = (crop_w, crop_h, crop_w + fW, crop_h + fH)
+
+    for cam in IMG_KEYS:
+        img_path = os.path.join(RESOURCES_DIR, cam_info[cam]["filename"])
+        img = Image.open(img_path)
+        img = img.resize(resize_dims)
+        img = img.crop(crop)
+
+        ida_mat = torch.eye(4)
+        ida_mat[0, 0] = resize
+        ida_mat[1, 1] = resize
+        ida_mat[0, 3] = -crop[0]
+        ida_mat[1, 3] = -crop[1]
+
+        img_np = np.array(img, dtype=np.float32)
+        img_np = (img_np - img_mean) / img_std
+        img_tensor = torch.from_numpy(img_np).permute(2, 0, 1)
+
+        # Sensor to ego transformation (camera to vehicle frame)
+        w, x, y, z = cam_info[cam]["calibrated_sensor"]["rotation"]
+        sensor2ego_rot = torch.Tensor(Quaternion(w, x, y, z).rotation_matrix)
+        sensor2ego_tran = torch.Tensor(cam_info[cam]["calibrated_sensor"]["translation"])
+        sensor2ego = torch.eye(4)
+        sensor2ego[:3, :3] = sensor2ego_rot
+        sensor2ego[:3, 3] = sensor2ego_tran
+
+        # For key frame, sensor2ego_mats is just the sensor2ego transform
+        sweepsensor2keyego = sensor2ego
+
+        intrin_mat = torch.zeros((4, 4))
+        intrin_mat[3, 3] = 1
+        intrin_mat[:3, :3] = torch.Tensor(cam_info[cam]["calibrated_sensor"]["camera_intrinsic"])
+
+        sweep_imgs.append(img_tensor)
+        sweep_sensor2ego_mats.append(sweepsensor2keyego)
+        sweep_intrin_mats.append(intrin_mat)
+        sweep_ida_mats.append(ida_mat)
+        sweep_sensor2sensor_mats.append(torch.eye(4))
+
+    # Stack and reshape to [B, num_sweeps, num_cameras, ...]
+    imgs = torch.stack(sweep_imgs).unsqueeze(0).unsqueeze(0)  # [1, 1, 6, 3, H, W]
+    sensor2ego_mats = torch.stack(sweep_sensor2ego_mats).unsqueeze(0).unsqueeze(0)  # [1, 1, 6, 4, 4]
+    intrin_mats = torch.stack(sweep_intrin_mats).unsqueeze(0).unsqueeze(0)
+    ida_mats = torch.stack(sweep_ida_mats).unsqueeze(0).unsqueeze(0)
+    sensor2sensor_mats = torch.stack(sweep_sensor2sensor_mats).unsqueeze(0).unsqueeze(0)
+
+    # For 2-key model, duplicate sweep to have 2 sweeps
+    imgs = imgs.repeat(1, 2, 1, 1, 1, 1)
+    sensor2ego_mats = sensor2ego_mats.repeat(1, 2, 1, 1, 1)
+    intrin_mats = intrin_mats.repeat(1, 2, 1, 1, 1)
+    ida_mats = ida_mats.repeat(1, 2, 1, 1, 1)
+    sensor2sensor_mats = sensor2sensor_mats.repeat(1, 2, 1, 1, 1)
+
+    mats_dict = {
+        "sensor2ego_mats": sensor2ego_mats,
+        "intrin_mats": intrin_mats,
+        "ida_mats": ida_mats,
+        "sensor2sensor_mats": sensor2sensor_mats,
+        "bda_mat": torch.eye(4).unsqueeze(0),
+    }
+
+    ego2global_rotation = np.mean([cam_info[cam]["ego_pose"]["rotation"] for cam in IMG_KEYS], 0)
+    ego2global_translation = np.mean([cam_info[cam]["ego_pose"]["translation"] for cam in IMG_KEYS], 0)
+
+    return imgs, mats_dict, ego2global_rotation, ego2global_translation
+
+
+def load_lidar_points(info):
+    lidar_path = info["lidar_infos"]["LIDAR_TOP"]["filename"]
+    lidar_points = np.fromfile(os.path.join(RESOURCES_DIR, lidar_path), dtype=np.float32, count=-1).reshape(-1, 5)[
+        ..., :4
+    ]
+    lidar_calibrated_sensor = info["lidar_infos"]["LIDAR_TOP"]["calibrated_sensor"]
+
+    from nuscenes.utils.data_classes import LidarPointCloud
+
+    pts = LidarPointCloud(lidar_points.T)
+    pts.rotate(Quaternion(lidar_calibrated_sensor["rotation"]).rotation_matrix)
+    pts.translate(np.array(lidar_calibrated_sensor["translation"]))
+    return pts.points.T
 
 
 def get_ego_box(box_dict, ego2global_rotation, ego2global_translation):
+    from nuscenes.utils.data_classes import Box
+
     box = Box(
         box_dict["translation"],
         box_dict["size"],
@@ -44,12 +198,6 @@ def get_ego_box(box_dict, ego2global_rotation, ego2global_translation):
 
 
 def rotate_points_along_z(points, angle):
-    """
-    Args:
-        points: (B, N, 3 + C)
-        angle: (B), angle along z-axis, angle increases x ==> y
-    Returns:
-    """
     cosa = np.cos(angle)
     sina = np.sin(angle)
     zeros = np.zeros(points.shape[0])
@@ -61,19 +209,6 @@ def rotate_points_along_z(points, angle):
 
 
 def get_corners(boxes3d):
-    """
-        7 -------- 4
-       /|         /|
-      6 -------- 5 .
-      | |        | |
-      . 3 -------- 0
-      |/         |/
-      2 -------- 1
-    Args:
-        boxes3d:  (N, 7) [x, y, z, dx, dy, dz, heading],
-            (x, y, z) is the box center
-    Returns:
-    """
     template = (
         np.array(
             (
@@ -89,11 +224,9 @@ def get_corners(boxes3d):
         )
         / 2
     )
-
     corners3d = np.tile(boxes3d[:, None, 3:6], [1, 8, 1]) * template[None, :, :]
     corners3d = rotate_points_along_z(corners3d.reshape(-1, 8, 3), boxes3d[:, 6]).reshape(-1, 8, 3)
     corners3d += boxes3d[:, None, 0:3]
-
     return corners3d
 
 
@@ -120,57 +253,402 @@ def get_cam_corners(corners, translation, rotation, cam_intrinsics):
     return cam_corners
 
 
-def demo(
-    idx,
-    nusc_results_file,
-    dump_file,
-    threshold=0.0,
+def load_reference_model():
+    from models.experimental.BevDepth.reference.bevdepth.exps.nuscenes.mv.bev_depth_lss_r50_256x704_128x128_24e_2key import (
+        BEVDepthLightningModel,
+    )
+
+    logger.info("Loading reference BEVDepth model...")
+    lightning_model = BEVDepthLightningModel()
+    checkpoint_path = download_bevdepth_weights()
+
+    if not os.path.exists(checkpoint_path):
+        logger.warning(f"Checkpoint not found at {checkpoint_path}")
+        return None
+
+    lightning_model.load_checkpoint(checkpoint_path, verbose=False)
+    lightning_model.model.eval()
+    return lightning_model
+
+
+def decode_predictions(preds, class_names, score_threshold=0.3):
+    boxes_list = []
+    classes_list = []
+    scores_list = []
+
+    pc_range = [-51.2, -51.2, -5.0, 51.2, 51.2, 3.0]
+    voxel_size = [0.8, 0.8, 8.0]
+    out_size_factor = 1
+
+    for task_idx, task_pred in enumerate(preds):
+        if isinstance(task_pred, list):
+            pred_dict = task_pred[0]
+        else:
+            pred_dict = task_pred
+
+        heatmap = pred_dict["heatmap"].sigmoid()
+        reg = pred_dict["reg"]
+        height = pred_dict["height"]
+        dim = pred_dict["dim"]
+        rot = pred_dict["rot"]
+        vel = pred_dict.get("vel", None)
+
+        batch_size, num_classes, H, W = heatmap.shape
+
+        for b in range(batch_size):
+            for c in range(num_classes):
+                heat = heatmap[b, c]
+                mask = heat > score_threshold
+
+                if mask.sum() == 0:
+                    continue
+
+                ys, xs = torch.where(mask)
+                scores = heat[mask]
+
+                for i in range(len(xs)):
+                    x_idx = xs[i].item()
+                    y_idx = ys[i].item()
+                    score = scores[i].item()
+
+                    # Decode position
+                    x = (x_idx + reg[b, 0, y_idx, x_idx].item()) * voxel_size[0] * out_size_factor + pc_range[0]
+                    y = (y_idx + reg[b, 1, y_idx, x_idx].item()) * voxel_size[1] * out_size_factor + pc_range[1]
+                    z = height[b, 0, y_idx, x_idx].item()
+
+                    # Decode dimensions
+                    dx = dim[b, 0, y_idx, x_idx].item()
+                    dy = dim[b, 1, y_idx, x_idx].item()
+                    dz = dim[b, 2, y_idx, x_idx].item()
+
+                    # Decode rotation
+                    rot_sin = rot[b, 0, y_idx, x_idx].item()
+                    rot_cos = rot[b, 1, y_idx, x_idx].item()
+                    yaw = np.arctan2(rot_sin, rot_cos)
+
+                    # Velocity
+                    vx, vy = 0, 0
+                    if vel is not None:
+                        vx = vel[b, 0, y_idx, x_idx].item()
+                        vy = vel[b, 1, y_idx, x_idx].item()
+
+                    boxes_list.append([x, y, z, dx, dy, dz, yaw, vx, vy])
+                    classes_list.append(class_names[task_idx][c])
+                    scores_list.append(score)
+
+    return boxes_list, classes_list, scores_list
+
+
+def run_torch_inference(model, imgs, mats_dict):
+    logger.info("Running Torch inference...")
+    with torch.no_grad():
+        preds = model.model(imgs, mats_dict)
+    return preds
+
+
+def prepare_ttnn_parameters(device):
+    from ttnn.model_preprocessing import preprocess_model_parameters
+    from models.experimental.BevDepth.tt.custom_preprocessing import create_custom_mesh_preprocessor
+    from models.experimental.BevDepth.tests.test_bevdepth_backbone import (
+        extract_backbone_state_dict,
+        extract_neck_state_dict,
+        extract_depthnet_state_dict,
+        fuse_batchnorm_into_conv,
+        prepare_ttnn_parameters as prep_backbone_params,
+    )
+    from models.experimental.BevDepth.tt.ttnn_secondfpn import prepare_secondfpn_parameters
+    from models.experimental.BevDepth.tt.ttnn_depthnet import prepare_depthnet_parameters as prep_depthnet
+
+    logger.info("Preparing TTNN parameters...")
+
+    reference_model = load_reference_model()
+    if reference_model is None:
+        return None, None
+
+    checkpoint_path = download_bevdepth_weights()
+
+    backbone_state = extract_backbone_state_dict(checkpoint_path)
+    backbone_state = fuse_batchnorm_into_conv(backbone_state)
+    backbone_params = prep_backbone_params(backbone_state)
+
+    neck_state = extract_neck_state_dict(checkpoint_path)
+    neck_params = prepare_secondfpn_parameters(
+        neck_state,
+        in_channels=[256, 512, 1024, 2048],
+        out_channels=[128, 128, 128, 128],
+        upsample_strides=[0.25, 0.5, 1, 2],
+    )
+
+    depthnet_state = extract_depthnet_state_dict(checkpoint_path)
+    depthnet_params = prep_depthnet(
+        depthnet_state,
+        in_channels=512,
+        mid_channels=512,
+        depth_channels=112,
+    )
+
+    torch_head = reference_model.model.head
+    torch_head.eval()
+    head_params = preprocess_model_parameters(
+        initialize_model=lambda: torch_head,
+        custom_preprocessor=create_custom_mesh_preprocessor(None),
+        device=None,
+    )
+
+    params = {
+        "backbone": backbone_params,
+        "neck": neck_params,
+        "depthnet": depthnet_params,
+        "head": head_params,
+    }
+
+    return params, reference_model
+
+
+def run_ttnn_inference(device, params, imgs, mats_dict):
+    import ttnn
+    from models.experimental.BevDepth.tt.ttnn_bevdepth_backbone import TtBaseLSSFPN
+    from models.experimental.BevDepth.tt.ttnn_bevdepth_head import TtBEVDepthHead, head_optimisations
+
+    logger.info("Running TTNN inference...")
+
+    # Get actual image dimensions from input
+    _, _, _, _, img_h, img_w = imgs.shape
+    logger.info(f"TTNN input image size: {img_h}x{img_w}")
+
+    # LSS configuration matching BEVDepth official config (256x704)
+    lss_conf = {
+        "x_bound": [-51.2, 51.2, 0.8],
+        "y_bound": [-51.2, 51.2, 0.8],
+        "z_bound": [-5.0, 3.0, 0.2],
+        "d_bound": [2.0, 58.0, 0.5],
+        "final_dim": [img_h, img_w],
+        "downsample_factor": 16,
+        "output_channels": 80,
+    }
+
+    model_config = {
+        "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
+        "WEIGHTS_DTYPE": ttnn.bfloat16,
+        "ACTIVATIONS_DTYPE": ttnn.bfloat16,
+        "batch_size": 1,
+        "neck_in_channels": [256, 512, 1024, 2048],
+        "neck_out_channels": [128, 128, 128, 128],
+        "neck_upsample_strides": [0.25, 0.5, 1, 2],
+        "use_torch_conv_transpose": False,
+        "depthnet_in_channels": 512,
+        "depthnet_mid_channels": 512,
+        "depthnet_context_channels": 80,
+        "depthnet_depth_channels": 112,
+    }
+
+    ttnn_backbone = TtBaseLSSFPN(
+        device=device,
+        backbone_parameters=params["backbone"],
+        neck_parameters=params["neck"],
+        depthnet_parameters=params["depthnet"],
+        lss_conf=lss_conf,
+        model_config=model_config,
+    )
+
+    head_model_config = {
+        "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
+        "ACTIVATIONS_DTYPE": ttnn.bfloat16,
+        "WEIGHTS_DTYPE": ttnn.bfloat16,
+    }
+    ttnn_head = TtBEVDepthHead(
+        parameters=params["head"],
+        model_config=head_model_config,
+        layer_optimisations=head_optimisations,
+    )
+
+    ttnn_bev_feature = ttnn_backbone(imgs, mats_dict, is_return_depth=False)
+
+    ttnn_bev_input = ttnn.from_torch(
+        ttnn_bev_feature.permute(0, 2, 3, 1),
+        dtype=ttnn.bfloat16,
+        device=device,
+    )
+    ttnn_bev_input = ttnn.to_device(ttnn_bev_input, device, memory_config=ttnn.L1_MEMORY_CONFIG)
+    ttnn_output = ttnn_head(ttnn_bev_input, device=device)
+
+    # Convert TTNN output to torch format
+    output_keys = ["heatmap", "reg", "height", "dim", "rot", "vel"]
+    torch_preds = []
+
+    for task_idx in range(len(ttnn_output)):
+        task_dict = {}
+        for key in output_keys:
+            ttnn_tensor, shape = ttnn_output[task_idx][key]
+            tensor_torch = ttnn.to_torch(ttnn_tensor)
+            # TTNN output is [N, 1, H*W, C] format - reshape to [N, C, H, W]
+            if len(tensor_torch.shape) == 4:
+                N, _, HW, C = tensor_torch.shape
+                H = W = int(HW**0.5)
+                # Reshape [N, 1, H*W, C] -> [N, H, W, C] -> [N, C, H, W]
+                tensor_torch = tensor_torch.reshape(N, H, W, C).permute(0, 3, 1, 2)
+            task_dict[key] = tensor_torch
+        torch_preds.append([task_dict])
+
+    return torch_preds
+
+
+def visualize_results(
+    info,
+    pts,
+    pred_corners_torch,
+    pred_classes_torch,
+    pred_corners_ttnn,
+    pred_classes_ttnn,
+    gt_corners,
+    output_path,
     show_range=60,
-    show_classes=[
-        "car",
-        "truck",
-        "construction_vehicle",
-        "bus",
-        "trailer",
-        "barrier",
-        "motorcycle",
-        "bicycle",
-        "pedestrian",
-        "traffic_cone",
-    ],
 ):
-    # Set cameras
-    IMG_KEYS = ["CAM_FRONT_LEFT", "CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_BACK_RIGHT", "CAM_BACK", "CAM_BACK_LEFT"]
-    infos = mmengine_load("../resources/nuScenes/infos.pkl")
+    cam_info = info["cam_infos"]
 
-    assert idx < len(infos)
-    # Get data from dataset
-    results = mmengine_load(nusc_results_file)
+    if pred_corners_ttnn is not None:
+        fig = plt.figure(figsize=(24, 16))
+        num_rows = 4
+    else:
+        fig = plt.figure(figsize=(24, 8))
+        num_rows = 2
 
-    info = infos[idx]
-    lidar_path = info["lidar_infos"]["LIDAR_TOP"]["filename"]
-    lidar_points = np.fromfile(os.path.join("../resources/nuScenes", lidar_path), dtype=np.float32, count=-1).reshape(
-        -1, 5
-    )[..., :4]
-    lidar_calibrated_sensor = info["lidar_infos"]["LIDAR_TOP"]["calibrated_sensor"]
-    # Get point cloud
-    pts = lidar_points.copy()
-    ego2global_rotation = np.mean([info["cam_infos"][cam]["ego_pose"]["rotation"] for cam in IMG_KEYS], 0)
-    ego2global_translation = np.mean([info["cam_infos"][cam]["ego_pose"]["translation"] for cam in IMG_KEYS], 0)
-    lidar_points = LidarPointCloud(lidar_points.T)
-    lidar_points.rotate(Quaternion(lidar_calibrated_sensor["rotation"]).rotation_matrix)
-    lidar_points.translate(np.array(lidar_calibrated_sensor["translation"]))
-    pts = lidar_points.points.T
+    # Draw camera views with Torch predictions (top row)
+    for i, k in enumerate(IMG_KEYS):
+        fig_idx = i + 1 if i < 3 else i + 2
+        ax = plt.subplot(num_rows, 4, fig_idx)
+        ax.set_title(f"{k} (Torch)" if pred_corners_ttnn is not None else k)
+        ax.axis("off")
+        ax.set_xlim(0, 1600)
+        ax.set_ylim(900, 0)
 
-    # Get GT corners
+        img_path = os.path.join(RESOURCES_DIR, cam_info[k]["filename"])
+        img = cv2.imread(img_path)
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        ax.imshow(img)
+
+        for corners, cls in zip(pred_corners_torch, pred_classes_torch):
+            cam_corners = get_cam_corners(
+                corners,
+                cam_info[k]["calibrated_sensor"]["translation"],
+                cam_info[k]["calibrated_sensor"]["rotation"],
+                cam_info[k]["calibrated_sensor"]["camera_intrinsic"],
+            )
+            lines = get_3d_lines(cam_corners)
+            for line in lines:
+                ax.plot(
+                    line[0], line[1], c=plt.colormaps["tab10"](SHOW_CLASSES.index(cls) if cls in SHOW_CLASSES else 0)
+                )
+
+    # BEV for Torch
+    ax_bev_torch = plt.subplot(num_rows, 4, 4)
+    ax_bev_torch.set_title("BEV (Torch)")
+    ax_bev_torch.axis("equal")
+    ax_bev_torch.set_xlim(-40, 40)
+    ax_bev_torch.set_ylim(-40, 40)
+
+    ax_bev_torch.scatter(-pts[:, 1], pts[:, 0], s=0.01, c=pts[:, -1], cmap="gray")
+
+    for corners in gt_corners:
+        lines = get_bev_lines(corners)
+        for line in lines:
+            ax_bev_torch.plot([-x for x in line[1]], line[0], c="r", label="ground truth")
+
+    for corners in pred_corners_torch:
+        lines = get_bev_lines(corners)
+        for line in lines:
+            ax_bev_torch.plot([-x for x in line[1]], line[0], c="g", label="torch prediction")
+
+    handles, labels = ax_bev_torch.get_legend_handles_labels()
+    by_label = dict(zip(labels, handles))
+    ax_bev_torch.legend(by_label.values(), by_label.keys(), loc="upper right", framealpha=1)
+
+    # If TTNN predictions available, add bottom rows
+    if pred_corners_ttnn is not None:
+        for i, k in enumerate(IMG_KEYS):
+            fig_idx = i + 9 if i < 3 else i + 10
+            ax = plt.subplot(num_rows, 4, fig_idx)
+            ax.set_title(f"{k} (TTNN)")
+            ax.axis("off")
+            ax.set_xlim(0, 1600)
+            ax.set_ylim(900, 0)
+
+            img_path = os.path.join(RESOURCES_DIR, cam_info[k]["filename"])
+            img = cv2.imread(img_path)
+            img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            ax.imshow(img)
+
+            for corners, cls in zip(pred_corners_ttnn, pred_classes_ttnn):
+                cam_corners = get_cam_corners(
+                    corners,
+                    cam_info[k]["calibrated_sensor"]["translation"],
+                    cam_info[k]["calibrated_sensor"]["rotation"],
+                    cam_info[k]["calibrated_sensor"]["camera_intrinsic"],
+                )
+                lines = get_3d_lines(cam_corners)
+                for line in lines:
+                    ax.plot(
+                        line[0],
+                        line[1],
+                        c=plt.colormaps["tab10"](SHOW_CLASSES.index(cls) if cls in SHOW_CLASSES else 0),
+                    )
+
+        ax_bev_ttnn = plt.subplot(num_rows, 4, 12)
+        ax_bev_ttnn.set_title("BEV (TTNN)")
+        ax_bev_ttnn.axis("equal")
+        ax_bev_ttnn.set_xlim(-40, 40)
+        ax_bev_ttnn.set_ylim(-40, 40)
+
+        ax_bev_ttnn.scatter(-pts[:, 1], pts[:, 0], s=0.01, c=pts[:, -1], cmap="gray")
+
+        for corners in gt_corners:
+            lines = get_bev_lines(corners)
+            for line in lines:
+                ax_bev_ttnn.plot([-x for x in line[1]], line[0], c="r", label="ground truth")
+
+        for corners in pred_corners_ttnn:
+            lines = get_bev_lines(corners)
+            for line in lines:
+                ax_bev_ttnn.plot([-x for x in line[1]], line[0], c="b", label="ttnn prediction")
+
+        handles, labels = ax_bev_ttnn.get_legend_handles_labels()
+        by_label = dict(zip(labels, handles))
+        ax_bev_ttnn.legend(by_label.values(), by_label.keys(), loc="upper right", framealpha=1)
+
+    plt.tight_layout(w_pad=0, h_pad=2)
+    plt.savefig(output_path, dpi=150)
+    logger.info(f"Saved visualization to {output_path}")
+
+
+def boxes_to_corners(boxes_list, classes_list, show_range):
+    pred_corners = []
+    pred_classes = []
+
+    for box, cls in zip(boxes_list, classes_list):
+        if cls not in SHOW_CLASSES:
+            continue
+        box_np = np.array(box[:9])
+        if np.linalg.norm(box_np[:2]) <= show_range:
+            corners = get_corners(box_np[None])[0]
+            pred_corners.append(corners)
+            pred_classes.append(cls)
+
+    return pred_corners, pred_classes
+
+
+def get_gt_corners(info, ego2global_rotation, ego2global_translation, show_range):
+    from models.experimental.BevDepth.reference.bevdepth.datasets.nusc_det_dataset import (
+        map_name_from_general_to_detection,
+    )
+
     gt_corners = []
-    for i in range(len(info["ann_infos"])):
-        if map_name_from_general_to_detection[info["ann_infos"][i]["category_name"]] in show_classes:
+    for ann in info["ann_infos"]:
+        if map_name_from_general_to_detection.get(ann["category_name"], "ignore") in SHOW_CLASSES:
             box = get_ego_box(
                 dict(
-                    size=info["ann_infos"][i]["size"],
-                    rotation=info["ann_infos"][i]["rotation"],
-                    translation=info["ann_infos"][i]["translation"],
+                    size=ann["size"],
+                    rotation=ann["rotation"],
+                    translation=ann["translation"],
                 ),
                 ego2global_rotation,
                 ego2global_translation,
@@ -179,87 +657,138 @@ def demo(
                 corners = get_corners(box[None])[0]
                 gt_corners.append(corners)
 
-    # Get prediction corners
-    pred_corners, pred_class = [], []
-    for box in results["results"][info["sample_token"]]:
-        if box["detection_score"] >= threshold and box["detection_name"] in show_classes:
-            box3d = get_ego_box(box, ego2global_rotation, ego2global_translation)
-            box3d[2] += 0.5 * box3d[5]  # NOTE
-            if np.linalg.norm(box3d[:2]) <= show_range:
-                corners = get_corners(box3d[None])[0]
-                pred_corners.append(corners)
-                pred_class.append(box["detection_name"])
+    return gt_corners
 
-    # Set figure size
-    plt.figure(figsize=(24, 8))
 
-    for i, k in enumerate(IMG_KEYS):
-        # Draw camera views
-        fig_idx = i + 1 if i < 3 else i + 2
-        plt.subplot(2, 4, fig_idx)
+def load_precomputed_results(info, ego2global_rotation, ego2global_translation, score_threshold=0.3):
+    results_path = os.path.join(RESOURCES_DIR, "results.json")
+    with open(results_path, "r") as f:
+        results = json.load(f)
 
-        # Set camera attributes
-        plt.title(k)
-        plt.axis("off")
-        plt.xlim(0, 1600)
-        plt.ylim(900, 0)
+    sample_token = info["sample_token"]
+    detections = results["results"].get(sample_token, [])
 
-        img = mmcv.imread(os.path.join("../resources/nuScenes", info["cam_infos"][k]["filename"]))
-        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+    boxes_list = []
+    classes_list = []
+    scores_list = []
 
-        # Draw images
-        plt.imshow(img)
+    for det in detections:
+        if det["detection_score"] < score_threshold:
+            continue
 
-        # Draw 3D predictions
-        for corners, cls in zip(pred_corners, pred_class):
-            cam_corners = get_cam_corners(
-                corners,
-                info["cam_infos"][k]["calibrated_sensor"]["translation"],
-                info["cam_infos"][k]["calibrated_sensor"]["rotation"],
-                info["cam_infos"][k]["calibrated_sensor"]["camera_intrinsic"],
-            )
-            lines = get_3d_lines(cam_corners)
-            for line in lines:
-                plt.plot(line[0], line[1], c=cm.get_cmap("tab10")(show_classes.index(cls)))
+        box = get_ego_box(
+            dict(
+                size=det["size"],
+                rotation=det["rotation"],
+                translation=det["translation"],
+            ),
+            ego2global_rotation,
+            ego2global_translation,
+        )
+        vx = det.get("velocity", [0, 0])[0]
+        vy = det.get("velocity", [0, 0])[1]
+        boxes_list.append([box[0], box[1], box[2], box[3], box[4], box[5], box[6], vx, vy])
+        classes_list.append(det["detection_name"])
+        scores_list.append(det["detection_score"])
 
-    # Draw BEV
-    plt.subplot(1, 4, 4)
+    return boxes_list, classes_list, scores_list
 
-    # Set BEV attributes
-    plt.title("LIDAR_TOP")
-    plt.axis("equal")
-    plt.xlim(-40, 40)
-    plt.ylim(-40, 40)
 
-    # Draw point cloud
-    plt.scatter(-pts[:, 1], pts[:, 0], s=0.01, c=pts[:, -1], cmap="gray")
+def main():
+    args = parse_args()
 
-    # Draw BEV GT boxes
-    for corners in gt_corners:
-        lines = get_bev_lines(corners)
-        for line in lines:
-            plt.plot([-x for x in line[1]], line[0], c="r", label="ground truth")
+    logger.info("=" * 60)
+    logger.info("BEVDepth Demo - Torch and TTNN Visualization")
+    logger.info("=" * 60)
 
-    # Draw BEV predictions
-    for corners in pred_corners:
-        lines = get_bev_lines(corners)
-        for line in lines:
-            plt.plot([-x for x in line[1]], line[0], c="g", label="prediction")
+    # Load sample data
+    infos = load_infos()
+    info = infos[0]
+    logger.info(f"Loaded sample with token: {info['sample_token']}")
 
-    # Set legend
-    handles, labels = plt.gca().get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    plt.legend(by_label.values(), by_label.keys(), loc="upper right", framealpha=1)
+    # Load images and transformation matrices (using 256x640 for TTNN compatibility)
+    imgs, mats_dict, ego2global_rotation, ego2global_translation = load_images_and_mats(info)
+    logger.info(f"Input images shape: {imgs.shape}")
 
-    # Save figure
-    plt.tight_layout(w_pad=0, h_pad=2)
-    plt.savefig(dump_file)
+    # Load lidar points for BEV visualization
+    pts = load_lidar_points(info)
+    logger.info(f"Loaded {len(pts)} lidar points")
+
+    # Get ground truth corners
+    gt_corners = get_gt_corners(info, ego2global_rotation, ego2global_translation, args.show_range)
+    logger.info(f"Found {len(gt_corners)} ground truth boxes")
+
+    # Class names for each task head
+    class_names = [
+        ["car"],
+        ["truck", "construction_vehicle"],
+        ["bus", "trailer"],
+        ["barrier"],
+        ["motorcycle", "bicycle"],
+        ["pedestrian", "traffic_cone"],
+    ]
+
+    pred_corners_torch = []
+    pred_classes_torch = []
+    pred_corners_ttnn = None
+    pred_classes_ttnn = None
+
+    if args.mode == "precomputed":
+        boxes_pre, classes_pre, scores_pre = load_precomputed_results(
+            info, ego2global_rotation, ego2global_translation, args.threshold
+        )
+        pred_corners_torch, pred_classes_torch = boxes_to_corners(boxes_pre, classes_pre, args.show_range)
+        logger.info(f"Precomputed: Loaded {len(pred_corners_torch)} detections")
+
+    if args.mode in ["torch", "both"]:
+        model = load_reference_model()
+        if model is not None:
+            torch_preds = run_torch_inference(model, imgs, mats_dict)
+            boxes_torch, classes_torch, scores_torch = decode_predictions(torch_preds, class_names, args.threshold)
+            pred_corners_torch, pred_classes_torch = boxes_to_corners(boxes_torch, classes_torch, args.show_range)
+            logger.info(f"Torch: Detected {len(pred_corners_torch)} objects")
+
+    if args.mode in ["ttnn", "both"]:
+        try:
+            import ttnn
+
+            # Use same L1 memory config as E2E test
+            device = ttnn.open_device(device_id=0, l1_small_size=32768)
+            try:
+                params, _ = prepare_ttnn_parameters(device)
+                if params is not None:
+                    ttnn_preds = run_ttnn_inference(device, params, imgs, mats_dict)
+                    boxes_ttnn, classes_ttnn, scores_ttnn = decode_predictions(ttnn_preds, class_names, args.threshold)
+                    pred_corners_ttnn, pred_classes_ttnn = boxes_to_corners(boxes_ttnn, classes_ttnn, args.show_range)
+                    logger.info(f"TTNN: Detected {len(pred_corners_ttnn)} objects")
+            finally:
+                ttnn.close_device(device)
+        except ImportError:
+            logger.warning("TTNN not available, skipping TTNN inference")
+        except Exception as e:
+            logger.error(f"TTNN inference failed: {e}")
+            import traceback
+
+            traceback.print_exc()
+
+    # Visualize results
+    output_path = os.path.join(SCRIPT_DIR, args.output)
+    visualize_results(
+        info,
+        pts,
+        pred_corners_torch,
+        pred_classes_torch,
+        pred_corners_ttnn,
+        pred_classes_ttnn,
+        gt_corners,
+        output_path,
+        args.show_range,
+    )
+
+    logger.info("=" * 60)
+    logger.info("Demo complete!")
+    logger.info("=" * 60)
 
 
 if __name__ == "__main__":
-    args = parse_args()
-    demo(
-        args.idx,
-        args.result_path,
-        args.target_path,
-    )
+    main()
