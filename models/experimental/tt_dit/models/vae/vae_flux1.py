@@ -23,11 +23,18 @@ class ResnetBlock:
     def __init__(
         self,
         mesh_device=None,
-        norm_core_grid=None,
         parallel_config=None,
         ccl_manager=None,
         torch_ref=None,
     ):
+        """
+        Initialize the ResnetBlock.
+        Args:
+            torch_ref: The reference to the torch model.
+            mesh_device: The device to use for the model.
+            parallel_config: The parallel config to use for the model.
+            ccl_manager: The ccl manager to use for the model.
+        """
         self.norm1 = GroupNorm.from_torch(
             torch_ref=torch_ref.norm1,
             mesh_device=mesh_device,
@@ -75,14 +82,12 @@ class ResnetBlock:
         cls,
         torch_ref,
         mesh_device=None,
-        norm_core_grid=None,
         parallel_config=None,
         ccl_manager=None,
     ):
         resnet_block = cls(
             torch_ref=torch_ref,
             mesh_device=mesh_device,
-            norm_core_grid=norm_core_grid,
             parallel_config=parallel_config,
             ccl_manager=ccl_manager,
         )
@@ -111,6 +116,14 @@ class Upsample2D:
         ccl_manager=None,
         torch_ref=None,
     ):
+        """
+        Initialize the Upsample2D block.
+        Args:
+            torch_ref: The reference to the torch model.
+            mesh_device: The device to use for the model.
+            parallel_config: The parallel config to use for the model.
+            ccl_manager: The ccl manager to use for the model.
+        """
         self.conv = Conv2d.from_torch(
             torch_ref.conv,
             mesh_device=mesh_device,
@@ -147,6 +160,14 @@ class Downsample2D:
         ccl_manager=None,
         torch_ref=None,
     ):
+        """
+        Initialize the Downsample2D block.
+        Args:
+            torch_ref: The reference to the torch model.
+            mesh_device: The device to use for the model.
+            parallel_config: The parallel config to use for the model.
+            ccl_manager: The ccl manager to use for the model.
+        """
         self.conv = Conv2d(
             torch_ref.conv.in_channels,
             torch_ref.conv.out_channels,
@@ -184,16 +205,22 @@ class UpDecoderBlock2D:
     def __init__(
         self,
         mesh_device=None,
-        norm_core_grid=None,
         parallel_config=None,
         ccl_manager=None,
         torch_ref=None,
     ):
+        """
+        Initialize the UpDecoderBlock2D.
+        Args:
+            torch_ref: The reference to the torch model.
+            mesh_device: The device to use for the model.
+            parallel_config: The parallel config to use for the model.
+            ccl_manager: The ccl manager to use for the model.
+        """
         self.resnets = [
             ResnetBlock(
                 torch_ref=resnet,
                 mesh_device=mesh_device,
-                norm_core_grid=norm_core_grid,
                 parallel_config=parallel_config,
                 ccl_manager=ccl_manager,
             )
@@ -211,11 +238,10 @@ class UpDecoderBlock2D:
         ]
 
     @classmethod
-    def from_torch(cls, torch_ref, mesh_device=None, norm_core_grid=None, parallel_config=None, ccl_manager=None):
+    def from_torch(cls, torch_ref, mesh_device=None, parallel_config=None, ccl_manager=None):
         layer = cls(
             torch_ref=torch_ref,
             mesh_device=mesh_device,
-            norm_core_grid=norm_core_grid,
             parallel_config=parallel_config,
             ccl_manager=ccl_manager,
         )
@@ -240,16 +266,22 @@ class DownEncoderBlock2D:
     def __init__(
         self,
         mesh_device=None,
-        norm_core_grid=None,
         parallel_config=None,
         ccl_manager=None,
         torch_ref=None,
     ):
+        """
+        Initialize the DownEncoderBlock2D block.
+        Args:
+            torch_ref: The reference to the torch model.
+            mesh_device: The device to use for the model.
+            parallel_config: The parallel config to use for the model.
+            ccl_manager: The ccl manager to use for the model.
+        """
         self.resnets = [
             ResnetBlock(
                 torch_ref=resnet,
                 mesh_device=mesh_device,
-                norm_core_grid=norm_core_grid,
                 parallel_config=parallel_config,
                 ccl_manager=ccl_manager,
             )
@@ -267,11 +299,10 @@ class DownEncoderBlock2D:
         ]
 
     @classmethod
-    def from_torch(cls, torch_ref, mesh_device=None, norm_core_grid=None, parallel_config=None, ccl_manager=None):
+    def from_torch(cls, torch_ref, mesh_device=None, parallel_config=None, ccl_manager=None):
         layer = cls(
             torch_ref=torch_ref,
             mesh_device=mesh_device,
-            norm_core_grid=norm_core_grid,
             parallel_config=parallel_config,
             ccl_manager=ccl_manager,
         )
@@ -300,6 +331,14 @@ class Attention:
         ccl_manager=None,
         torch_ref=None,
     ):
+        """
+        Initialize the Attention block.
+        Args:
+            torch_ref: The reference to the torch model.
+            mesh_device: The device to use for the model.
+            parallel_config: The parallel config to use for the model.
+            ccl_manager: The ccl manager to use for the model.
+        """
         self.query_dim = torch_ref.to_q.in_features
         self.num_heads = torch_ref.heads
         self.head_dim = torch_ref.to_q.out_features // self.num_heads
@@ -397,6 +436,14 @@ class UnetMidBlock2D:
         ccl_manager=None,
         torch_ref=None,
     ):
+        """
+        Initialize the UnetMidBlock2D.
+        Args:
+            torch_ref: The reference to the torch model.
+            mesh_device: The device to use for the model.
+            parallel_config: The parallel config to use for the model.
+            ccl_manager: The ccl manager to use for the model.
+        """
         self.attentions = [
             Attention(
                 torch_ref=attention,
@@ -440,6 +487,14 @@ class VAEDecoder:
         parallel_config=None,
         ccl_manager=None,
     ):
+        """
+        Initialize the VAEDecoder.
+        Args:
+            torch_ref: The reference to the torch model.
+            mesh_device: The device to use for the model.
+            parallel_config: The parallel config to use for the model.
+            ccl_manager: The ccl manager to use for the model.
+        """
         self.conv_in = Conv2d.from_torch(
             torch_ref.conv_in,
             mesh_device=mesh_device,
@@ -513,6 +568,14 @@ class VAEEncoder:
         parallel_config=None,
         ccl_manager=None,
     ):
+        """
+        Initialize the VAEEncoder.
+        Args:
+            torch_ref: The reference to the torch model.
+            mesh_device: The device to use for the model.
+            parallel_config: The parallel config to use for the model.
+            ccl_manager: The ccl manager to use for the model.
+        """
         self.conv_in = Conv2d.from_torch(
             torch_ref.conv_in,
             mesh_device=mesh_device,
