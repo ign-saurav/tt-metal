@@ -3,6 +3,7 @@ import torch
 from dataclasses import dataclass
 
 from models.experimental.BevDepth.tt.utils import TTConv2D, TTSplitConvTranspose2D
+from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_Head_TTNN, prepare_secondfpn_head_parameters
 
 from models.experimental.BevDepth.tests.bevdepth_head_neck import SECONDFPN
 
@@ -412,23 +413,48 @@ class TtSeparateHead:
 
 
 class TtBEVDepthHead:
-    def __init__(self, parameters, model_config, layer_optimisations=head_optimisations, checkpoint_path=None):
+    def __init__(
+        self,
+        parameters,
+        model_config,
+        layer_optimisations=head_optimisations,
+        checkpoint_path=None,
+        device=None,
+        use_ttnn_neck=True,
+    ):
         super().__init__()
         self.parameters = parameters
         self.model_config = model_config
         self.layer_optimisations = layer_optimisations
+        self.device = device
 
         self.trunk_params = parameters.get("trunk", {})
         self.trunk = TtResNet(self.trunk_params, model_config, layer_optimisations)
 
-        # self.neck_params = parameters.get("neck", {})
-        # self.neck = TtSECONDFPN(self.neck_params, model_config, layer_optimisations)
-        # Load BEVDepthLightningModel and use head.neck from it
-        self.neck = SECONDFPN()
-        self.neck.load_checkpoint(
-            "models/experimental/BevDepth/reference/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth"
+        checkpoint_path = (
+            checkpoint_path
+            or "models/experimental/BevDepth/reference/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth"
         )
-        self.neck = self.neck.eval()
+
+        if use_ttnn_neck and device is not None:
+            state_dict = torch.load(checkpoint_path, map_location="cpu")
+            if "state_dict" in state_dict:
+                state_dict = state_dict["state_dict"]
+            neck_params = prepare_secondfpn_head_parameters(state_dict)
+            self.neck = SECONDFPN_Head_TTNN(
+                device=device,
+                parameters=neck_params,
+                in_channels=[160, 160, 320, 640],
+                out_channels=[64, 64, 64, 64],
+                upsample_strides=[1, 2, 4, 8],
+                model_config=model_config,
+            )
+            self.use_ttnn_neck = True
+        else:
+            self.neck = SECONDFPN()
+            self.neck.load_checkpoint(checkpoint_path)
+            self.neck = self.neck.eval()
+            self.use_ttnn_neck = False  # Force to False if device not available
         # Initialize shared_conv as TTConv2D
         shared_conv_params = parameters.get("shared_conv", {})
         self.shared_conv = TTConv2D(
@@ -460,47 +486,28 @@ class TtBEVDepthHead:
             raise ValueError("Device must be provided in __call__")
 
         # Trunk returns (x0, x1, x2, x3) - 4 outputs
-        # x0 is after conv1 (160ch), x1 is after layer1 (160ch), x2 is after layer2 (320ch), x3 is after layer3 (640ch)
-        # This matches the reference neck config: in_channels=[160, 160, 320, 640]
         trunk_outputs = self.trunk(x, device)
         x0, x1, x2, x3 = trunk_outputs
-        # print(f"Trunk outputs shapes: x0: {x0.shape}, x1: {x1.shape}, x2: {x2.shape}, x3: {x3.shape}")
-        # print(f"x0: {ttnn.to_torch(x0).permute(0, 3, 1, 2).reshape(-1)[:10]}")
-        # print(f"x1: {ttnn.to_torch(x1).permute(0, 3, 1, 2).reshape(-1)[:10]}")
-        # print(f"x2: {ttnn.to_torch(x2).permute(0, 3, 1, 2).reshape(-1)[:10]}")
-        # print(f"x3: {ttnn.to_torch(x3).permute(0, 3, 1, 2).reshape(-1)[:10]}")
 
-        # Convert TTNN tensors to PyTorch for reference neck
-        # Reference neck expects NCHW format, TTNN uses NHWC
-        x0_torch = ttnn.to_torch(x0)
-        x1_torch = ttnn.to_torch(x1)
-        x2_torch = ttnn.to_torch(x2)
-        x3_torch = ttnn.to_torch(x3)
+        if self.use_ttnn_neck:
+            # TTNN neck: expects list of TTNN tensors in NHWC format
+            neck_inputs = [x0, x1, x2, x3]
+            x = self.neck(neck_inputs, batch_size=1)
+            x = ttnn.to_device(x, device, memory_config=ttnn.L1_MEMORY_CONFIG)
+        else:
+            # PyTorch fallback: convert TTNN to PyTorch, run neck, convert back
+            x0_torch = ttnn.to_torch(x0).permute(0, 3, 1, 2).float()
+            x1_torch = ttnn.to_torch(x1).permute(0, 3, 1, 2).float()
+            x2_torch = ttnn.to_torch(x2).permute(0, 3, 1, 2).float()
+            x3_torch = ttnn.to_torch(x3).permute(0, 3, 1, 2).float()
 
-        # Convert from NHWC to NCHW
-        x0_torch = x0_torch.permute(0, 3, 1, 2).float()
-        x1_torch = x1_torch.permute(0, 3, 1, 2).float()
-        x2_torch = x2_torch.permute(0, 3, 1, 2).float()
-        x3_torch = x3_torch.permute(0, 3, 1, 2).float()
-        print(f"x0_torch: {x0_torch.reshape(-1)[:10]}")
-        print(f"x1_torch: {x1_torch.reshape(-1)[:10]}")
-        print(f"x2_torch: {x2_torch.reshape(-1)[:10]}")
-        print(f"x3_torch: {x3_torch.reshape(-1)[:10]}")
+            neck_inputs = [x0_torch, x1_torch, x2_torch, x3_torch]
+            with torch.no_grad():
+                neck_output = self.neck(neck_inputs)
 
-        # Reference neck expects list of tensors matching in_channels=[160, 160, 320, 640]
-        neck_inputs = [x0_torch, x1_torch, x2_torch, x3_torch]
-        with torch.no_grad():
-            neck_output = self.neck(neck_inputs)
-
-        # neck_output is a list with one tensor [out] in NCHW format
-        x = neck_output
-        print(f"Neck output: {x.shape}")
-        print(f"Neck output: {x.reshape(-1)[:10]}")
-
-        # Convert back to TTNN format (NHWC)
-        x = x.permute(0, 2, 3, 1)  # NCHW -> NHWC
-        x = ttnn.from_torch(x, dtype=ttnn.bfloat16, device=device)
-        x = ttnn.to_device(x, device, memory_config=ttnn.L1_MEMORY_CONFIG)
+            x = neck_output.permute(0, 2, 3, 1)  # NCHW -> NHWC
+            x = ttnn.from_torch(x, dtype=ttnn.bfloat16, device=device)
+            x = ttnn.to_device(x, device, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         # Shared conv: 256 -> 64 channels (64+64+128 = 256 from concatenation)
         x, output_shape = self.shared_conv(device, x, x.shape)
