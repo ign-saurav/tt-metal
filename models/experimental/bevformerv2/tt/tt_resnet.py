@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-from ttnn import UnaryWithParam, UnaryOpType
+from typing import Optional
 
 from models.tt_cnn.tt.builder import TtConv2d, TtMaxPool2d
-from models.experimental.bevformerv2.tt.utils import create_conv2d_configuration, create_maxpool2d_configuration
-from models.experimental.bevformerv2.tt.tt_bottleneck import TtBottleneck, get_bottleneck_optimisation
+from models.experimental.bevformerv2.tt.tt_bottleneck import TtBottleneck
 from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
+from models.experimental.bevformerv2.tt.config import TtResNet50Configs
 
 
 class TtResNet50_MMD_C345:
@@ -25,184 +25,102 @@ class TtResNet50_MMD_C345:
         device,
         *,
         model_configs: BevFormerV2ModelConfig | None = None,
+        configs: Optional[TtResNet50Configs] = None,
     ):
         self.device = device
+
+        # Use provided configs or build them inline
+        if configs is not None:
+            self.configs = configs
+        else:
+            from models.experimental.bevformerv2.tt.config import create_resnet50_configs
+
+            self.configs = create_resnet50_configs(conv_args, conv_pth, device, model_configs)
 
         # ------------------------
         # Stem
         # ------------------------
-        conv1_config = create_conv2d_configuration(
-            conv_args.conv1,
-            conv_pth.conv1,
-            device=device,
-            activation=UnaryWithParam(UnaryOpType.RELU),
-            act_block_h=32,
-            model_configs=model_configs,
-            layer_path="stem.conv1",
-        )
-        self.conv1 = TtConv2d(conv1_config, device)
-
-        # ------------------------
-        # MaxPool (after stem conv1)
-        # ------------------------
-        # Get channels from conv1 output (out_channels)
-        conv1_channels = conv1_config.out_channels
-        maxpool_config = create_maxpool2d_configuration(
-            conv_args.maxpool,
-            channels=conv1_channels,
-        )
-        self.maxpool = TtMaxPool2d(maxpool_config, device)
+        self.conv1 = TtConv2d(self.configs.stem.conv1, device)
+        self.maxpool = TtMaxPool2d(self.configs.stem.maxpool, device)
 
         # ------------------------
         # Layer 1 (3 blocks)
         # ------------------------
-        layer1_optimisations = get_bottleneck_optimisation("layer1")
         self.layer1_0 = TtBottleneck(
-            conv_args.layer1[0],
-            conv_pth.layer1_0,
-            device,
-            is_downsample=True,
-            model_configs=model_configs,
-            block_path="layer1.0",
-            layer_optimisations=layer1_optimisations,
+            device=device,
+            configs=self.configs.layer1.bottlenecks[0],
         )
         self.layer1_1 = TtBottleneck(
-            conv_args.layer1[1],
-            conv_pth.layer1_1,
-            device,
-            model_configs=model_configs,
-            block_path="layer1.1",
-            layer_optimisations=layer1_optimisations,
+            device=device,
+            configs=self.configs.layer1.bottlenecks[1],
         )
         self.layer1_2 = TtBottleneck(
-            conv_args.layer1[2],
-            conv_pth.layer1_2,
-            device,
-            model_configs=model_configs,
-            block_path="layer1.2",
-            layer_optimisations=layer1_optimisations,
+            device=device,
+            configs=self.configs.layer1.bottlenecks[2],
         )
 
         # ------------------------
         # Layer 2 (4 blocks)
         # ------------------------
-        layer2_optimisations = get_bottleneck_optimisation("layer2")
         self.layer2_0 = TtBottleneck(
-            conv_args.layer2[0],
-            conv_pth.layer2_0,
-            device,
-            is_downsample=True,
-            model_configs=model_configs,
-            block_path="layer2.0",
-            layer_optimisations=layer2_optimisations,
+            device=device,
+            configs=self.configs.layer2.bottlenecks[0],
         )
         self.layer2_1 = TtBottleneck(
-            conv_args.layer2[1],
-            conv_pth.layer2_1,
-            device,
-            model_configs=model_configs,
-            block_path="layer2.1",
-            layer_optimisations=layer2_optimisations,
+            device=device,
+            configs=self.configs.layer2.bottlenecks[1],
         )
         self.layer2_2 = TtBottleneck(
-            conv_args.layer2[2],
-            conv_pth.layer2_2,
-            device,
-            model_configs=model_configs,
-            block_path="layer2.2",
-            layer_optimisations=layer2_optimisations,
+            device=device,
+            configs=self.configs.layer2.bottlenecks[2],
         )
         self.layer2_3 = TtBottleneck(
-            conv_args.layer2[3],
-            conv_pth.layer2_3,
-            device,
-            model_configs=model_configs,
-            block_path="layer2.3",
-            layer_optimisations=layer2_optimisations,
+            device=device,
+            configs=self.configs.layer2.bottlenecks[3],
         )
 
         # ------------------------
         # Layer 3 (6 blocks)
         # ------------------------
-        layer3_optimisations = get_bottleneck_optimisation("layer3")
         self.layer3_0 = TtBottleneck(
-            conv_args.layer3[0],
-            conv_pth.layer3_0,
-            device,
-            is_downsample=True,
-            model_configs=model_configs,
-            block_path="layer3.0",
-            layer_optimisations=layer3_optimisations,
+            device=device,
+            configs=self.configs.layer3.bottlenecks[0],
         )
         self.layer3_1 = TtBottleneck(
-            conv_args.layer3[1],
-            conv_pth.layer3_1,
-            device,
-            model_configs=model_configs,
-            block_path="layer3.1",
-            layer_optimisations=layer3_optimisations,
+            device=device,
+            configs=self.configs.layer3.bottlenecks[1],
         )
         self.layer3_2 = TtBottleneck(
-            conv_args.layer3[2],
-            conv_pth.layer3_2,
-            device,
-            model_configs=model_configs,
-            block_path="layer3.2",
-            layer_optimisations=layer3_optimisations,
+            device=device,
+            configs=self.configs.layer3.bottlenecks[2],
         )
         self.layer3_3 = TtBottleneck(
-            conv_args.layer3[3],
-            conv_pth.layer3_3,
-            device,
-            model_configs=model_configs,
-            block_path="layer3.3",
-            layer_optimisations=layer3_optimisations,
+            device=device,
+            configs=self.configs.layer3.bottlenecks[3],
         )
         self.layer3_4 = TtBottleneck(
-            conv_args.layer3[4],
-            conv_pth.layer3_4,
-            device,
-            model_configs=model_configs,
-            block_path="layer3.4",
-            layer_optimisations=layer3_optimisations,
+            device=device,
+            configs=self.configs.layer3.bottlenecks[4],
         )
         self.layer3_5 = TtBottleneck(
-            conv_args.layer3[5],
-            conv_pth.layer3_5,
-            device,
-            model_configs=model_configs,
-            block_path="layer3.5",
-            layer_optimisations=layer3_optimisations,
+            device=device,
+            configs=self.configs.layer3.bottlenecks[5],
         )
 
         # ------------------------
         # Layer 4 (3 blocks)
         # ------------------------
-        layer4_optimisations = get_bottleneck_optimisation("layer4")
         self.layer4_0 = TtBottleneck(
-            conv_args.layer4[0],
-            conv_pth.layer4_0,
-            device,
-            is_downsample=True,
-            model_configs=model_configs,
-            block_path="layer4.0",
-            layer_optimisations=layer4_optimisations,
+            device=device,
+            configs=self.configs.layer4.bottlenecks[0],
         )
         self.layer4_1 = TtBottleneck(
-            conv_args.layer4[1],
-            conv_pth.layer4_1,
-            device,
-            model_configs=model_configs,
-            block_path="layer4.1",
-            layer_optimisations=layer4_optimisations,
+            device=device,
+            configs=self.configs.layer4.bottlenecks[1],
         )
         self.layer4_2 = TtBottleneck(
-            conv_args.layer4[2],
-            conv_pth.layer4_2,
-            device,
-            model_configs=model_configs,
-            block_path="layer4.2",
-            layer_optimisations=layer4_optimisations,
+            device=device,
+            configs=self.configs.layer4.bottlenecks[2],
         )
 
     # ------------------------------

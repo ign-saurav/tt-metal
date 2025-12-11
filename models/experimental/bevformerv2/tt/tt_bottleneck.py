@@ -9,6 +9,7 @@ from typing import Optional
 from models.tt_cnn.tt.builder import TtConv2d
 from models.experimental.bevformerv2.tt.utils import create_conv2d_configuration
 from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
+from models.experimental.bevformerv2.tt.config import TtBottleneckConfigs
 
 
 @dataclass
@@ -77,81 +78,102 @@ def get_bottleneck_optimisation(layer_name: Optional[str] = None):
 class TtBottleneck:
     def __init__(
         self,
-        conv_args,
-        conv_pth,
-        device,
+        conv_args=None,
+        conv_pth=None,
+        device=None,
         is_downsample=False,
         *,
         model_configs: BevFormerV2ModelConfig | None = None,
         block_path: str | None = None,
         layer_optimisations: Optional[BottleneckOptimizer] = None,
+        configs: Optional[TtBottleneckConfigs] = None,
     ):
         self.is_downsample = is_downsample
 
-        # Get layer optimizations
-        if layer_optimisations is None:
-            layer_optimisations = get_bottleneck_optimisation(block_path)
+        # Use provided configs or build them inline
+        if configs is not None:
+            # Use configs from config.py
+            self.is_downsample = configs.downsample is not None
+            self.conv1 = TtConv2d(configs.conv1, device)
+            self.conv2 = TtConv2d(configs.conv2, device)
+            self.conv3 = TtConv2d(configs.conv3, device)
+            if configs.downsample is not None:
+                self.downsample = TtConv2d(configs.downsample, device)
 
-        self.layer_optimisations = layer_optimisations
-
-        # Determine activation dtype from optimizations or defaults
-        activation_dtype = layer_optimisations.downsample.get("activation_dtype", ttnn.bfloat16)
-        if activation_dtype == ttnn.bfloat8_b:
-            self.activation_dtype = ttnn.bfloat8_b
+            # Determine activation dtype from downsample config if available
+            if configs.downsample is not None:
+                self.activation_dtype = configs.downsample.activation_dtype
+            else:
+                self.activation_dtype = ttnn.bfloat16
         else:
-            self.activation_dtype = ttnn.bfloat16
+            # Build configs inline (backward compatibility)
+            if conv_args is None or conv_pth is None or device is None:
+                raise ValueError("Either configs must be provided, or conv_args, conv_pth, and device must be provided")
 
-        # conv1
-        conv1_opts = layer_optimisations.conv1.copy()
-        conv1_config = create_conv2d_configuration(
-            conv_args.conv1,
-            conv_pth.conv1,
-            device=device,
-            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            model_configs=model_configs,
-            layer_path=f"{block_path}.conv1" if block_path else None,
-            **conv1_opts,
-        )
-        self.conv1 = TtConv2d(conv1_config, device)
+            # Get layer optimizations
+            if layer_optimisations is None:
+                layer_optimisations = get_bottleneck_optimisation(block_path)
 
-        # conv2
-        conv2_opts = layer_optimisations.conv2.copy()
-        conv2_config = create_conv2d_configuration(
-            conv_args.conv2,
-            conv_pth.conv2,
-            device=device,
-            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            model_configs=model_configs,
-            layer_path=f"{block_path}.conv2" if block_path else None,
-            **conv2_opts,
-        )
-        self.conv2 = TtConv2d(conv2_config, device)
+            self.layer_optimisations = layer_optimisations
 
-        # conv3
-        conv3_opts = layer_optimisations.conv3.copy()
-        conv3_config = create_conv2d_configuration(
-            conv_args.conv3,
-            conv_pth.conv3,
-            device=device,
-            activation=None,
-            model_configs=model_configs,
-            layer_path=f"{block_path}.conv3" if block_path else None,
-            **conv3_opts,
-        )
-        self.conv3 = TtConv2d(conv3_config, device)
+            # Determine activation dtype from optimizations or defaults
+            activation_dtype = layer_optimisations.downsample.get("activation_dtype", ttnn.bfloat16)
+            if activation_dtype == ttnn.bfloat8_b:
+                self.activation_dtype = ttnn.bfloat8_b
+            else:
+                self.activation_dtype = ttnn.bfloat16
 
-        if is_downsample:
-            downsample_opts = layer_optimisations.downsample.copy()
-            downsample_config = create_conv2d_configuration(
-                conv_args.downsample[0],
-                conv_pth.downsample,
+            # conv1
+            conv1_opts = layer_optimisations.conv1.copy()
+            conv1_config = create_conv2d_configuration(
+                conv_args.conv1,
+                conv_pth.conv1,
+                device=device,
+                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+                model_configs=model_configs,
+                layer_path=f"{block_path}.conv1" if block_path else None,
+                **conv1_opts,
+            )
+            self.conv1 = TtConv2d(conv1_config, device)
+
+            # conv2
+            conv2_opts = layer_optimisations.conv2.copy()
+            conv2_config = create_conv2d_configuration(
+                conv_args.conv2,
+                conv_pth.conv2,
+                device=device,
+                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+                model_configs=model_configs,
+                layer_path=f"{block_path}.conv2" if block_path else None,
+                **conv2_opts,
+            )
+            self.conv2 = TtConv2d(conv2_config, device)
+
+            # conv3
+            conv3_opts = layer_optimisations.conv3.copy()
+            conv3_config = create_conv2d_configuration(
+                conv_args.conv3,
+                conv_pth.conv3,
                 device=device,
                 activation=None,
                 model_configs=model_configs,
-                layer_path=f"{block_path}.downsample" if block_path else None,
-                **downsample_opts,
+                layer_path=f"{block_path}.conv3" if block_path else None,
+                **conv3_opts,
             )
-            self.downsample = TtConv2d(downsample_config, device)
+            self.conv3 = TtConv2d(conv3_config, device)
+
+            if is_downsample:
+                downsample_opts = layer_optimisations.downsample.copy()
+                downsample_config = create_conv2d_configuration(
+                    conv_args.downsample[0],
+                    conv_pth.downsample,
+                    device=device,
+                    activation=None,
+                    model_configs=model_configs,
+                    layer_path=f"{block_path}.downsample" if block_path else None,
+                    **downsample_opts,
+                )
+                self.downsample = TtConv2d(downsample_config, device)
 
     def __call__(self, x_identity):
         x = self.conv1(x_identity)

@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
+from typing import Optional
 
 from models.tt_cnn.tt.builder import TtConv2d
 from models.experimental.bevformerv2.tt.utils import create_conv2d_configuration
 from models.experimental.bevformerv2.tt.model_configs import BevFormerV2ModelConfig
+from models.experimental.bevformerv2.tt.config import TtFPNConvConfigs, TtFPNConfigs
 
 
 class TtConvModule:
@@ -17,30 +19,42 @@ class TtConvModule:
 
     def __init__(
         self,
-        conv_args,
-        conv_pth,
+        conv_args=None,
+        conv_pth=None,
         *,
         device=None,
         model_configs: BevFormerV2ModelConfig | None = None,
         layer_path: str | None = None,
         is_blk: bool = False,
         dealloc_act: bool = True,
+        configs: Optional[TtFPNConvConfigs] = None,
     ):
         self.device = device
-        # Keep a handle to the inferred conv metadata so we can recover (B, H, W)
-        # for reshape / upsample inside the FPN top‑down pathway.
-        self.meta = conv_args.conv
 
-        conv_config = create_conv2d_configuration(
-            conv_args.conv,
-            conv_pth.conv,
-            device=self.device,
-            dealloc_act=dealloc_act,
-            is_blk=is_blk,
-            model_configs=model_configs,
-            layer_path=layer_path,
-        )
-        self.conv = TtConv2d(conv_config, self.device)
+        # Use provided configs or build them inline
+        if configs is not None:
+            # Use configs from config.py
+            self.meta = None  # Metadata not needed when using configs
+            self.conv = TtConv2d(configs.conv, self.device)
+        else:
+            # Build configs inline (backward compatibility)
+            if conv_args is None or conv_pth is None:
+                raise ValueError("Either configs must be provided, or conv_args and conv_pth must be provided")
+
+            # Keep a handle to the inferred conv metadata so we can recover (B, H, W)
+            # for reshape / upsample inside the FPN top‑down pathway.
+            self.meta = conv_args.conv
+
+            conv_config = create_conv2d_configuration(
+                conv_args.conv,
+                conv_pth.conv,
+                device=self.device,
+                dealloc_act=dealloc_act,
+                is_blk=is_blk,
+                model_configs=model_configs,
+                layer_path=layer_path,
+            )
+            self.conv = TtConv2d(conv_config, self.device)
 
     def __call__(self, x):
         # TtConv2d returns just the output tensor
@@ -71,45 +85,51 @@ class TtFPN:
 
     def __init__(
         self,
-        conv_args,
-        conv_pth,
-        device,
+        conv_args=None,
+        conv_pth=None,
+        device=None,
         *,
         model_configs: BevFormerV2ModelConfig | None = None,
+        configs: Optional[TtFPNConfigs] = None,
     ):
         self.device = device
         self.start_level = 0
+
+        # Use provided configs or build them inline
+        if configs is not None:
+            self.configs = configs
+            # Metadata not needed when using configs, but initialize empty list
+            self._lateral_meta = []
+        else:
+            # Build configs inline (backward compatibility)
+            if conv_args is None or conv_pth is None or device is None:
+                raise ValueError("Either configs must be provided, or conv_args, conv_pth, and device must be provided")
+
+            from models.experimental.bevformerv2.tt.config import create_fpn_configs
+
+            self.configs = create_fpn_configs(conv_args, conv_pth, device, model_configs)
+
+            # Store metadata for backward compatibility
+            self._lateral_meta = []
+            for i in range(len(conv_args.lateral_convs)):
+                self._lateral_meta.append(conv_args.lateral_convs[i].conv)
 
         # Lateral and FPN convs are stored as Python lists for cheap iteration.
         self.lateral_convs: list[TtConvModule] = []
         self.fpn_convs: list[TtConvModule] = []
 
-        # Metadata for each lateral level (B, H, W) inferred from conv_args.
-        self._lateral_meta = []
-
-        num_lateral = len(conv_args.lateral_convs)
-        num_fpn = len(conv_args.fpn_convs)
+        num_lateral = len(self.configs.lateral_convs)
+        num_fpn = len(self.configs.fpn_convs)
         assert num_fpn >= num_lateral, "FPN must have at least as many fpn_convs as lateral_convs"
 
         # ------------------------
         # Build lateral convolutions
         # ------------------------
         for i in range(num_lateral):
-            lat_args = conv_args.lateral_convs[i]
-            lat_pth = conv_pth.lateral_convs[i]
-
-            self._lateral_meta.append(lat_args.conv)
-
             self.lateral_convs.append(
                 TtConvModule(
-                    lat_args,
-                    lat_pth,
                     device=device,
-                    model_configs=model_configs,
-                    layer_path=f"fpn.lateral_convs.{i}.conv",
-                    # FPN laterals are cheap; we typically deallocate their activations
-                    # once they are consumed by the next stage.
-                    dealloc_act=True,
+                    configs=self.configs.lateral_convs[i],
                 )
             )
 
@@ -117,24 +137,10 @@ class TtFPN:
         # Build FPN convolutions
         # ------------------------
         for i in range(num_fpn):
-            fpn_args = conv_args.fpn_convs[i]
-            fpn_pth = conv_pth.fpn_convs[i]
-
-            is_extra_level = i >= num_lateral
-
-            # Extra levels (P6, P7, ...) often feed into many downstream heads,
-            # so we keep their activations alive by default (dealloc_act=False).
-            dealloc_act = not is_extra_level
-
             self.fpn_convs.append(
                 TtConvModule(
-                    fpn_args,
-                    fpn_pth,
                     device=device,
-                    model_configs=model_configs,
-                    layer_path=f"fpn.fpn_convs.{i}.conv",
-                    is_blk=False,
-                    dealloc_act=dealloc_act,
+                    configs=self.configs.fpn_convs[i],
                 )
             )
 
@@ -155,15 +161,24 @@ class TtFPN:
           5. reshape back to [1, 1, B * H * W, C] and switch to TILE layout
         """
         # Metadata for the current and previous lateral levels.
-        coarse_meta = self._lateral_meta[level]
-        fine_meta = self._lateral_meta[level - 1]
-
-        coarse_b = coarse_meta.batch_size
-        coarse_h = coarse_meta.input_height
-        coarse_w = coarse_meta.input_width
-
-        fine_h = fine_meta.input_height
-        fine_w = fine_meta.input_width
+        # Try to get from stored metadata, otherwise infer from configs
+        if len(self._lateral_meta) > level:
+            coarse_meta = self._lateral_meta[level]
+            fine_meta = self._lateral_meta[level - 1]
+            coarse_b = coarse_meta.batch_size
+            coarse_h = coarse_meta.input_height
+            coarse_w = coarse_meta.input_width
+            fine_h = fine_meta.input_height
+            fine_w = fine_meta.input_width
+        else:
+            # Infer from configs if metadata not available
+            coarse_config = self.configs.lateral_convs[level].conv
+            fine_config = self.configs.lateral_convs[level - 1].conv
+            coarse_b = coarse_config.batch_size
+            coarse_h = coarse_config.input_height
+            coarse_w = coarse_config.input_width
+            fine_h = fine_config.input_height
+            fine_w = fine_config.input_width
 
         # Convert to row‑major layout and unflatten.
         top = ttnn.to_layout(top, ttnn.ROW_MAJOR_LAYOUT)
