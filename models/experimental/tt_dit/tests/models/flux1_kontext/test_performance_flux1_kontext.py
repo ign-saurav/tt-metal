@@ -22,9 +22,11 @@ from diffusers.utils import load_image
     "mesh_device, cfg, sp, tp, topology, num_links",
     [
         [(2, 4), (1, 0), (2, 0), (4, 1), ttnn.Topology.Linear, 1],
+        [(2, 4), (2, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
     ],
     ids=[
-        "2x4sp0tp1",
+        "2x4cfg1sp2tp4",
+        "2x4cfg2sp1tp4",
     ],
     indirect=["mesh_device"],
 )
