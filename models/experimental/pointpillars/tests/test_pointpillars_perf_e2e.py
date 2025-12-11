@@ -2,17 +2,17 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import time
 import pytest
 import torch
 from loguru import logger
 
 import ttnn
 from ttnn.model_preprocessing import preprocess_model_parameters
-from models.common.utility_functions import comp_pcc, tt2torch_tensor
+from models.common.utility_functions import comp_pcc, profiler, run_for_wormhole_b0, tt2torch_tensor
 from models.experimental.pointpillars.tt.pointpillars import TtPointPillars, PointPillarsPreprocessor
 from models.experimental.pointpillars.reference.model.pointpillars import PointPillars
 from models.experimental.pointpillars.tt.custom_preprocessor import create_custom_mesh_preprocessor
+from models.perf.perf_utils import prep_perf_report
 from models.tt_cnn.tt.pipeline import (
     PipelineConfig,
     create_pipeline_from_config,
@@ -20,11 +20,68 @@ from models.tt_cnn.tt.pipeline import (
 )
 
 
-def run_pointpillars_e2e(
-    device,
-    batch_size_per_device,
-    model_location_generator=None,
-):
+def run_pointpillars_pipeline(device, test_infra, num_measurement_iterations):
+    """Run the PointPillars model through the pipeline and measure performance."""
+    tt_inputs_host = test_infra["host_input_tensor"]
+    input_dram_mem_config = test_infra["input_dram_mem_config"]
+    input_l1_mem_config = test_infra["input_l1_mem_config"]
+    tt_model = test_infra["tt_model"]
+
+    def pointpillars_model_wrapper(l1_input_tensor):
+        return tt_model.forward(l1_input_tensor)
+
+    pipeline = create_pipeline_from_config(
+        device=device,
+        model=pointpillars_model_wrapper,
+        config=PipelineConfig(
+            use_trace=True,
+            num_command_queues=2,
+            all_transfers_on_separate_command_queue=False,
+        ),
+        dram_input_memory_config=input_dram_mem_config,
+        l1_input_memory_config=input_l1_mem_config,
+    )
+
+    logger.info(f"Running model warmup with input shape {list(tt_inputs_host.shape)}")
+    profiler.start("compile")
+    pipeline.compile(tt_inputs_host)
+    profiler.end("compile")
+
+    host_inputs = [tt_inputs_host] * num_measurement_iterations
+    pipeline.preallocate_output_tensors_on_host(num_measurement_iterations)
+
+    logger.info(
+        f"Starting performance pipeline for {num_measurement_iterations} iterations with batch_size={test_infra['batch_size']} and num_devices={test_infra['num_devices']}"
+    )
+    profiler.start("run_model_pipeline_2cqs")
+    outputs = pipeline.enqueue(host_inputs).pop_all()
+    profiler.end("run_model_pipeline_2cqs")
+
+    # Validate last output
+    tt_cls, tt_reg, tt_dir = outputs[-1]
+    torch_cls = test_infra["torch_cls"]
+    torch_reg = test_infra["torch_reg"]
+    torch_dir = test_infra["torch_dir"]
+
+    tt_cls_torch = tt2torch_tensor(tt_cls).permute(0, 3, 1, 2)
+    passing_cls, pcc_cls = comp_pcc(torch_cls, tt_cls_torch, 0.97)
+    logger.info(f"Classification PCC: {pcc_cls}")
+
+    tt_reg_torch = tt2torch_tensor(tt_reg).permute(0, 3, 1, 2)
+    passing_reg, pcc_reg = comp_pcc(torch_reg, tt_reg_torch, 0.99)
+    logger.info(f"Regression PCC: {pcc_reg}")
+
+    tt_dir_torch = tt2torch_tensor(tt_dir).permute(0, 3, 1, 2)
+    passing_dir, pcc_dir = comp_pcc(torch_dir, tt_dir_torch, 0.99)
+    logger.info(f"Direction PCC: {pcc_dir}")
+
+    pipeline.cleanup()
+
+    return outputs, passing_cls and passing_reg and passing_dir
+
+
+def setup_pointpillars_test_infra(device, batch_size_per_device):
+    """Setup test infrastructure for PointPillars."""
     torch.manual_seed(0)
     num_devices = device.get_num_devices()
     batch_size = batch_size_per_device * num_devices
@@ -55,14 +112,14 @@ def run_pointpillars_e2e(
         else:
             state_dict = checkpoint
         torch_model.load_state_dict(state_dict)
-        logger.info("Successfully loaded pretrained weights from epoch_160.pth")
+        logger.info("Successfully loaded pretrained weights")
     except FileNotFoundError:
-        logger.warning("Checkpoint file 'epoch_160.pth' not found, using random weights")
+        logger.warning("Checkpoint file not found, using random weights")
 
     torch_model = torch_model.to(dtype=torch.bfloat16)
     torch_model.eval()
 
-    # Create test input (point cloud)
+    # Create test input (point cloud) and get reference outputs
     batched_pts = [torch.randn(18221, 4, dtype=torch.bfloat16)]
     torch_cls, torch_reg, torch_dir = torch_model(batched_pts)
 
@@ -90,7 +147,6 @@ def run_pointpillars_e2e(
         device=device,
     )
 
-    # === PREPROCESSING (done once, outside pipeline) ===
     # Preprocess point cloud to pillar features
     pillar_features = preprocessor.forward(batched_pts)
     pillar_features = ttnn.permute(pillar_features, (0, 2, 3, 1))  # NHWC to NCHW
@@ -107,7 +163,6 @@ def run_pointpillars_e2e(
         layout=ttnn.ROW_MAJOR_LAYOUT,
     )
 
-    # === PIPELINE SETUP ===
     # Set up memory configurations
     input_dram_mem_config = get_memory_config_for_persistent_dram_tensor(
         host_input_tensor.shape, ttnn.TensorMemoryLayout.HEIGHT_SHARDED, device.dram_grid_size()
@@ -123,73 +178,105 @@ def run_pointpillars_e2e(
         use_height_and_width_as_shard_shape=True,
     )
 
-    # Create model wrapper for pipeline
-    def pointpillars_model_wrapper(l1_input_tensor):
-        # The pipeline handles transfers, so we just run the model
-        return tt_model.forward(l1_input_tensor)
-
-    # Warmup pass to prepare conv_transpose2d weights on device BEFORE trace capture
+    # Warmup pass to prepare conv weights on device BEFORE trace capture
     warmup_input = ttnn.to_device(host_input_tensor, device, memory_config=input_l1_mem_config)
     _ = tt_model.forward(warmup_input)
     ttnn.deallocate(warmup_input)
     logger.info("Warmup pass complete - weights prepared on device")
 
-    # Configure pipeline with trace enabled (weights are now prepared, no writes during trace)
-    config = PipelineConfig(use_trace=True, num_command_queues=2, all_transfers_on_separate_command_queue=False)
+    return {
+        "host_input_tensor": host_input_tensor,
+        "input_dram_mem_config": input_dram_mem_config,
+        "input_l1_mem_config": input_l1_mem_config,
+        "tt_model": tt_model,
+        "torch_cls": torch_cls,
+        "torch_reg": torch_reg,
+        "torch_dir": torch_dir,
+        "batch_size": batch_size,
+        "num_devices": num_devices,
+    }
 
-    pipe = create_pipeline_from_config(
-        config,
-        pointpillars_model_wrapper,
-        device,
-        dram_input_memory_config=input_dram_mem_config,
-        l1_input_memory_config=input_l1_mem_config,
+
+def run_perf_e2e_pointpillars(
+    device,
+    batch_size_per_device,
+    expected_inference_throughput,
+):
+    """Run end-to-end performance test for PointPillars."""
+    profiler.clear()
+
+    num_devices = device.get_num_devices()
+    batch_size = batch_size_per_device * num_devices
+
+    test_infra = setup_pointpillars_test_infra(device, batch_size_per_device)
+
+    num_measurement_iterations = 32
+    outputs, validation_passed = run_pointpillars_pipeline(device, test_infra, num_measurement_iterations)
+
+    compile_time = profiler.get("compile")
+    inference_time_avg = profiler.get("run_model_pipeline_2cqs") / num_measurement_iterations
+    expected_inference_time = batch_size / expected_inference_throughput
+
+    prep_perf_report(
+        model_name=f"ttnn_pointpillars_trace_2cqs_batch_size{batch_size}",
+        batch_size=batch_size,
+        inference_and_compile_time=compile_time,
+        inference_time=inference_time_avg,
+        expected_compile_time=300,
+        expected_inference_time=expected_inference_time,
+        comments=f"pointpillars_batchsize{batch_size}_devices{num_devices}",
+        inference_time_cpu=0.0,
     )
 
-    # === PIPELINE EXECUTION ===
-    iterations = 10
-    host_inputs = [host_input_tensor] * iterations
+    fps = batch_size / inference_time_avg
+    logger.info(
+        f"PointPillars batch_size: {batch_size}, inference time (avg): {inference_time_avg:.4f}s, FPS: {fps:.2f}"
+    )
+    logger.info(f"PointPillars compile time: {compile_time:.2f}s")
+    logger.info(f"Expected throughput: {expected_inference_throughput} FPS, Actual: {fps:.2f} FPS")
 
-    pipe.compile(host_input_tensor)
-    pipe.preallocate_output_tensors_on_host(len(host_inputs))
-
-    start = time.time()
-    outputs = pipe.enqueue(host_inputs).pop_all()
-    end = time.time()
-
-    pipe.cleanup()
-
-    # Compare outputs (using last iteration)
-    tt_cls, tt_reg, tt_dir = outputs[-1]
-
-    # Compare classification output
-    tt_cls_torch = tt2torch_tensor(tt_cls)
-    tt_cls_torch = tt_cls_torch.permute(0, 3, 1, 2)
-    passing_cls, pcc_cls = comp_pcc(torch_cls, tt_cls_torch, 0.97)
-    logger.info(f"Classification PCC: {pcc_cls}")
-    assert passing_cls, f"Classification PCC check failed: {pcc_cls}"
-
-    # Compare regression output
-    tt_reg_torch = tt2torch_tensor(tt_reg)
-    tt_reg_torch = tt_reg_torch.permute(0, 3, 1, 2)
-    passing_reg, pcc_reg = comp_pcc(torch_reg, tt_reg_torch, 0.99)
-    logger.info(f"Regression PCC: {pcc_reg}")
-    assert passing_reg, f"Regression PCC check failed: {pcc_reg}"
-
-    # Compare direction output
-    tt_dir_torch = tt2torch_tensor(tt_dir)
-    tt_dir_torch = tt_dir_torch.permute(0, 3, 1, 2)
-    passing_dir, pcc_dir = comp_pcc(torch_dir, tt_dir_torch, 0.99)
-    logger.info(f"Direction PCC: {pcc_dir}")
-    assert passing_dir, f"Direction PCC check failed: {pcc_dir}"
-
-    inference_time = (end - start) / iterations
-    logger.info(f"Average model time={1000.0 * inference_time : .2f} ms")
-    logger.info(f"Average model performance={iterations * batch_size / (end-start) : .2f} fps")
+    assert validation_passed, "Output validation failed"
 
 
+@run_for_wormhole_b0()
+@pytest.mark.models_performance_bare_metal
 @pytest.mark.parametrize(
     "device_params", [{"l1_small_size": 79104, "trace_region_size": 6434816, "num_command_queues": 2}], indirect=True
 )
-@pytest.mark.parametrize("batch_size_per_device", [1])
-def test_pointpillars_e2e_pipeline(batch_size_per_device, device, model_location_generator):
-    run_pointpillars_e2e(device, batch_size_per_device, model_location_generator)
+@pytest.mark.parametrize("batch_size_per_device", (1,))
+@pytest.mark.parametrize(
+    "expected_inference_throughput",
+    [30],  # Expected FPS for single device (N150)
+)
+def test_pointpillars_perf_single_device(
+    device,
+    batch_size_per_device,
+    expected_inference_throughput,
+):
+    run_perf_e2e_pointpillars(
+        device,
+        batch_size_per_device,
+        expected_inference_throughput,
+    )
+
+
+@run_for_wormhole_b0()
+@pytest.mark.models_performance_bare_metal
+@pytest.mark.parametrize(
+    "device_params", [{"l1_small_size": 79104, "trace_region_size": 6434816, "num_command_queues": 2}], indirect=True
+)
+@pytest.mark.parametrize("batch_size_per_device", (1,))
+@pytest.mark.parametrize(
+    "expected_inference_throughput",
+    [300],  # Expected FPS for multi-device N300 (scales ~linearly)
+)
+def test_pointpillars_perf_multi_device(
+    mesh_device,
+    batch_size_per_device,
+    expected_inference_throughput,
+):
+    run_perf_e2e_pointpillars(
+        mesh_device,
+        batch_size_per_device,
+        expected_inference_throughput,
+    )
