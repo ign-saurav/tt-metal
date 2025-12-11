@@ -82,11 +82,16 @@ class TtBackbone:
         stride,
         block_idx,
     ):
+        # Move weights from device to host for proper conv2d preparation
         weight = parameters.weight
+        if isinstance(weight, ttnn.Tensor) and ttnn.is_tensor_storage_on_device(weight):
+            weight = ttnn.from_device(weight)
 
         bias = None
         if hasattr(parameters, "bias") and parameters.bias is not None:
             bias = parameters.bias
+            if isinstance(bias, ttnn.Tensor) and ttnn.is_tensor_storage_on_device(bias):
+                bias = ttnn.from_device(bias)
 
         math_fidelity = ttnn.MathFidelity.HiFi4 if block_idx == 2 else ttnn.MathFidelity.HiFi2
 

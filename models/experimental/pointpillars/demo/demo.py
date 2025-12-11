@@ -226,6 +226,18 @@ class PointPillarsDemo:
         """
         with torch.no_grad():
             pillar_features = self.preprocessor.forward(batched_pts=[pc_torch])
+            # Convert from NCHW to NHWC format
+            pillar_features = ttnn.permute(pillar_features, (0, 2, 3, 1))
+            # Flatten spatial dimensions: [1, 496, 432, 64] -> [1, 1, 214272, 64]
+            pillar_features = ttnn.reshape(
+                pillar_features,
+                (
+                    pillar_features.shape[0],
+                    1,
+                    pillar_features.shape[1] * pillar_features.shape[2],
+                    pillar_features.shape[3],
+                ),
+            )
             tt_cls, tt_reg, tt_dir = self.tt_model.forward(pillar_features)
 
         return tt_cls, tt_reg, tt_dir
