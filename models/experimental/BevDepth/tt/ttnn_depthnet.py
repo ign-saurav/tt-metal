@@ -829,207 +829,117 @@ class ASPP_TTNN:
                             f"Ref std={ref_x1.std().item():.6f}"
                         )
 
-        # Branch 2-4: 3x3 conv with dilation
-        # Check if PyTorch fallback is enabled for dilated convolutions
-        use_pytorch_dilated = self.model_config.get("USE_PYTORCH_FALLBACK_ASPP_DILATED_CONV", True)
+        # Branch 2-4: 3x3 conv with dilation using native TTNN dilation support
+        use_pytorch_dilated = self.model_config.get("USE_PYTORCH_FALLBACK_ASPP_DILATED_CONV", False)
 
         if use_pytorch_dilated:
-            # TTNN doesn't support dilation, so use PyTorch fallback for dilated convolutions
-            # x2: dilation=6, x3: dilation=12, x4: dilation=18
+            # Legacy PyTorch fallback (kept for comparison/debugging)
             import torch.nn.functional as F
 
-            # Helper function to run dilated conv with PyTorch fallback
-            def run_dilated_conv(x_ttnn, weight, bias, dilation_val, branch_name):
+            def run_dilated_conv_torch(x_ttnn, weight, bias, dilation_val, branch_name):
                 x_torch = ttnn.to_torch(x_ttnn)
                 if len(x_torch.shape) == 4 and x_torch.shape[-1] == self.in_channels:
-                    x_torch = x_torch.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-
-                weight_torch = weight
-                if isinstance(weight_torch, ttnn.Tensor):
-                    weight_torch = ttnn.to_torch(weight_torch)
-                bias_torch = bias
-                if bias_torch is not None and isinstance(bias_torch, ttnn.Tensor):
-                    bias_torch = ttnn.to_torch(bias_torch)
-
+                    x_torch = x_torch.permute(0, 3, 1, 2)
+                weight_torch = weight if not isinstance(weight, ttnn.Tensor) else ttnn.to_torch(weight)
+                bias_torch = bias if bias is None or not isinstance(bias, ttnn.Tensor) else ttnn.to_torch(bias)
                 with torch.no_grad():
-                    # PyTorch conv2d with proper dilation
                     x_torch = F.conv2d(
                         x_torch.float(),
                         weight_torch.float(),
                         bias_torch.float() if bias_torch is not None else None,
                         stride=1,
-                        padding=dilation_val,  # padding = dilation for 3x3 kernel
+                        padding=dilation_val,
                         dilation=dilation_val,
                     )
                     x_torch = F.relu(x_torch)
-
-                # Convert back to TTNN format [B, C, H, W] -> [B, H, W, C]
-                x_torch = x_torch.permute(0, 2, 3, 1)  # [B, C, H, W] -> [B, H, W, C]
-
-                x_ttnn = ttnn.from_torch(
+                x_torch = x_torch.permute(0, 2, 3, 1)
+                return ttnn.from_torch(
                     x_torch,
                     dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
                     layout=ttnn.TILE_LAYOUT,
                     device=self.device,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 )
-                return x_ttnn
 
-            # x2: 3x3 conv with dilation=6
-            x2 = run_dilated_conv(x, self.params.aspp2_weight, self.params.aspp2_bias, 6, "x2")
-
-            # x3: 3x3 conv with dilation=12
-            x3 = run_dilated_conv(x, self.params.aspp3_weight, self.params.aspp3_bias, 12, "x3")
-
-            # x4: 3x3 conv with dilation=18
-            x4 = run_dilated_conv(x, self.params.aspp4_weight, self.params.aspp4_bias, 18, "x4")
+            x2 = run_dilated_conv_torch(x, self.params.aspp2_weight, self.params.aspp2_bias, 6, "x2")
+            x3 = run_dilated_conv_torch(x, self.params.aspp3_weight, self.params.aspp3_bias, 12, "x3")
+            x4 = run_dilated_conv_torch(x, self.params.aspp4_weight, self.params.aspp4_bias, 18, "x4")
         else:
-            # Try TTNN implementation (note: TTNN doesn't support dilation, so this will use padding approximation)
-            # This is for testing/debugging purposes - may have lower accuracy
-            logger.warning(
-                "Using TTNN implementation for dilated convolutions (dilation not supported, using padding approximation)"
-            )
-            from models.experimental.BevDepth.tt.utils import ttnn_conv2d
+            # Pure TTNN implementation using native dilation parameter
+            def run_dilated_conv_ttnn(x_ttnn, weight, bias, dilation_val, branch_name):
+                # Ensure input is in correct format
+                if x_ttnn.is_sharded():
+                    x_ttnn = ttnn.sharded_to_interleaved(x_ttnn, ttnn.DRAM_MEMORY_CONFIG)
+                if x_ttnn.layout != ttnn.TILE_LAYOUT:
+                    x_ttnn = ttnn.to_layout(x_ttnn, ttnn.TILE_LAYOUT)
 
-            # x2: 3x3 conv with dilation=6 (approximated with padding=6)
-            x2 = ttnn_conv2d(
-                input_tensor=x,
-                weight_tensor=self.params.aspp2_weight,
-                bias_tensor=self.params.aspp2_bias,
-                device=self.device,
-                batch_size=batch_size,
-                input_height=height,
-                input_width=width,
-                in_channels=self.in_channels,
-                out_channels=self.mid_channels,
-                kernel_size=(3, 3),
-                stride=(1, 1),
-                padding=(6, 6),  # Approximation: padding = dilation (not true dilation)
-                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-                math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-                weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-                activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-                packer_l1_acc=False,
-            )
-            # Convert and reshape x2
-            if x2.is_sharded():
-                x2 = ttnn.sharded_to_interleaved(x2, ttnn.DRAM_MEMORY_CONFIG)
-            if x2.is_allocated() and x2.memory_config().buffer_type != ttnn.BufferType.DRAM:
-                x2 = ttnn.to_memory_config(x2, ttnn.DRAM_MEMORY_CONFIG)
-            if x2.layout != ttnn.TILE_LAYOUT:
-                x2 = ttnn.to_layout(x2, ttnn.TILE_LAYOUT)
-            # Reshape x2 to [B, H, W, C] - calculate output size (padding=6 adds 10 to each dimension)
-            # Output = input + 2*padding - kernel + 1 = input + 12 - 3 + 1 = input + 10
-            output_h = height + 10
-            output_w = width + 10
-            # Get actual spatial size from tensor
-            if len(x2.shape) == 3:
-                spatial_size = x2.shape[1] // batch_size
-            elif len(x2.shape) == 4:
-                spatial_size = x2.shape[1] * x2.shape[2] if x2.shape[0] == batch_size else x2.shape[2] * x2.shape[3]
-            else:
-                spatial_size = output_h * output_w
-            # Reshape and crop to match input size
-            if spatial_size == output_h * output_w:
-                x2 = ttnn.reshape(x2, (batch_size, output_h, output_w, self.mid_channels))
-                # Crop to input size
-                crop_h = (output_h - height) // 2
-                crop_w = (output_w - width) // 2
-                x2 = ttnn.slice(
-                    x2, [0, crop_h, crop_w, 0], [batch_size, crop_h + height, crop_w + width, self.mid_channels]
-                )
-            else:
-                # Fallback: reshape to expected size
-                x2 = ttnn.reshape(x2, (batch_size, height, width, self.mid_channels))
+                # Prepare weight tensor
+                weight_ttnn = weight
+                if isinstance(weight, torch.Tensor):
+                    weight_ttnn = ttnn.from_torch(
+                        weight.to(torch.bfloat16), dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
+                    )
 
-            # x3: 3x3 conv with dilation=12 (approximated with padding=12)
-            x3 = ttnn_conv2d(
-                input_tensor=x,
-                weight_tensor=self.params.aspp3_weight,
-                bias_tensor=self.params.aspp3_bias,
-                device=self.device,
-                batch_size=batch_size,
-                input_height=height,
-                input_width=width,
-                in_channels=self.in_channels,
-                out_channels=self.mid_channels,
-                kernel_size=(3, 3),
-                stride=(1, 1),
-                padding=(12, 12),  # Approximation: padding = dilation
-                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-                math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-                weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-                activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-                packer_l1_acc=False,
-            )
-            if x3.is_sharded():
-                x3 = ttnn.sharded_to_interleaved(x3, ttnn.DRAM_MEMORY_CONFIG)
-            if x3.is_allocated() and x3.memory_config().buffer_type != ttnn.BufferType.DRAM:
-                x3 = ttnn.to_memory_config(x3, ttnn.DRAM_MEMORY_CONFIG)
-            if x3.layout != ttnn.TILE_LAYOUT:
-                x3 = ttnn.to_layout(x3, ttnn.TILE_LAYOUT)
-            # Reshape and crop x3
-            output_h = height + 22  # padding=12 adds 22 to each dimension
-            output_w = width + 22
-            if len(x3.shape) == 3:
-                spatial_size = x3.shape[1] // batch_size
-            else:
-                spatial_size = output_h * output_w
-            if spatial_size == output_h * output_w:
-                x3 = ttnn.reshape(x3, (batch_size, output_h, output_w, self.mid_channels))
-                crop_h = (output_h - height) // 2
-                crop_w = (output_w - width) // 2
-                x3 = ttnn.slice(
-                    x3, [0, crop_h, crop_w, 0], [batch_size, crop_h + height, crop_w + width, self.mid_channels]
-                )
-            else:
-                x3 = ttnn.reshape(x3, (batch_size, height, width, self.mid_channels))
+                # Prepare bias tensor
+                bias_ttnn = None
+                if bias is not None:
+                    if isinstance(bias, torch.Tensor):
+                        bias_reshaped = bias.reshape(1, 1, 1, -1).to(torch.bfloat16)
+                        bias_ttnn = ttnn.from_torch(bias_reshaped, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
+                    else:
+                        bias_ttnn = bias
 
-            # x4: 3x3 conv with dilation=18 (approximated with padding=18)
-            x4 = ttnn_conv2d(
-                input_tensor=x,
-                weight_tensor=self.params.aspp4_weight,
-                bias_tensor=self.params.aspp4_bias,
-                device=self.device,
-                batch_size=batch_size,
-                input_height=height,
-                input_width=width,
-                in_channels=self.in_channels,
-                out_channels=self.mid_channels,
-                kernel_size=(3, 3),
-                stride=(1, 1),
-                padding=(18, 18),  # Approximation: padding = dilation
-                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-                math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-                weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-                activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-                packer_l1_acc=False,
-            )
-            if x4.is_sharded():
-                x4 = ttnn.sharded_to_interleaved(x4, ttnn.DRAM_MEMORY_CONFIG)
-            if x4.is_allocated() and x4.memory_config().buffer_type != ttnn.BufferType.DRAM:
-                x4 = ttnn.to_memory_config(x4, ttnn.DRAM_MEMORY_CONFIG)
-            if x4.layout != ttnn.TILE_LAYOUT:
-                x4 = ttnn.to_layout(x4, ttnn.TILE_LAYOUT)
-            # Reshape and crop x4
-            output_h = height + 34  # padding=18 adds 34 to each dimension
-            output_w = width + 34
-            if len(x4.shape) == 3:
-                spatial_size = x4.shape[1] // batch_size
-            else:
-                spatial_size = output_h * output_w
-            if spatial_size == output_h * output_w:
-                x4 = ttnn.reshape(x4, (batch_size, output_h, output_w, self.mid_channels))
-                crop_h = (output_h - height) // 2
-                crop_w = (output_w - width) // 2
-                x4 = ttnn.slice(
-                    x4, [0, crop_h, crop_w, 0], [batch_size, crop_h + height, crop_w + width, self.mid_channels]
+                conv_config = ttnn.Conv2dConfig(
+                    weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+                    output_layout=ttnn.TILE_LAYOUT,
                 )
-            else:
-                x4 = ttnn.reshape(x4, (batch_size, height, width, self.mid_channels))
+                compute_config = ttnn.init_device_compute_kernel_config(
+                    self.device.arch(),
+                    math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+                    fp32_dest_acc_en=True,
+                )
+
+                # Native TTNN conv2d with dilation parameter
+                out, [out_h, out_w] = ttnn.conv2d(
+                    input_tensor=x_ttnn,
+                    weight_tensor=weight_ttnn,
+                    bias_tensor=bias_ttnn,
+                    device=self.device,
+                    in_channels=self.in_channels,
+                    out_channels=self.mid_channels,
+                    batch_size=batch_size,
+                    input_height=height,
+                    input_width=width,
+                    kernel_size=(3, 3),
+                    stride=(1, 1),
+                    padding=(dilation_val, dilation_val),
+                    dilation=(dilation_val, dilation_val),
+                    conv_config=conv_config,
+                    compute_config=compute_config,
+                    return_output_dim=True,
+                    dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+                )
+
+                if out.is_sharded():
+                    out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
+                out = ttnn.relu(out)
+
+                # Reshape to [B, H, W, C]
+                if len(out.shape) == 4 and out.shape[1] == 1:
+                    out = ttnn.reshape(out, (batch_size, out_h, out_w, self.mid_channels))
+                elif len(out.shape) == 3:
+                    out = ttnn.reshape(out, (batch_size, out_h, out_w, self.mid_channels))
+
+                return out
+
+            # x2: 3x3 conv with dilation=6 (native TTNN)
+            x2 = run_dilated_conv_ttnn(x, self.params.aspp2_weight, self.params.aspp2_bias, 6, "x2")
+
+            # x3: 3x3 conv with dilation=12 (native TTNN)
+            x3 = run_dilated_conv_ttnn(x, self.params.aspp3_weight, self.params.aspp3_bias, 12, "x3")
+
+            # x4: 3x3 conv with dilation=18 (native TTNN)
+            x4 = run_dilated_conv_ttnn(x, self.params.aspp4_weight, self.params.aspp4_bias, 18, "x4")
 
         # Global pooling branch
         x5 = ttnn.global_avg_pool2d(x)
@@ -1093,31 +1003,19 @@ class ASPP_TTNN:
                     f"Cannot reshape x5: shape={x5.shape}, expected elements={expected_elements}, actual={actual_elements}"
                 )
 
-        # Convert to ROW_MAJOR_LAYOUT before upsample
-        # TILE_LAYOUT requires tile-aligned dimensions (divisible by 32)
-        # Upsample from 1x1 to height x width
-        # Reference uses F.interpolate with mode="bilinear", align_corners=True
-        # Check if PyTorch fallback is enabled for upsampling
-        use_pytorch_upsample = self.model_config.get("USE_PYTORCH_FALLBACK_ASPP_UPSAMPLE", True)
+        # Upsample from 1x1 to height x width using TtUpsample with channel slicing
+        use_pytorch_upsample = self.model_config.get("USE_PYTORCH_FALLBACK_ASPP_UPSAMPLE", False)
 
         if use_pytorch_upsample:
-            # Use PyTorch fallback directly (avoids L1 OOM for large scale factors)
+            # Legacy PyTorch fallback (kept for comparison/debugging)
             import torch
             import torch.nn.functional as F
 
-            # Convert to PyTorch
             x5_torch = ttnn.to_torch(x5)
-            # Convert from [B, H, W, C] to [B, C, H, W] for F.interpolate
             if len(x5_torch.shape) == 4 and x5_torch.shape[-1] == self.mid_channels:
                 x5_torch = x5_torch.permute(0, 3, 1, 2)
-
-            # Use F.interpolate with bilinear mode, align_corners=True to match reference
             x5_torch = F.interpolate(x5_torch.float(), size=(height, width), mode="bilinear", align_corners=True)
-
-            # Convert back to [B, H, W, C] format
             x5_torch = x5_torch.permute(0, 2, 3, 1)
-
-            # Convert back to TTNN
             x5 = ttnn.from_torch(
                 x5_torch,
                 dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
@@ -1126,51 +1024,31 @@ class ASPP_TTNN:
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
         else:
-            # Try TTNN bilinear upsampling (may fail with L1 OOM for large scale factors)
-            try:
-                # Since input is 1x1, we must use ROW_MAJOR_LAYOUT
-                if x5.layout != ttnn.ROW_MAJOR_LAYOUT:
-                    x5 = ttnn.to_layout(x5, ttnn.ROW_MAJOR_LAYOUT)
+            # Pure TTNN bilinear upsampling using TtUpsample with channel slicing
+            from models.tt_cnn.tt.builder import TtUpsample, UpsampleConfiguration, ChannelSliceStrategyConfiguration
 
-                # Try with DRAM memory config to avoid L1 OOM
-                x5 = ttnn.upsample(
-                    x5, scale_factor=[height, width], mode="bilinear", memory_config=ttnn.DRAM_MEMORY_CONFIG
-                )
+            # Convert to ROW_MAJOR for upsample
+            if x5.is_sharded():
+                x5 = ttnn.sharded_to_interleaved(x5, ttnn.DRAM_MEMORY_CONFIG)
+            x5 = ttnn.to_layout(x5, ttnn.ROW_MAJOR_LAYOUT)
 
-                # Convert back to TILE_LAYOUT for concatenation
-                if x5.layout != ttnn.TILE_LAYOUT:
-                    x5 = ttnn.to_layout(x5, ttnn.TILE_LAYOUT)
-            except RuntimeError as e:
-                if "Out of Memory" in str(e) or "L1" in str(e):
-                    # Fallback to PyTorch bilinear upsampling for large scale factors
-                    logger.warning(f"TTNN bilinear upsampling failed with L1 OOM, using PyTorch fallback: {e}")
-                    import torch
-                    import torch.nn.functional as F
+            # Use channel slicing to avoid L1 OOM for large scale factors
+            num_slices = 4 if self.mid_channels >= 256 else 2
+            upsample_config = UpsampleConfiguration(
+                input_height=1,
+                input_width=1,
+                channels=self.mid_channels,
+                batch_size=batch_size,
+                scale_factor=(height, width),
+                mode="bilinear",
+                slice_strategy=ChannelSliceStrategyConfiguration(num_slices=num_slices),
+            )
+            upsample_layer = TtUpsample(upsample_config, self.device)
+            x5 = upsample_layer(x5)
 
-                    # Convert to PyTorch
-                    x5_torch = ttnn.to_torch(x5)
-                    # Convert from [B, H, W, C] to [B, C, H, W] for F.interpolate
-                    if len(x5_torch.shape) == 4 and x5_torch.shape[-1] == self.mid_channels:
-                        x5_torch = x5_torch.permute(0, 3, 1, 2)
-
-                    # Use F.interpolate with bilinear mode, align_corners=True to match reference
-                    x5_torch = F.interpolate(
-                        x5_torch.float(), size=(height, width), mode="bilinear", align_corners=True
-                    )
-
-                    # Convert back to [B, H, W, C] format
-                    x5_torch = x5_torch.permute(0, 2, 3, 1)
-
-                    # Convert back to TTNN
-                    x5 = ttnn.from_torch(
-                        x5_torch,
-                        dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                        layout=ttnn.TILE_LAYOUT,
-                        device=self.device,
-                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                    )
-                else:
-                    raise
+            # Convert back to TILE_LAYOUT
+            x5 = ttnn.to_layout(x5, ttnn.TILE_LAYOUT)
+            x5 = ttnn.to_memory_config(x5, ttnn.DRAM_MEMORY_CONFIG)
 
         # Debug: Compare all branches before concatenation
         if debug_aspp:

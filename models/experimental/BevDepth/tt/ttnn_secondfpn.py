@@ -18,7 +18,7 @@ class SECONDFPN_TTNN:
         upsample_strides=[0.25, 0.5, 1, 2],
         model_config=None,
         use_torch_conv_transpose=False,
-        use_torch_conv2d_fallback=True,
+        use_torch_conv2d_fallback=True,  # PyTorch fallback for backbone neck conv2d
     ):
         self.device = device
         self.in_channels = in_channels
@@ -369,4 +369,216 @@ def prepare_secondfpn_parameters(
         params.deblocks.append(deblock)
 
     logger.info(f"Prepared SECONDFPN parameters for {len(in_channels)} levels")
+    return params
+
+
+class SECONDFPN_Head_TTNN:
+    """Pure TTNN implementation of SecondFPN for BEVDepth Head (bev_neck)."""
+
+    def __init__(
+        self,
+        device,
+        parameters,
+        in_channels=[160, 160, 320, 640],
+        out_channels=[64, 64, 64, 64],
+        upsample_strides=[1, 2, 4, 8],
+        model_config=None,
+        use_slicing=True,
+    ):
+        self.device = device
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.upsample_strides = upsample_strides
+        self.num_levels = len(in_channels)
+        self.use_slicing = use_slicing
+
+        self.model_config = model_config or {
+            "WEIGHTS_DTYPE": ttnn.bfloat16,
+            "ACTIVATIONS_DTYPE": ttnn.bfloat16,
+            "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
+        }
+
+        self.deblocks = parameters.deblocks
+        logger.info(f"SECONDFPN_Head_TTNN init: {self.num_levels} levels, pure TTNN with DRAM slicing")
+
+    def __call__(self, x_list, batch_size=1):
+        ups = []
+        target_height = None
+        target_width = None
+
+        for i in range(self.num_levels):
+            feat = x_list[i]
+            height, width = feat.shape[1], feat.shape[2]
+            stride = int(self.upsample_strides[i])
+            kernel_size = self.deblocks[i].kernel_size
+
+            if feat.is_sharded():
+                feat = ttnn.sharded_to_interleaved(feat, ttnn.DRAM_MEMORY_CONFIG)
+            elif feat.memory_config().memory_layout != ttnn.TensorMemoryLayout.INTERLEAVED:
+                feat = ttnn.to_memory_config(feat, ttnn.DRAM_MEMORY_CONFIG)
+
+            if feat.layout != ttnn.TILE_LAYOUT:
+                feat = ttnn.to_layout(feat, ttnn.TILE_LAYOUT)
+
+            weight_tensor = self.deblocks[i].conv_weight
+            if isinstance(weight_tensor, torch.Tensor):
+                weight_tensor = ttnn.from_torch(
+                    weight_tensor.clone(),
+                    dtype=self.model_config["WEIGHTS_DTYPE"],
+                    layout=ttnn.ROW_MAJOR_LAYOUT,
+                )
+
+            bias_tensor = self.deblocks[i].conv_bias
+            if bias_tensor is not None and isinstance(bias_tensor, torch.Tensor):
+                if len(bias_tensor.shape) == 1:
+                    bias_tensor = bias_tensor.view(1, 1, 1, -1)
+                bias_tensor = ttnn.from_torch(
+                    bias_tensor.clone(),
+                    dtype=self.model_config["WEIGHTS_DTYPE"],
+                    layout=ttnn.ROW_MAJOR_LAYOUT,
+                )
+
+            conv_config = ttnn.Conv2dConfig(
+                weights_dtype=self.model_config["WEIGHTS_DTYPE"],
+                shard_layout=None,
+                deallocate_activation=False,
+                output_layout=ttnn.TILE_LAYOUT,
+            )
+
+            compute_config = ttnn.init_device_compute_kernel_config(
+                self.device.arch(),
+                math_fidelity=self.model_config["MATH_FIDELITY"],
+                math_approx_mode=False,
+                fp32_dest_acc_en=True,
+                packer_l1_acc=True,
+            )
+
+            # Use DRAM slicing for large inputs to avoid L1 overflow
+            l1_estimate = height * width * self.in_channels[i]
+            slice_config = None
+            # use slicing if the l1 estimate is greater than 100000 elements
+            if self.use_slicing and l1_estimate > 100000:
+                num_slices = 8
+                slice_config = ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dDRAMSliceHeight, num_slices=num_slices)
+
+            conv_out_height = (height - 1) * stride + kernel_size[0]
+            conv_out_width = (width - 1) * stride + kernel_size[1]
+
+            feat, [conv_out_height, conv_out_width] = ttnn.conv_transpose2d(
+                input_tensor=feat,
+                weight_tensor=weight_tensor,
+                bias_tensor=bias_tensor,
+                device=self.device,
+                in_channels=self.in_channels[i],
+                out_channels=self.out_channels[i],
+                batch_size=batch_size,
+                input_height=height,
+                input_width=width,
+                kernel_size=kernel_size,
+                stride=(stride, stride),
+                padding=(0, 0),
+                output_padding=(0, 0),
+                dilation=(1, 1),
+                conv_config=conv_config,
+                compute_config=compute_config,
+                dram_slice_config=slice_config,
+                return_output_dim=True,
+                return_weights_and_bias=False,
+                mirror_kernel=True,
+                dtype=self.model_config["ACTIVATIONS_DTYPE"],
+            )
+
+            if feat.is_sharded():
+                feat = ttnn.sharded_to_interleaved(feat, ttnn.DRAM_MEMORY_CONFIG)
+            feat = ttnn.relu(feat)
+
+            if len(feat.shape) == 4:
+                if feat.shape[1] == 1 and feat.shape[2] != conv_out_height:
+                    feat = ttnn.reshape(feat, (batch_size, conv_out_height, conv_out_width, self.out_channels[i]))
+            elif len(feat.shape) == 3:
+                feat = ttnn.reshape(feat, (batch_size, conv_out_height, conv_out_width, self.out_channels[i]))
+
+            if target_height is None:
+                target_height = conv_out_height
+                target_width = conv_out_width
+
+            ups.append(feat)
+
+        processed_ups = []
+        for up_tensor in ups:
+            if isinstance(up_tensor, ttnn.Tensor) and up_tensor.is_sharded():
+                up_tensor = ttnn.sharded_to_interleaved(up_tensor, ttnn.DRAM_MEMORY_CONFIG)
+            processed_ups.append(up_tensor)
+
+        out = ttnn.concat(processed_ups, dim=-1, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        return out
+
+
+def prepare_secondfpn_head_parameters(
+    state_dict,
+    in_channels=[160, 160, 320, 640],
+    out_channels=[64, 64, 64, 64],
+    upsample_strides=[1, 2, 4, 8],
+):
+    """Prepare parameters for head's SecondFPN (bev_neck)."""
+    from models.experimental.BevDepth.tests.test_resnet50_backbone_pcc import fuse_conv_bn_weights
+
+    class Parameters:
+        pass
+
+    params = Parameters()
+    params.deblocks = []
+
+    all_keys = list(state_dict.keys())
+    possible_prefixes = [
+        "model.head.neck.",
+        "head.neck.",
+        "neck.",
+    ]
+
+    prefix = None
+    for p in possible_prefixes:
+        if any(k.startswith(p) for k in all_keys):
+            prefix = p
+            break
+
+    if prefix is None:
+        logger.error(f"Could not find head neck prefix. Available keys: {all_keys[:20]}")
+        raise KeyError("No head neck keys found in checkpoint")
+
+    logger.info(f"Using head SECONDFPN prefix: {prefix}")
+
+    for i in range(len(in_channels)):
+        deblock = Parameters()
+        weight = state_dict[f"{prefix}deblocks.{i}.0.weight"].clone()
+
+        kernel_h, kernel_w = weight.shape[2], weight.shape[3]
+        deblock.kernel_size = (kernel_h, kernel_w)
+
+        bn_weight = state_dict.get(f"{prefix}deblocks.{i}.1.weight", None)
+        bn_bias = state_dict.get(f"{prefix}deblocks.{i}.1.bias", None)
+        bn_mean = state_dict.get(f"{prefix}deblocks.{i}.1.running_mean", None)
+        bn_var = state_dict.get(f"{prefix}deblocks.{i}.1.running_var", None)
+
+        if bn_weight is not None and bn_mean is not None and bn_var is not None:
+            conv_weight_for_fusion = weight.permute(1, 0, 2, 3).contiguous().float()
+            eps = 1e-3
+            fused_weight, fused_bias = fuse_conv_bn_weights(
+                conv_weight_for_fusion,
+                bn_weight.float(),
+                bn_bias.float(),
+                bn_mean.float(),
+                bn_var.float(),
+                eps=eps,
+            )
+            fused_weight = fused_weight.permute(1, 0, 2, 3).contiguous()
+            deblock.conv_weight = fused_weight.to(torch.bfloat16)
+            deblock.conv_bias = fused_bias.to(torch.bfloat16)
+        else:
+            deblock.conv_weight = weight.to(torch.bfloat16)
+            deblock.conv_bias = None
+
+        params.deblocks.append(deblock)
+
+    logger.info(f"Prepared head SECONDFPN parameters for {len(in_channels)} levels")
     return params
