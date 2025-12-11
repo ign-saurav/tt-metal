@@ -118,6 +118,7 @@ class Flux1KontextPipeline:
 
         self._mesh_device = mesh_device
         self._parallel_config = parallel_config
+        self.sp_axis = self._parallel_config.sequence_parallel.mesh_axis
 
         # Create submeshes based on CFG parallel factor
         submesh_shape = list(mesh_device.shape)
@@ -213,6 +214,7 @@ class Flux1KontextPipeline:
             ):
                 logger.info(f"Loading transformer weights from PyTorch state dict")
                 tt_transformer.load_torch_state_dict(torch_transformer.state_dict())
+                logger.info(f"Successfully loaded transformer weights")
 
             self.transformers.append(tt_transformer)
             ttnn.synchronize_device(submesh_device)
@@ -295,8 +297,12 @@ class Flux1KontextPipeline:
             ):
                 logger.info(f"Loading T5 text encoder weights from PyTorch state dict")
                 self._text_encoder_2.load_torch_state_dict(torch_text_encoder_2.state_dict())
+                logger.info(f"Successfully loaded T5 text encoder weights")
 
         self._traces = None
+
+        # intermediate buffers for safe tracing
+        self._vae_input_latents = None
 
         ttnn.synchronize_device(self.encoder_device)
 
@@ -389,14 +395,17 @@ class Flux1KontextPipeline:
         seed: Optional[int] = None,
         traced: bool = True,
     ):
+        prompt = [prompt] if isinstance(prompt, str) else prompt
+        if negative_prompt is not None:
+            negative_prompt = [negative_prompt] if isinstance(negative_prompt, str) else negative_prompt
         return self(
             image=image,
             width=width,
             height=height,
-            prompt_1=[prompt],
-            prompt_2=[prompt],
-            negative_prompt_1=[negative_prompt] if negative_prompt else None,
-            negative_prompt_2=[negative_prompt] if negative_prompt else None,
+            prompt_1=prompt,
+            prompt_2=prompt,
+            negative_prompt_1=negative_prompt,
+            negative_prompt_2=negative_prompt,
             cfg_scale=cfg_scale,
             guidance_scale=guidance_scale,
             num_inference_steps=num_inference_steps,
@@ -406,14 +415,16 @@ class Flux1KontextPipeline:
 
     # adapted from https://github.com/huggingface/diffusers/blob/v0.35.1/src/diffusers/pipelines/flux/pipeline_flux_kontext.py
     def _get_t5_prompt_embeds(
+        self,
         *,
-        prompts: list[str],
+        prompts: Union[list[str], str],
         text_encoder: T5Encoder | T5EncoderModel | None,
         tokenizer: T5TokenizerFast,
         max_sequence_length: int,
         num_images_per_prompt: int,
         mesh_device: ttnn.MeshDevice | None = None,
     ):
+        prompts = [prompts] if isinstance(prompts, str) else prompts
         batch_size = len(prompts)
 
         tokens = tokenizer(
@@ -463,14 +474,16 @@ class Flux1KontextPipeline:
 
     # adapted from https://github.com/huggingface/diffusers/blob/v0.35.1/src/diffusers/pipelines/flux/pipeline_flux_kontext.py
     def _get_clip_prompt_embeds(
+        self,
         *,
-        prompts: list[str],
+        prompts: Union[list[str], str],
         text_encoder: CLIPEncoder | CLIPTextModel,
         tokenizer: CLIPTokenizer,
         sequence_length: int,
         num_images_per_prompt: int,
         mesh_device: ttnn.MeshDevice | None = None,
     ):
+        prompts = [prompts] if isinstance(prompts, str) else prompts
         batch_size = len(prompts)
 
         tokens = tokenizer(
@@ -522,14 +535,17 @@ class Flux1KontextPipeline:
     def _encode_prompts_partial(
         self,
         *,
-        prompt_1: list[str],
-        prompt_2: Optional[list[str]] = None,
+        prompt_1: Union[list[str], str],
+        prompt_2: Optional[Union[list[str], str]] = None,
         num_images_per_prompt: int = 1,
         max_sequence_length: int = 512,
     ):
         timer = self.timing_collector
-        prompt_2 = prompt_2 or prompt_1
         tokenizer_max_length = self._tokenizer_1.model_max_length
+
+        prompt_1 = [prompt_1] if isinstance(prompt_1, str) else prompt_1
+        prompt_2 = prompt_2 or prompt_1
+        prompt_2 = [prompt_2] if isinstance(prompt_2, str) else prompt_2
 
         # We only use the pooled prompt output from the CLIPTextModel
         with timer.time_section("clip_encoding") if timer else nullcontext():
@@ -557,10 +573,10 @@ class Flux1KontextPipeline:
     def encode_prompts(
         self,
         *,
-        prompt_1: list[str],
-        prompt_2: Optional[list[str]] = None,
-        negative_prompt_1: Optional[list[str]] = None,
-        negative_prompt_2: Optional[list[str]] = None,
+        prompt_1: Union[list[str], str],
+        prompt_2: Optional[Union[list[str], str]] = None,
+        negative_prompt_1: Optional[Union[list[str], str]] = None,
+        negative_prompt_2: Optional[Union[list[str], str]] = None,
         cfg_enabled: bool,
         num_images_per_prompt: int = 1,
         max_sequence_length: int = 512,
@@ -572,23 +588,56 @@ class Flux1KontextPipeline:
             max_sequence_length=max_sequence_length,
         )
 
-        if not cfg_enabled:
-            return prompt_embeds, pooled_prompt_embeds
+        if cfg_enabled:
+            negative_prompt_embeds, negative_pooled_prompt_embeds = self._encode_prompts_partial(
+                prompt_1=negative_prompt_1,
+                prompt_2=negative_prompt_2,
+                num_images_per_prompt=num_images_per_prompt,
+                max_sequence_length=max_sequence_length,
+            )
 
-        negative_prompt_embeds, negative_pooled_prompt_embeds = self._encode_prompts_partial(
-            prompt_1=negative_prompt_1,
-            prompt_2=negative_prompt_2,
-            num_images_per_prompt=num_images_per_prompt,
-            max_sequence_length=max_sequence_length,
-        )
-
-        prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
-        pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
+            prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
+            pooled_prompt_embeds = torch.cat([negative_pooled_prompt_embeds, pooled_prompt_embeds], dim=0)
 
         text_ids = torch.zeros(prompt_embeds.shape[1], 3)
         return prompt_embeds, pooled_prompt_embeds, text_ids
 
-    def _encode_vae_image(self, image: torch.Tensor):
+    def _vae_decode(self, tt_latents, width, height):
+        ttnn.synchronize_device(self.vae_device)
+
+        tt_latents = self._ccl_managers[self.vae_submesh_idx].all_gather_persistent_buffer(
+            tt_latents,
+            dim=1,
+            mesh_axis=self.sp_axis,
+            use_hyperparams=True,
+        )
+
+        torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
+
+        # We need to slice the output latents since TTNN persistant buffer is created for combined latents
+        if self.img_to_img:
+            torch_latents = torch_latents[:, : self.output_latents_seq_length]
+
+        torch_latents = (torch_latents / self._latents_scaling) + self._latents_shift
+        torch_latents = _unpack_latents(torch_latents, height, width, self._vae_scale_factor)
+
+        tt_latents = ttnn.from_torch(
+            torch_latents.permute(0, 2, 3, 1),
+            layout=ttnn.TILE_LAYOUT,
+            dtype=ttnn.bfloat16,
+            device=None,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(self.vae_device),
+        )
+
+        if self._vae_input_latents is None:
+            self._vae_input_latents = tt_latents.to(self.vae_device)
+        else:
+            ttnn.copy_host_to_device_tensor(tt_latents, self._vae_input_latents)
+
+        tt_decoded_output = self._vae_decoder(self._vae_input_latents)
+        return tt_decoded_output
+
+    def _vae_encode(self, image: torch.Tensor):
         if self.use_torch_vae_encoder:
             encoded_image = self._vae_encoder(image)
         else:
@@ -629,7 +678,7 @@ class Flux1KontextPipeline:
             if image.shape[1] != self._latent_channels:
                 timer = self.timing_collector
                 with timer.time_section("vae_encoding") if timer else nullcontext():
-                    image_latents = self._encode_vae_image(image=image)
+                    image_latents = self._vae_encode(image=image)
             else:
                 image_latents = image
             if batch_size > image_latents.shape[0] and batch_size % image_latents.shape[0] == 0:
@@ -682,13 +731,18 @@ class Flux1KontextPipeline:
         max_area: int = 1024**2,
         _auto_resize: bool = True,
     ):
-        timer = self.timing_collector.reset() if self.timing_collector else None
-        prompt_count = len(prompt_1)
-
-        sp_axis = self._parallel_config.sequence_parallel.mesh_axis
-
+        if prompt_1 is not None and isinstance(prompt_1, str):
+            prompt_count = 1
+        elif prompt_1 is not None and isinstance(prompt_1, list):
+            prompt_count = len(prompt_1)
+        else:
+            raise ValueError("'prompt_1' should be a list or string")
         assert num_images_per_prompt == 1, "generating multiple images is not supported"
         assert prompt_count == 1, "generating multiple images is not supported"
+
+        timer = self.timing_collector.reset() if self.timing_collector else None
+
+        cfg_enabled = cfg_scale > 1 and (negative_prompt_1 is not None)
 
         with timer.time_section("total") if timer else nullcontext():
             assert height % (self._vae_scale_factor * self._patch_size) == 0
@@ -708,10 +762,8 @@ class Flux1KontextPipeline:
                     f"Generation `height` and `width` have been adjusted to {height} and {width} to fit the model requirements."
                 )
 
-            cfg_enabled = cfg_scale > 1 and negative_prompt_1
-            logger.info("encoding prompts...")
-
             with timer.time_section("total_encoding") if timer else nullcontext():
+                logger.info("encoding prompts...")
                 prompt_embeds, pooled_prompt_embeds, text_ids = self.encode_prompts(
                     prompt_1=prompt_1,
                     prompt_2=prompt_2,
@@ -743,13 +795,14 @@ class Flux1KontextPipeline:
 
             with timer.time_section("preparing_latents") if timer else nullcontext():
                 logger.info("preparing_latents...")
+                generator = torch.Generator().manual_seed(seed) if seed is not None else None
                 latents, image_latents, latent_ids, image_ids = self.prepare_latents(
                     image,
                     prompt_count * num_images_per_prompt,
                     self._num_channels_latents,
                     height,
                     width,
-                    torch.Generator().manual_seed(seed),
+                    generator,
                 )
 
             self.output_latents_shape = latents.shape
@@ -821,7 +874,7 @@ class Flux1KontextPipeline:
                 )
 
                 shard_latents_dims = [None, None]
-                shard_latents_dims[sp_axis] = 1  # height of latents
+                shard_latents_dims[self.sp_axis] = 1  # height of latents
                 tt_initial_latents = ttnn.from_torch(
                     latents,
                     layout=ttnn.TILE_LAYOUT,
@@ -852,7 +905,7 @@ class Flux1KontextPipeline:
                     tt_guidance = None
 
                 shard_rope_dims = [None, None]
-                shard_rope_dims[sp_axis] = 0
+                shard_rope_dims[self.sp_axis] = 0
                 rope_mesh_mapper = ttnn.ShardTensor2dMesh(
                     submesh_device,
                     tuple(submesh_device.shape),
@@ -979,34 +1032,8 @@ class Flux1KontextPipeline:
             logger.info("decoding image...")
 
             with timer.time_section("vae_decoding") if timer else nullcontext():
-                # Sync because we don't pass a persistent buffer or a barrier semaphore.
-                ttnn.synchronize_device(self.vae_device)
-
-                tt_latents = self._ccl_managers[self.vae_submesh_idx].all_gather_persistent_buffer(
-                    tt_latents_step_list[self.vae_submesh_idx],
-                    dim=1,
-                    mesh_axis=sp_axis,
-                    use_hyperparams=True,
-                )
-
-                torch_latents = ttnn.to_torch(ttnn.get_device_tensors(tt_latents)[0])
-
-                # We need to slice the output latents since TTNN persistant buffer is created for combined latents
-                if self.img_to_img:
-                    torch_latents = torch_latents[:, : self.output_latents_seq_length]
-
-                torch_latents = (torch_latents / self._latents_scaling) + self._latents_shift
-                torch_latents = _unpack_latents(torch_latents, height, width, self._vae_scale_factor)
-
-                tt_latents = ttnn.from_torch(
-                    torch_latents.permute(0, 2, 3, 1),
-                    layout=ttnn.TILE_LAYOUT,
-                    dtype=ttnn.bfloat16,
-                    device=self.vae_device,
-                    mesh_mapper=ttnn.ReplicateTensorToMesh(self.vae_device),
-                )
-                tt_decoded_output = self._vae_decoder(tt_latents)
-                decoded_output = ttnn.to_torch(ttnn.get_device_tensors(tt_decoded_output)[0]).permute(0, 3, 1, 2)
+                decoded_output = self._vae_decode(tt_latents_step_list[self.vae_submesh_idx], width, height)
+                decoded_output = ttnn.to_torch(ttnn.get_device_tensors(decoded_output)[0]).permute(0, 3, 1, 2)
 
                 image = self._image_processor.postprocess(decoded_output, output_type="pt")
                 assert isinstance(image, torch.Tensor)
@@ -1086,14 +1113,18 @@ class Flux1KontextPipeline:
         if traced and self._traces is None:
             self._traces = []
             for submesh_id, submesh_device in enumerate(self._submesh_devices):
+                latent_device = latents[submesh_id]  # already on device
+                prompt_device = prompt_embeds[submesh_id]  # already on device
+                pooled_projection_device = pooled_prompt_embeds[submesh_id]  # already on device
                 timestep_device = timestep[submesh_id].to(submesh_device)
                 sigma_difference_device = sigma_difference[submesh_id].to(submesh_device)
+
                 trace_id = ttnn.begin_trace_capture(submesh_device, cq_id=0)
                 pred = self._step_inner(
                     cfg_enabled=cfg_enabled,
-                    latent=latents[submesh_id],
-                    prompt=prompt_embeds[submesh_id],
-                    pooled=pooled_prompt_embeds[submesh_id],
+                    latent=latent_device,
+                    prompt=prompt_device,
+                    pooled=pooled_projection_device,
                     timestep=timestep_device,
                     guidance=guidance[submesh_id],
                     spatial_rope_cos=spatial_rope_cos[submesh_id],
