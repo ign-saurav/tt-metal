@@ -377,7 +377,10 @@ class TtnnChatTTSDecoder:
         use_cache: bool = False,
     ) -> tuple:
         """
-        Self-attention mechanism with optional KV caching for decode mode.
+        Self-attention mechanism with support for both prefill and decode modes.
+
+        Prefill mode (seq_len > 1): Uses standard reshape operations
+        Decode mode (seq_len == 1): Uses optimized decode-specific operations
 
         Returns:
             tuple: (attn_output, past_key_value)
@@ -385,6 +388,9 @@ class TtnnChatTTSDecoder:
         if len(hidden_states.shape) == 4:
             hidden_states = ttnn.squeeze(hidden_states, 0)
         batch_size, seq_len, _ = hidden_states.shape
+
+        # Determine mode based on sequence length
+        is_prefill = seq_len > 1
 
         # Reshape to 4D for ttnn.linear
         hidden_states_4d = ttnn.unsqueeze(hidden_states, dim=1)
@@ -414,123 +420,190 @@ class TtnnChatTTSDecoder:
             memory_config=get_activations_memory_config(),
         )
 
-        # Squeeze back to 3D
+        # Squeeze back to 3D: [batch, seq_len, hidden_size]
         query = ttnn.squeeze(query, dim=1)
         key = ttnn.squeeze(key, dim=1)
         value = ttnn.squeeze(value, dim=1)
 
-        # Concatenate QKV for proper reshaping
-        xqkv_fused = ttnn.concat([query, key, value], dim=-1)
-        ttnn.deallocate(query)
-        ttnn.deallocate(key)
-        ttnn.deallocate(value)
+        if is_prefill:
+            # PREFILL MODE: Use standard reshape operations
+            # Reshape to [batch, seq_len, num_heads, head_dim]
+            query = ttnn.reshape(query, (batch_size, seq_len, self.num_attention_heads, self.head_dim))
+            key = ttnn.reshape(key, (batch_size, seq_len, self.num_attention_heads, self.head_dim))
+            value = ttnn.reshape(value, (batch_size, seq_len, self.num_attention_heads, self.head_dim))
 
-        # Reshape to 4D format expected by nlp_create_qkv_heads_decode
-        xqkv_fused = ttnn.reshape(xqkv_fused, (1, 1, seq_len, xqkv_fused.shape[-1]))
-
-        # Reshape using dedicated decode operation
-        query, key, value = ttnn.experimental.nlp_create_qkv_heads_decode(
-            xqkv_fused,
-            num_heads=self.num_attention_heads,
-            num_kv_heads=self.num_attention_heads,
-            memory_config=ttnn.L1_HEIGHT_SHARDED_MEMORY_CONFIG,
-        )
-        ttnn.deallocate(xqkv_fused)
-
-        # KV caching: concatenate with past key/value if provided
-        if past_key_value is not None:
-            past_key, past_value = past_key_value
-            # Convert from torch tensor to ttnn if needed
-            if not isinstance(past_key, ttnn.Tensor):
-                past_key = torch_to_ttnn(
-                    past_key.permute(0, 2, 1, 3),
-                    self.device,
-                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                    layout=ttnn.TILE_LAYOUT,
-                )
-            if not isinstance(past_value, ttnn.Tensor):
-                past_value = torch_to_ttnn(
-                    past_value.permute(0, 2, 1, 3),
-                    self.device,
-                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                    layout=ttnn.TILE_LAYOUT,
-                )
-
-            # Convert new K/V to interleaved to match cache format
-            key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
-            value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
-
-            # Concatenate with past tensors
-            key = ttnn.concat([past_key, key], dim=1)
-            value = ttnn.concat([past_value, value], dim=1)
-
-            # Permute to SDPA decode format [batch, heads, seq, dim]
+            # Permute to [batch, heads, seq, dim] for SDPA
+            query = ttnn.permute(query, (0, 2, 1, 3))
             key = ttnn.permute(key, (0, 2, 1, 3))
             value = ttnn.permute(value, (0, 2, 1, 3))
 
-        # Store current key/value for next iteration if caching
-        new_past_key_value = (key, value) if use_cache else None
+            # KV caching: concatenate with past key/value if provided and non-empty
+            if past_key_value is not None:
+                past_key, past_value = past_key_value
+                # Check if past cache has any content (seq_len > 0)
+                past_seq_len = past_key.shape[2] if hasattr(past_key, "shape") else 0
 
-        # SDPA requires all inputs to be in DRAM
-        query = ttnn.to_memory_config(query, ttnn.DRAM_MEMORY_CONFIG)
-        key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
-        value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
+                if past_seq_len > 0:
+                    # Convert from torch tensor to ttnn if needed
+                    if not isinstance(past_key, ttnn.Tensor):
+                        past_key = torch_to_ttnn(
+                            past_key,  # Already in [batch, heads, seq, dim] format
+                            self.device,
+                            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                            layout=ttnn.TILE_LAYOUT,
+                        )
+                    if not isinstance(past_value, ttnn.Tensor):
+                        past_value = torch_to_ttnn(
+                            past_value,
+                            self.device,
+                            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                            layout=ttnn.TILE_LAYOUT,
+                        )
 
-        # Get current sequence position for decode
-        current_seq_pos = key.shape[1] - 1
+                    # Concatenate along sequence dimension
+                    key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
+                    value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
+                    key = ttnn.concat([past_key, key], dim=2)
+                    value = ttnn.concat([past_value, value], dim=2)
 
-        program_config = ttnn.SDPAProgramConfig(
-            compute_with_storage_grid_size=self.device.compute_with_storage_grid_size(),
-            q_chunk_size=self.num_attention_heads,
-            k_chunk_size=32,  # Must divide K sequence length (padded to tile size)
-            exp_approx_mode=False,
-        )
+            # Store current key/value for next iteration if caching
+            new_past_key_value = (key, value) if use_cache else None
 
-        attn_output = ttnn.transformer.scaled_dot_product_attention_decode(
-            query,
-            key,
-            value,
-            is_causal=True,
-            cur_pos=[current_seq_pos],
-            scale=1.0 / (self.head_dim**0.5),
-            program_config=program_config,
-            compute_kernel_config=self.compute_kernel_config_sdpa,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
+            # Move to DRAM for SDPA
+            query = ttnn.to_memory_config(query, ttnn.DRAM_MEMORY_CONFIG)
+            key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
+            value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
 
-        # Convert to sharded for nlp_concat_heads_decode
-        num_cores_for_sharding = batch_size
+            # SDPA for prefill
+            attn_output = ttnn.transformer.scaled_dot_product_attention(
+                query,
+                key,
+                value,
+                attn_mask=attention_mask,
+                is_causal=True,
+                scale=1.0 / (self.head_dim**0.5),
+                compute_kernel_config=self.compute_kernel_config_sdpa,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
 
-        shard_spec = ttnn.ShardSpec(
-            grid=ttnn.CoreRangeSet(
-                {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(num_cores_for_sharding - 1, 0))}
-            ),
-            shard_shape=[32, 64],  # Must be tile-aligned
-            shard_orientation=ttnn.ShardOrientation.ROW_MAJOR,
-        )
-        sharded_mem_config = ttnn.MemoryConfig(
-            ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-            ttnn.BufferType.L1,
-            shard_spec,
-        )
-        attn_output = ttnn.to_memory_config(attn_output, sharded_mem_config)
+            # Reshape back: [batch, heads, seq, dim] -> [batch, seq, heads, dim] -> [batch, seq, hidden]
+            attn_output = ttnn.permute(attn_output, (0, 2, 1, 3))
+            attn_output = ttnn.reshape(attn_output, (batch_size, seq_len, self.hidden_size))
 
-        # Use nlp_concat_heads_decode to reshape back
-        attn_output = ttnn.experimental.nlp_concat_heads_decode(
-            attn_output,
-            num_heads=self.num_attention_heads,
-        )
+        else:
+            # DECODE MODE: Use optimized decode-specific operations
+            # Concatenate QKV for proper reshaping
+            xqkv_fused = ttnn.concat([query, key, value], dim=-1)
+            ttnn.deallocate(query)
+            ttnn.deallocate(key)
+            ttnn.deallocate(value)
 
-        # Slice to remove padding: nlp_concat_heads_decode pads to 32 users
-        attn_output = ttnn.to_memory_config(attn_output, ttnn.DRAM_MEMORY_CONFIG)
-        attn_output = ttnn.slice(
-            attn_output,
-            [0, 0, 0, 0],
-            [1, 1, batch_size, self.hidden_size],
-            memory_config=ttnn.L1_MEMORY_CONFIG,
-        )
+            # Reshape to 4D format expected by nlp_create_qkv_heads_decode
+            xqkv_fused = ttnn.reshape(xqkv_fused, (1, 1, seq_len, xqkv_fused.shape[-1]))
 
-        attn_output = ttnn.squeeze(attn_output, dim=2)
+            # Reshape using dedicated decode operation
+            query, key, value = ttnn.experimental.nlp_create_qkv_heads_decode(
+                xqkv_fused,
+                num_heads=self.num_attention_heads,
+                num_kv_heads=self.num_attention_heads,
+                memory_config=ttnn.L1_HEIGHT_SHARDED_MEMORY_CONFIG,
+            )
+            ttnn.deallocate(xqkv_fused)
+
+            # KV caching: concatenate with past key/value if provided
+            if past_key_value is not None:
+                past_key, past_value = past_key_value
+                # Convert from torch tensor to ttnn if needed
+                if not isinstance(past_key, ttnn.Tensor):
+                    past_key = torch_to_ttnn(
+                        past_key.permute(0, 2, 1, 3),
+                        self.device,
+                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                        layout=ttnn.TILE_LAYOUT,
+                    )
+                if not isinstance(past_value, ttnn.Tensor):
+                    past_value = torch_to_ttnn(
+                        past_value.permute(0, 2, 1, 3),
+                        self.device,
+                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                        layout=ttnn.TILE_LAYOUT,
+                    )
+
+                # Convert new K/V to interleaved to match cache format
+                key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
+                value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
+
+                # Concatenate with past tensors
+                key = ttnn.concat([past_key, key], dim=1)
+                value = ttnn.concat([past_value, value], dim=1)
+
+                # Permute to SDPA decode format [batch, heads, seq, dim]
+                key = ttnn.permute(key, (0, 2, 1, 3))
+                value = ttnn.permute(value, (0, 2, 1, 3))
+
+            # Store current key/value for next iteration if caching
+            new_past_key_value = (key, value) if use_cache else None
+
+            # SDPA requires all inputs to be in DRAM
+            query = ttnn.to_memory_config(query, ttnn.DRAM_MEMORY_CONFIG)
+            key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
+            value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
+
+            # Get current sequence position for decode
+            current_seq_pos = key.shape[1] - 1
+
+            program_config = ttnn.SDPAProgramConfig(
+                compute_with_storage_grid_size=self.device.compute_with_storage_grid_size(),
+                q_chunk_size=self.num_attention_heads,
+                k_chunk_size=32,  # Must divide K sequence length (padded to tile size)
+                exp_approx_mode=False,
+            )
+
+            attn_output = ttnn.transformer.scaled_dot_product_attention_decode(
+                query,
+                key,
+                value,
+                is_causal=True,
+                cur_pos=[current_seq_pos],
+                scale=1.0 / (self.head_dim**0.5),
+                program_config=program_config,
+                compute_kernel_config=self.compute_kernel_config_sdpa,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
+
+            # Convert to sharded for nlp_concat_heads_decode
+            num_cores_for_sharding = batch_size
+
+            shard_spec = ttnn.ShardSpec(
+                grid=ttnn.CoreRangeSet(
+                    {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(num_cores_for_sharding - 1, 0))}
+                ),
+                shard_shape=[32, 64],  # Must be tile-aligned
+                shard_orientation=ttnn.ShardOrientation.ROW_MAJOR,
+            )
+            sharded_mem_config = ttnn.MemoryConfig(
+                ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+                ttnn.BufferType.L1,
+                shard_spec,
+            )
+            attn_output = ttnn.to_memory_config(attn_output, sharded_mem_config)
+
+            # Use nlp_concat_heads_decode to reshape back
+            attn_output = ttnn.experimental.nlp_concat_heads_decode(
+                attn_output,
+                num_heads=self.num_attention_heads,
+            )
+
+            # Slice to remove padding: nlp_concat_heads_decode pads to 32 users
+            attn_output = ttnn.to_memory_config(attn_output, ttnn.DRAM_MEMORY_CONFIG)
+            attn_output = ttnn.slice(
+                attn_output,
+                [0, 0, 0, 0],
+                [1, 1, batch_size, self.hidden_size],
+                memory_config=ttnn.L1_MEMORY_CONFIG,
+            )
+
+            attn_output = ttnn.squeeze(attn_output, dim=2)
 
         # Output projection
         attn_output_4d = ttnn.unsqueeze(attn_output, dim=1)
