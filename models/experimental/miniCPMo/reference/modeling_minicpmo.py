@@ -2999,10 +2999,12 @@ class ConditionalChatTTS(PreTrainedModel):
 
         # Use TT model only for first prefill (position_ids starts at 0)
         # TTNN causal SDPA requires Q and K to have same seq length, so it can't handle incremental prefill
+        # TODO: TT prefill is disabled for now to test pure reference flow
         is_first_prefill = position_ids[0, 0].item() == 0
-        use_tt = (
-            hasattr(self, "tt_device") and self.tt_device is not None and self.tt_model is not None and is_first_prefill
-        )
+        use_tt = False  # Disabled for debugging
+        # use_tt = (
+        #     hasattr(self, "tt_device") and self.tt_device is not None and self.tt_model is not None and is_first_prefill
+        # )
 
         if use_tt:
             inputs_embeds_ttnn = torch_to_ttnn(
@@ -3223,24 +3225,48 @@ class ConditionalChatTTS(PreTrainedModel):
                 streaming_text_chunk_size=self.streaming_text_chunk_size,
             )
 
-            # Model forward
-            outputs: BaseModelOutputWithPast = self.model(
-                attention_mask=causal_mask,
-                position_ids=position_ids,
-                past_key_values=past_key_values,
-                inputs_embeds=inputs_embeds,
-                use_cache=True,
-                output_attentions=False,
-                cache_position=cache_position,
-            )
+            # Model forward - use TT model if available (decode mode with single token)
+            # TODO: TT decode is disabled for now - mixing TT prefill with TT decode causes
+            # numerical differences that prevent EOS token from being sampled correctly.
+            # Enable once TT decode is verified for numerical accuracy.
+            use_tt = False  # hasattr(self, "tt_device") and self.tt_device is not None and self.tt_model is not None
+
+            if use_tt:
+                inputs_embeds_ttnn = torch_to_ttnn(
+                    inputs_embeds,
+                    self.tt_device,
+                    memory_config=get_activations_memory_config(),
+                )
+                # Run TTNN forward pass (decode mode: single token with KV cache)
+                hidden_states_tt, past_key_values_tt = self.tt_model.forward(
+                    inputs_embeds=inputs_embeds_ttnn,
+                    attention_mask=None,  # Decode mode uses causal mask internally
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    use_cache=True,
+                )
+                # Convert outputs back to PyTorch
+                hidden_states = tt2torch_tensor(hidden_states_tt)
+                # Convert to float32 to match head_code layers (tts.float() was called)
+                hidden_states = hidden_states.float()
+                past_key_values = [(tt2torch_tensor(k), tt2torch_tensor(v)) for k, v in past_key_values_tt]
+            else:
+                outputs: BaseModelOutputWithPast = self.model(
+                    attention_mask=causal_mask,
+                    position_ids=position_ids,
+                    past_key_values=past_key_values,
+                    inputs_embeds=inputs_embeds,
+                    use_cache=True,
+                    output_attentions=False,
+                    cache_position=cache_position,
+                )
+                hidden_states = outputs.last_hidden_state
+                past_key_values = outputs.past_key_values
 
             del position_ids
             del inputs_embeds
             del cache_position
             del causal_mask
-
-            hidden_states = outputs.last_hidden_state
-            past_key_values = outputs.past_key_values
 
             with P.cached():
                 logits = torch.empty(

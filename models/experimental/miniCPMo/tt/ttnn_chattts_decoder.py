@@ -11,10 +11,70 @@ Implements the transformer decoder component of ChatTTS with:
 """
 
 import ttnn
+import torch
 import logging
 from typing import Optional, List
 
 logger = logging.getLogger(__name__)
+
+
+def _compute_rotary_cos_sin(head_dim: int, max_position_embeddings: int = 4096, base: float = 10000.0):
+    """Precompute rotary embedding cos/sin tables."""
+    inv_freq = 1.0 / (base ** (torch.arange(0, head_dim, 2).float() / head_dim))
+    t = torch.arange(max_position_embeddings, dtype=inv_freq.dtype)
+    freqs = torch.einsum("i,j->ij", t, inv_freq)
+    emb = torch.cat((freqs, freqs), dim=-1)
+    cos = emb.cos()  # [max_pos, head_dim]
+    sin = emb.sin()  # [max_pos, head_dim]
+    return cos, sin
+
+
+def _rotate_half(x: torch.Tensor) -> torch.Tensor:
+    """Rotates half the hidden dims of the input."""
+    x1 = x[..., : x.shape[-1] // 2]
+    x2 = x[..., x.shape[-1] // 2 :]
+    return torch.cat((-x2, x1), dim=-1)
+
+
+def _apply_rotary_pos_emb(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    position_ids: torch.Tensor,
+) -> tuple:
+    """Apply rotary position embeddings to Q and K tensors.
+
+    Args:
+        q: Query tensor [batch, heads, seq_len, head_dim]
+        k: Key tensor [batch, heads, seq_len, head_dim]
+        cos: Cosine table [max_pos, head_dim]
+        sin: Sine table [max_pos, head_dim]
+        position_ids: Position indices [batch, seq_len] or [seq_len]
+
+    Returns:
+        Tuple of (q_embed, k_embed) with RoPE applied
+    """
+    # Get positions - handle both 1D and 2D position_ids
+    if position_ids.dim() == 1:
+        positions = position_ids
+    else:
+        positions = position_ids.squeeze(0)
+
+    # Index into cos/sin tables: [seq_len, head_dim]
+    cos_pos = cos[positions]  # [seq_len, head_dim]
+    sin_pos = sin[positions]  # [seq_len, head_dim]
+
+    # Expand for broadcasting: [1, 1, seq_len, head_dim]
+    cos_pos = cos_pos.unsqueeze(0).unsqueeze(0)
+    sin_pos = sin_pos.unsqueeze(0).unsqueeze(0)
+
+    # Apply rotary embeddings
+    q_embed = (q * cos_pos) + (_rotate_half(q) * sin_pos)
+    k_embed = (k * cos_pos) + (_rotate_half(k) * sin_pos)
+
+    return q_embed, k_embed
+
 
 try:
     from .common import (
@@ -75,6 +135,9 @@ class TtnnChatTTSDecoder:
 
         # Derived dimensions
         self.head_dim = hidden_size // num_attention_heads
+
+        # Precompute rotary embeddings (cos/sin tables)
+        self.rotary_cos, self.rotary_sin = _compute_rotary_cos_sin(self.head_dim, max_position_embeddings)
 
         # Compute kernel configs (following TTNN LLM patterns)
         self.compute_kernel_config_hifi2 = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi2)
@@ -280,6 +343,7 @@ class TtnnChatTTSDecoder:
         position_ids: Optional[ttnn.Tensor] = None,
         past_key_values: Optional[List[tuple]] = None,
         use_cache: bool = False,
+        cache_position: Optional["torch.Tensor"] = None,
     ) -> tuple:
         """
         Forward pass of ChatTTS decoder.
@@ -290,6 +354,7 @@ class TtnnChatTTSDecoder:
             position_ids: Position IDs [batch_size, seq_len]
             past_key_values: List of (key, value) tuples for each layer
             use_cache: Whether to return key/value states for caching
+            cache_position: Position indices for KV cache (torch.Tensor), used for incremental prefill
 
         Returns:
             tuple: (last_hidden_state, past_key_values)
@@ -310,7 +375,7 @@ class TtnnChatTTSDecoder:
         for layer_idx, layer_weights in enumerate(self.layers):
             past_key_value = past_key_values[layer_idx] if past_key_values is not None else None
             hidden_states, new_past_key_value = self._transformer_layer(
-                hidden_states, layer_weights, attention_mask, position_ids, past_key_value, use_cache
+                hidden_states, layer_weights, attention_mask, position_ids, past_key_value, use_cache, cache_position
             )
             if use_cache:
                 new_past_key_values.append(new_past_key_value)
@@ -336,6 +401,7 @@ class TtnnChatTTSDecoder:
         position_ids: Optional[ttnn.Tensor] = None,
         past_key_value: Optional[tuple] = None,
         use_cache: bool = False,
+        cache_position: Optional["torch.Tensor"] = None,
     ) -> tuple:
         """
         Process one transformer layer.
@@ -358,7 +424,13 @@ class TtnnChatTTSDecoder:
 
         # 2. Self-attention
         attn_output, new_past_key_value = self._self_attention(
-            hidden_states, layer_weights["self_attn"], attention_mask, past_key_value, use_cache
+            hidden_states,
+            layer_weights["self_attn"],
+            attention_mask,
+            past_key_value,
+            use_cache,
+            cache_position,
+            position_ids,
         )
 
         # 3. Residual connection
@@ -388,12 +460,23 @@ class TtnnChatTTSDecoder:
         attention_mask: Optional[ttnn.Tensor] = None,
         past_key_value: Optional[tuple] = None,
         use_cache: bool = False,
+        cache_position: Optional["torch.Tensor"] = None,
+        position_ids: Optional["torch.Tensor"] = None,
     ) -> tuple:
         """
         Self-attention mechanism with support for both prefill and decode modes.
 
         Prefill mode (seq_len > 1): Uses standard reshape operations
         Decode mode (seq_len == 1): Uses optimized decode-specific operations
+
+        Args:
+            hidden_states: Input hidden states
+            attn_weights: Attention layer weights
+            attention_mask: Optional attention mask
+            past_key_value: Optional past key/value for KV cache
+            use_cache: Whether to return updated KV cache
+            cache_position: Position indices for incremental prefill (torch.Tensor)
+            position_ids: Position IDs for decode mode (torch.Tensor)
 
         Returns:
             tuple: (attn_output, past_key_value)
@@ -450,6 +533,29 @@ class TtnnChatTTSDecoder:
             key = ttnn.permute(key, (0, 2, 1, 3))
             value = ttnn.permute(value, (0, 2, 1, 3))
 
+            # Apply RoPE (Rotary Position Embeddings) to Q and K
+            # This must happen BEFORE concatenating with past KV cache
+            # Use cache_position if provided, otherwise use sequential positions [0, 1, 2, ...]
+            rope_positions = cache_position
+            if rope_positions is None:
+                # For initial prefill, create sequential positions
+                rope_positions = torch.arange(seq_len, dtype=torch.long).unsqueeze(0)
+
+            # Convert Q, K to torch for RoPE application
+            query_torch = ttnn.to_torch(query).to(torch.bfloat16)
+            key_torch = ttnn.to_torch(key).to(torch.bfloat16)
+
+            # Apply RoPE to Q and K
+            query_torch, key_torch = _apply_rotary_pos_emb(
+                query_torch, key_torch, self.rotary_cos, self.rotary_sin, rope_positions
+            )
+
+            # Convert back to TTNN
+            query = torch_to_ttnn(
+                query_torch, self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT
+            )
+            key = torch_to_ttnn(key_torch, self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
+
             # KV caching: concatenate with past key/value if provided and non-empty
             if past_key_value is not None:
                 past_key, past_value = past_key_value
@@ -460,7 +566,7 @@ class TtnnChatTTSDecoder:
                     # Convert from torch tensor to ttnn if needed
                     if not isinstance(past_key, ttnn.Tensor):
                         past_key = torch_to_ttnn(
-                            past_key,  # Already in [batch, heads, seq, dim] format
+                            past_key,  # Already in [batch, heads, seq, dim] format (with RoPE already applied)
                             self.device,
                             memory_config=ttnn.DRAM_MEMORY_CONFIG,
                             layout=ttnn.TILE_LAYOUT,
@@ -487,17 +593,87 @@ class TtnnChatTTSDecoder:
             key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
             value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
 
-            # SDPA for prefill
-            attn_output = ttnn.transformer.scaled_dot_product_attention(
-                query,
-                key,
-                value,
-                attn_mask=attention_mask,
-                is_causal=True,
-                scale=1.0 / (self.head_dim**0.5),
-                compute_kernel_config=self.compute_kernel_config_sdpa,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            )
+            # Check if this is incremental prefill (Q_len != K_len)
+            q_len = query.shape[2]
+            k_len = key.shape[2]
+            is_incremental_prefill = q_len != k_len
+
+            if is_incremental_prefill and cache_position is not None:
+                # Incremental prefill: TTNN SDPA requires Q and K to be tile-aligned (multiples of 32)
+                # Since our sequences may not meet this requirement, use manual attention computation
+                # Create causal mask where query at position cache_position[i] can attend to K positions <= cache_position[i]
+                cache_pos = cache_position.squeeze(0) if cache_position.dim() > 1 else cache_position
+                # Create position indices for K
+                k_positions = torch.arange(k_len, device=cache_pos.device)
+                # For each query position, it can attend to K positions <= its cache position
+                # cache_pos has shape [q_len], k_positions has shape [k_len]
+                # Result: [q_len, k_len] where mask[i, j] = True if k_positions[j] <= cache_pos[i]
+                causal_mask = k_positions.unsqueeze(0) <= cache_pos.unsqueeze(1)
+                # Convert to attention mask format: 0 for attend, -inf for mask
+                attn_mask_values = torch.where(
+                    causal_mask,
+                    torch.tensor(0.0, dtype=torch.bfloat16),
+                    torch.tensor(float("-inf"), dtype=torch.bfloat16),
+                )
+                # Add batch and head dimensions: [1, 1, q_len, k_len]
+                attn_mask_values = attn_mask_values.unsqueeze(0).unsqueeze(0)
+                # Convert to TTNN
+                causal_attn_mask = torch_to_ttnn(
+                    attn_mask_values,
+                    self.device,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    layout=ttnn.TILE_LAYOUT,
+                )
+
+                # Manual attention: scores = Q @ K^T / sqrt(d), then softmax, then @ V
+                # query: [batch, heads, q_len, dim], key: [batch, heads, k_len, dim]
+                scale = 1.0 / (self.head_dim**0.5)
+
+                # Transpose key for matmul: [batch, heads, dim, k_len]
+                key_t = ttnn.permute(key, (0, 1, 3, 2))
+
+                # Compute attention scores: [batch, heads, q_len, k_len]
+                attn_scores = ttnn.matmul(
+                    query,
+                    key_t,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    compute_kernel_config=self.compute_kernel_config_hifi4,
+                )
+
+                # Scale
+                attn_scores = ttnn.multiply(attn_scores, scale, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+                # Apply causal mask
+                attn_scores = ttnn.add(attn_scores, causal_attn_mask, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+                # Softmax over last dimension
+                attn_probs = ttnn.softmax(attn_scores, dim=-1, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+                # Apply attention to values: [batch, heads, q_len, dim]
+                attn_output = ttnn.matmul(
+                    attn_probs,
+                    value,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    compute_kernel_config=self.compute_kernel_config_hifi4,
+                )
+
+                # Cleanup
+                ttnn.deallocate(key_t)
+                ttnn.deallocate(attn_scores)
+                ttnn.deallocate(attn_probs)
+                ttnn.deallocate(causal_attn_mask)
+            else:
+                # Standard prefill with causal mask - use optimized SDPA
+                attn_output = ttnn.transformer.scaled_dot_product_attention(
+                    query,
+                    key,
+                    value,
+                    attn_mask=attention_mask,
+                    is_causal=True,
+                    scale=1.0 / (self.head_dim**0.5),
+                    compute_kernel_config=self.compute_kernel_config_sdpa,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                )
 
             # Reshape back: [batch, heads, seq, dim] -> [batch, seq, heads, dim] -> [batch, seq, hidden]
             attn_output = ttnn.permute(attn_output, (0, 2, 1, 3))
@@ -522,6 +698,47 @@ class TtnnChatTTSDecoder:
                 memory_config=ttnn.L1_HEIGHT_SHARDED_MEMORY_CONFIG,
             )
             ttnn.deallocate(xqkv_fused)
+
+            # Apply RoPE to the new single-token Q and K
+            # Determine position for this decode step
+            if cache_position is not None:
+                rope_pos = cache_position
+            elif position_ids is not None:
+                rope_pos = position_ids
+            elif past_key_value is not None:
+                # Infer position from past KV cache length (shape is [batch, heads, seq, dim])
+                past_len = past_key_value[0].shape[2] if hasattr(past_key_value[0], "shape") else 0
+                rope_pos = torch.tensor([[past_len]], dtype=torch.long)
+            else:
+                rope_pos = torch.tensor([[0]], dtype=torch.long)
+
+            # Convert Q, K to torch for RoPE (decode Q/K are small - single token)
+            query = ttnn.to_memory_config(query, ttnn.DRAM_MEMORY_CONFIG)
+            key_for_rope = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
+
+            query_torch = ttnn.to_torch(query).to(torch.bfloat16)
+            key_torch = ttnn.to_torch(key_for_rope).to(torch.bfloat16)
+
+            # nlp_create_qkv_heads_decode outputs [batch, seq=1, heads, dim]
+            # We need [batch, heads, seq, dim] for RoPE
+            orig_shape = query_torch.shape
+            if query_torch.dim() == 4 and query_torch.shape[1] == 1:
+                query_torch = query_torch.permute(0, 2, 1, 3)  # [batch, heads, 1, dim]
+                key_torch = key_torch.permute(0, 2, 1, 3)
+
+            query_torch, key_torch = _apply_rotary_pos_emb(
+                query_torch, key_torch, self.rotary_cos, self.rotary_sin, rope_pos
+            )
+
+            # Permute back to [batch, seq=1, heads, dim]
+            if orig_shape[1] == 1:
+                query_torch = query_torch.permute(0, 2, 1, 3)
+                key_torch = key_torch.permute(0, 2, 1, 3)
+
+            query = torch_to_ttnn(
+                query_torch, self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT
+            )
+            key = torch_to_ttnn(key_torch, self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
 
             # KV caching: concatenate with past key/value if provided
             if past_key_value is not None:
@@ -563,7 +780,8 @@ class TtnnChatTTSDecoder:
             value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
 
             # Get current sequence position for decode
-            current_seq_pos = key.shape[1] - 1
+            # After permute, key is [batch, heads, seq, dim], so seq is at index 2
+            current_seq_pos = key.shape[2] - 1
 
             program_config = ttnn.SDPAProgramConfig(
                 compute_with_storage_grid_size=self.device.compute_with_storage_grid_size(),
