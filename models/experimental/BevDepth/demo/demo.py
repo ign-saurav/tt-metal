@@ -752,7 +752,6 @@ def main():
         try:
             import ttnn
 
-            # Use same L1 memory config as E2E test
             device = ttnn.open_device(device_id=0, l1_small_size=32768)
             try:
                 params, _ = prepare_ttnn_parameters(device)
