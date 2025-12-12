@@ -88,6 +88,7 @@ from models.experimental.miniCPMo.reference.utils import sentence_end
 from models.experimental.miniCPMo.reference.utils import VoiceChecker
 from models.experimental.miniCPMo.tt.ttnn_whisper_encoder import TtnnWhisperEncoder
 from models.experimental.miniCPMo.tt.ttnn_audio_projector import TtnnAudioProjector
+from models.experimental.miniCPMo.tt.ttnn_chattts_decoder import TtnnChatTTSDecoder
 
 logger = logging.getLogger(__name__)
 
@@ -222,6 +223,26 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
             assert _tts_deps, "please make sure vector_quantize_pytorch and vocos are installed."
             self.tts = self.init_tts_module()
 
+            # Initialize TTNN TTS decoder
+            self.tt_tts_decoder = TtnnChatTTSDecoder(
+                device=tt_device,
+                llm_dim=self.embed_dim,
+                hidden_size=self.tts.config.hidden_size,
+                num_attention_heads=self.tts.config.num_attention_heads,
+                num_hidden_layers=self.tts.config.num_hidden_layers,
+                intermediate_size=self.tts.config.intermediate_size,
+                num_text_tokens=self.tts.emb_text.num_embeddings,
+                num_audio_tokens=self.tts.num_audio_tokens,
+                num_vq=self.tts.num_vq,
+                num_spk_embs=self.tts.num_spk_embs,
+                max_position_embeddings=self.tts.config.max_position_embeddings,
+            )
+            # Load weights from TTS model (skip if using meta tensors from init_empty_weights)
+            # Check if state_dict is provided externally, otherwise use self.tts
+            # loading tts weights
+            tts_state_dict = state_dict["tts"]
+            self.tt_tts_decoder.load_weights(tts_state_dict)
+
         # Load processor directly from local files to avoid cache resolution
         # Get the local path from config or use a default
         local_path = getattr(self.config, "_name_or_path", None)
@@ -294,7 +315,7 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
         load tts tokenizer and vocos
         1. try load form local 2. try load from huggingface
         """
-        from .processing_minicpmo import ChatTTSProcessor
+        from models.experimental.miniCPMo.reference.processing_minicpmo import ChatTTSProcessor
 
         if tts_text_tokenizer_path is None:
             tts_text_tokenizer_path = os.path.join(self.config._name_or_path, "assets/chattts_tokenizer")
@@ -366,6 +387,97 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
     def init_tts_module(self):
         model = ConditionalChatTTS(self.config.tts_config)
         return model
+
+    def tt_prefill_text(
+        self,
+        input_ids: torch.Tensor,
+        position_ids: torch.LongTensor,
+        past_key_values: List[Tuple[torch.Tensor, torch.Tensor]],
+        lm_spk_emb_last_hidden_states: Optional[torch.Tensor] = None,
+    ):
+        """TTNN version of prefill_text using the TtnnChatTTSDecoder.
+
+        Prefill a chunk of new text tokens in streaming setting using TTNN acceleration.
+
+        Args:
+            input_ids (Tensor): Tensor of shape [batch_size, seq_len]
+            position_ids (LongTensor): Tensor of shape [batch_size, seq_len]
+            past_key_values (List[Tuple[Tensor]]): KV Cache of all layers
+            lm_spk_emb_last_hidden_states (Tensor, optional): Speaker embeddings
+
+        Returns:
+            Updated past_key_values
+        """
+        from models.experimental.miniCPMo.tt.common import torch_to_ttnn, get_activations_memory_config
+        from models.common.utility_functions import tt2torch_tensor
+
+        assert input_ids.shape[0] == 1
+        assert past_key_values is not None
+
+        # Create input embeddings using the reference model's method
+        inputs_embeds = self.tts.merge_inputs_embeds(
+            input_ids=input_ids,
+            lm_spk_emb_last_hidden_states=lm_spk_emb_last_hidden_states,
+        )
+
+        # Clone and truncate KV Cache for prefill
+        past_key_values_for_prefill = []
+        for i in range(len(past_key_values)):
+            past_key_values_for_prefill.append(
+                (
+                    past_key_values[i][0][:, :, : position_ids[:, 0], :].clone(),
+                    past_key_values[i][1][:, :, : position_ids[:, 0], :].clone(),
+                )
+            )
+
+        # Convert inputs to TTNN format
+        inputs_embeds_ttnn = torch_to_ttnn(
+            inputs_embeds,
+            self.tt_device,
+            memory_config=get_activations_memory_config(),
+        )
+
+        # Run TTNN decoder forward pass in prefill mode
+        logger.info(
+            f"[tt_prefill_text] Called with input_ids shape: {input_ids.shape}, position_ids: {position_ids.tolist()}"
+        )
+        hidden_states_ttnn, new_past_key_values_ttnn = self.tt_tts_decoder.forward(
+            inputs_embeds=inputs_embeds_ttnn,
+            attention_mask=None,
+            position_ids=position_ids,
+            past_key_values=past_key_values_for_prefill,
+            use_cache=True,
+        )
+        logger.info(f"[tt_prefill_text] TTNN decoder forward completed")
+
+        # Convert TTNN KV cache outputs to PyTorch tensors and update past_key_values
+        # new_past_key_values_ttnn is a list of (key, value) tuples per layer
+        # Each key/value is in shape [batch, heads, seq, dim]
+        for layer_idx in range(len(past_key_values)):
+            if new_past_key_values_ttnn is not None and layer_idx < len(new_past_key_values_ttnn):
+                key_ttnn, value_ttnn = new_past_key_values_ttnn[layer_idx]
+
+                # Convert TTNN tensors to PyTorch
+                key_torch = tt2torch_tensor(key_ttnn)
+                value_torch = tt2torch_tensor(value_ttnn)
+
+                # Handle shape: TTNN returns [batch, heads, full_seq, dim]
+                # We need to extract only the new positions and update
+                # The new K/V already includes past + new tokens after concat in prefill mode
+                new_seq_len = key_torch.shape[2]
+                start_pos = position_ids[:, 0].item()
+                end_pos = position_ids[:, -1].item() + 1
+
+                # Update the KV cache at the new positions
+                # key_torch contains [past_seq + new_seq] after prefill concat
+                past_key_values[layer_idx][0][:, :, start_pos:end_pos, :] = key_torch[
+                    :, :, start_pos:end_pos, :
+                ].clone()
+                past_key_values[layer_idx][1][:, :, start_pos:end_pos, :] = value_torch[
+                    :, :, start_pos:end_pos, :
+                ].clone()
+
+        return past_key_values
 
     def get_input_embeddings(self):
         return self.llm.get_input_embeddings()
@@ -1603,14 +1715,16 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
                 position_ids = torch.arange(begin, end, dtype=torch.long, device=self.tts.device).unsqueeze(0)
 
                 if begin == 0:
-                    past_key_values = self.tts.prefill_text(
+                    # Use TTNN TTS decoder for prefill
+                    past_key_values = self.tt_prefill_text(
                         input_ids=text_input_ids,
                         position_ids=position_ids,
                         past_key_values=past_key_values,
                         lm_spk_emb_last_hidden_states=spk_embeds,
                     )
                 else:
-                    past_key_values = self.tts.prefill_text(
+                    # Use TTNN TTS decoder for prefill
+                    past_key_values = self.tt_prefill_text(
                         input_ids=text_input_ids, position_ids=position_ids, past_key_values=past_key_values
                     )
 
