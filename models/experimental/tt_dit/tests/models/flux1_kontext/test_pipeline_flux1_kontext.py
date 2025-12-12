@@ -11,9 +11,7 @@ from loguru import logger
 from diffusers.utils import load_image
 
 from ....pipelines.flux1_kontext.pipeline_flux1_kontext import Flux1KontextPipeline
-from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large import (
-    TimingCollector,
-)
+from models.perf.benchmarking_utils import BenchmarkProfiler
 
 
 @pytest.mark.parametrize(
@@ -40,10 +38,10 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
         [(2, 4), (2, 0), (1, 0), (4, 1), ttnn.Topology.Linear, 1],
     ],
     ids=[
-        "1x4sp0tp1",
-        "2x4sp0tp1",
-        # "2x4cfg1sp0tp1",
-        "2x4cfg0sp0tp1",
+        "1x4cfg1sp1tp4",
+        "2x4cfg1sp2tp4",
+        # "2x4cfg2sp1tp4",
+        "2x4cfg2sp1tp4",
     ],
     indirect=["mesh_device"],
 )
@@ -52,6 +50,13 @@ from ....pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large 
     [
         pytest.param(True, True, id="encoder_cpu"),
         pytest.param(False, False, id="encoder_device"),
+    ],
+)
+@pytest.mark.parametrize(
+    "use_torch_vae",
+    [
+        pytest.param(True, id="vae_cpu"),
+        pytest.param(False, id="vae_device"),
     ],
 )
 @pytest.mark.parametrize(
@@ -84,6 +89,7 @@ def test_flux1_pipeline(
     no_prompt: bool,
     use_torch_t5_text_encoder: bool,
     use_torch_clip_text_encoder: bool,
+    use_torch_vae: bool,
     model_location_generator,
     traced: bool,
     use_cache: bool,
@@ -99,9 +105,6 @@ def test_flux1_pipeline(
         if traced:
             pytest.skip("Skipping traced test in CI environment. Use Performance test for detailed timing analysis.")
 
-    # Create timing collector
-    timing_collector = TimingCollector()
-
     pipeline = Flux1KontextPipeline.create_pipeline(
         checkpoint_name=model_location_generator("black-forest-labs/FLUX.1-Kontext-dev"),
         mesh_device=mesh_device,
@@ -110,13 +113,10 @@ def test_flux1_pipeline(
         tp_config=tp,
         use_torch_t5_text_encoder=use_torch_t5_text_encoder,
         use_torch_clip_text_encoder=use_torch_clip_text_encoder,
-        use_torch_vae_encoder=False,
+        use_torch_vae=use_torch_vae,
         num_links=num_links,
         topology=topology,
     )
-
-    # Set timing collector
-    pipeline.timing_collector = timing_collector
 
     input_image = load_image(
         "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/yarn-art-pikachu.png"
@@ -131,37 +131,40 @@ def test_flux1_pipeline(
         filename_prefix += "_t5cpu"
     if use_torch_clip_text_encoder:
         filename_prefix += "_clipcpu"
+    if use_torch_vae:
+        filename_prefix += "_vaecpu"
     if not traced:
         filename_prefix += "_untraced"
 
     def run(*, prompt: str, negative_prompt: str, number: int, seed: int) -> None:
+        benchmark_profiler = BenchmarkProfiler()
         images = pipeline.run_single_prompt(
             image=input_image,
-            width=width,
-            height=height,
             prompt=prompt,
             negative_prompt=negative_prompt,
             cfg_scale=true_cfg_scale,
-            guidance_scale=guidance_scale,
+            height=height,
+            width=width,
             num_inference_steps=num_inference_steps,
+            guidance_scale=guidance_scale,
             seed=seed,
             traced=traced,
+            timer=benchmark_profiler,
+            timer_iteration=0,
         )
 
         output_filename = f"{filename_prefix}_{number}.png"
         images[0].save(output_filename)
         logger.info(f"Image saved as {output_filename}")
 
-        timing_data = timing_collector.get_timing_data()
-        logger.info(f"CLIP encoding time: {timing_data.clip_encoding_time:.2f}s")
-        logger.info(f"T5 encoding time: {timing_data.t5_encoding_time:.2f}s")
-        logger.info(f"Total encoding time: {timing_data.total_encoding_time:.2f}s")
-        logger.info(f"VAE decoding time: {timing_data.vae_decoding_time:.2f}s")
-        logger.info(f"Total pipeline time: {timing_data.total_time:.2f}s")
-        logger.info(f"Total pipeline FPS: {(1 / timing_data.total_time):.2f}")
-        if timing_data.denoising_step_times:
-            avg_step_time = sum(timing_data.denoising_step_times) / len(timing_data.denoising_step_times)
-            logger.info(f"Average denoising step time: {avg_step_time:.2f}s")
+        logger.info(f"CLIP encoding time: {benchmark_profiler.get_duration('clip_encoding', 0):.2f}s")
+        logger.info(f"T5 encoding time: {benchmark_profiler.get_duration('t5_encoding', 0):.2f}s")
+        logger.info(f"Total encoding time: {benchmark_profiler.get_duration('total_encoding', 0):.2f}s")
+        logger.info(f"VAE encoding time: {benchmark_profiler.get_duration('vae_encoding', 0):.2f}s")
+        logger.info(f"VAE decoding time: {benchmark_profiler.get_duration('vae_decoding', 0):.2f}s")
+        logger.info(f"Total pipeline time: {benchmark_profiler.get_duration('run', 0):.2f}s")
+        avg_step_time = benchmark_profiler.get_duration("denoising", 0) / num_inference_steps
+        logger.info(f"Average denoising step time: {avg_step_time:.2f}s")
 
     if no_prompt:
         for i in range(len(negative_prompts)):

@@ -49,7 +49,6 @@ def test_flux1_kontext_pipeline_performance(
     num_links,
     model_location_generator,
     is_ci_env,
-    galaxy_type,
 ) -> None:
     """Performance test for Flux.1 Kontext pipeline with detailed timing analysis. We use the dev variant"""
 
@@ -74,7 +73,7 @@ def test_flux1_kontext_pipeline_performance(
         "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/yarn-art-pikachu.png"
     ).convert("RGB")
     prompts = [
-        "Make Pikachu hold a sign that says 'Black Forest Labs is awesome', yarn art style, detailed, vibrant colors"
+        "Make Pikachu hold a sign that says 'TTNN is awesome', yarn art style, detailed, vibrant colors"
     ]
     negative_prompts = [""] * len(prompts)
 
@@ -121,15 +120,15 @@ def test_flux1_kontext_pipeline_performance(
             with benchmark_profiler("run", iteration=i):
                 images = pipeline.run_single_prompt(
                     image=input_image,
-                    width=image_w,
-                    height=image_h,
                     prompt=prompts[prompt_idx],
                     negative_prompt=negative_prompts[prompt_idx],
+                    cfg_scale=true_cfg_scale,
+                    height=image_h,
+                    width=image_w,
                     num_inference_steps=num_inference_steps,
+                    guidance_scale=guidance_scale,
                     seed=0,
                     traced=True,
-                    cfg_scale=true_cfg_scale,
-                    guidance_scale=guidance_scale,
                     timer=benchmark_profiler,
                     timer_iteration=i,
                 )
@@ -146,8 +145,8 @@ def test_flux1_kontext_pipeline_performance(
     clip_times = [benchmark_profiler.get_duration("clip_encoding", i) for i in range(num_perf_runs)]
     t5_times = [benchmark_profiler.get_duration("t5_encoding", i) for i in range(num_perf_runs)]
     total_encoding_times = [benchmark_profiler.get_duration("total_encoding", i) for i in range(num_perf_runs)]
-    vae_times = [benchmark_profiler.get_duration("vae_decoding", i) for i in range(num_perf_runs)]
     vae_encoding_times = [benchmark_profiler.get_duration("vae_encoding", i) for i in range(num_perf_runs)]
+    vae_times = [benchmark_profiler.get_duration("vae_decoding", i) for i in range(num_perf_runs)]
     total_times = [benchmark_profiler.get_duration("run", i) for i in range(num_perf_runs)]
 
     # Calculate per-step denoising times
