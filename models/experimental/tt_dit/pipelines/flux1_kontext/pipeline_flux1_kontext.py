@@ -6,11 +6,14 @@ from __future__ import annotations
 
 from contextlib import nullcontext, contextmanager
 from dataclasses import dataclass, field
+from typing import Optional, Union, List, Dict
+
+import os
 import time
-import numpy as np
-import torch
 import tqdm
 import ttnn
+import torch
+import numpy as np
 from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler, FluxTransformer2DModel
 from diffusers.image_processor import VaeImageProcessor
 from loguru import logger
@@ -25,8 +28,6 @@ from ...parallel.config import DiTParallelConfig, EncoderParallelConfig, Paralle
 from ...parallel.manager import CCLManager
 from ...utils.padding import PaddingConfig
 from ...utils import cache
-import os
-from typing import Optional, Union, List
 
 
 PREFERRED_KONTEXT_RESOLUTIONS = [
@@ -324,17 +325,6 @@ class Flux1KontextPipeline:
                 ccl_manager=self._ccl_managers[self.vae_submesh_idx],
             )
 
-        # warmup for safe tracing.
-        logger.info("warming up for tracing...")
-        self.run_single_prompt(
-            image=torch.randn(1, 3, 1024, 1024),
-            prompt="",
-            negative_prompt="",
-            num_inference_steps=1,
-            cfg_scale=1.6,
-            seed=0,
-            traced=False,
-        )
         self.synchronize_devices()
 
     @staticmethod
@@ -754,12 +744,12 @@ class Flux1KontextPipeline:
             height = round((max_area / aspect_ratio) ** 0.5)
 
             multiple_of = self._vae_scale_factor * 2
-            width = width // multiple_of * multiple_of
-            height = height // multiple_of * multiple_of
+            self.generation_width = width // multiple_of * multiple_of
+            self.generation_height = height // multiple_of * multiple_of
 
-            if height != original_height or width != original_width:
+            if self.generation_height != original_height or self.generation_width != original_width:
                 logger.warning(
-                    f"Generation `height` and `width` have been adjusted to {height} and {width} to fit the model requirements."
+                    f"Generation `height` and `width` have been adjusted to {self.generation_height} and {self.generation_width} to fit the model requirements."
                 )
 
             with timer.time_section("total_encoding") if timer else nullcontext():
@@ -800,8 +790,8 @@ class Flux1KontextPipeline:
                     image,
                     prompt_count * num_images_per_prompt,
                     self._num_channels_latents,
-                    height,
-                    width,
+                    self.generation_height,
+                    self.generation_width,
                     generator,
                 )
 
@@ -1032,7 +1022,9 @@ class Flux1KontextPipeline:
             logger.info("decoding image...")
 
             with timer.time_section("vae_decoding") if timer else nullcontext():
-                decoded_output = self._vae_decode(tt_latents_step_list[self.vae_submesh_idx], width, height)
+                decoded_output = self._vae_decode(
+                    tt_latents_step_list[self.vae_submesh_idx], self.generation_width, self.generation_height
+                )
                 decoded_output = ttnn.to_torch(ttnn.get_device_tensors(decoded_output)[0]).permute(0, 3, 1, 2)
 
                 image = self._image_processor.postprocess(decoded_output, output_type="pt")
@@ -1113,12 +1105,36 @@ class Flux1KontextPipeline:
         if traced and self._traces is None:
             self._traces = []
             for submesh_id, submesh_device in enumerate(self._submesh_devices):
+                logger.info(f"Tracing for Device ID : {submesh_id}...")
                 latent_device = latents[submesh_id]  # already on device
                 prompt_device = prompt_embeds[submesh_id]  # already on device
                 pooled_projection_device = pooled_prompt_embeds[submesh_id]  # already on device
                 timestep_device = timestep[submesh_id].to(submesh_device)
                 sigma_difference_device = sigma_difference[submesh_id].to(submesh_device)
 
+                logger.info("Compile run for tracing...")
+                pred = self._step_inner(
+                    cfg_enabled=cfg_enabled,
+                    latent=latent_device,
+                    prompt=prompt_device,
+                    pooled=pooled_projection_device,
+                    timestep=timestep_device,
+                    guidance=guidance[submesh_id],
+                    spatial_rope_cos=spatial_rope_cos[submesh_id],
+                    spatial_rope_sin=spatial_rope_sin[submesh_id],
+                    prompt_rope_cos=prompt_rope_cos[submesh_id],
+                    prompt_rope_sin=prompt_rope_sin[submesh_id],
+                    spatial_sequence_length=spatial_sequence_length,
+                    prompt_sequence_length=prompt_sequence_length,
+                    submesh_index=submesh_id,
+                )
+
+                if submesh_id == self.vae_submesh_idx:
+                    logger.info("Initializing VAE buffers for safe tracing...")
+                    self._vae_decode(latent_device, self.generation_width, self.generation_height)
+
+                logger.info("Capturing trace...")
+                ttnn.synchronize_device(submesh_device)
                 trace_id = ttnn.begin_trace_capture(submesh_device, cq_id=0)
                 pred = self._step_inner(
                     cfg_enabled=cfg_enabled,
@@ -1136,9 +1152,8 @@ class Flux1KontextPipeline:
                     submesh_index=submesh_id,
                 )
                 ttnn.end_trace_capture(submesh_device, trace_id, cq_id=0)
-
-                for device in self._submesh_devices:
-                    ttnn.synchronize_device(device)
+                ttnn.synchronize_device(submesh_device)
+                logger.info("Trace captured sucessfully...")
 
                 self._traces.append(
                     PipelineTrace(
