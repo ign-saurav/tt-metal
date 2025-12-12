@@ -1,10 +1,12 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
+# SPDX-License-Identifier: Apache-2.0
+# Adapted from https://github.com/open-mmlab/mmdetection3d/blob/v1.0.0rc4/mmdet3d/ops/norm.py
 # Copyright (c) OpenMMLab. All rights reserved.
 import inspect
 
 import torch.nn as nn
 
 # from mmcv.utils import is_tuple_of
-# Copyright (c) OpenMMLab. All rights reserved.
 # import collections.abc
 # from mmcv.utils.parrots_wrapper import SyncBatchNorm, _BatchNorm, _InstanceNorm
 from torch.nn.modules.batchnorm import _BatchNorm

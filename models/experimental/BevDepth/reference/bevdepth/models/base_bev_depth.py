@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
+# SPDX-License-Identifier: Apache-2.0
+# Adapted from https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/models/base_bev_depth.py
+
 from torch import nn
 
 from models.experimental.BevDepth.reference.bevdepth.layers.backbones.base_lss_fpn import BaseLSSFPN
@@ -61,49 +65,3 @@ class BaseBEVDepth(nn.Module):
             x = self.backbone(x, mats_dict, timestamps)
             preds = self.head(x)
             return preds
-
-    def get_targets(self, gt_boxes, gt_labels):
-        """Generate training targets for a single sample.
-
-        Args:
-            gt_bboxes_3d (:obj:`LiDARInstance3DBoxes`): Ground truth gt boxes.
-            gt_labels_3d (torch.Tensor): Labels of boxes.
-
-        Returns:
-            tuple[list[torch.Tensor]]: Tuple of target including \
-                the following results in order.
-
-                - list[torch.Tensor]: Heatmap scores.
-                - list[torch.Tensor]: Ground truth boxes.
-                - list[torch.Tensor]: Indexes indicating the position \
-                    of the valid boxes.
-                - list[torch.Tensor]: Masks indicating which boxes \
-                    are valid.
-        """
-        return self.head.get_targets(gt_boxes, gt_labels)
-
-    def loss(self, targets, preds_dicts):
-        """Loss function for BEVDepth.
-
-        Args:
-            gt_bboxes_3d (list[:obj:`LiDARInstance3DBoxes`]): Ground
-                truth gt boxes.
-            gt_labels_3d (list[torch.Tensor]): Labels of boxes.
-            preds_dicts (dict): Output of forward function.
-
-        Returns:
-            dict[str:torch.Tensor]: Loss of heatmap and bbox of each task.
-        """
-        return self.head.loss(targets, preds_dicts)
-
-    def get_bboxes(self, preds_dicts, img_metas=None, img=None, rescale=False):
-        """Generate bboxes from bbox head predictions.
-
-        Args:
-            preds_dicts (tuple[list[dict]]): Prediction results.
-            img_metas (list[dict]): Point cloud and image's meta info.
-
-        Returns:
-            list[dict]: Decoded bbox, scores and labels after nms.
-        """
-        return self.head.get_bboxes(preds_dicts, img_metas, img, rescale)

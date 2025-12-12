@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
+# SPDX-License-Identifier: Apache-2.0
+# Adapted from https://github.com/open-mmlab/mmdetection3d/blob/v1.0.0rc4/mmdet3d/models/dense_heads/centerpoint_head.py
 # Copyright (c) OpenMMLab. All rights reserved.
 import copy
 from typing import Dict, List, Optional, Tuple, Union
@@ -5,24 +8,13 @@ from typing import Dict, List, Optional, Tuple, Union
 import torch
 from mmcv.cnn import ConvModule, build_conv_layer
 
-# from mmdet.models.utils import multi_apply
 from mmengine.model import BaseModule
 from mmengine.structures import InstanceData
 from torch import Tensor, nn
 
-# from mmdet3d.models.utils import (clip_sigmoid, draw_heatmap_gaussian,
-#                                   gaussian_radius)
 from models.experimental.BevDepth.reference.bevdepth.layers.heads.gaussian import draw_heatmap_gaussian, gaussian_radius
-
-# from mmdet3d.registry import MODELS, TASK_UTILS
-# from models.experimental.BevDepth.bevdepth.layers.heads.registry import TASK_UTILS
 from models.experimental.BevDepth.reference.bevdepth.layers.heads.builder import MODELS
-
-# from mmdet3d.structures import Det3DDataSample, xywhr2xyxyr
 from models.experimental.BevDepth.reference.bevdepth.layers.heads.det3d_data_sample import Det3DDataSample
-
-# from ..layers import circle_nms, nms_bev
-# from mmcv.ops import nms, nms_rotated
 from functools import partial
 
 import torch
@@ -109,79 +101,6 @@ def circle_nms(dets: Tensor, thresh: float, post_max_size: int = 83) -> Tensor:
         return keep[:post_max_size]
 
     return keep
-
-
-# def nms_rotated(dets: Tensor,
-#                 scores: Tensor,
-#                 iou_threshold: float,
-#                 labels: Optional[Tensor] = None,
-#                 clockwise: bool = True) -> Tuple[Tensor, Tensor]:
-#     """Performs non-maximum suppression (NMS) on the rotated boxes according to
-#     their intersection-over-union (IoU).
-
-#     Rotated NMS iteratively removes lower scoring rotated boxes which have an
-#     IoU greater than iou_threshold with another (higher scoring) rotated box.
-
-#     Args:
-#         dets (torch.Tensor):  Rotated boxes in shape (N, 5).
-#             They are expected to be in
-#             (x_ctr, y_ctr, width, height, angle_radian) format.
-#         scores (torch.Tensor): scores in shape (N, ).
-#         iou_threshold (float): IoU thresh for NMS.
-#         labels (torch.Tensor, optional): boxes' label in shape (N,).
-#         clockwise (bool): flag indicating whether the positive angular
-#             orientation is clockwise. default True.
-#             `New in version 1.4.3.`
-
-#     Returns:
-#         tuple: kept dets(boxes and scores) and indice, which is always the
-#         same data type as the input.
-#     """
-#     if dets.shape[0] == 0:
-#         return dets, None
-#     if not clockwise:
-#         flip_mat = dets.new_ones(dets.shape[-1])
-#         flip_mat[-1] = -1
-#         dets_cw = dets * flip_mat
-#     else:
-#         dets_cw = dets
-#     multi_label = labels is not None
-#     if labels is None:
-#         input_labels = scores.new_empty(0, dtype=torch.int)
-#     else:
-#         input_labels = labels
-#     if dets.device.type in ('npu', 'mlu'):
-#         order = scores.new_empty(0, dtype=torch.long)
-#         keep_inds = ext_module.nms_rotated(dets_cw, scores, order, dets_cw,
-#                                            input_labels, iou_threshold,
-#                                            multi_label)
-#         dets = torch.cat((dets[keep_inds], scores[keep_inds].reshape(-1, 1)),
-#                          dim=1)
-#         return dets, keep_inds
-
-#     if multi_label:
-#         dets_wl = torch.cat((dets_cw, labels.unsqueeze(1)), 1)  # type: ignore
-#     else:
-#         dets_wl = dets_cw
-#     _, order = scores.sort(0, descending=True)
-#     dets_sorted = dets_wl.index_select(0, order)
-
-#     if torch.__version__ == 'parrots':
-#         keep_inds = ext_module.nms_rotated(
-#             dets_wl,
-#             scores,
-#             order,
-#             dets_sorted,
-#             input_labels,
-#             iou_threshold=iou_threshold,
-#             multi_label=multi_label)
-#     else:
-#         keep_inds = ext_module.nms_rotated(dets_wl, scores, order, dets_sorted,
-#                                            input_labels, iou_threshold,
-#                                            multi_label)
-#     dets = torch.cat((dets[keep_inds], scores[keep_inds].reshape(-1, 1)),
-#                      dim=1)
-#     return dets, keep_inds
 
 
 # This function duplicates functionality of mmcv.ops.iou_3d.nms_bev
@@ -1033,23 +952,6 @@ class CenterHead(BaseModule):
                 top_scores_keep = top_scores >= thresh
                 top_scores = top_scores.masked_select(top_scores_keep)
 
-            # if top_scores.shape[0] != 0:
-            #     if self.test_cfg['score_threshold'] > 0.0:
-            #         box_preds = box_preds[top_scores_keep]
-            #         top_labels = top_labels[top_scores_keep]
-
-            #     boxes_for_nms = xywhr2xyxyr(img_metas[i]['box_type_3d'](
-            #         box_preds[:, :], self.bbox_coder.code_size).bev)
-            #     # the nms in 3d detection just remove overlap boxes.
-
-            #     selected = nms_bev(
-            #         boxes_for_nms,
-            #         top_scores,
-            #         thresh=self.test_cfg['nms_thr'],
-            #         pre_max_size=self.test_cfg['pre_max_size'],
-            #         post_max_size=self.test_cfg['post_max_size'])
-            # else:
-            #  Fix Me: nms_bev is not called due to compatibility issues with mmcv.ops.nms_rotated.
             selected = []
 
             # if selected is not None:

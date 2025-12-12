@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
+# SPDX-License-Identifier: Apache-2.0
+# Adapted from https://github.com/open-mmlab/mmdetection3d/blob/master/mmdet3d/models/necks/second_fpn.py
 # Copyright (c) OpenMMLab. All rights reserved.
 import numpy as np
 import torch

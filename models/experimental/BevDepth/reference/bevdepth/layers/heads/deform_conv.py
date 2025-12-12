@@ -1,5 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) OpenMMLab. All rights reserved.
-# Adapted from https://github.com/open-mmlab/mmcv/blob/main/mmcv/ops/deform_conv.py
 # This is a standalone implementation that works without MMCV's compiled extensions
 
 from typing import Tuple, Union

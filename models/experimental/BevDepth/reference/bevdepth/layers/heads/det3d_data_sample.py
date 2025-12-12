@@ -1,15 +1,13 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import Dict, List, Optional, Tuple, Union
 
 import torch
 
-# from mmdet.structures import DetDataSample
 from mmengine.structures import InstanceData
 
-# from .point_data import PointData
 from models.experimental.BevDepth.reference.bevdepth.layers.heads.point_data import PointData
-
-# Copyright (c) OpenMMLab. All rights reserved.
 from typing import List, Optional
 
 from mmengine.structures import BaseDataElement, InstanceData, PixelData
