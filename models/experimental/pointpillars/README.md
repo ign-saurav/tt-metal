@@ -58,7 +58,7 @@ A sample of data (pointcloud,image,calibration data) needed for demo can be take
 
 ### Run Tests
 ```
-models/experimental/pointpillars/tests/test_pointpillars.py
+models/experimental/pointpillars/tests/pcc/test_pointpillars.py
 ```
 This runs an end-to-end flow that:
 
@@ -70,7 +70,6 @@ This runs an end-to-end flow that:
 
   - Optionally compares results and saves artifacts.
 
-  - FPS ~ 31
 
 ### Run the Demo
 ```
@@ -91,14 +90,29 @@ Expected output:
 Demo completed successfully!
 Predicted classification label overlaid and image/s saved in output directory[resources/output/]
 ```
+## Performance
+### Single Device (BS=1)(n150):
+- end-2-end perf with trace enable and 2CQ is `36` FPS
+
+### Multi Device (BS=2)(n300):
+- end-2-end perf with trace enable and 2CQ is `70` FPS
+
+To run perf test:
+```
+# Single device (N150)
+pytest models/experimental/pointpillars/tests/perf/test_pointpillars_perf_e2e.py::test_pointpillars_perf_single_device -s
+
+# Multi device (N300)
+pytest models/experimental/pointpillars/tests/perf/test_pointpillars_perf_e2e.py::test_pointpillars_perf_multi_device -s
+```
 
 ## Note
 - PointPillars consists of five main stages:
 
 | Stage | Description | Execution |
 |-------|-------------|-----------|
-| **PillarLayer** | Point cloud voxelization - converts raw 3D points into pillar representation | PyTorch (CPU/GPU) |
-| **PillarEncoder** | Encodes pillar features using Conv1D + BatchNorm + ReLU + MaxPool | **TTNN** |
+| **PillarLayer** | Point cloud voxelization - converts raw 3D points into pillar representation | PyTorch (Host) |
+| **PillarEncoder** | Encodes pillar features using Conv1D + BatchNorm + ReLU + MaxPool | Indexing with tensor was done on host|
 | **Backbone** | Multi-scale feature extraction with 2D convolutions | **TTNN** |
 | **Neck** | Feature fusion using transposed convolutions for upsampling | **TTNN** |
 | **Head** | Detection outputs (classification, regression, direction) | **TTNN** |
