@@ -1,8 +1,157 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
+import torch
 import ttnn
 from tests.ttnn.ttnn_utility_fuction import get_shard_grid_from_num_cores
+
+# Import tt_cnn builder API
+from models.tt_cnn.tt.builder import (
+    Conv2dConfiguration,
+    MaxPool2dConfiguration,
+    UpsampleConfiguration,
+    TtConv2d,
+    TtMaxPool2d,
+    TtUpsample,
+    AutoShardedStrategyConfiguration,
+)
+
+
+# =============================================================================
+# Builder API Wrappers - Use these for new code
+# =============================================================================
+
+
+def create_tt_conv2d(
+    device,
+    input_height: int,
+    input_width: int,
+    in_channels: int,
+    out_channels: int,
+    batch_size: int,
+    kernel_size: tuple,
+    stride: tuple = (1, 1),
+    padding: tuple = (0, 0),
+    dilation: tuple = (1, 1),
+    groups: int = 1,
+    weight: torch.Tensor = None,
+    bias: torch.Tensor = None,
+    activation=None,
+    math_fidelity=ttnn.MathFidelity.HiFi4,
+    weights_dtype=ttnn.bfloat16,
+    activation_dtype=ttnn.bfloat16,
+    output_dtype=ttnn.bfloat16,
+    sharding_strategy=None,
+    deallocate_activation=True,
+    enable_act_double_buffer=False,
+    enable_weights_double_buffer=False,
+    fp32_dest_acc_en=True,
+    packer_l1_acc=False,
+) -> TtConv2d:
+    """
+    Create a TtConv2d using the builder API.
+
+    This is the preferred way to create convolutions for BEVDepth.
+    """
+    # Convert weights to TTNN format
+    ttnn_weight = ttnn.from_torch(weight, dtype=ttnn.float32)
+    ttnn_bias = None
+    if bias is not None:
+        bias_reshaped = bias.reshape(1, 1, 1, -1) if len(bias.shape) == 1 else bias
+        ttnn_bias = ttnn.from_torch(bias_reshaped, dtype=ttnn.float32)
+
+    # Default sharding strategy
+    if sharding_strategy is None:
+        sharding_strategy = AutoShardedStrategyConfiguration()
+
+    config = Conv2dConfiguration(
+        input_height=input_height,
+        input_width=input_width,
+        in_channels=in_channels,
+        out_channels=out_channels,
+        batch_size=batch_size,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+        groups=groups,
+        weight=ttnn_weight,
+        bias=ttnn_bias,
+        activation=activation,
+        activation_dtype=activation_dtype,
+        weights_dtype=weights_dtype,
+        output_dtype=output_dtype,
+        math_fidelity=math_fidelity,
+        sharding_strategy=sharding_strategy,
+        deallocate_activation=deallocate_activation,
+        enable_act_double_buffer=enable_act_double_buffer,
+        enable_weights_double_buffer=enable_weights_double_buffer,
+        fp32_dest_acc_en=fp32_dest_acc_en,
+        packer_l1_acc=packer_l1_acc,
+    )
+
+    return TtConv2d(config, device)
+
+
+def create_tt_maxpool2d(
+    device,
+    input_height: int,
+    input_width: int,
+    channels: int,
+    batch_size: int,
+    kernel_size: tuple = (2, 2),
+    stride: tuple = (2, 2),
+    padding: tuple = (0, 0),
+    dilation: tuple = (1, 1),
+    ceil_mode: bool = False,
+    dtype=ttnn.bfloat16,
+) -> TtMaxPool2d:
+    """
+    Create a TtMaxPool2d using the builder API.
+    """
+    config = MaxPool2dConfiguration(
+        input_height=input_height,
+        input_width=input_width,
+        channels=channels,
+        batch_size=batch_size,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=padding,
+        dilation=dilation,
+        ceil_mode=ceil_mode,
+        dtype=dtype,
+    )
+
+    return TtMaxPool2d(config, device)
+
+
+def create_tt_upsample(
+    device,
+    input_height: int,
+    input_width: int,
+    channels: int,
+    batch_size: int,
+    scale_factor: int = 2,
+    mode: str = "nearest",
+) -> TtUpsample:
+    """
+    Create a TtUpsample using the builder API.
+    """
+    config = UpsampleConfiguration(
+        input_height=input_height,
+        input_width=input_width,
+        channels=channels,
+        batch_size=batch_size,
+        scale_factor=scale_factor,
+        mode=mode,
+    )
+
+    return TtUpsample(config, device)
+
+
+# =============================================================================
+# Legacy Wrapper - Kept for backward compatibility
+# =============================================================================
 
 
 def ttnn_conv2d(
