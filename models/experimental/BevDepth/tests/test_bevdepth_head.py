@@ -66,7 +66,9 @@ class HeadTestInfra:
         # print(parameters)
 
         # Initialize TTNN model
-        self.ttnn_model = TtBEVDepthHead(parameters, model_config, layer_optimisations=head_optimisations)
+        self.ttnn_model = TtBEVDepthHead(
+            parameters, model_config, layer_optimisations=head_optimisations, device=self.device
+        )
 
         # Run model in phases and validate
         logger.info(f"Running TTNN Head model")
@@ -81,7 +83,9 @@ class HeadTestInfra:
         self.input_tensor = ttnn.to_device(tt_host_tensor, self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         # Optional: reinstantiate TTNN model
-        self.ttnn_model = TtBEVDepthHead(parameters, model_config, layer_optimisations=head_optimisations)
+        self.ttnn_model = TtBEVDepthHead(
+            parameters, model_config, layer_optimisations=head_optimisations, device=self.device
+        )
 
         self.run()
         self.validate()

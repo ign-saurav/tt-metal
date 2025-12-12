@@ -249,7 +249,6 @@ def test_bevdepth_e2e(device):
         "neck_in_channels": [256, 512, 1024, 2048],
         "neck_out_channels": [128, 128, 128, 128],
         "neck_upsample_strides": [0.25, 0.5, 1, 2],
-        "use_torch_conv_transpose": False,
         "depthnet_in_channels": 512,
         "depthnet_mid_channels": 512,
         "depthnet_context_channels": 80,
@@ -275,6 +274,7 @@ def test_bevdepth_e2e(device):
         parameters=params["head"],
         model_config=head_model_config,
         layer_optimisations=head_optimisations,
+        device=device,
     )
 
     logger.info("Running reference model...")

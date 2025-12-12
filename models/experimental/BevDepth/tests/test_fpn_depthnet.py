@@ -283,7 +283,6 @@ def test_secondfpn_pcc(device, batch_size, height, width):
         out_channels=out_channels,
         upsample_strides=upsample_strides,
         model_config=model_config,
-        use_torch_conv_transpose=False,  # Set to False to test TTNN conv_transpose2d
     )
 
     # Convert inputs to TTNN format (B, H, W, C) - all 4 layers
@@ -459,16 +458,6 @@ def test_depthnet_pcc(device, batch_size, height, width, depth_channels):
         "WEIGHTS_DTYPE": ttnn.bfloat16,
         "ACTIVATIONS_DTYPE": ttnn.bfloat16,
         "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
-        "ENABLE_STEP_PCC": True,  # Enable step-by-step PCC logging
-        "USE_PYTORCH_FALLBACK_BASICBLOCK": False,  # Set to False to test TTNN implementations
-        "USE_PYTORCH_FALLBACK_ASPP": False,  # Disable PyTorch fallback - debug TTNN ASPP implementation
-        "USE_PYTORCH_FALLBACK_ASPP_DILATED_CONV": True,  # Use PyTorch fallback for dilated convs (x2, x3, x4) -
-        "USE_PYTORCH_FALLBACK_ASPP_UPSAMPLE": True,  # Use PyTorch fallback for bilinear upsampling (x5) - avoids L1 OOM
-        "USE_PYTORCH_FALLBACK_DCN": False,  # Disable PyTorch fallback - debug TTNN DCN implementation
-        "USE_PYTORCH_FALLBACK_FINAL_CONV": False,  # Disable PyTorch fallback - debug TTNN final_depth_conv implementation
-        "DEBUG_BLOCK1": False,  # Disable detailed debugging for block1 (already working)
-        "DEBUG_ASPP": False,  # Disable detailed debugging for ASPP
-        "TEST_BLOCK1_ONLY": False,  # Set to True to test only block1 (skip block2, block3)
     }
 
     ttnn_depthnet = DepthNet_TTNN(
