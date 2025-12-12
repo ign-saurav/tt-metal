@@ -17,7 +17,6 @@ class SECONDFPN_TTNN:
         out_channels=[128, 128, 128, 128],
         upsample_strides=[0.25, 0.5, 1, 2],
         model_config=None,
-        use_torch_conv_transpose=False,
         use_torch_conv2d_fallback=False,
     ):
         self.device = device
@@ -25,7 +24,6 @@ class SECONDFPN_TTNN:
         self.out_channels = out_channels
         self.upsample_strides = upsample_strides
         self.num_levels = len(in_channels)
-        self.use_torch_conv_transpose = use_torch_conv_transpose
         self.use_torch_conv2d_fallback = use_torch_conv2d_fallback
 
         self.model_config = model_config or {
@@ -35,10 +33,18 @@ class SECONDFPN_TTNN:
         }
 
         self.deblocks = parameters.deblocks
+        # Store deep copies of weights as float32 numpy to prevent any torch/ttnn corruption
+        self._original_weights = []
+        for i in range(self.num_levels):
+            w = self.deblocks[i].conv_weight.detach().float().cpu().numpy().copy()
+            b = (
+                self.deblocks[i].conv_bias.detach().float().cpu().numpy().copy()
+                if self.deblocks[i].conv_bias is not None
+                else None
+            )
+            self._original_weights.append((w, b))
         logger.info(
-            f"SECONDFPN init: {self.num_levels} levels, "
-            f"use_torch_conv_transpose={use_torch_conv_transpose}, "
-            f"use_torch_conv2d_fallback={use_torch_conv2d_fallback}"
+            f"SECONDFPN init: {self.num_levels} levels, " f"use_torch_conv2d_fallback={use_torch_conv2d_fallback}"
         )
 
     def __call__(self, x, batch_size=1):
@@ -55,8 +61,53 @@ class SECONDFPN_TTNN:
             # stride >= 1 uses ConvTranspose2d, stride < 1 uses Conv2d
             use_conv_transpose = stride >= 1
 
-            if use_conv_transpose and self.use_torch_conv_transpose:
-                # PyTorch fallback for conv_transpose2d
+            if feat.is_sharded():
+                feat = ttnn.sharded_to_interleaved(feat, ttnn.DRAM_MEMORY_CONFIG)
+            elif feat.memory_config().memory_layout != ttnn.TensorMemoryLayout.INTERLEAVED:
+                feat = ttnn.to_memory_config(feat, ttnn.DRAM_MEMORY_CONFIG)
+
+            if feat.layout != ttnn.TILE_LAYOUT:
+                feat = ttnn.to_layout(feat, ttnn.TILE_LAYOUT)
+
+            # Create fresh weight tensors each call from stored numpy arrays
+            orig_weight_np, orig_bias_np = self._original_weights[i]
+            weight_tensor = ttnn.from_torch(
+                torch.from_numpy(orig_weight_np.copy()).to(torch.bfloat16),
+                dtype=self.model_config["WEIGHTS_DTYPE"],
+                layout=ttnn.ROW_MAJOR_LAYOUT,
+            )
+
+            bias_tensor = None
+            if orig_bias_np is not None:
+                b = torch.from_numpy(orig_bias_np.copy()).to(torch.bfloat16)
+                if len(b.shape) == 1:
+                    b = b.view(1, 1, 1, -1)
+                bias_tensor = ttnn.from_torch(
+                    b,
+                    dtype=self.model_config["WEIGHTS_DTYPE"],
+                    layout=ttnn.ROW_MAJOR_LAYOUT,
+                )
+
+            conv_config = ttnn.Conv2dConfig(
+                weights_dtype=self.model_config["WEIGHTS_DTYPE"],
+                shard_layout=None,
+                deallocate_activation=False,
+                reallocate_halo_output=False,
+                enable_act_double_buffer=False,
+                enable_weights_double_buffer=False,
+                output_layout=ttnn.TILE_LAYOUT,
+            )
+
+            compute_config = ttnn.init_device_compute_kernel_config(
+                self.device.arch(),
+                math_fidelity=self.model_config["MATH_FIDELITY"],
+                math_approx_mode=False,
+                fp32_dest_acc_en=True,
+                packer_l1_acc=True,
+            )
+
+            if use_conv_transpose:
+                # TTNN conv_transpose2d path
                 int_stride = int(stride)
                 conv_out_height = (height - 1) * int_stride + kernel_size[0]
                 conv_out_width = (width - 1) * int_stride + kernel_size[1]
@@ -65,100 +116,85 @@ class SECONDFPN_TTNN:
                     target_height = conv_out_height
                     target_width = conv_out_width
 
-                # Convert TTNN tensor to PyTorch
-                if isinstance(feat, ttnn.Tensor):
-                    feat_torch = ttnn.to_torch(feat)
-                    if len(feat_torch.shape) == 4:
-                        feat_torch = feat_torch.permute(0, 3, 1, 2).contiguous()
-                else:
-                    feat_torch = feat
-
-                weight = self.deblocks[i].conv_weight
-                bias = self.deblocks[i].conv_bias
-
-                weight = weight.float()
-                if bias is not None:
-                    bias = bias.float()
-                    if len(bias.shape) > 1:
-                        bias = bias.squeeze()
-
-                out = F.conv_transpose2d(
-                    feat_torch.float(),
-                    weight,
-                    bias,
-                    stride=int_stride,
-                    padding=0,
-                )
-                out = F.relu(out)
-
-                # Convert back to TTNN (NHWC)
-                out_nhwc = out.permute(0, 2, 3, 1).contiguous()
-                feat = ttnn.from_torch(
-                    out_nhwc.to(torch.bfloat16),
-                    dtype=self.model_config["ACTIVATIONS_DTYPE"],
-                    layout=ttnn.ROW_MAJOR_LAYOUT,
+                feat, [conv_out_height, conv_out_width] = ttnn.conv_transpose2d(
+                    input_tensor=feat,
+                    weight_tensor=weight_tensor,
+                    bias_tensor=bias_tensor,
                     device=self.device,
-                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    in_channels=self.in_channels[i],
+                    out_channels=self.out_channels[i],
+                    batch_size=batch_size,
+                    input_height=height,
+                    input_width=width,
+                    kernel_size=kernel_size,
+                    stride=(int_stride, int_stride),
+                    padding=(0, 0),
+                    output_padding=(0, 0),
+                    dilation=(1, 1),
+                    conv_config=conv_config,
+                    compute_config=compute_config,
+                    return_output_dim=True,
+                    return_weights_and_bias=False,
+                    mirror_kernel=True,
+                    dtype=self.model_config["ACTIVATIONS_DTYPE"],
                 )
 
-            else:
-                # TTNN implementation
                 if feat.is_sharded():
                     feat = ttnn.sharded_to_interleaved(feat, ttnn.DRAM_MEMORY_CONFIG)
-                elif feat.memory_config().memory_layout != ttnn.TensorMemoryLayout.INTERLEAVED:
-                    feat = ttnn.to_memory_config(feat, ttnn.DRAM_MEMORY_CONFIG)
+                feat = ttnn.relu(feat)
 
-                if feat.layout != ttnn.TILE_LAYOUT:
-                    feat = ttnn.to_layout(feat, ttnn.TILE_LAYOUT)
+            else:
+                # Conv2d path (stride < 1)
+                conv_stride = int(np.round(1 / stride)) if stride < 1 else 1
+                conv_out_height = (height - kernel_size[0]) // conv_stride + 1
+                conv_out_width = (width - kernel_size[1]) // conv_stride + 1
 
-                # Create fresh weight tensors each call
-                weight_tensor = self.deblocks[i].conv_weight
-                if isinstance(weight_tensor, torch.Tensor):
-                    weight_tensor = ttnn.from_torch(
-                        weight_tensor.clone(),
-                        dtype=self.model_config["WEIGHTS_DTYPE"],
-                        layout=ttnn.ROW_MAJOR_LAYOUT,
+                if target_height is None:
+                    target_height = conv_out_height
+                    target_width = conv_out_width
+
+                # kernel==stride case has precision issues in TTNN, use PyTorch fallback if enabled
+                kernel_equals_stride = kernel_size[0] == conv_stride and kernel_size[1] == conv_stride
+                use_pytorch_conv2d = kernel_equals_stride and self.use_torch_conv2d_fallback
+
+                if use_pytorch_conv2d:
+                    if isinstance(feat, ttnn.Tensor):
+                        feat_torch = ttnn.to_torch(feat)
+                        if len(feat_torch.shape) == 4:
+                            feat_torch = feat_torch.permute(0, 3, 1, 2).contiguous()
+                    else:
+                        feat_torch = feat
+
+                    weight = self.deblocks[i].conv_weight
+                    bias = self.deblocks[i].conv_bias
+
+                    weight = weight.float()
+                    if bias is not None:
+                        bias = bias.float()
+                        if len(bias.shape) > 1:
+                            bias = bias.squeeze()
+
+                    out = F.conv2d(
+                        feat_torch.float(),
+                        weight,
+                        bias,
+                        stride=conv_stride,
+                        padding=0,
                     )
+                    out = F.relu(out)
 
-                bias_tensor = self.deblocks[i].conv_bias
-                if bias_tensor is not None and isinstance(bias_tensor, torch.Tensor):
-                    if len(bias_tensor.shape) == 1:
-                        bias_tensor = bias_tensor.view(1, 1, 1, -1)
-                    bias_tensor = ttnn.from_torch(
-                        bias_tensor.clone(),
-                        dtype=self.model_config["WEIGHTS_DTYPE"],
+                    out_nhwc = out.permute(0, 2, 3, 1).contiguous()
+                    feat = ttnn.from_torch(
+                        out_nhwc.to(torch.bfloat16),
+                        dtype=self.model_config["ACTIVATIONS_DTYPE"],
                         layout=ttnn.ROW_MAJOR_LAYOUT,
+                        device=self.device,
+                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
                     )
-
-                conv_config = ttnn.Conv2dConfig(
-                    weights_dtype=self.model_config["WEIGHTS_DTYPE"],
-                    shard_layout=None,
-                    deallocate_activation=False,
-                    reallocate_halo_output=False,
-                    enable_act_double_buffer=False,
-                    enable_weights_double_buffer=False,
-                    output_layout=ttnn.TILE_LAYOUT,
-                )
-
-                compute_config = ttnn.init_device_compute_kernel_config(
-                    self.device.arch(),
-                    math_fidelity=self.model_config["MATH_FIDELITY"],
-                    math_approx_mode=False,
-                    fp32_dest_acc_en=True,
-                    packer_l1_acc=True,
-                )
-
-                if use_conv_transpose:
-                    # TTNN conv_transpose2d path
-                    int_stride = int(stride)
-                    conv_out_height = (height - 1) * int_stride + kernel_size[0]
-                    conv_out_width = (width - 1) * int_stride + kernel_size[1]
-
-                    if target_height is None:
-                        target_height = conv_out_height
-                        target_width = conv_out_width
-
-                    feat, [conv_out_height, conv_out_width] = ttnn.conv_transpose2d(
+                    conv_out_height = out.shape[2]
+                    conv_out_width = out.shape[3]
+                else:
+                    result = ttnn.conv2d(
                         input_tensor=feat,
                         weight_tensor=weight_tensor,
                         bias_tensor=bias_tensor,
@@ -169,105 +205,27 @@ class SECONDFPN_TTNN:
                         input_height=height,
                         input_width=width,
                         kernel_size=kernel_size,
-                        stride=(int_stride, int_stride),
+                        stride=(conv_stride, conv_stride),
                         padding=(0, 0),
-                        output_padding=(0, 0),
-                        dilation=(1, 1),
                         conv_config=conv_config,
                         compute_config=compute_config,
                         return_output_dim=True,
                         return_weights_and_bias=False,
-                        mirror_kernel=True,
                         dtype=self.model_config["ACTIVATIONS_DTYPE"],
                     )
+                    feat = result[0]
+                    conv_out_height = result[1][0]
+                    conv_out_width = result[1][1]
 
                     if feat.is_sharded():
                         feat = ttnn.sharded_to_interleaved(feat, ttnn.DRAM_MEMORY_CONFIG)
                     feat = ttnn.relu(feat)
 
-                else:
-                    # Conv2d path (stride < 1)
-                    conv_stride = int(np.round(1 / stride)) if stride < 1 else 1
-                    conv_out_height = (height - kernel_size[0]) // conv_stride + 1
-                    conv_out_width = (width - kernel_size[1]) // conv_stride + 1
-
-                    if target_height is None:
-                        target_height = conv_out_height
-                        target_width = conv_out_width
-
-                    # kernel==stride case has precision issues in TTNN, use PyTorch fallback if enabled
-                    kernel_equals_stride = kernel_size[0] == conv_stride and kernel_size[1] == conv_stride
-                    use_pytorch_conv2d = kernel_equals_stride and self.use_torch_conv2d_fallback
-
-                    if use_pytorch_conv2d:
-                        if isinstance(feat, ttnn.Tensor):
-                            feat_torch = ttnn.to_torch(feat)
-                            if len(feat_torch.shape) == 4:
-                                feat_torch = feat_torch.permute(0, 3, 1, 2).contiguous()
-                        else:
-                            feat_torch = feat
-
-                        weight = self.deblocks[i].conv_weight
-                        bias = self.deblocks[i].conv_bias
-
-                        weight = weight.float()
-                        if bias is not None:
-                            bias = bias.float()
-                            if len(bias.shape) > 1:
-                                bias = bias.squeeze()
-
-                        out = F.conv2d(
-                            feat_torch.float(),
-                            weight,
-                            bias,
-                            stride=conv_stride,
-                            padding=0,
-                        )
-                        out = F.relu(out)
-
-                        out_nhwc = out.permute(0, 2, 3, 1).contiguous()
-                        feat = ttnn.from_torch(
-                            out_nhwc.to(torch.bfloat16),
-                            dtype=self.model_config["ACTIVATIONS_DTYPE"],
-                            layout=ttnn.ROW_MAJOR_LAYOUT,
-                            device=self.device,
-                            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                        )
-                        conv_out_height = out.shape[2]
-                        conv_out_width = out.shape[3]
-                    else:
-                        result = ttnn.conv2d(
-                            input_tensor=feat,
-                            weight_tensor=weight_tensor,
-                            bias_tensor=bias_tensor,
-                            device=self.device,
-                            in_channels=self.in_channels[i],
-                            out_channels=self.out_channels[i],
-                            batch_size=batch_size,
-                            input_height=height,
-                            input_width=width,
-                            kernel_size=kernel_size,
-                            stride=(conv_stride, conv_stride),
-                            padding=(0, 0),
-                            conv_config=conv_config,
-                            compute_config=compute_config,
-                            return_output_dim=True,
-                            return_weights_and_bias=False,
-                            dtype=self.model_config["ACTIVATIONS_DTYPE"],
-                        )
-                        feat = result[0]
-                        conv_out_height = result[1][0]
-                        conv_out_width = result[1][1]
-
-                        if feat.is_sharded():
-                            feat = ttnn.sharded_to_interleaved(feat, ttnn.DRAM_MEMORY_CONFIG)
-                        feat = ttnn.relu(feat)
-
-                if len(feat.shape) == 4:
-                    if feat.shape[1] == 1 and feat.shape[2] != conv_out_height:
-                        feat = ttnn.reshape(feat, (batch_size, conv_out_height, conv_out_width, self.out_channels[i]))
-                elif len(feat.shape) == 3:
+            if len(feat.shape) == 4:
+                if feat.shape[1] == 1 and feat.shape[2] != conv_out_height:
                     feat = ttnn.reshape(feat, (batch_size, conv_out_height, conv_out_width, self.out_channels[i]))
+            elif len(feat.shape) == 3:
+                feat = ttnn.reshape(feat, (batch_size, conv_out_height, conv_out_width, self.out_channels[i]))
 
             ups.append(feat)
 

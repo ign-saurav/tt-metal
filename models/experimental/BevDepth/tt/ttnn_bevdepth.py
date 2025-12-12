@@ -72,6 +72,7 @@ class TtBEVDepth:
             parameters=head_parameters,
             model_config=head_model_config,
             layer_optimisations=head_optimisations,
+            device=self.device,
         )
 
     def __call__(self, x, mats_dict, timestamps=None):

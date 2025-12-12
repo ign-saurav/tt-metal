@@ -132,394 +132,40 @@ class BasicBlock_TTNN:
         self.out_channels = out_channels
         self.model_config = model_config
         self.params = parameters
-        # Check if PyTorch fallback is enabled for BasicBlock
-        self.use_pytorch_fallback = self.model_config.get("USE_PYTORCH_FALLBACK_BASICBLOCK", False)
-
-        if self.use_pytorch_fallback:
-            logger.info("PyTorch fallback enabled for BasicBlock - will use reference BasicBlock with unfused weights")
-            # For PyTorch fallback, we need to create a reference BasicBlock
-            # Check if we have unfused weights stored
-            if hasattr(parameters, "conv1_weight_unfused") and hasattr(parameters, "norm1_weight"):
-                # We have unfused weights, create reference BasicBlock
-                try:
-                    from models.experimental.BevDepth.reference.bevdepth.layers.heads.resnet import BasicBlock
-                    import torch.nn as nn
-
-                    self.ref_block = BasicBlock(
-                        inplanes=in_channels,
-                        planes=out_channels,
-                        stride=1,
-                        dilation=1,
-                        downsample=None,
-                        style="pytorch",
-                        with_cp=False,
-                        conv_cfg=None,
-                        norm_cfg=dict(type="BN"),
-                        dcn=None,
-                        plugins=None,
-                        init_cfg=None,
-                    )
-                    self.ref_block.eval()
-
-                    # Load unfused weights into reference block
-                    self.ref_block.conv1.weight.data = parameters.conv1_weight_unfused.clone()
-                    if parameters.conv1_bias_unfused is not None:
-                        self.ref_block.conv1.bias = nn.Parameter(parameters.conv1_bias_unfused.clone())
-                    else:
-                        self.ref_block.conv1.bias = None
-
-                    self.ref_block.conv2.weight.data = parameters.conv2_weight_unfused.clone()
-                    if parameters.conv2_bias_unfused is not None:
-                        self.ref_block.conv2.bias = nn.Parameter(parameters.conv2_bias_unfused.clone())
-                    else:
-                        self.ref_block.conv2.bias = None
-
-                    # Load BN parameters
-                    if parameters.norm1_weight is not None:
-                        self.ref_block.norm1.weight.data = parameters.norm1_weight.clone()
-                        self.ref_block.norm1.bias.data = parameters.norm1_bias.clone()
-                        self.ref_block.norm1.running_mean.data = parameters.norm1_mean.clone()
-                        self.ref_block.norm1.running_var.data = parameters.norm1_var.clone()
-                        # Ensure BN is in eval mode
-                        self.ref_block.norm1.eval()
-
-                    if parameters.norm2_weight is not None:
-                        self.ref_block.norm2.weight.data = parameters.norm2_weight.clone()
-                        self.ref_block.norm2.bias.data = parameters.norm2_bias.clone()
-                        self.ref_block.norm2.running_mean.data = parameters.norm2_mean.clone()
-                        self.ref_block.norm2.running_var.data = parameters.norm2_var.clone()
-                        # Ensure BN is in eval mode
-                        self.ref_block.norm2.eval()
-
-                    # Ensure entire block is in eval mode
-                    self.ref_block.eval()
-
-                    logger.info("Created reference BasicBlock with unfused weights for PyTorch fallback")
-                    self.use_ref_block = True
-                except Exception as e:
-                    logger.warning(f"Failed to create reference BasicBlock: {e}, will use fused weights with F.conv2d")
-                    self.use_ref_block = False
-            else:
-                logger.warning("Unfused weights not available, using fused weights with F.conv2d")
-                self.use_ref_block = False
 
     def __call__(self, x, batch_size, height, width):
-        # PyTorch fallback: use reference BasicBlock or F.conv2d with fused weights
-        if self.use_pytorch_fallback:
-            import torch
-
-            # Convert TTNN tensor to PyTorch
-            x_torch = ttnn.to_torch(x)
-            # Convert from [B, H, W, C] to [B, C, H, W]
-            if len(x_torch.shape) == 4 and x_torch.shape[-1] == self.in_channels:
-                x_torch = x_torch.permute(0, 3, 1, 2)
-
-            # First, try to use the reference model's actual BasicBlock instance (most accurate)
-            ref_block_instance = None
-            if hasattr(self, "parent_depthnet"):
-                if self.block_name == "block1" and hasattr(self.parent_depthnet, "ref_block1"):
-                    ref_block_instance = self.parent_depthnet.ref_block1
-                elif self.block_name == "block2" and hasattr(self.parent_depthnet, "ref_block2"):
-                    ref_block_instance = self.parent_depthnet.ref_block2
-                elif self.block_name == "block3" and hasattr(self.parent_depthnet, "ref_block3"):
-                    ref_block_instance = self.parent_depthnet.ref_block3
-
-            # Get reference input if available (from test hooks)
-            ref_input = None
-            if hasattr(self, "block_name"):
-                # Try to get from DepthNet's step_pcc_ref_inputs (passed via model_config or directly)
-                if hasattr(self.model_config, "step_pcc_ref_inputs"):
-                    ref_inputs = self.model_config.step_pcc_ref_inputs
-                elif hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "step_pcc_ref_inputs"):
-                    ref_inputs = self.parent_depthnet.step_pcc_ref_inputs
-                else:
-                    ref_inputs = {}
-                ref_input = ref_inputs.get(self.block_name)
-
-            # Use reference input if available
-            test_with_ref_input = ref_input is not None
-            input_to_use = ref_input if test_with_ref_input else x_torch.float()
-
-            # Prefer reference model's actual BasicBlock instance
-            if ref_block_instance is not None:
-                with torch.no_grad():
-                    out_torch = ref_block_instance(input_to_use)
-            elif hasattr(self, "use_ref_block") and self.use_ref_block:
-                with torch.no_grad():
-                    out_torch = self.ref_block(input_to_use)
-            else:
-                # Fallback: use F.conv2d with fused weights
-                import torch.nn.functional as F
-
-                identity = x_torch
-
-                # Get fused weights (already fused in prepare_depthnet_parameters)
-                conv1_weight = self.params.conv1_weight
-                conv1_bias = self.params.conv1_bias
-                conv2_weight = self.params.conv2_weight
-                conv2_bias = self.params.conv2_bias
-
-                # Convert to torch if needed and ensure float32 for precision
-                if isinstance(conv1_weight, ttnn.Tensor):
-                    conv1_weight = ttnn.to_torch(conv1_weight)
-                conv1_weight = conv1_weight.float()
-
-                if isinstance(conv1_bias, ttnn.Tensor):
-                    conv1_bias = ttnn.to_torch(conv1_bias)
-                conv1_bias = conv1_bias.float() if conv1_bias is not None else None
-
-                if isinstance(conv2_weight, ttnn.Tensor):
-                    conv2_weight = ttnn.to_torch(conv2_weight)
-                conv2_weight = conv2_weight.float()
-
-                if isinstance(conv2_bias, ttnn.Tensor):
-                    conv2_bias = ttnn.to_torch(conv2_bias)
-                conv2_bias = conv2_bias.float() if conv2_bias is not None else None
-
-                # Ensure input is float32 for precision
-                x_torch = x_torch.float()
-
-                # Conv1: 3x3 with ReLU (BN already fused)
-                out = F.conv2d(x_torch, conv1_weight, conv1_bias, stride=1, padding=1)
-                out = F.relu(out)
-
-                # Conv2: 3x3 (BN already fused, no activation yet)
-                out = F.conv2d(out, conv2_weight, conv2_bias, stride=1, padding=1)
-
-                # Add identity and apply ReLU
-                out = out + identity
-                out = F.relu(out)
-
-                out_torch = out
-
-            # Convert back to TTNN format [B, C, H, W] -> [B, H, W, C]
-            out_torch = out_torch.permute(0, 2, 3, 1)
-
-            # Convert to TTNN tensor
-            out = ttnn.from_torch(
-                out_torch,
-                dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                layout=ttnn.TILE_LAYOUT,
-                device=self.device,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            )
-            return out
-
         from models.experimental.BevDepth.tt.utils import ttnn_conv2d
-        import torch
-
-        # Get reference intermediate outputs if available (for debugging)
-        ref_intermediates = {}
-        if hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "step_pcc_ref_outputs"):
-            ref_outputs = self.parent_depthnet.step_pcc_ref_outputs
-            # Try to get intermediate outputs for this block
-            block_idx = {"block1": 0, "block2": 1, "block3": 2}.get(self.block_name, -1)
-            if block_idx >= 0 and hasattr(self.parent_depthnet, "ref_block1"):
-                # We'll manually run the reference block to get intermediates
-                pass
 
         identity = x
-
-        # Debug: Log input statistics and compare weights
-        if self.block_name == "block1" and self.model_config.get("DEBUG_BLOCK1", False):
-            x_torch = ttnn.to_torch(x)
-            if len(x_torch.shape) == 4 and x_torch.shape[-1] == self.in_channels:
-                x_torch = x_torch.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-            logger.info(
-                f"[{self.block_name}] Input stats: mean={x_torch.float().mean().item():.6f}, "
-                f"std={x_torch.float().std().item():.6f}, min={x_torch.float().min().item():.6f}, "
-                f"max={x_torch.float().max().item():.6f}"
-            )
-
-            # Compare fused weights with reference
-            if hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "ref_block1"):
-                ref_block = self.parent_depthnet.ref_block1
-
-                if ref_block is None:
-                    logger.warning(f"[{self.block_name}] Reference block is None, skipping weight comparison")
-                else:
-                    # Get TTNN fused weights
-                    conv1_weight_ttnn = self.params.conv1_weight
-                    if isinstance(conv1_weight_ttnn, ttnn.Tensor):
-                        conv1_weight_ttnn = ttnn.to_torch(conv1_weight_ttnn)
-                    conv1_weight_ttnn = conv1_weight_ttnn.float()
-
-                    conv1_bias_ttnn = self.params.conv1_bias
-                    if conv1_bias_ttnn is not None:
-                        if isinstance(conv1_bias_ttnn, ttnn.Tensor):
-                            conv1_bias_ttnn = ttnn.to_torch(conv1_bias_ttnn)
-                        conv1_bias_ttnn = conv1_bias_ttnn.float()
-
-                    # Get reference weights and compute what fused weights should be
-                    ref_conv1_weight = ref_block.conv1.weight.data.float()
-                    ref_conv1_bias = ref_block.conv1.bias.data.float() if ref_block.conv1.bias is not None else None
-                    ref_bn1_weight = ref_block.norm1.weight.data.float()
-                    ref_bn1_bias = ref_block.norm1.bias.data.float()
-                    ref_bn1_mean = ref_block.norm1.running_mean.data.float()
-                    ref_bn1_var = ref_block.norm1.running_var.data.float()
-                    ref_bn1_eps = ref_block.norm1.eps
-
-                    # Compute reference fused weights
-                    ref_std = torch.sqrt(ref_bn1_var + ref_bn1_eps)
-                    ref_scale = ref_bn1_weight / ref_std
-                    ref_fused_weight = ref_conv1_weight * ref_scale.view(-1, 1, 1, 1)
-                    if ref_conv1_bias is not None:
-                        ref_fused_bias = ref_bn1_bias + ref_scale * (ref_conv1_bias - ref_bn1_mean)
-                    else:
-                        ref_fused_bias = ref_bn1_bias - ref_scale * ref_bn1_mean
-
-                    # Compare weights
-                    from models.common.utility_functions import comp_pcc
-
-                    weight_pcc = comp_pcc(ref_fused_weight, conv1_weight_ttnn)
-                    weight_pcc_val = weight_pcc[1] if isinstance(weight_pcc, tuple) else weight_pcc
-                    bias_pcc = comp_pcc(ref_fused_bias, conv1_bias_ttnn) if conv1_bias_ttnn is not None else (1.0, 1.0)
-                    bias_pcc_val = bias_pcc[1] if isinstance(bias_pcc, tuple) else bias_pcc
-
-                    logger.info(
-                        f"[{self.block_name}] Weight comparison: conv1_weight PCC={weight_pcc_val:.6f}, "
-                        f"conv1_bias PCC={bias_pcc_val:.6f}"
-                    )
-                    logger.info(
-                        f"[{self.block_name}] Weight norms: TTNN={conv1_weight_ttnn.norm().item():.6f}, "
-                        f"Ref={ref_fused_weight.norm().item():.6f}"
-                    )
-                    ttnn_bias_norm = conv1_bias_ttnn.norm().item() if conv1_bias_ttnn is not None else 0.0
-                    logger.info(
-                        f"[{self.block_name}] Bias norms: TTNN={ttnn_bias_norm:.6f}, "
-                        f"Ref={ref_fused_bias.norm().item():.6f}"
-                    )
-
-        # Input x should be allocated from reduce conv, but verify
-        # Ensure tensor is properly allocated BEFORE any operations
-        if not x.is_allocated():
-            logger.error(
-                f"Input tensor to BasicBlock is not allocated - shape: {x.shape}, sharded: {x.is_sharded()}, layout: {x.layout}"
-            )
-            # Try to recover by converting sharded to interleaved (this allocates)
-            if x.is_sharded():
-                x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
-                if not x.is_allocated():
-                    raise RuntimeError("Tensor still not allocated after sharded_to_interleaved")
-            else:
-                # Not sharded and not allocated - this is a critical error
-                # We cannot materialize an unallocated, non-sharded tensor
-                # This indicates a bug upstream (conv2d should return allocated tensors)
-                raise RuntimeError(
-                    f"Input tensor to BasicBlock is not allocated and not sharded. "
-                    f"Shape: {x.shape}, Layout: {x.layout}. "
-                    f"This should not happen - upstream operations should return allocated tensors."
-                )
 
         # Ensure tensor is in interleaved DRAM (not sharded) for stability
         if x.is_sharded():
             x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
 
-        # Verify allocation before to_layout (to_layout can create unallocated views)
-        if not x.is_allocated():
-            logger.error("Tensor is not allocated before to_layout in BasicBlock")
-            raise RuntimeError("Tensor buffer is not allocated before to_layout - cannot proceed")
-
-        # Now safe to call to_layout (tensor is allocated)
         if x.layout != ttnn.TILE_LAYOUT:
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-            # Verify allocation after to_layout
-            if not x.is_allocated():
-                logger.error("Tensor became unallocated after to_layout")
-                raise RuntimeError("Tensor buffer is not allocated after to_layout - cannot proceed")
 
-        # Final verification: tensor should be allocated, in TILE_LAYOUT, and in DRAM
-        if not x.is_allocated():
-            logger.error("Tensor is still not allocated after all operations")
-            raise RuntimeError("Tensor buffer is not allocated - cannot proceed")
-
-        # Conv1: 3x3 - use BLOCK_SHARDED to avoid L1 buffer overflow
-        # For debugging: run conv1 without activation first to compare
-        debug_conv1_only = self.block_name == "block1" and self.model_config.get("DEBUG_BLOCK1", False)
-
-        if debug_conv1_only:
-            # Run conv1 without activation to compare intermediate output
-            out_conv1 = ttnn_conv2d(
-                input_tensor=x,
-                weight_tensor=self.params.conv1_weight,
-                bias_tensor=self.params.conv1_bias,
-                device=self.device,
-                batch_size=batch_size,
-                input_height=height,
-                input_width=width,
-                in_channels=self.in_channels,
-                out_channels=self.out_channels,
-                kernel_size=(3, 3),
-                stride=(1, 1),
-                padding=(1, 1),
-                activation=None,  # No activation for debugging
-                math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-                weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-                activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-                packer_l1_acc=False,
-            )
-            # Convert sharded to interleaved if needed (must be done BEFORE reshape)
-            if out_conv1.is_sharded():
-                out_conv1 = ttnn.sharded_to_interleaved(out_conv1, ttnn.DRAM_MEMORY_CONFIG)
-            if len(out_conv1.shape) == 3:
-                out_conv1 = ttnn.reshape(out_conv1, (batch_size, height, width, self.out_channels))
-
-            # Compare with reference conv1 output
-            out_conv1_torch = ttnn.to_torch(out_conv1)
-            if len(out_conv1_torch.shape) == 4 and out_conv1_torch.shape[-1] == self.out_channels:
-                out_conv1_torch = out_conv1_torch.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-
-            # Get reference conv1 output by running reference block's conv1
-            if hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "ref_block1"):
-                ref_block = self.parent_depthnet.ref_block1
-                if ref_block is not None:
-                    x_ref = None
-                    if hasattr(self.parent_depthnet, "step_pcc_ref_inputs"):
-                        x_ref = self.parent_depthnet.step_pcc_ref_inputs.get(self.block_name)
-
-                    if x_ref is not None:
-                        with torch.no_grad():
-                            # Run reference conv1 + BN1 (no ReLU yet)
-                            ref_conv1_out = ref_block.conv1(x_ref.float())
-                            ref_conv1_out = ref_block.norm1(ref_conv1_out)
-
-                            from models.common.utility_functions import comp_pcc
-
-                            conv1_pcc = comp_pcc(ref_conv1_out, out_conv1_torch.float())
-                            conv1_pcc_val = conv1_pcc[1] if isinstance(conv1_pcc, tuple) else conv1_pcc
-                            logger.info(
-                                f"[{self.block_name}] After conv1+BN1 (before ReLU): PCC={conv1_pcc_val:.6f}, "
-                                f"TTNN mean={out_conv1_torch.float().mean().item():.6f}, "
-                                f"Ref mean={ref_conv1_out.mean().item():.6f}, "
-                                f"TTNN std={out_conv1_torch.float().std().item():.6f}, "
-                                f"Ref std={ref_conv1_out.std().item():.6f}"
-                            )
-
-            # Now apply ReLU
-            out = ttnn.relu(out_conv1)
-        else:
-            # Normal path: conv1 with ReLU fused
-            out = ttnn_conv2d(
-                input_tensor=x,
-                weight_tensor=self.params.conv1_weight,
-                bias_tensor=self.params.conv1_bias,
-                device=self.device,
-                batch_size=batch_size,
-                input_height=height,
-                input_width=width,
-                in_channels=self.in_channels,
-                out_channels=self.out_channels,
-                kernel_size=(3, 3),
-                stride=(1, 1),
-                padding=(1, 1),
-                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-                math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-                weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-                activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-                packer_l1_acc=False,
-            )
+        # Conv1: 3x3 with ReLU fused
+        out = ttnn_conv2d(
+            input_tensor=x,
+            weight_tensor=self.params.conv1_weight,
+            bias_tensor=self.params.conv1_bias,
+            device=self.device,
+            batch_size=batch_size,
+            input_height=height,
+            input_width=width,
+            in_channels=self.in_channels,
+            out_channels=self.out_channels,
+            kernel_size=(3, 3),
+            stride=(1, 1),
+            padding=(1, 1),
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            packer_l1_acc=False,
+        )
 
         # Convert sharded to interleaved if needed (must be done BEFORE reshape)
         if out.is_sharded():
@@ -566,79 +212,8 @@ class BasicBlock_TTNN:
         if len(out_conv2.shape) == 3:
             out_conv2 = ttnn.reshape(out_conv2, (batch_size, height, width, self.out_channels))
 
-        # Debug: Compare conv2 output with reference
-        if self.block_name == "block1" and self.model_config.get("DEBUG_BLOCK1", False):
-            out_conv2_torch = ttnn.to_torch(out_conv2)
-            if len(out_conv2_torch.shape) == 4 and out_conv2_torch.shape[-1] == self.out_channels:
-                out_conv2_torch = out_conv2_torch.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-
-            # Get reference conv2 output
-            if hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "ref_block1"):
-                ref_block = self.parent_depthnet.ref_block1
-                if ref_block is not None:
-                    x_ref = None
-                    if hasattr(self.parent_depthnet, "step_pcc_ref_inputs"):
-                        x_ref = self.parent_depthnet.step_pcc_ref_inputs.get(self.block_name)
-
-                    if x_ref is not None:
-                        with torch.no_grad():
-                            # Run full reference block up to conv2+BN2
-                            ref_out = ref_block.conv1(x_ref.float())
-                            ref_out = ref_block.norm1(ref_out)
-                            ref_out = torch.relu(ref_out)
-                            ref_out = ref_block.conv2(ref_out)
-                            ref_out = ref_block.norm2(ref_out)
-
-                            from models.common.utility_functions import comp_pcc
-
-                            conv2_pcc = comp_pcc(ref_out, out_conv2_torch.float())
-                            conv2_pcc_val = conv2_pcc[1] if isinstance(conv2_pcc, tuple) else conv2_pcc
-                            logger.info(
-                                f"[{self.block_name}] After conv2+BN2 (before add): PCC={conv2_pcc_val:.6f}, "
-                                f"TTNN mean={out_conv2_torch.float().mean().item():.6f}, "
-                                f"Ref mean={ref_out.mean().item():.6f}, "
-                                f"TTNN std={out_conv2_torch.float().std().item():.6f}, "
-                                f"Ref std={ref_out.std().item():.6f}"
-                            )
-
         # Add + ReLU
         out = ttnn.add(out_conv2, identity)
-
-        # Debug: Compare after add
-        if self.block_name == "block1" and self.model_config.get("DEBUG_BLOCK1", False):
-            out_add_torch = ttnn.to_torch(out)
-            if len(out_add_torch.shape) == 4 and out_add_torch.shape[-1] == self.out_channels:
-                out_add_torch = out_add_torch.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-
-            if hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "ref_block1"):
-                ref_block = self.parent_depthnet.ref_block1
-                if ref_block is not None:
-                    x_ref = None
-                    if hasattr(self.parent_depthnet, "step_pcc_ref_inputs"):
-                        x_ref = self.parent_depthnet.step_pcc_ref_inputs.get(self.block_name)
-
-                    if x_ref is not None:
-                        with torch.no_grad():
-                            # Run full reference block up to add
-                            ref_out = ref_block.conv1(x_ref.float())
-                            ref_out = ref_block.norm1(ref_out)
-                            ref_out = torch.relu(ref_out)
-                            ref_out = ref_block.conv2(ref_out)
-                            ref_out = ref_block.norm2(ref_out)
-                            ref_out = ref_out + x_ref.float()  # Add identity
-
-                            from models.common.utility_functions import comp_pcc
-
-                            add_pcc = comp_pcc(ref_out, out_add_torch.float())
-                            add_pcc_val = add_pcc[1] if isinstance(add_pcc, tuple) else add_pcc
-                            logger.info(
-                                f"[{self.block_name}] After add (before final ReLU): PCC={add_pcc_val:.6f}, "
-                                f"TTNN mean={out_add_torch.float().mean().item():.6f}, "
-                                f"Ref mean={ref_out.mean().item():.6f}, "
-                                f"TTNN std={out_add_torch.float().std().item():.6f}, "
-                                f"Ref std={ref_out.std().item():.6f}"
-                            )
-
         out = ttnn.relu(out)
 
         return out
@@ -651,82 +226,10 @@ class ASPP_TTNN:
         self.mid_channels = mid_channels
         self.model_config = model_config
         self.params = parameters
-        # Check if we should use reference ASPP instance
-        self.use_ref_aspp = False
 
     def __call__(self, x, batch_size, height, width):
-        # Try to use reference ASPP instance if available (only if enabled in config)
-        use_ref_aspp = self.model_config.get("USE_PYTORCH_FALLBACK_ASPP", False)
-        ref_aspp_instance = None
-        if use_ref_aspp and hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "ref_aspp"):
-            ref_aspp_instance = self.parent_depthnet.ref_aspp
-
-        if ref_aspp_instance is not None:
-            import torch
-
-            # Convert TTNN tensor to PyTorch
-            x_torch = ttnn.to_torch(x)
-            # Convert from [B, H, W, C] to [B, C, H, W]
-            if len(x_torch.shape) == 4 and x_torch.shape[-1] == self.in_channels:
-                x_torch = x_torch.permute(0, 3, 1, 2)
-
-            # Get reference input if available
-            ref_input = None
-            if hasattr(self.model_config, "step_pcc_ref_inputs"):
-                ref_inputs = self.model_config.step_pcc_ref_inputs
-            elif hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "step_pcc_ref_inputs"):
-                ref_inputs = self.parent_depthnet.step_pcc_ref_inputs
-            else:
-                ref_inputs = {}
-            ref_input = ref_inputs.get("aspp")
-
-            # Use reference input if available
-            input_to_use = ref_input if ref_input is not None else x_torch.float()
-
-            logger.info("  [aspp] Using reference model's actual ASPP instance")
-            with torch.no_grad():
-                out_torch = ref_aspp_instance(input_to_use)
-
-            # Convert back to TTNN format [B, C, H, W] -> [B, H, W, C]
-            out_torch = out_torch.permute(0, 2, 3, 1)
-
-            # Convert to TTNN tensor
-            out = ttnn.from_torch(
-                out_torch,
-                dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                layout=ttnn.TILE_LAYOUT,
-                device=self.device,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            )
-            return out
-
-        # Otherwise, use TTNN implementation
         from models.experimental.BevDepth.tt.utils import ttnn_conv2d
         import torch
-
-        # Debug: Log input statistics
-        debug_aspp = self.model_config.get("DEBUG_ASPP", False)
-        if debug_aspp:
-            x_torch = ttnn.to_torch(x)
-            if len(x_torch.shape) == 4 and x_torch.shape[-1] == self.in_channels:
-                x_torch = x_torch.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-            logger.info(
-                f"[aspp] Input stats: mean={x_torch.float().mean().item():.6f}, "
-                f"std={x_torch.float().std().item():.6f}, min={x_torch.float().min().item():.6f}, "
-                f"max={x_torch.float().max().item():.6f}"
-            )
-
-            # Compare with reference input if available
-            ref_input = None
-            if hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "step_pcc_ref_inputs"):
-                ref_input = self.parent_depthnet.step_pcc_ref_inputs.get("aspp")
-
-            if ref_input is not None:
-                from models.common.utility_functions import comp_pcc
-
-                input_pcc = comp_pcc(ref_input, x_torch.float())
-                input_pcc_val = input_pcc[1] if isinstance(input_pcc, tuple) else input_pcc
-                logger.info(f"[aspp] Input PCC vs reference: {input_pcc_val:.6f}")
 
         # Ensure input is in DRAM before conv2d
         # Avoid calling memory_config() which might fail if buffer isn't allocated
@@ -799,147 +302,81 @@ class ASPP_TTNN:
         ):
             x1 = ttnn.reshape(x1, (batch_size, height, width, self.mid_channels))
 
-        # Debug: Compare x1 with reference
-        if debug_aspp:
-            x1_torch = ttnn.to_torch(x1)
-            if len(x1_torch.shape) == 4 and x1_torch.shape[-1] == self.mid_channels:
-                x1_torch = x1_torch.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-
-            # Get reference x1 output
-            if hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "ref_aspp"):
-                ref_aspp = self.parent_depthnet.ref_aspp
-                ref_input = None
-                if hasattr(self.parent_depthnet, "step_pcc_ref_inputs"):
-                    ref_input = self.parent_depthnet.step_pcc_ref_inputs.get("aspp")
-
-                if ref_input is not None:
-                    with torch.no_grad():
-                        # Run reference aspp1 branch
-                        ref_x1 = ref_aspp.aspp1(ref_input.float())
-
-                        from models.common.utility_functions import comp_pcc
-
-                        x1_pcc = comp_pcc(ref_x1, x1_torch.float())
-                        x1_pcc_val = x1_pcc[1] if isinstance(x1_pcc, tuple) else x1_pcc
-                        logger.info(
-                            f"[aspp] x1 (aspp1 branch) PCC={x1_pcc_val:.6f}, "
-                            f"TTNN mean={x1_torch.float().mean().item():.6f}, "
-                            f"Ref mean={ref_x1.mean().item():.6f}, "
-                            f"TTNN std={x1_torch.float().std().item():.6f}, "
-                            f"Ref std={ref_x1.std().item():.6f}"
-                        )
-
         # Branch 2-4: 3x3 conv with dilation using native TTNN dilation support
-        use_pytorch_dilated = self.model_config.get("USE_PYTORCH_FALLBACK_ASPP_DILATED_CONV", False)
+        def run_dilated_conv_ttnn(x_ttnn, weight, bias, dilation_val, branch_name):
+            # Ensure input is in correct format
+            if x_ttnn.is_sharded():
+                x_ttnn = ttnn.sharded_to_interleaved(x_ttnn, ttnn.DRAM_MEMORY_CONFIG)
+            if x_ttnn.layout != ttnn.TILE_LAYOUT:
+                x_ttnn = ttnn.to_layout(x_ttnn, ttnn.TILE_LAYOUT)
 
-        if use_pytorch_dilated:
-            # Legacy PyTorch fallback (kept for comparison/debugging)
-            import torch.nn.functional as F
-
-            def run_dilated_conv_torch(x_ttnn, weight, bias, dilation_val, branch_name):
-                x_torch = ttnn.to_torch(x_ttnn)
-                if len(x_torch.shape) == 4 and x_torch.shape[-1] == self.in_channels:
-                    x_torch = x_torch.permute(0, 3, 1, 2)
-                weight_torch = weight if not isinstance(weight, ttnn.Tensor) else ttnn.to_torch(weight)
-                bias_torch = bias if bias is None or not isinstance(bias, ttnn.Tensor) else ttnn.to_torch(bias)
-                with torch.no_grad():
-                    x_torch = F.conv2d(
-                        x_torch.float(),
-                        weight_torch.float(),
-                        bias_torch.float() if bias_torch is not None else None,
-                        stride=1,
-                        padding=dilation_val,
-                        dilation=dilation_val,
-                    )
-                    x_torch = F.relu(x_torch)
-                x_torch = x_torch.permute(0, 2, 3, 1)
-                return ttnn.from_torch(
-                    x_torch,
-                    dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                    layout=ttnn.TILE_LAYOUT,
-                    device=self.device,
-                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            # Prepare weight tensor
+            weight_ttnn = weight
+            if isinstance(weight, torch.Tensor):
+                weight_ttnn = ttnn.from_torch(
+                    weight.to(torch.bfloat16), dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
                 )
 
-            x2 = run_dilated_conv_torch(x, self.params.aspp2_weight, self.params.aspp2_bias, 6, "x2")
-            x3 = run_dilated_conv_torch(x, self.params.aspp3_weight, self.params.aspp3_bias, 12, "x3")
-            x4 = run_dilated_conv_torch(x, self.params.aspp4_weight, self.params.aspp4_bias, 18, "x4")
-        else:
-            # Pure TTNN implementation using native dilation parameter
-            def run_dilated_conv_ttnn(x_ttnn, weight, bias, dilation_val, branch_name):
-                # Ensure input is in correct format
-                if x_ttnn.is_sharded():
-                    x_ttnn = ttnn.sharded_to_interleaved(x_ttnn, ttnn.DRAM_MEMORY_CONFIG)
-                if x_ttnn.layout != ttnn.TILE_LAYOUT:
-                    x_ttnn = ttnn.to_layout(x_ttnn, ttnn.TILE_LAYOUT)
+            # Prepare bias tensor
+            bias_ttnn = None
+            if bias is not None:
+                if isinstance(bias, torch.Tensor):
+                    bias_reshaped = bias.reshape(1, 1, 1, -1).to(torch.bfloat16)
+                    bias_ttnn = ttnn.from_torch(bias_reshaped, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
+                else:
+                    bias_ttnn = bias
 
-                # Prepare weight tensor
-                weight_ttnn = weight
-                if isinstance(weight, torch.Tensor):
-                    weight_ttnn = ttnn.from_torch(
-                        weight.to(torch.bfloat16), dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
-                    )
+            conv_config = ttnn.Conv2dConfig(
+                weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+                output_layout=ttnn.TILE_LAYOUT,
+            )
+            compute_config = ttnn.init_device_compute_kernel_config(
+                self.device.arch(),
+                math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+                fp32_dest_acc_en=True,
+            )
 
-                # Prepare bias tensor
-                bias_ttnn = None
-                if bias is not None:
-                    if isinstance(bias, torch.Tensor):
-                        bias_reshaped = bias.reshape(1, 1, 1, -1).to(torch.bfloat16)
-                        bias_ttnn = ttnn.from_torch(bias_reshaped, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
-                    else:
-                        bias_ttnn = bias
+            # Native TTNN conv2d with dilation parameter
+            out, [out_h, out_w] = ttnn.conv2d(
+                input_tensor=x_ttnn,
+                weight_tensor=weight_ttnn,
+                bias_tensor=bias_ttnn,
+                device=self.device,
+                in_channels=self.in_channels,
+                out_channels=self.mid_channels,
+                batch_size=batch_size,
+                input_height=height,
+                input_width=width,
+                kernel_size=(3, 3),
+                stride=(1, 1),
+                padding=(dilation_val, dilation_val),
+                dilation=(dilation_val, dilation_val),
+                conv_config=conv_config,
+                compute_config=compute_config,
+                return_output_dim=True,
+                dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            )
 
-                conv_config = ttnn.Conv2dConfig(
-                    weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-                    output_layout=ttnn.TILE_LAYOUT,
-                )
-                compute_config = ttnn.init_device_compute_kernel_config(
-                    self.device.arch(),
-                    math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-                    fp32_dest_acc_en=True,
-                )
+            if out.is_sharded():
+                out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
+            out = ttnn.relu(out)
 
-                # Native TTNN conv2d with dilation parameter
-                out, [out_h, out_w] = ttnn.conv2d(
-                    input_tensor=x_ttnn,
-                    weight_tensor=weight_ttnn,
-                    bias_tensor=bias_ttnn,
-                    device=self.device,
-                    in_channels=self.in_channels,
-                    out_channels=self.mid_channels,
-                    batch_size=batch_size,
-                    input_height=height,
-                    input_width=width,
-                    kernel_size=(3, 3),
-                    stride=(1, 1),
-                    padding=(dilation_val, dilation_val),
-                    dilation=(dilation_val, dilation_val),
-                    conv_config=conv_config,
-                    compute_config=compute_config,
-                    return_output_dim=True,
-                    dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                )
+            # Reshape to [B, H, W, C]
+            if len(out.shape) == 4 and out.shape[1] == 1:
+                out = ttnn.reshape(out, (batch_size, out_h, out_w, self.mid_channels))
+            elif len(out.shape) == 3:
+                out = ttnn.reshape(out, (batch_size, out_h, out_w, self.mid_channels))
 
-                if out.is_sharded():
-                    out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
-                out = ttnn.relu(out)
+            return out
 
-                # Reshape to [B, H, W, C]
-                if len(out.shape) == 4 and out.shape[1] == 1:
-                    out = ttnn.reshape(out, (batch_size, out_h, out_w, self.mid_channels))
-                elif len(out.shape) == 3:
-                    out = ttnn.reshape(out, (batch_size, out_h, out_w, self.mid_channels))
+        # x2: 3x3 conv with dilation=6 (native TTNN)
+        x2 = run_dilated_conv_ttnn(x, self.params.aspp2_weight, self.params.aspp2_bias, 6, "x2")
 
-                return out
+        # x3: 3x3 conv with dilation=12 (native TTNN)
+        x3 = run_dilated_conv_ttnn(x, self.params.aspp3_weight, self.params.aspp3_bias, 12, "x3")
 
-            # x2: 3x3 conv with dilation=6 (native TTNN)
-            x2 = run_dilated_conv_ttnn(x, self.params.aspp2_weight, self.params.aspp2_bias, 6, "x2")
-
-            # x3: 3x3 conv with dilation=12 (native TTNN)
-            x3 = run_dilated_conv_ttnn(x, self.params.aspp3_weight, self.params.aspp3_bias, 12, "x3")
-
-            # x4: 3x3 conv with dilation=18 (native TTNN)
-            x4 = run_dilated_conv_ttnn(x, self.params.aspp4_weight, self.params.aspp4_bias, 18, "x4")
+        # x4: 3x3 conv with dilation=18 (native TTNN)
+        x4 = run_dilated_conv_ttnn(x, self.params.aspp4_weight, self.params.aspp4_bias, 18, "x4")
 
         # Global pooling branch
         x5 = ttnn.global_avg_pool2d(x)
@@ -1004,179 +441,36 @@ class ASPP_TTNN:
                 )
 
         # Upsample from 1x1 to height x width using TtUpsample with channel slicing
-        use_pytorch_upsample = self.model_config.get("USE_PYTORCH_FALLBACK_ASPP_UPSAMPLE", False)
+        from models.tt_cnn.tt.builder import TtUpsample, UpsampleConfiguration, ChannelSliceStrategyConfiguration
 
-        if use_pytorch_upsample:
-            # Legacy PyTorch fallback (kept for comparison/debugging)
-            import torch
-            import torch.nn.functional as F
+        # Convert to ROW_MAJOR for upsample
+        if x5.is_sharded():
+            x5 = ttnn.sharded_to_interleaved(x5, ttnn.DRAM_MEMORY_CONFIG)
+        x5 = ttnn.to_layout(x5, ttnn.ROW_MAJOR_LAYOUT)
 
-            x5_torch = ttnn.to_torch(x5)
-            if len(x5_torch.shape) == 4 and x5_torch.shape[-1] == self.mid_channels:
-                x5_torch = x5_torch.permute(0, 3, 1, 2)
-            x5_torch = F.interpolate(x5_torch.float(), size=(height, width), mode="bilinear", align_corners=True)
-            x5_torch = x5_torch.permute(0, 2, 3, 1)
-            x5 = ttnn.from_torch(
-                x5_torch,
-                dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                layout=ttnn.TILE_LAYOUT,
-                device=self.device,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            )
-        else:
-            # Pure TTNN bilinear upsampling using TtUpsample with channel slicing
-            from models.tt_cnn.tt.builder import TtUpsample, UpsampleConfiguration, ChannelSliceStrategyConfiguration
+        # Use channel slicing to avoid L1 OOM for large scale factors
+        # Need more slices for larger output sizes: output_size = channels * H * W * 2 bytes
+        output_bytes = self.mid_channels * height * width * 2
+        l1_bank_size = 1363712  # ~1.3MB
+        num_slices = max(4, (output_bytes // l1_bank_size) + 1)
+        upsample_config = UpsampleConfiguration(
+            input_height=1,
+            input_width=1,
+            channels=self.mid_channels,
+            batch_size=batch_size,
+            scale_factor=(height, width),
+            mode="bilinear",
+            slice_strategy=ChannelSliceStrategyConfiguration(num_slices=num_slices),
+        )
+        upsample_layer = TtUpsample(upsample_config, self.device)
+        x5 = upsample_layer(x5)
 
-            # Convert to ROW_MAJOR for upsample
-            if x5.is_sharded():
-                x5 = ttnn.sharded_to_interleaved(x5, ttnn.DRAM_MEMORY_CONFIG)
-            x5 = ttnn.to_layout(x5, ttnn.ROW_MAJOR_LAYOUT)
-
-            # Use channel slicing to avoid L1 OOM for large scale factors
-            num_slices = 4 if self.mid_channels >= 256 else 2
-            upsample_config = UpsampleConfiguration(
-                input_height=1,
-                input_width=1,
-                channels=self.mid_channels,
-                batch_size=batch_size,
-                scale_factor=(height, width),
-                mode="bilinear",
-                slice_strategy=ChannelSliceStrategyConfiguration(num_slices=num_slices),
-            )
-            upsample_layer = TtUpsample(upsample_config, self.device)
-            x5 = upsample_layer(x5)
-
-            # Convert back to TILE_LAYOUT
-            x5 = ttnn.to_layout(x5, ttnn.TILE_LAYOUT)
-            x5 = ttnn.to_memory_config(x5, ttnn.DRAM_MEMORY_CONFIG)
-
-        # Debug: Compare all branches before concatenation
-        if debug_aspp:
-            # Get reference outputs for all branches
-            if hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "ref_aspp"):
-                ref_aspp = self.parent_depthnet.ref_aspp
-                ref_input = None
-                if hasattr(self.parent_depthnet, "step_pcc_ref_inputs"):
-                    ref_input = self.parent_depthnet.step_pcc_ref_inputs.get("aspp")
-
-                if ref_input is not None:
-                    with torch.no_grad():
-                        ref_x1 = ref_aspp.aspp1(ref_input.float())
-                        ref_x2 = ref_aspp.aspp2(ref_input.float())
-                        ref_x3 = ref_aspp.aspp3(ref_input.float())
-                        ref_x4 = ref_aspp.aspp4(ref_input.float())
-                        ref_x5 = ref_aspp.global_avg_pool(ref_input.float())
-                        ref_x5 = torch.nn.functional.interpolate(
-                            ref_x5, size=ref_x4.size()[2:], mode="bilinear", align_corners=True
-                        )
-
-                        from models.common.utility_functions import comp_pcc
-
-                        # Compare each branch
-                        for branch_name, x_ttnn, x_ref in [
-                            ("x1", x1, ref_x1),
-                            ("x2", x2, ref_x2),
-                            ("x3", x3, ref_x3),
-                            ("x4", x4, ref_x4),
-                            ("x5", x5, ref_x5),
-                        ]:
-                            x_torch = ttnn.to_torch(x_ttnn)
-                            if len(x_torch.shape) == 4 and x_torch.shape[-1] == self.mid_channels:
-                                x_torch = x_torch.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-
-                            branch_pcc = comp_pcc(x_ref, x_torch.float())
-                            branch_pcc_val = branch_pcc[1] if isinstance(branch_pcc, tuple) else branch_pcc
-                            logger.info(
-                                f"[aspp] {branch_name} branch PCC={branch_pcc_val:.6f}, "
-                                f"TTNN mean={x_torch.float().mean().item():.6f}, "
-                                f"Ref mean={x_ref.mean().item():.6f}, "
-                                f"TTNN std={x_torch.float().std().item():.6f}, "
-                                f"Ref std={x_ref.std().item():.6f}"
-                            )
-
-        # Debug: Compare all branches before concatenation
-        if debug_aspp:
-            # Get reference outputs for all branches
-            if hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "ref_aspp"):
-                ref_aspp = self.parent_depthnet.ref_aspp
-                ref_input = None
-                if hasattr(self.parent_depthnet, "step_pcc_ref_inputs"):
-                    ref_input = self.parent_depthnet.step_pcc_ref_inputs.get("aspp")
-
-                if ref_input is not None:
-                    with torch.no_grad():
-                        ref_x1 = ref_aspp.aspp1(ref_input.float())
-                        ref_x2 = ref_aspp.aspp2(ref_input.float())
-                        ref_x3 = ref_aspp.aspp3(ref_input.float())
-                        ref_x4 = ref_aspp.aspp4(ref_input.float())
-                        ref_x5 = ref_aspp.global_avg_pool(ref_input.float())
-                        ref_x5 = torch.nn.functional.interpolate(
-                            ref_x5, size=ref_x4.size()[2:], mode="bilinear", align_corners=True
-                        )
-
-                        from models.common.utility_functions import comp_pcc
-
-                        # Compare each branch
-                        for branch_name, x_ttnn, x_ref in [
-                            ("x1", x1, ref_x1),
-                            ("x2", x2, ref_x2),
-                            ("x3", x3, ref_x3),
-                            ("x4", x4, ref_x4),
-                            ("x5", x5, ref_x5),
-                        ]:
-                            x_torch = ttnn.to_torch(x_ttnn)
-                            if len(x_torch.shape) == 4 and x_torch.shape[-1] == self.mid_channels:
-                                x_torch = x_torch.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-
-                            branch_pcc = comp_pcc(x_ref, x_torch.float())
-                            branch_pcc_val = branch_pcc[1] if isinstance(branch_pcc, tuple) else branch_pcc
-                            logger.info(
-                                f"[aspp] {branch_name} branch PCC={branch_pcc_val:.6f}, "
-                                f"TTNN mean={x_torch.float().mean().item():.6f}, "
-                                f"Ref mean={x_ref.mean().item():.6f}, "
-                                f"TTNN std={x_torch.float().std().item():.6f}, "
-                                f"Ref std={x_ref.std().item():.6f}"
-                            )
+        # Convert back to TILE_LAYOUT
+        x5 = ttnn.to_layout(x5, ttnn.TILE_LAYOUT)
+        x5 = ttnn.to_memory_config(x5, ttnn.DRAM_MEMORY_CONFIG)
 
         # Concatenate all 5 branches: x1, x2, x3, x4, x5
         out = ttnn.concat([x1, x2, x3, x4, x5], dim=-1)
-
-        # Debug: Compare concatenated output
-        if debug_aspp:
-            out_concat_torch = ttnn.to_torch(out)
-            if len(out_concat_torch.shape) == 4 and out_concat_torch.shape[-1] == self.mid_channels * 5:
-                out_concat_torch = out_concat_torch.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-
-            if hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "ref_aspp"):
-                ref_aspp = self.parent_depthnet.ref_aspp
-                ref_input = None
-                if hasattr(self.parent_depthnet, "step_pcc_ref_inputs"):
-                    ref_input = self.parent_depthnet.step_pcc_ref_inputs.get("aspp")
-
-                if ref_input is not None:
-                    with torch.no_grad():
-                        # Get reference concatenated output
-                        ref_x1 = ref_aspp.aspp1(ref_input.float())
-                        ref_x2 = ref_aspp.aspp2(ref_input.float())
-                        ref_x3 = ref_aspp.aspp3(ref_input.float())
-                        ref_x4 = ref_aspp.aspp4(ref_input.float())
-                        ref_x5 = ref_aspp.global_avg_pool(ref_input.float())
-                        ref_x5 = torch.nn.functional.interpolate(
-                            ref_x5, size=ref_x4.size()[2:], mode="bilinear", align_corners=True
-                        )
-                        ref_concat = torch.cat([ref_x1, ref_x2, ref_x3, ref_x4, ref_x5], dim=1)
-
-                        from models.common.utility_functions import comp_pcc
-
-                        concat_pcc = comp_pcc(ref_concat, out_concat_torch.float())
-                        concat_pcc_val = concat_pcc[1] if isinstance(concat_pcc, tuple) else concat_pcc
-                        logger.info(
-                            f"[aspp] After concat (before final conv) PCC={concat_pcc_val:.6f}, "
-                            f"TTNN mean={out_concat_torch.float().mean().item():.6f}, "
-                            f"Ref mean={ref_concat.mean().item():.6f}, "
-                            f"TTNN std={out_concat_torch.float().std().item():.6f}, "
-                            f"Ref std={ref_concat.std().item():.6f}"
-                        )
 
         # Ensure out is in DRAM before final conv (force DRAM slicing)
         if out.is_sharded():
@@ -1258,45 +552,6 @@ class ASPP_TTNN:
 
         out = out_accum
 
-        # Debug: Compare after final conv (before bias and ReLU)
-        if debug_aspp:
-            out_conv_torch = ttnn.to_torch(out)
-            if len(out_conv_torch.shape) == 4 and out_conv_torch.shape[-1] == self.mid_channels:
-                out_conv_torch = out_conv_torch.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-
-            if hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "ref_aspp"):
-                ref_aspp = self.parent_depthnet.ref_aspp
-                ref_input = None
-                if hasattr(self.parent_depthnet, "step_pcc_ref_inputs"):
-                    ref_input = self.parent_depthnet.step_pcc_ref_inputs.get("aspp")
-
-                if ref_input is not None:
-                    with torch.no_grad():
-                        # Run reference ASPP up to conv1+bn1 (before ReLU)
-                        ref_x1 = ref_aspp.aspp1(ref_input.float())
-                        ref_x2 = ref_aspp.aspp2(ref_input.float())
-                        ref_x3 = ref_aspp.aspp3(ref_input.float())
-                        ref_x4 = ref_aspp.aspp4(ref_input.float())
-                        ref_x5 = ref_aspp.global_avg_pool(ref_input.float())
-                        ref_x5 = torch.nn.functional.interpolate(
-                            ref_x5, size=ref_x4.size()[2:], mode="bilinear", align_corners=True
-                        )
-                        ref_concat = torch.cat([ref_x1, ref_x2, ref_x3, ref_x4, ref_x5], dim=1)
-                        ref_conv_out = ref_aspp.conv1(ref_concat)
-                        ref_conv_out = ref_aspp.bn1(ref_conv_out)
-
-                        from models.common.utility_functions import comp_pcc
-
-                        conv_pcc = comp_pcc(ref_conv_out, out_conv_torch.float())
-                        conv_pcc_val = conv_pcc[1] if isinstance(conv_pcc, tuple) else conv_pcc
-                        logger.info(
-                            f"[aspp] After final conv1+bn1 (before ReLU) PCC={conv_pcc_val:.6f}, "
-                            f"TTNN mean={out_conv_torch.float().mean().item():.6f}, "
-                            f"Ref mean={ref_conv_out.mean().item():.6f}, "
-                            f"TTNN std={out_conv_torch.float().std().item():.6f}, "
-                            f"Ref std={ref_conv_out.std().item():.6f}"
-                        )
-
         # Apply bias if it exists
         if self.params.conv1_bias is not None:
             bias_ttnn = self.params.conv1_bias
@@ -1325,36 +580,6 @@ class ASPP_TTNN:
             out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
         if out.layout != ttnn.TILE_LAYOUT:
             out = ttnn.to_layout(out, ttnn.TILE_LAYOUT)
-
-        # Debug: Compare final ASPP output with reference
-        if debug_aspp:
-            out_torch = ttnn.to_torch(out)
-            if len(out_torch.shape) == 4 and out_torch.shape[-1] == self.mid_channels:
-                out_torch = out_torch.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-
-            # Get reference final ASPP output
-            if hasattr(self, "parent_depthnet") and hasattr(self.parent_depthnet, "ref_aspp"):
-                ref_aspp = self.parent_depthnet.ref_aspp
-                ref_input = None
-                if hasattr(self.parent_depthnet, "step_pcc_ref_inputs"):
-                    ref_input = self.parent_depthnet.step_pcc_ref_inputs.get("aspp")
-
-                if ref_input is not None:
-                    with torch.no_grad():
-                        # Run full reference ASPP
-                        ref_out = ref_aspp(ref_input.float())
-
-                        from models.common.utility_functions import comp_pcc
-
-                        final_pcc = comp_pcc(ref_out, out_torch.float())
-                        final_pcc_val = final_pcc[1] if isinstance(final_pcc, tuple) else final_pcc
-                        logger.info(
-                            f"[aspp] Final output (after conv1+bn1+relu+dropout) PCC={final_pcc_val:.6f}, "
-                            f"TTNN mean={out_torch.float().mean().item():.6f}, "
-                            f"Ref mean={ref_out.mean().item():.6f}, "
-                            f"TTNN std={out_torch.float().std().item():.6f}, "
-                            f"Ref std={ref_out.std().item():.6f}"
-                        )
 
         return out
 
@@ -1386,24 +611,9 @@ class DepthNet_TTNN:
 
         # Initialize sub-modules
         self.block1 = BasicBlock_TTNN(device, parameters.block1, mid_channels, mid_channels, self.model_config)
-        self.block1.block_name = "block1"
-        self.block1.parent_depthnet = self
         self.block2 = BasicBlock_TTNN(device, parameters.block2, mid_channels, mid_channels, self.model_config)
-        self.block2.block_name = "block2"
-        self.block2.parent_depthnet = self
         self.block3 = BasicBlock_TTNN(device, parameters.block3, mid_channels, mid_channels, self.model_config)
-        self.block3.block_name = "block3"
-        self.block3.parent_depthnet = self
-
-        # Store reference layer instances if available (from test)
-        self.ref_block1 = None
-        self.ref_block2 = None
-        self.ref_block3 = None
-        self.ref_aspp = None
-        self.ref_dcn = None
-        self.ref_final_conv = None
         self.aspp = ASPP_TTNN(device, parameters.aspp, mid_channels, mid_channels, self.model_config)
-        self.aspp.parent_depthnet = self
 
         # Initialize MLP and SELayer if parameters are available
         # Check actual input size from MLP weights (fc1_weight shape)
@@ -1437,81 +647,6 @@ class DepthNet_TTNN:
             self.mlp_bn = None
 
         logger.info(f"DepthNet init: in={in_channels}, mid={mid_channels}, depth={depth_channels}")
-
-        # Enable step-by-step PCC logging (can be set via model_config)
-        self.enable_step_pcc = self.model_config.get("ENABLE_STEP_PCC", False)
-        self.step_pcc_ref_outputs = {}  # Will be populated by test if enabled
-
-    def _log_step_pcc(self, step_name, ttnn_output, ref_output=None):
-        """Helper function to log PCC at each step"""
-        if not self.enable_step_pcc:
-            return
-
-        if ref_output is None:
-            # Try to get from stored reference outputs
-            ref_output = self.step_pcc_ref_outputs.get(step_name)
-
-        if ref_output is not None:
-            try:
-                from models.common.utility_functions import comp_pcc
-                import torch
-
-                # Ensure ref_output is a torch tensor
-                if not isinstance(ref_output, torch.Tensor):
-                    logger.warning(f"  [{step_name}] Reference output is not a torch tensor, skipping PCC")
-                    return
-
-                # Convert TTNN to torch if needed
-                if isinstance(ttnn_output, ttnn.Tensor):
-                    ttnn_torch = ttnn.to_torch(ttnn_output)
-                else:
-                    ttnn_torch = ttnn_output
-
-                # Handle format conversion: TTNN is [B, H, W, C], reference is [B, C, H, W]
-                if len(ttnn_torch.shape) == 4 and len(ref_output.shape) == 4:
-                    # Check if TTNN is in [B, H, W, C] format
-                    if ttnn_torch.shape[-1] == ref_output.shape[1] and ttnn_torch.shape[1] == ref_output.shape[2]:
-                        # TTNN is [B, H, W, C], convert to [B, C, H, W]
-                        ttnn_torch = ttnn_torch.permute(0, 3, 1, 2)
-                    elif ttnn_torch.shape[0] == 1 and ttnn_torch.shape[1] == 1:
-                        # Flattened format: [1, 1, H*W, C] -> [B, C, H, W]
-                        batch_size = ref_output.shape[0]
-                        channels = ref_output.shape[1]
-                        height = ref_output.shape[2]
-                        width = ref_output.shape[3]
-                        ttnn_torch = ttnn_torch.reshape(batch_size, height, width, channels)
-                        ttnn_torch = ttnn_torch.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-                    # If shapes don't match, try to reshape
-                    if ttnn_torch.shape != ref_output.shape:
-                        try:
-                            ttnn_torch = ttnn_torch.reshape(ref_output.shape)
-                        except:
-                            logger.warning(
-                                f"  [{step_name}] Shape mismatch: TTNN={ttnn_torch.shape}, Ref={ref_output.shape}, skipping PCC"
-                            )
-                            return
-
-                # Ensure same dtype for comparison
-                if ttnn_torch.dtype != ref_output.dtype:
-                    ttnn_torch = ttnn_torch.to(ref_output.dtype)
-
-                # Compute PCC
-                pcc_result = comp_pcc(ref_output, ttnn_torch)
-                pcc_value = pcc_result[1] if isinstance(pcc_result, tuple) else pcc_result
-                logger.info(f"  [{step_name}] PCC = {pcc_value:.6f}")
-            except Exception as e:
-                logger.warning(f"  [{step_name}] Failed to compute PCC: {e}")
-        else:
-            # Log tensor statistics instead
-            if isinstance(ttnn_output, ttnn.Tensor):
-                ttnn_torch = ttnn.to_torch(ttnn_output)
-                logger.info(
-                    f"  [{step_name}] TTNN output: shape={ttnn_torch.shape}, mean={ttnn_torch.mean().item():.6f}, std={ttnn_torch.std().item():.6f}"
-                )
-            else:
-                logger.info(
-                    f"  [{step_name}] TTNN output: shape={ttnn_output.shape}, mean={ttnn_output.mean().item():.6f}, std={ttnn_output.std().item():.6f}"
-                )
 
     def __call__(self, x, batch_size=1, mats_dict=None):
         """
@@ -1751,7 +886,6 @@ class DepthNet_TTNN:
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
 
         # Log PCC after reduce_conv
-        self._log_step_pcc("reduce_conv", x)
 
         # Context branch: Apply SELayer before context_conv
         if x.is_sharded():
@@ -1781,7 +915,6 @@ class DepthNet_TTNN:
             # Apply SELayer: x * gate(conv_expand(relu(conv_reduce(x_se))))
             x_context = self.context_se(x, context_se_ttnn)
             # Log PCC after context SELayer
-            self._log_step_pcc("context_se", x_context)
         else:
             x_context = x
 
@@ -1835,8 +968,6 @@ class DepthNet_TTNN:
             logger.error(f"Unexpected context tensor shape after conv2d: {context.shape}")
             raise RuntimeError(f"Cannot reshape unexpected context conv2d output shape: {context.shape}")
 
-        self._log_step_pcc("context_conv", context)
-
         # Depth branch: Apply SELayer before depth_conv
         if x.shape[-1] != self.mid_channels:
             raise RuntimeError(f"Wrong shape before depth SELayer: expected {self.mid_channels}, got {x.shape[-1]}")
@@ -1869,30 +1000,16 @@ class DepthNet_TTNN:
             # Apply SELayer: x * gate(conv_expand(relu(conv_reduce(x_se))))
             x_depth = self.depth_se(x, depth_se_ttnn)
             # Log PCC after depth SELayer
-            self._log_step_pcc("depth_se", x_depth)
         else:
             x_depth = x
 
-        # Test block1 in isolation if enabled
-        test_block1_only = self.model_config.get("TEST_BLOCK1_ONLY", False)
-
+        # BasicBlocks
         depth = self.block1(x_depth, batch_size, height, width)
-        self._log_step_pcc("block1", depth)
-
-        if test_block1_only:
-            logger.info("TEST_BLOCK1_ONLY enabled - stopping after block1 for debugging")
-            # Return early to test block1 in isolation
-            # Still need to run through ASPP, DCN, etc. to get final output shape
-            # But we can skip block2 and block3
-        else:
-            depth = self.block2(depth, batch_size, height, width)
-            self._log_step_pcc("block2", depth)
-            depth = self.block3(depth, batch_size, height, width)
-            self._log_step_pcc("block3", depth)
+        depth = self.block2(depth, batch_size, height, width)
+        depth = self.block3(depth, batch_size, height, width)
 
         # ASPP
         depth = self.aspp(depth, batch_size, height, width)
-        self._log_step_pcc("aspp", depth)
 
         # Ensure depth is in DRAM before DCN conv
         if depth.is_sharded():
@@ -1903,150 +1020,98 @@ class DepthNet_TTNN:
             if depth.is_sharded():
                 depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
 
-        # DCN (Deformable Conv) - try to use reference instance first (only if enabled in config)
-        use_ref_dcn = self.model_config.get("USE_PYTORCH_FALLBACK_DCN", False)
-        ref_dcn_instance = None
-        if use_ref_dcn and hasattr(self, "ref_dcn"):
-            ref_dcn_instance = self.ref_dcn
+        # DCN (Deformable Conv) - using torchvision's deform_conv2d
+        # Similar approach to uniad/vadv2: convert to PyTorch, run deform_conv2d, convert back
+        try:
+            from torchvision.ops import deform_conv2d as tv_deform_conv2d
 
-        if ref_dcn_instance is not None:
-            import torch
-
-            # Convert TTNN tensor to PyTorch
+            # Convert TTNN tensor to PyTorch (NCHW format)
             depth_torch = ttnn.to_torch(depth)
-            # Convert from [B, H, W, C] to [B, C, H, W]
-            if len(depth_torch.shape) == 4 and depth_torch.shape[-1] == self.mid_channels:
-                depth_torch = depth_torch.permute(0, 3, 1, 2)
+            # Handle different tensor formats
+            if len(depth_torch.shape) == 4:
+                if depth_torch.shape[1] == 1 and depth_torch.shape[2] == height * width:
+                    # Flattened format: [B, 1, H*W, C] -> [B, H, W, C]
+                    depth_torch = depth_torch.reshape(batch_size, height, width, self.mid_channels)
+                elif depth_torch.shape[1] == height and depth_torch.shape[2] == width:
+                    # Already in [B, H, W, C] format
+                    pass
+                else:
+                    # Try to infer from total elements
+                    total_elements = depth_torch.numel()
+                    expected_elements = batch_size * height * width * self.mid_channels
+                    if total_elements == expected_elements:
+                        depth_torch = depth_torch.reshape(batch_size, height, width, self.mid_channels)
+            # Convert from [B, H, W, C] to [B, C, H, W] for PyTorch
+            depth_torch = depth_torch.permute(0, 3, 1, 2).contiguous().float()
 
-            # Get reference input if available
-            ref_input = None
-            if hasattr(self, "step_pcc_ref_inputs"):
-                ref_input = self.step_pcc_ref_inputs.get("dcn")
+            # Generate offset using conv_offset layer (similar to DeformConv2dPack)
+            offset = self.params.dcn_conv_offset(depth_torch)
 
-            # Use reference input if available
-            input_to_use = ref_input if ref_input is not None else depth_torch.float()
+            # Run torchvision's deform_conv2d
+            # torchvision uses [x, y] order for offsets, which matches our conv_offset output
+            depth_torch = tv_deform_conv2d(
+                input=depth_torch.float(),
+                offset=offset.float(),
+                weight=self.params.dcn_weight.float(),
+                bias=self.params.dcn_bias.float() if self.params.dcn_bias is not None else None,
+                stride=(1, 1),
+                padding=(1, 1),
+                dilation=(1, 1),
+            )
 
-            logger.info("  [dcn] Using reference model's actual DCN instance")
-            with torch.no_grad():
-                depth_torch = ref_dcn_instance(input_to_use)
+            # Convert back to TTNN format [B, H, W, C]
+            depth_torch = depth_torch.permute(0, 2, 3, 1).contiguous()  # [B, C, H, W] -> [B, H, W, C]
 
-            # Convert back to TTNN format [B, C, H, W] -> [B, H, W, C]
-            depth_torch = depth_torch.permute(0, 2, 3, 1)
-
-            # Convert to TTNN tensor
+            # Convert back to TTNN tensor
             depth = ttnn.from_torch(
                 depth_torch,
+                device=self.device,
                 dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
                 layout=ttnn.TILE_LAYOUT,
-                device=self.device,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
 
-            # Ensure depth is in correct shape
+            # Ensure depth is in correct shape [batch, height, width, channels]
             if len(depth.shape) == 4 and depth.shape[0] == 1 and depth.shape[1] == 1:
+                # Flattened format: [1, 1, B*H*W, C] -> [B, H, W, C]
                 depth = ttnn.reshape(depth, (batch_size, height, width, self.mid_channels))
             elif len(depth.shape) == 3:
+                # [1, B*H*W, C] -> [B, H, W, C]
                 depth = ttnn.reshape(depth, (batch_size, height, width, self.mid_channels))
 
             # Log PCC after DCN
-            self._log_step_pcc("dcn", depth)
-        else:
-            # Fallback: using torchvision's deform_conv2d (no compiled extensions needed)
-            # Similar approach to uniad/vadv2: convert to PyTorch, run deform_conv2d, convert back
-            try:
-                from torchvision.ops import deform_conv2d as tv_deform_conv2d
+        except ImportError:
+            # Fallback to regular grouped conv if torchvision not available
+            logger.warning("torchvision.ops.deform_conv2d not available, using regular Conv2d as approximation")
+            depth = ttnn_conv2d(
+                input_tensor=depth,
+                weight_tensor=self.params.dcn_weight,
+                bias_tensor=self.params.dcn_bias,
+                device=self.device,
+                batch_size=batch_size,
+                input_height=height,
+                input_width=width,
+                in_channels=self.mid_channels,
+                out_channels=self.mid_channels,
+                kernel_size=(3, 3),
+                stride=(1, 1),
+                padding=(1, 1),
+                activation=None,
+                math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+                weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+                activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+                packer_l1_acc=False,
+            )
 
-                # Convert TTNN tensor to PyTorch (NCHW format)
-                depth_torch = ttnn.to_torch(depth)
-                # Handle different tensor formats
-                if len(depth_torch.shape) == 4:
-                    if depth_torch.shape[1] == 1 and depth_torch.shape[2] == height * width:
-                        # Flattened format: [B, 1, H*W, C] -> [B, H, W, C]
-                        depth_torch = depth_torch.reshape(batch_size, height, width, self.mid_channels)
-                    elif depth_torch.shape[1] == height and depth_torch.shape[2] == width:
-                        # Already in [B, H, W, C] format
-                        pass
-                    else:
-                        # Try to infer from total elements
-                        total_elements = depth_torch.numel()
-                        expected_elements = batch_size * height * width * self.mid_channels
-                        if total_elements == expected_elements:
-                            depth_torch = depth_torch.reshape(batch_size, height, width, self.mid_channels)
-                # Convert from [B, H, W, C] to [B, C, H, W] for PyTorch
-                depth_torch = depth_torch.permute(0, 3, 1, 2).contiguous().float()
+            # Convert sharded to interleaved if needed (must be done BEFORE reshape)
+            if depth.is_sharded():
+                depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
 
-                # Generate offset using conv_offset layer (similar to DeformConv2dPack)
-                offset = self.params.dcn_conv_offset(depth_torch)
+            if len(depth.shape) == 3:
+                depth = ttnn.reshape(depth, (batch_size, height, width, self.mid_channels))
 
-                # Run torchvision's deform_conv2d
-                # torchvision uses [x, y] order for offsets, which matches our conv_offset output
-                depth_torch = tv_deform_conv2d(
-                    input=depth_torch.float(),
-                    offset=offset.float(),
-                    weight=self.params.dcn_weight.float(),
-                    bias=self.params.dcn_bias.float() if self.params.dcn_bias is not None else None,
-                    stride=(1, 1),
-                    padding=(1, 1),
-                    dilation=(1, 1),
-                )
-
-                # Convert back to TTNN format [B, H, W, C]
-                depth_torch = depth_torch.permute(0, 2, 3, 1).contiguous()  # [B, C, H, W] -> [B, H, W, C]
-                # Keep in [B, H, W, C] format for TTNN (don't flatten to [1, 1, B*H*W, C])
-                # depth_torch should already be [batch_size, height, width, mid_channels]
-
-                # Convert back to TTNN tensor
-                depth = ttnn.from_torch(
-                    depth_torch,
-                    device=self.device,
-                    dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                    layout=ttnn.TILE_LAYOUT,
-                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                )
-
-                # Ensure depth is in correct shape [batch, height, width, channels]
-                if len(depth.shape) == 4 and depth.shape[0] == 1 and depth.shape[1] == 1:
-                    # Flattened format: [1, 1, B*H*W, C] -> [B, H, W, C]
-                    depth = ttnn.reshape(depth, (batch_size, height, width, self.mid_channels))
-                elif len(depth.shape) == 3:
-                    # [1, B*H*W, C] -> [B, H, W, C]
-                    depth = ttnn.reshape(depth, (batch_size, height, width, self.mid_channels))
-
-                # Log PCC after DCN
-                self._log_step_pcc("dcn", depth)
-            except ImportError:
-                # Fallback to regular grouped conv if torchvision not available
-                logger.warning("torchvision.ops.deform_conv2d not available, using regular Conv2d as approximation")
-                depth = ttnn_conv2d(
-                    input_tensor=depth,
-                    weight_tensor=self.params.dcn_weight,
-                    bias_tensor=self.params.dcn_bias,
-                    device=self.device,
-                    batch_size=batch_size,
-                    input_height=height,
-                    input_width=width,
-                    in_channels=self.mid_channels,
-                    out_channels=self.mid_channels,
-                    kernel_size=(3, 3),
-                    stride=(1, 1),
-                    padding=(1, 1),
-                    activation=None,
-                    math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-                    weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-                    activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                    shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-                    packer_l1_acc=False,
-                )
-
-                # Convert sharded to interleaved if needed (must be done BEFORE reshape)
-                if depth.is_sharded():
-                    depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
-
-                if len(depth.shape) == 3:
-                    depth = ttnn.reshape(depth, (batch_size, height, width, self.mid_channels))
-
-                # Log PCC after DCN
-                self._log_step_pcc("dcn", depth)
+            # Log PCC after DCN
 
         # Ensure depth is in DRAM before final conv
         if depth.is_sharded():
@@ -2057,66 +1122,27 @@ class DepthNet_TTNN:
             if depth.is_sharded():
                 depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
 
-        # Final depth conv - try to use reference instance first (only if enabled in config)
-        use_ref_final_conv = self.model_config.get("USE_PYTORCH_FALLBACK_FINAL_CONV", False)
-        ref_final_conv = None
-        if use_ref_final_conv and hasattr(self, "ref_final_conv"):
-            ref_final_conv = self.ref_final_conv
-
-        if ref_final_conv is not None:
-            import torch
-
-            # Convert TTNN tensor to PyTorch
-            depth_torch = ttnn.to_torch(depth)
-            # Convert from [B, H, W, C] to [B, C, H, W]
-            if len(depth_torch.shape) == 4 and depth_torch.shape[-1] == self.mid_channels:
-                depth_torch = depth_torch.permute(0, 3, 1, 2)
-
-            # Get reference input if available
-            ref_input = None
-            if hasattr(self, "step_pcc_ref_inputs"):
-                ref_input = self.step_pcc_ref_inputs.get("final_depth_conv")
-
-            # Use reference input if available
-            input_to_use = ref_input if ref_input is not None else depth_torch.float()
-
-            logger.info("  [final_depth_conv] Using reference model's actual final conv instance")
-            with torch.no_grad():
-                depth_torch = ref_final_conv(input_to_use)
-
-            # Convert back to TTNN format [B, C, H, W] -> [B, H, W, C]
-            depth_torch = depth_torch.permute(0, 2, 3, 1)
-
-            # Convert to TTNN tensor
-            depth = ttnn.from_torch(
-                depth_torch,
-                dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                layout=ttnn.TILE_LAYOUT,
-                device=self.device,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            )
-        else:
-            # Use TTNN implementation
-            depth = ttnn_conv2d(
-                input_tensor=depth,
-                weight_tensor=self.params.final_weight,
-                bias_tensor=self.params.final_bias,
-                device=self.device,
-                batch_size=batch_size,
-                input_height=height,
-                input_width=width,
-                in_channels=self.mid_channels,
-                out_channels=self.depth_channels,
-                kernel_size=(1, 1),
-                stride=(1, 1),
-                padding=(0, 0),
-                activation=None,
-                math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-                weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-                activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-                packer_l1_acc=False,
-            )
+        # Final depth conv - TTNN implementation
+        depth = ttnn_conv2d(
+            input_tensor=depth,
+            weight_tensor=self.params.final_weight,
+            bias_tensor=self.params.final_bias,
+            device=self.device,
+            batch_size=batch_size,
+            input_height=height,
+            input_width=width,
+            in_channels=self.mid_channels,
+            out_channels=self.depth_channels,
+            kernel_size=(1, 1),
+            stride=(1, 1),
+            padding=(0, 0),
+            activation=None,
+            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            packer_l1_acc=False,
+        )
 
         # Convert sharded to interleaved if needed (must be done BEFORE reshape)
         if depth.is_sharded():
@@ -2126,7 +1152,6 @@ class DepthNet_TTNN:
             depth = ttnn.reshape(depth, (batch_size, height, width, self.depth_channels))
 
         # Log PCC after final depth conv
-        self._log_step_pcc("final_depth_conv", depth)
 
         # Convert both tensors to INTERLEAVED DRAM before concat
         # ttnn.concat requires INTERLEAVED layout when inputs are sharded
