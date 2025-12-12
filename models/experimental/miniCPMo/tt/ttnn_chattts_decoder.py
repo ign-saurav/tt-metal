@@ -11,7 +11,10 @@ Implements the transformer decoder component of ChatTTS with:
 """
 
 import ttnn
+import logging
 from typing import Optional, List
+
+logger = logging.getLogger(__name__)
 
 try:
     from .common import (
@@ -293,6 +296,13 @@ class TtnnChatTTSDecoder:
         """
         batch_size, seq_len, hidden_size = inputs_embeds.shape
 
+        # Determine mode based on sequence length
+        is_prefill = seq_len > 1
+        mode = "prefill" if is_prefill else "decode"
+        logger.info(
+            f"[TtnnChatTTSDecoder.forward] Called in {mode} mode, batch_size={batch_size}, seq_len={seq_len}, use_cache={use_cache}"
+        )
+
         hidden_states = inputs_embeds
         new_past_key_values = [] if use_cache else None
 
@@ -313,6 +323,9 @@ class TtnnChatTTSDecoder:
             memory_config=get_activations_memory_config(),
         )
 
+        logger.info(
+            f"[TtnnChatTTSDecoder.forward] Completed, returning hidden_states shape={hidden_states.shape}, num_kv_layers={len(new_past_key_values) if new_past_key_values else 0}"
+        )
         return hidden_states, new_past_key_values
 
     def _transformer_layer(
