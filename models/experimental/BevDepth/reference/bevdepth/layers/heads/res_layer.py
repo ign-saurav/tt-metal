@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) OpenMMLab. All rights reserved.
 from typing import Optional
 
@@ -9,8 +11,6 @@ from torch import Tensor
 from torch import nn as nn
 
 # from mmdet.utils import ConfigType, OptConfigType, OptMultiConfig
-
-# Copyright (c) OpenMMLab. All rights reserved.
 """Collecting some commonly used type hint in mmdetection."""
 from typing import List, Optional, Sequence, Tuple, Union
 

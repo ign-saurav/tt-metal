@@ -8,7 +8,7 @@ from ttnn.model_preprocessing import convert_torch_model_to_ttnn_model, fold_bat
 
 from mmcv.cnn import ConvModule
 from models.experimental.BevDepth.reference.bevdepth.layers.heads.resnet import BasicBlock
-from models.experimental.BevDepth.reference.bevdepth.layers.necks import SECONDFPN
+from models.experimental.BevDepth.reference.bevdepth.layers.necks.second_fpn import SECONDFPN
 from models.experimental.BevDepth.reference.bevdepth.layers.heads.resnet import ResNet
 from models.experimental.BevDepth.reference.bevdepth.layers.heads.bev_depth_head import BEVDepthHead
 

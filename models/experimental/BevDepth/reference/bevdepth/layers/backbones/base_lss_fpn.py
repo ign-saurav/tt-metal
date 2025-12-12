@@ -1,4 +1,8 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
+# SPDX-License-Identifier: Apache-2.0
+# Adapted from https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/layers/backbones/base_lss_fpn.py
 # Copyright (c) Megvii Inc. All rights reserved.
+
 import torch
 import torch.nn.functional as F
 
@@ -206,7 +210,7 @@ __all__ = ["BaseLSSFPN"]
 from models.experimental.BevDepth.reference.bevdepth.layers.heads.builder import BACKBONES, MODELS, NECKS
 
 # Import necks to ensure they are registered
-from models.experimental.BevDepth.reference.bevdepth.layers.necks import SECONDFPN  # noqa: F401
+from models.experimental.BevDepth.reference.bevdepth.layers.necks.second_fpn import SECONDFPN  # noqa: F401
 
 
 # Register the class

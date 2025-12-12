@@ -1,3 +1,5 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
+# SPDX-License-Identifier: Apache-2.0
 # Copyright (c) OpenMMLab. All rights reserved.
 """MMDetection provides 17 registry nodes to support using modules across
 projects. Each node is a child of the root registry in MMEngine.

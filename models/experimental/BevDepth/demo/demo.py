@@ -31,6 +31,32 @@ SHOW_CLASSES = [
     "traffic_cone",
 ]
 
+map_name_from_general_to_detection = {
+    "human.pedestrian.adult": "pedestrian",
+    "human.pedestrian.child": "pedestrian",
+    "human.pedestrian.wheelchair": "ignore",
+    "human.pedestrian.stroller": "ignore",
+    "human.pedestrian.personal_mobility": "ignore",
+    "human.pedestrian.police_officer": "pedestrian",
+    "human.pedestrian.construction_worker": "pedestrian",
+    "animal": "ignore",
+    "vehicle.car": "car",
+    "vehicle.motorcycle": "motorcycle",
+    "vehicle.bicycle": "bicycle",
+    "vehicle.bus.bendy": "bus",
+    "vehicle.bus.rigid": "bus",
+    "vehicle.truck": "truck",
+    "vehicle.construction": "construction_vehicle",
+    "vehicle.emergency.ambulance": "ignore",
+    "vehicle.emergency.police": "ignore",
+    "vehicle.trailer": "trailer",
+    "movable_object.barrier": "barrier",
+    "movable_object.trafficcone": "traffic_cone",
+    "movable_object.pushable_pullable": "ignore",
+    "movable_object.debris": "ignore",
+    "static_object.bicycle_rack": "ignore",
+}
+
 
 def parse_args():
     parser = ArgumentParser(description="BEVDepth Demo - Torch and TTNN visualization")
@@ -637,10 +663,6 @@ def boxes_to_corners(boxes_list, classes_list, show_range):
 
 
 def get_gt_corners(info, ego2global_rotation, ego2global_translation, show_range):
-    from models.experimental.BevDepth.reference.bevdepth.datasets.nusc_det_dataset import (
-        map_name_from_general_to_detection,
-    )
-
     gt_corners = []
     for ann in info["ann_infos"]:
         if map_name_from_general_to_detection.get(ann["category_name"], "ignore") in SHOW_CLASSES:
