@@ -18,7 +18,7 @@ class SECONDFPN_TTNN:
         upsample_strides=[0.25, 0.5, 1, 2],
         model_config=None,
         use_torch_conv_transpose=False,
-        use_torch_conv2d_fallback=True,  # PyTorch fallback for backbone neck conv2d
+        use_torch_conv2d_fallback=False,
     ):
         self.device = device
         self.in_channels = in_channels
@@ -45,9 +45,6 @@ class SECONDFPN_TTNN:
         ups = []
         target_height = None
         target_width = None
-
-        if hasattr(self, "_weight_cache"):
-            self._weight_cache.clear()
 
         for i in range(self.num_levels):
             feat = x[i]
@@ -114,32 +111,24 @@ class SECONDFPN_TTNN:
                 if feat.layout != ttnn.TILE_LAYOUT:
                     feat = ttnn.to_layout(feat, ttnn.TILE_LAYOUT)
 
-                # Cache key for this layer
-                cache_key = f"ttnn_weights_{i}"
-                if not hasattr(self, "_weight_cache"):
-                    self._weight_cache = {}
+                # Create fresh weight tensors each call
+                weight_tensor = self.deblocks[i].conv_weight
+                if isinstance(weight_tensor, torch.Tensor):
+                    weight_tensor = ttnn.from_torch(
+                        weight_tensor.clone(),
+                        dtype=self.model_config["WEIGHTS_DTYPE"],
+                        layout=ttnn.ROW_MAJOR_LAYOUT,
+                    )
 
-                if cache_key not in self._weight_cache:
-                    weight_tensor = self.deblocks[i].conv_weight
-                    if isinstance(weight_tensor, torch.Tensor):
-                        weight_tensor = ttnn.from_torch(
-                            weight_tensor.clone(),
-                            dtype=self.model_config["WEIGHTS_DTYPE"],
-                            layout=ttnn.ROW_MAJOR_LAYOUT,
-                        )
-
-                    bias_tensor = self.deblocks[i].conv_bias
-                    if bias_tensor is not None and isinstance(bias_tensor, torch.Tensor):
-                        if len(bias_tensor.shape) == 1:
-                            bias_tensor = bias_tensor.view(1, 1, 1, -1)
-                        bias_tensor = ttnn.from_torch(
-                            bias_tensor.clone(),
-                            dtype=self.model_config["WEIGHTS_DTYPE"],
-                            layout=ttnn.ROW_MAJOR_LAYOUT,
-                        )
-                    self._weight_cache[cache_key] = (weight_tensor, bias_tensor)
-                else:
-                    weight_tensor, bias_tensor = self._weight_cache[cache_key]
+                bias_tensor = self.deblocks[i].conv_bias
+                if bias_tensor is not None and isinstance(bias_tensor, torch.Tensor):
+                    if len(bias_tensor.shape) == 1:
+                        bias_tensor = bias_tensor.view(1, 1, 1, -1)
+                    bias_tensor = ttnn.from_torch(
+                        bias_tensor.clone(),
+                        dtype=self.model_config["WEIGHTS_DTYPE"],
+                        layout=ttnn.ROW_MAJOR_LAYOUT,
+                    )
 
                 conv_config = ttnn.Conv2dConfig(
                     weights_dtype=self.model_config["WEIGHTS_DTYPE"],

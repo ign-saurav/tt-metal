@@ -60,7 +60,7 @@ def ttnn_conv2d(
     conv_config = ttnn.Conv2dConfig(
         weights_dtype=weights_dtype,
         activation=activation,
-        shard_layout=shard_layout if shard_layout else ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+        shard_layout=None,
         deallocate_activation=deallocate_activation,
         reallocate_halo_output=(
             reallocate_halo_output if deallocate_activation else False
@@ -69,7 +69,6 @@ def ttnn_conv2d(
         enable_weights_double_buffer=enable_weights_double_buffer,
         config_tensors_in_dram=True,  # Keep tensors in DRAM to reduce L1 usage
         act_block_h_override=act_block_h_val,  # 0 = auto (use maximum), >0 = override (must be multiple of 32)
-        # Smaller values = smaller CBs but lower performance. With DRAM slicing, auto (0) might work better
     )
 
     compute_config = ttnn.init_device_compute_kernel_config(
