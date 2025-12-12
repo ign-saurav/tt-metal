@@ -28,6 +28,16 @@ from typing import Optional
 from typing import Tuple
 from typing import Union
 
+# Optional TT (Tenstorrent) imports - only available when running with TT hardware
+try:
+    from models.common.utility_functions import tt2torch_tensor
+    from models.experimental.miniCPMo.tt.common import torch_to_ttnn, get_activations_memory_config
+
+    _tt_deps = True
+except ImportError:
+    _tt_deps = False
+
+
 import numpy as np
 import soundfile as sf
 import torch
@@ -82,6 +92,9 @@ from .utils import sentence_end
 from .utils import VoiceChecker
 
 logger = logging.getLogger(__name__)
+
+if _tt_deps:
+    from models.experimental.miniCPMo.tt.ttnn_chattts_decoder import TtnnChatTTSDecoder
 
 
 @dataclass
@@ -216,6 +229,13 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
 
         assert os.path.exists(vocos_ckpt_path)
         self.vocos = self.initialize_vocos(vocos_ckpt_path)
+
+    def init_tt_device(self, device):
+        """Initialize TT device and TT-specific models."""
+        self.tt_device = device
+        # Initialize TT model in TTS module if TTS is enabled
+        if hasattr(self, "tts") and self.tts is not None:
+            self.tts.init_tt_model(device, self.embed_dim)
 
     def initialize_vocos(self, ckpt_path):
         feature_extractor = instantiate_class(
@@ -1488,12 +1508,12 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
                     + self.tts.use_speaker_embedding * self.tts.num_spk_embs,
                     condition_length - 1,
                 )
-
             if end - begin > 0:
                 text_input_ids = tts_input_ids[:, begin:end]
                 position_ids = torch.arange(begin, end, dtype=torch.long, device=self.tts.device).unsqueeze(0)
 
                 if begin == 0:
+                    print("xyx")
                     past_key_values = self.tts.prefill_text(
                         input_ids=text_input_ids,
                         position_ids=position_ids,
@@ -1501,6 +1521,7 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
                         lm_spk_emb_last_hidden_states=spk_embeds,
                     )
                 else:
+                    print("yyy", begin)
                     past_key_values = self.tts.prefill_text(
                         input_ids=text_input_ids, position_ids=position_ids, past_key_values=past_key_values
                     )
@@ -2860,6 +2881,28 @@ class ConditionalChatTTS(PreTrainedModel):
 
         model = LlamaModel(model_config)
         self.model = model
+        self.tt_model = None  # Initialized later via init_tt_model()
+
+    def init_tt_model(self, device, llm_embed_dim):
+        """Initialize the TT model after the device is available."""
+        if not _tt_deps:
+            raise RuntimeError("TT dependencies (ttnn) not available. Cannot initialize TT model.")
+        self.tt_device = device
+        self.tt_model = TtnnChatTTSDecoder(
+            device=self.tt_device,
+            llm_dim=llm_embed_dim,
+            hidden_size=self.config.hidden_size,
+            num_attention_heads=self.config.num_attention_heads,
+            num_hidden_layers=self.config.num_hidden_layers,
+            intermediate_size=self.config.intermediate_size,
+            num_text_tokens=self.emb_text.num_embeddings,
+            num_audio_tokens=self.num_audio_tokens,
+            num_vq=self.num_vq,
+            num_spk_embs=self.num_spk_embs,
+            max_position_embeddings=self.config.max_position_embeddings,
+        )
+        # Load weights from the reference model
+        self.tt_model.load_weights(self.state_dict())
 
     @torch.inference_mode()
     def merge_inputs_embeds(
@@ -2944,18 +2987,53 @@ class ConditionalChatTTS(PreTrainedModel):
                 )
             )
         # Model forward
-        outputs_prefill: BaseModelOutputWithPast = self.model(
-            attention_mask=None,  # because for text, it is standard causal attention mask, do nothing
-            position_ids=position_ids,  # position_ids denotes the position of new text tokens in the sequence
-            past_key_values=past_key_values_for_prefill,  # `past_key_values` will be updated by the model
-            inputs_embeds=inputs_embeds,  # contains text and language model embedding
-            use_cache=True,
-            output_attentions=False,
-            cache_position=position_ids,  # which new positions will use this cache, basically the same as position_ids
+        # outputs_prefill: BaseModelOutputWithPast = self.model(
+        #     attention_mask=None,  # because for text, it is standard causal attention mask, do nothing
+        #     position_ids=position_ids,  # position_ids denotes the position of new text tokens in the sequence
+        #     past_key_values=past_key_values_for_prefill,  # `past_key_values` will be updated by the model
+        #     inputs_embeds=inputs_embeds,  # contains text and language model embedding
+        #     use_cache=True,
+        #     output_attentions=False,
+        #     cache_position=position_ids,  # which new positions will use this cache, basically the same as position_ids
+        # )
+
+        # Use TT model only for first prefill (position_ids starts at 0)
+        # TTNN causal SDPA requires Q and K to have same seq length, so it can't handle incremental prefill
+        is_first_prefill = position_ids[0, 0].item() == 0
+        use_tt = (
+            hasattr(self, "tt_device") and self.tt_device is not None and self.tt_model is not None and is_first_prefill
         )
 
-        # Get model updated KV Cache
-        past_key_values_for_prefill_updated = outputs_prefill.past_key_values
+        if use_tt:
+            inputs_embeds_ttnn = torch_to_ttnn(
+                inputs_embeds,
+                self.tt_device,
+                memory_config=get_activations_memory_config(),
+            )
+            # Run TTNN forward pass (prefill mode: no past_key_values)
+            _, past_key_values_tt = self.tt_model.forward(
+                inputs_embeds=inputs_embeds_ttnn,
+                attention_mask=None,
+                position_ids=position_ids,
+                past_key_values=past_key_values_for_prefill,
+                use_cache=True,
+            )
+            # Convert each tensor in past_key_values from TTNN to PyTorch
+            past_key_values_for_prefill_updated = [
+                (tt2torch_tensor(k), tt2torch_tensor(v)) for k, v in past_key_values_tt
+            ]
+        else:
+            # Reference model forward
+            outputs_prefill: BaseModelOutputWithPast = self.model(
+                attention_mask=None,
+                position_ids=position_ids,
+                past_key_values=past_key_values_for_prefill,
+                inputs_embeds=inputs_embeds,
+                use_cache=True,
+                output_attentions=False,
+                cache_position=position_ids,
+            )
+            past_key_values_for_prefill_updated = outputs_prefill.past_key_values
 
         # Update generated KV Cache to input `past_key_values`
         for layer_idx in range(len(past_key_values)):
