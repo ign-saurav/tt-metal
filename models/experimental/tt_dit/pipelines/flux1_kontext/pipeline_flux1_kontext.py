@@ -4,12 +4,11 @@
 
 from __future__ import annotations
 
-from contextlib import nullcontext, contextmanager
-from dataclasses import dataclass, field
+from contextlib import nullcontext
+from dataclasses import dataclass
 from typing import Optional, Union, List, Dict
 
 import os
-import time
 import tqdm
 import ttnn
 import torch
@@ -18,6 +17,7 @@ from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler, FluxTransf
 from diffusers.image_processor import VaeImageProcessor
 from loguru import logger
 from transformers import CLIPTextModel, CLIPTokenizer, T5EncoderModel, T5TokenizerFast
+from models.perf.benchmarking_utils import BenchmarkProfiler
 
 from ...encoders.clip.model_clip import CLIPConfig, CLIPEncoder
 from ...encoders.t5.model_t5 import T5Config, T5Encoder
@@ -33,55 +33,6 @@ from ...utils import cache
 PREFERRED_KONTEXT_RESOLUTIONS = [
     (1024, 1024),
 ]
-
-
-@dataclass
-class TimingData:
-    clip_encoding_time: float = 0.0
-    t5_encoding_time: float = 0.0
-    total_encoding_time: float = 0.0
-    denoising_step_times: List[float] = field(default_factory=list)
-    vae_encoding_time: float = 0.0
-    vae_decoding_time: float = 0.0
-    total_time: float = 0.0
-
-
-class TimingCollector:
-    def __init__(self):
-        self.timings: Dict[str, float] = {}
-        self.step_timings: Dict[str, List[float]] = {}
-
-    @contextmanager
-    def time_section(self, name: str):
-        start = time.time()
-        yield
-        end = time.time()
-        self.timings[name] = end - start
-
-    @contextmanager
-    def time_step(self, name: str):
-        start = time.time()
-        yield
-        end = time.time()
-        if name not in self.step_timings:
-            self.step_timings[name] = []
-        self.step_timings[name].append(end - start)
-
-    def get_timing_data(self) -> TimingData:
-        return TimingData(
-            clip_encoding_time=self.timings.get("clip_encoding", 0.0),
-            t5_encoding_time=self.timings.get("t5_encoding", 0.0),
-            total_encoding_time=self.timings.get("total_encoding", 0.0),
-            denoising_step_times=self.step_timings.get("denoising_step", []),
-            vae_encoding_time=self.timings.get("vae_encoding", 0.0),
-            vae_decoding_time=self.timings.get("vae_decoding", 0.0),
-            total_time=self.timings.get("total", 0.0),
-        )
-
-    def reset(self):
-        self.timings = {}
-        self.step_timings = {}
-        return self
 
 
 @dataclass
@@ -115,7 +66,6 @@ class Flux1KontextPipeline:
         topology: ttnn.Topology,
         num_links: int,
     ) -> None:
-        self.timing_collector = None
 
         self._mesh_device = mesh_device
         self._parallel_config = parallel_config
@@ -384,6 +334,8 @@ class Flux1KontextPipeline:
         num_inference_steps: int = 28,
         seed: Optional[int] = None,
         traced: bool = True,
+        timer: BenchmarkProfiler = None,
+        timer_iteration: int = 0,
     ):
         prompt = [prompt] if isinstance(prompt, str) else prompt
         if negative_prompt is not None:
@@ -401,6 +353,8 @@ class Flux1KontextPipeline:
             num_inference_steps=num_inference_steps,
             seed=seed,
             traced=traced,
+            timer=timer,
+            timer_iteration=timer_iteration,
         )
 
     # adapted from https://github.com/huggingface/diffusers/blob/v0.35.1/src/diffusers/pipelines/flux/pipeline_flux_kontext.py
@@ -529,8 +483,9 @@ class Flux1KontextPipeline:
         prompt_2: Optional[Union[list[str], str]] = None,
         num_images_per_prompt: int = 1,
         max_sequence_length: int = 512,
+        timer: BenchmarkProfiler = None,
+        timer_iteration: int = 0,
     ):
-        timer = self.timing_collector
         tokenizer_max_length = self._tokenizer_1.model_max_length
 
         prompt_1 = [prompt_1] if isinstance(prompt_1, str) else prompt_1
@@ -538,7 +493,7 @@ class Flux1KontextPipeline:
         prompt_2 = [prompt_2] if isinstance(prompt_2, str) else prompt_2
 
         # We only use the pooled prompt output from the CLIPTextModel
-        with timer.time_section("clip_encoding") if timer else nullcontext():
+        with timer("clip_encoding", timer_iteration) if timer else nullcontext():
             pooled_prompt_embeds = self._get_clip_prompt_embeds(
                 prompts=prompt_1,
                 text_encoder=self._text_encoder_1,
@@ -548,7 +503,7 @@ class Flux1KontextPipeline:
                 mesh_device=self.encoder_device,
             )
 
-        with timer.time_section("t5_encoding") if timer else nullcontext():
+        with timer("t5_encoding", timer_iteration) if timer else nullcontext():
             prompt_embeds = self._get_t5_prompt_embeds(
                 prompts=prompt_2,
                 text_encoder=self._text_encoder_2,
@@ -570,12 +525,16 @@ class Flux1KontextPipeline:
         cfg_enabled: bool,
         num_images_per_prompt: int = 1,
         max_sequence_length: int = 512,
+        timer: BenchmarkProfiler = None,
+        timer_iteration: int = 0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         prompt_embeds, pooled_prompt_embeds = self._encode_prompts_partial(
             prompt_1=prompt_1,
             prompt_2=prompt_2,
             num_images_per_prompt=num_images_per_prompt,
             max_sequence_length=max_sequence_length,
+            timer=timer,
+            timer_iteration=timer_iteration,
         )
 
         if cfg_enabled:
@@ -584,6 +543,8 @@ class Flux1KontextPipeline:
                 prompt_2=negative_prompt_2,
                 num_images_per_prompt=num_images_per_prompt,
                 max_sequence_length=max_sequence_length,
+                timer=timer,
+                timer_iteration=timer_iteration,
             )
 
             prompt_embeds = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
@@ -655,6 +616,8 @@ class Flux1KontextPipeline:
         height: int,
         width: int,
         generator: Optional[Union[torch.Generator, List[torch.Generator]]] = None,
+        timer: BenchmarkProfiler = None,
+        timer_iteration: int = 0,
     ):
         # VAE applies 8x compression on images but we must also account for packing which requires
         # latent height and width to be divisible by 2.
@@ -666,8 +629,7 @@ class Flux1KontextPipeline:
         if image is not None:
             image = image.to(dtype=torch.float32)
             if image.shape[1] != self._latent_channels:
-                timer = self.timing_collector
-                with timer.time_section("vae_encoding") if timer else nullcontext():
+                with timer("vae_encoding", timer_iteration) if timer else nullcontext():
                     image_latents = self._vae_encode(image=image)
             else:
                 image_latents = image
@@ -720,6 +682,8 @@ class Flux1KontextPipeline:
         traced: bool = False,
         max_area: int = 1024**2,
         _auto_resize: bool = True,
+        timer: BenchmarkProfiler = None,
+        timer_iteration: int = 0,
     ):
         if prompt_1 is not None and isinstance(prompt_1, str):
             prompt_count = 1
@@ -730,11 +694,9 @@ class Flux1KontextPipeline:
         assert num_images_per_prompt == 1, "generating multiple images is not supported"
         assert prompt_count == 1, "generating multiple images is not supported"
 
-        timer = self.timing_collector.reset() if self.timing_collector else None
-
         cfg_enabled = cfg_scale > 1 and (negative_prompt_1 is not None)
 
-        with timer.time_section("total") if timer else nullcontext():
+        with timer("total", timer_iteration) if timer else nullcontext():
             assert height % (self._vae_scale_factor * self._patch_size) == 0
             assert width % (self._vae_scale_factor * self._patch_size) == 0
 
@@ -752,7 +714,7 @@ class Flux1KontextPipeline:
                     f"Generation `height` and `width` have been adjusted to {self.generation_height} and {self.generation_width} to fit the model requirements."
                 )
 
-            with timer.time_section("total_encoding") if timer else nullcontext():
+            with timer("total_encoding", timer_iteration) if timer else nullcontext():
                 logger.info("encoding prompts...")
                 prompt_embeds, pooled_prompt_embeds, text_ids = self.encode_prompts(
                     prompt_1=prompt_1,
@@ -761,11 +723,13 @@ class Flux1KontextPipeline:
                     negative_prompt_2=negative_prompt_2,
                     cfg_enabled=cfg_enabled,
                     num_images_per_prompt=num_images_per_prompt,
+                    timer=timer,
+                    timer_iteration=timer_iteration,
                 )
                 _, prompt_sequence_length, _ = prompt_embeds.shape
 
             self.img_to_img = image is not None
-            with timer.time_section("input_image_preprocessing") if timer else nullcontext():
+            with timer("input_image_preprocessing", timer_iteration) if timer else nullcontext():
                 logger.info("preprocessing image prompt...")
                 if image is not None and not (
                     isinstance(image, torch.Tensor) and image.size(1) == self._latent_channels
@@ -783,7 +747,7 @@ class Flux1KontextPipeline:
                     image = self._image_processor.resize(image, image_height, image_width)
                     image = self._image_processor.preprocess(image, image_height, image_width)
 
-            with timer.time_section("preparing_latents") if timer else nullcontext():
+            with timer("preparing_latents", timer_iteration) if timer else nullcontext():
                 logger.info("preparing_latents...")
                 generator = torch.Generator().manual_seed(seed) if seed is not None else None
                 latents, image_latents, latent_ids, image_ids = self.prepare_latents(
@@ -793,6 +757,8 @@ class Flux1KontextPipeline:
                     self.generation_height,
                     self.generation_width,
                     generator,
+                    timer,
+                    timer_iteration,
                 )
 
             self.output_latents_shape = latents.shape
@@ -975,7 +941,7 @@ class Flux1KontextPipeline:
 
             logger.info("denoising...")
             for i, t in enumerate(tqdm.tqdm(self._scheduler.timesteps)):
-                with timer.time_step("denoising_step") if timer else nullcontext():
+                with timer(f"denoising_step_{i}", timer_iteration) if timer else nullcontext():
                     sigma_difference = self._scheduler.sigmas[i + 1] - self._scheduler.sigmas[i]
 
                     tt_timestep_list = []
@@ -1021,7 +987,7 @@ class Flux1KontextPipeline:
 
             logger.info("decoding image...")
 
-            with timer.time_section("vae_decoding") if timer else nullcontext():
+            with timer("vae_decoding", timer_iteration) if timer else nullcontext():
                 decoded_output = self._vae_decode(
                     tt_latents_step_list[self.vae_submesh_idx], self.generation_width, self.generation_height
                 )

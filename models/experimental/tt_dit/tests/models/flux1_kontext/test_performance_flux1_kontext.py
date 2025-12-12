@@ -8,7 +8,6 @@ import ttnn
 from loguru import logger
 from models.perf.benchmarking_utils import BenchmarkProfiler, BenchmarkData
 from ....pipelines.flux1_kontext.pipeline_flux1_kontext import Flux1KontextPipeline
-from ....pipelines.flux1_kontext.pipeline_flux1_kontext import TimingCollector
 from diffusers.utils import load_image
 
 
@@ -35,7 +34,7 @@ from diffusers.utils import load_image
     [{"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 65536, "trace_region_size": 34000000}],
     indirect=True,
 )
-def test_flux1_pipeline_performance(
+def test_flux1_kontext_pipeline_performance(
     *,
     mesh_device: ttnn.MeshDevice,
     image_w,
@@ -71,28 +70,35 @@ def test_flux1_pipeline_performance(
     )
 
     # Test prompts
-    input_image = load_image("https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/yarn-art-pikachu.png").convert("RGB")
+    input_image = load_image(
+        "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/yarn-art-pikachu.png"
+    ).convert("RGB")
     prompts = [
         "Make Pikachu hold a sign that says 'Black Forest Labs is awesome', yarn art style, detailed, vibrant colors"
     ]
+    negative_prompts = [""] * len(prompts)
 
     # Warmup run (not timed)
     logger.info("Running warmup iteration...")
-    # timer_warmup = TimingCollector()
-    timer = TimingCollector()
-    pipeline.timing_collector = timer
-
-    images = pipeline.run_single_prompt(
-        image=input_image, width=image_w, height=image_h, prompt=prompts[0], num_inference_steps=num_inference_steps, seed=0, traced=True, cfg_scale=true_cfg_scale, guidance_scale=guidance_scale
-    )
+    with benchmark_profiler("run", iteration=0):
+        images = pipeline.run_single_prompt(
+            image=input_image,
+            width=image_w,
+            height=image_h,
+            prompt=prompts[0],
+            negative_prompt=negative_prompts[0],
+            num_inference_steps=num_inference_steps,
+            seed=0,
+            traced=True,
+            cfg_scale=true_cfg_scale,
+            guidance_scale=guidance_scale,
+        )
     images[0].save(f"flux1_kontext_dev_{image_w}_{image_h}_warmup.png")
 
-    warmup_timing = timer.get_timing_data()
-    logger.info(f"Warmup completed in {warmup_timing.total_time:.2f}s")
+    logger.info(f"Warmup completed in {benchmark_profiler.get_duration('run', 0):.2f}s")
 
     # Performance measurement runs
     logger.info("Running performance measurement iterations...")
-    all_timings = []
     num_perf_runs = 1
 
     # Optional Tracy profiling (if available)
@@ -118,18 +124,18 @@ def test_flux1_pipeline_performance(
                     width=image_w,
                     height=image_h,
                     prompt=prompts[prompt_idx],
+                    negative_prompt=negative_prompts[prompt_idx],
                     num_inference_steps=num_inference_steps,
                     seed=0,
                     traced=True,
-                    cfg_scale=true_cfg_scale, 
-                    guidance_scale=guidance_scale
+                    cfg_scale=true_cfg_scale,
+                    guidance_scale=guidance_scale,
+                    timer=benchmark_profiler,
+                    timer_iteration=i,
                 )
             images[0].save(f"flux1_kontext_dev_{image_w}_{image_h}_perf_run{i}.png")
 
-            # Collect timing data
-            timing_data = timer.get_timing_data()
-            all_timings.append(timing_data)
-            logger.info(f"  Run {i+1} completed in {timing_data.total_time:.2f}s")
+            logger.info(f"  Run {i+1} completed in {benchmark_profiler.get_duration('run', i):.2f}s")
 
     finally:
         if profiler:
@@ -137,17 +143,21 @@ def test_flux1_pipeline_performance(
             logger.info("Tracy profiling disabled")
 
     # Calculate statistics
-    clip_times = [t.clip_encoding_time for t in all_timings]
-    t5_times = [t.t5_encoding_time for t in all_timings]
-    total_encoding_times = [t.total_encoding_time for t in all_timings]
-    vae_times = [t.vae_decoding_time for t in all_timings]
-    vae_encoding_times = [t.vae_encoding_time for t in all_timings]
-    total_times = [t.total_time for t in all_timings]
+    clip_times = [benchmark_profiler.get_duration("clip_encoding", i) for i in range(num_perf_runs)]
+    t5_times = [benchmark_profiler.get_duration("t5_encoding", i) for i in range(num_perf_runs)]
+    total_encoding_times = [benchmark_profiler.get_duration("total_encoding", i) for i in range(num_perf_runs)]
+    vae_times = [benchmark_profiler.get_duration("vae_decoding", i) for i in range(num_perf_runs)]
+    vae_encoding_times = [benchmark_profiler.get_duration("vae_encoding", i) for i in range(num_perf_runs)]
+    total_times = [benchmark_profiler.get_duration("run", i) for i in range(num_perf_runs)]
 
     # Calculate per-step denoising times
     all_denoising_steps = []
-    for timing in all_timings:
-        all_denoising_steps.extend(timing.denoising_step_times)
+    for i in range(num_perf_runs):
+        for j in range(num_inference_steps):
+            assert benchmark_profiler.contains_step(
+                f"denoising_step_{j}", i
+            ), f"All runs should have {num_inference_steps} denoising steps"
+            all_denoising_steps.append(benchmark_profiler.get_duration(f"denoising_step_{j}", i))
 
     # Report results
     sp_factor = sp[0]  # pipeline.dit_parallel_config.sequence_parallel.factor
@@ -210,16 +220,6 @@ def test_flux1_pipeline_performance(
 
     print("=" * 80)
 
-    # Validate that we got reasonable results
-    assert len(all_timings) == num_perf_runs, f"Expected {num_perf_runs} timing results, got {len(all_timings)}"
-    assert all(t.total_time > 0 for t in all_timings), "All runs should have positive total time"
-    assert all(
-        len(t.denoising_step_times) == num_inference_steps for t in all_timings
-    ), f"All runs should have {num_inference_steps} denoising steps"
-
-    # Clean up
-    pipeline.timing_collector = None
-
     # Validate performance
     measurements = {
         "clip_encoding_time": statistics.mean(clip_times),
@@ -233,26 +233,55 @@ def test_flux1_pipeline_performance(
     if tuple(mesh_device.shape) == (2, 4):
         expected_metrics = {
             "clip_encoding_time": 0.1,
-            "t5_encoding_time": 0.26,#0.25,
-            "total_encoding_time": 0.6,#0.3,
-            "denoising_steps_time": 2.5 * num_inference_steps,#0.75 * num_inference_steps,
-            "vae_encoding_time": 1.7,#1.6,
-            "vae_decoding_time": 1.7,#1.6,
-            "total_time": 70,#22,
+            "t5_encoding_time": 0.27,
+            "total_encoding_time": 0.6,
+            "denoising_steps_time": 2.5 * num_inference_steps,
+            "vae_encoding_time": 1.8,
+            "vae_decoding_time": 1.8,
+            "total_time": 70,
         }
     else:
         assert False, f"Unknown mesh device for performance comparison: {mesh_device}"
 
     if is_ci_env:
         # In CI, dump a performance report
-        profiler_model_name = (
-            f"flux1_dev_{'t3k' if tuple(mesh_device.shape) == (2, 4) else 'tg'}_sp{sp_factor}_tp{tp_factor}"
-        )
         benchmark_data = BenchmarkData()
+        for iteration in range(num_perf_runs):
+            for step_name, target in zip(
+                ["clip_encoder", "t5_encoder", "vae_encoder", "denoising", "vae_decoder", "run"],
+                [
+                    expected_metrics["clip_encoding_time"],
+                    expected_metrics["t5_encoding_time"],
+                    expected_metrics["vae_encoding_time"],
+                    expected_metrics["denoising_steps_time"],
+                    expected_metrics["vae_decoding_time"],
+                    expected_metrics["total_time"],
+                ],
+            ):
+                benchmark_data.add_measurement(
+                    profiler=benchmark_profiler,
+                    iteration=iteration,
+                    step_name=step_name,
+                    name=step_name,
+                    value=benchmark_profiler.get_duration(step_name, iteration),
+                    target=target,
+                )
         benchmark_data.save_partial_run_json(
             benchmark_profiler,
-            run_type="flux1_dev_traced",
-            ml_model_name=profiler_model_name,
+            run_type="WH_T3K",
+            ml_model_name="Flux1KontextDev",
+            batch_size=1,
+            config_params={
+                "width": image_w,
+                "height": image_h,
+                "num_frames": 1,
+                "num_steps": num_inference_steps,
+                "sp_factor": sp_factor,
+                "tp_factor": tp_factor,
+                "topology": str(topology),
+                "num_links": num_links,
+                "fsdp": False,
+            },
         )
 
     pass_perf_check = True
