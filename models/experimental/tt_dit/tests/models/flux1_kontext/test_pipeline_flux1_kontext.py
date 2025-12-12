@@ -162,7 +162,7 @@ def test_flux1_pipeline(
         logger.info(f"Total encoding time: {benchmark_profiler.get_duration('total_encoding', 0):.2f}s")
         logger.info(f"VAE encoding time: {benchmark_profiler.get_duration('vae_encoding', 0):.2f}s")
         logger.info(f"VAE decoding time: {benchmark_profiler.get_duration('vae_decoding', 0):.2f}s")
-        logger.info(f"Total pipeline time: {benchmark_profiler.get_duration('run', 0):.2f}s")
+        logger.info(f"Total pipeline time: {benchmark_profiler.get_duration('total', 0):.2f}s")
         avg_step_time = benchmark_profiler.get_duration("denoising", 0) / num_inference_steps
         logger.info(f"Average denoising step time: {avg_step_time:.2f}s")
 

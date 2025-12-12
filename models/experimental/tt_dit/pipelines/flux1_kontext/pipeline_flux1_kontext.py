@@ -31,29 +31,8 @@ from ...utils.padding import PaddingConfig
 from ...utils import cache
 
 
-PREFERRED_KONTEXT_RESOLUTIONS = [
-    (672, 1568),
-    (688, 1504),
-    (720, 1456),
-    (752, 1392),
-    (800, 1328),
-    (832, 1248),
-    (880, 1184),
-    (944, 1104),
-    (1024, 1024),
-    (1104, 944),
-    (1184, 880),
-    (1248, 832),
-    (1328, 800),
-    (1392, 752),
-    (1456, 720),
-    (1504, 688),
-    (1568, 672),
-]
-
-
 # NOTE: Ttnn VAE encoder and decoder only supports 1024x1024 image resolutions currently.
-TTNN_KONTEXT_RESOLUTIONS = [
+PREFERRED_KONTEXT_RESOLUTIONS = [
     (1024, 1024),
 ]
 
@@ -652,7 +631,9 @@ class Flux1KontextPipeline:
         torch_latents = (torch_latents / self._latents_scaling) + self._latents_shift
 
         if self.use_torch_vae:
-            decoded_output = self._vae_decoder(torch_latents)
+            torch_latents = torch_latents.to(torch.float32)
+            with torch.no_grad():
+                decoded_output = self._vae_decoder(torch_latents)
         else:
             tt_latents = ttnn.from_torch(
                 torch_latents.permute(0, 2, 3, 1),
@@ -674,7 +655,8 @@ class Flux1KontextPipeline:
 
     def _vae_encode(self, image: torch.Tensor) -> torch.Tensor:
         if self.use_torch_vae:
-            encoded_image = self._vae_encoder(image)
+            with torch.no_grad():
+                encoded_image = self._vae_encoder(image)
         else:
             tt_image = ttnn.from_torch(
                 image.permute(0, 2, 3, 1),
@@ -809,11 +791,12 @@ class Flux1KontextPipeline:
             self.generation_width = width // multiple_of * multiple_of
             self.generation_height = height // multiple_of * multiple_of
 
-            if not self.use_torch_vae:
-                assert (
-                    self.generation_width,
-                    self.generation_height,
-                ) in TTNN_KONTEXT_RESOLUTIONS, f"Ttnn VAE decoder only supports {TTNN_KONTEXT_RESOLUTIONS} image resolutions currently. Set `use_torch_vae=True` to support different aspect ratios"
+            assert (
+                self.generation_width,
+                self.generation_height,
+            ) in PREFERRED_KONTEXT_RESOLUTIONS, (
+                f"Only {PREFERRED_KONTEXT_RESOLUTIONS} image resolutions are currently supported."
+            )
 
             if self.generation_height != original_height or self.generation_width != original_width:
                 logger.warning(
@@ -847,15 +830,10 @@ class Flux1KontextPipeline:
                     img = image[0] if isinstance(image, list) else image
                     image_height, image_width = self._image_processor.get_default_height_width(img)
                     aspect_ratio = image_width / image_height
-
-                    # Kontext is trained on specific resolutions, using one of them is recommended
-                    if self.use_torch_vae and _auto_resize:
+                    if _auto_resize:
+                        # Kontext is trained on specific resolutions, using one of them is recommended
                         _, image_width, image_height = min(
                             (abs(aspect_ratio - w / h), w, h) for w, h in PREFERRED_KONTEXT_RESOLUTIONS
-                        )
-                    else:
-                        _, image_width, image_height = min(
-                            (abs(aspect_ratio - w / h), w, h) for w, h in TTNN_KONTEXT_RESOLUTIONS
                         )
                     image_width = image_width // multiple_of * multiple_of
                     image_height = image_height // multiple_of * multiple_of
@@ -1058,50 +1036,51 @@ class Flux1KontextPipeline:
                 tt_prompt_rope_sin_list.append(tt_prompt_rope_sin)
 
             logger.info("denoising...")
-            for i, t in enumerate(tqdm.tqdm(self._scheduler.timesteps)):
-                with timer(f"denoising_step_{i}", timer_iteration) if timer else nullcontext():
-                    sigma_difference = self._scheduler.sigmas[i + 1] - self._scheduler.sigmas[i]
+            with timer("denoising", timer_iteration) if timer else nullcontext():
+                for i, t in enumerate(tqdm.tqdm(self._scheduler.timesteps)):
+                    with timer(f"denoising_step_{i}", timer_iteration) if timer else nullcontext():
+                        sigma_difference = self._scheduler.sigmas[i + 1] - self._scheduler.sigmas[i]
 
-                    tt_timestep_list = []
-                    tt_sigma_difference_list = []
-                    for i, submesh_device in enumerate(self._submesh_devices):
-                        tt_timestep = ttnn.full(
-                            [tt_pooled_prompt_embeds_list[i].shape[0], 1],
-                            fill_value=t,
-                            layout=ttnn.TILE_LAYOUT,
-                            dtype=ttnn.float32,
-                            device=submesh_device if not traced else None,
+                        tt_timestep_list = []
+                        tt_sigma_difference_list = []
+                        for i, submesh_device in enumerate(self._submesh_devices):
+                            tt_timestep = ttnn.full(
+                                [tt_pooled_prompt_embeds_list[i].shape[0], 1],
+                                fill_value=t,
+                                layout=ttnn.TILE_LAYOUT,
+                                dtype=ttnn.float32,
+                                device=submesh_device if not traced else None,
+                            )
+                            tt_timestep_list.append(tt_timestep)
+
+                            tt_sigma_difference = ttnn.full(
+                                self.output_latents_shape,
+                                fill_value=sigma_difference,
+                                layout=ttnn.TILE_LAYOUT,
+                                dtype=ttnn.bfloat16,
+                                device=submesh_device
+                                if not traced
+                                else None,  # Not used in trace region, can be on device always.
+                            )
+                            tt_sigma_difference_list.append(tt_sigma_difference)
+
+                        tt_latents_step_list = self._step(
+                            timestep=tt_timestep_list,
+                            latents=tt_latents_step_list,
+                            cfg_enabled=cfg_enabled,
+                            prompt_embeds=tt_prompt_embeds_list,
+                            pooled_prompt_embeds=tt_pooled_prompt_embeds_list,
+                            cfg_scale=cfg_scale,
+                            sigma_difference=tt_sigma_difference_list,
+                            guidance=tt_guidance_list,
+                            spatial_rope_cos=tt_spatial_rope_cos_list,
+                            spatial_rope_sin=tt_spatial_rope_sin_list,
+                            prompt_rope_cos=tt_prompt_rope_cos_list,
+                            prompt_rope_sin=tt_prompt_rope_sin_list,
+                            spatial_sequence_length=spatial_seq_length,
+                            prompt_sequence_length=prompt_sequence_length,
+                            traced=traced,
                         )
-                        tt_timestep_list.append(tt_timestep)
-
-                        tt_sigma_difference = ttnn.full(
-                            self.output_latents_shape,
-                            fill_value=sigma_difference,
-                            layout=ttnn.TILE_LAYOUT,
-                            dtype=ttnn.bfloat16,
-                            device=submesh_device
-                            if not traced
-                            else None,  # Not used in trace region, can be on device always.
-                        )
-                        tt_sigma_difference_list.append(tt_sigma_difference)
-
-                    tt_latents_step_list = self._step(
-                        timestep=tt_timestep_list,
-                        latents=tt_latents_step_list,
-                        cfg_enabled=cfg_enabled,
-                        prompt_embeds=tt_prompt_embeds_list,
-                        pooled_prompt_embeds=tt_pooled_prompt_embeds_list,
-                        cfg_scale=cfg_scale,
-                        sigma_difference=tt_sigma_difference_list,
-                        guidance=tt_guidance_list,
-                        spatial_rope_cos=tt_spatial_rope_cos_list,
-                        spatial_rope_sin=tt_spatial_rope_sin_list,
-                        prompt_rope_cos=tt_prompt_rope_cos_list,
-                        prompt_rope_sin=tt_prompt_rope_sin_list,
-                        spatial_sequence_length=spatial_seq_length,
-                        prompt_sequence_length=prompt_sequence_length,
-                        traced=traced,
-                    )
 
             logger.info("decoding image...")
 

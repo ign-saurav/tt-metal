@@ -25,7 +25,6 @@ from time import time
     ("mesh_device", "submesh_shape", "sp_axis", "tp_axis", "num_links", "id"),
     [
         pytest.param((1, 4), (1, 4), 0, 1, 1, "1x4sp0tp1", id="1x4sp0tp1"),
-        # pytest.param((2, 4), (1, 4), 0, 1, 1, "2x4_1x4sp0tp1", id="2x4_1x4sp0tp1"),
         pytest.param((2, 4), (2, 4), 0, 1, 1, "2x4sp0tp1", id="2x4sp0tp1"),
     ],
     indirect=["mesh_device"],
@@ -33,7 +32,7 @@ from time import time
 @pytest.mark.parametrize(
     ("batch_size", "spatial_seq_len", "prompt_seq_len"),
     [
-        (1, 4096, 512),
+        (1, 8192, 512),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"fabric_config": ttnn.FabricConfig.FABRIC_1D}], indirect=True)
@@ -173,7 +172,6 @@ def test_single_transformer_block(
     ("mesh_device", "submesh_shape", "sp_axis", "tp_axis", "num_links", "id"),
     [
         pytest.param((1, 4), (1, 4), 0, 1, 1, "1x4sp0tp1", id="1x4sp0tp1"),
-        # pytest.param((2, 4), (1, 4), 0, 1, 1, "2x4_1x4sp0tp1", id="2x4_1x4sp0tp1"),
         pytest.param((2, 4), (2, 4), 0, 1, 1, "2x4sp0tp1", id="2x4sp0tp1"),
     ],
     indirect=["mesh_device"],
@@ -181,7 +179,7 @@ def test_single_transformer_block(
 @pytest.mark.parametrize(
     ("batch_size", "spatial_seq_len", "prompt_seq_len"),
     [
-        (1, 4096, 512),
+        (1, 8192, 512),
     ],
 )
 @pytest.mark.parametrize(
