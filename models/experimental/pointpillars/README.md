@@ -111,7 +111,6 @@ models/experimental/pointpillars/
 │       └── vis_o3d.py                # 3D visualization
 │
 ├── runner/                            # Performance runner infrastructure
-│   ├── performant_runner.py          # Performance runner
 │   └── performant_runner_infra.py    # Runner infrastructure
 │
 ├── tests/                             # Test suite
