@@ -22,13 +22,22 @@ if str(tt_path) not in sys.path:
 if str(ref_path) not in sys.path:
     sys.path.insert(0, str(ref_path))
 
-from ttnn_dvae import TtnnDVAE
-from pytorch_dvae import PyTorchDVAE
-from test_utils import (
+from models.experimental.minicpm_o_2_6.tt.ttnn_dvae import TtnnDVAE
+
+# Import directly from the file to avoid reference_pytorch path conflict
+import importlib.util
+
+pytorch_dvae_path = Path(__file__).parent.parent / "reference" / "pytorch_dvae.py"
+spec = importlib.util.spec_from_file_location("pytorch_dvae", pytorch_dvae_path)
+pytorch_dvae_module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(pytorch_dvae_module)
+PyTorchDVAE = pytorch_dvae_module.PyTorchDVAE
+
+from models.experimental.minicpm_o_2_6.tt.test_utils import (
     compute_pcc,
     validate_pcc,
 )
-from weight_generator import generate_dvae_weights
+from models.experimental.minicpm_o_2_6.tt.weight_generator import generate_dvae_weights
 
 
 @pytest.fixture(scope="module")
@@ -66,14 +75,7 @@ def test_dvae_forward_pcc(device):
     )
 
     # Create models
-    ttnn_model = TtnnDVAE(
-        device=device,
-        num_encoder_layers=num_encoder_layers,
-        num_decoder_layers=num_decoder_layers,
-        hidden_dim=hidden_dim,
-        num_mel_bins=num_mel_bins,
-        enable_gfsq=enable_gfsq,
-    )
+    ttnn_model = TtnnDVAE(mesh_device=device)
 
     pt_model = PyTorchDVAE(
         num_encoder_layers=num_encoder_layers,

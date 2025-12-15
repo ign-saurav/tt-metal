@@ -256,9 +256,9 @@ class TtnnDVAE:
         self.coef = None
 
         # Initialize GFSQ quantizer (MiniCPM-o-2_6 configuration)
-        if self.enable_gfsq:
+        if self.config["enable_gfsq"]:
             self.vq_layer = TtnnGFSQ(
-                device=device,  # Pass device to GFSQ
+                device=self.device,  # Pass device to GFSQ
                 dim=1024,  # Encoder output dimension
                 levels=[5, 5, 5, 5],  # 4-level quantization per group
                 G=2,  # 2 groups
@@ -298,7 +298,7 @@ class TtnnDVAE:
             "hidden_dim": 256,
             "num_mel_bins": 100,
             "bn_dim": 128,  # Production: 128
-            "enable_gfsq": True,  # Enable/disable GFSQ quantization
+            "enable_gfsq": False,  # Enable/disable GFSQ quantization
         }
 
     def _load_weights(self, weights: Dict[str, torch.Tensor]):
