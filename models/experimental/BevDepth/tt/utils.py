@@ -14,6 +14,9 @@ from models.tt_cnn.tt.builder import (
     TtMaxPool2d,
     TtUpsample,
     AutoShardedStrategyConfiguration,
+    HeightShardedStrategyConfiguration,
+    WidthShardedStrategyConfiguration,
+    BlockShardedStrategyConfiguration,
 )
 
 
@@ -341,65 +344,148 @@ class TTConv2D:
         else:
             self.math_fidelity = self.kernel_fidelity["MATH_FIDELITY"]
 
-    def __call__(self, device, input_tensor, input_shape):
-        conv_config = ttnn.Conv2dConfig(
-            weights_dtype=self.weights_dtype,
-            activation=self.activation,
-            deallocate_activation=self.deallocate_activation,
-            reallocate_halo_output=self.reallocate_halo_output,
-            reshard_if_not_optimal=self.reshard_if_not_optimal,
-            shard_layout=self.shard_layout,
-            enable_act_double_buffer=self.enable_act_double_buffer,
-            enable_weights_double_buffer=self.enable_weights_double_buffer,
-        )
-        compute_config = ttnn.init_device_compute_kernel_config(
-            device.arch(),
-            math_fidelity=self.kernel_fidelity["MATH_FIDELITY"],
-            fp32_dest_acc_en=self.fp32_dest_acc_en,
-            packer_l1_acc=self.packer_l1_acc,
-            math_approx_mode=self.math_approx_mode,
-        )
+    def _create_sharding_strategy(self, device):
+        """Convert old-style sharding parameters to new ShardedStrategyConfiguration."""
+        # Determine shard layout
+        if self.shard_layout == ttnn.TensorMemoryLayout.HEIGHT_SHARDED:
+            sharding_strategy = HeightShardedStrategyConfiguration(
+                reshard_if_not_optimal=self.reshard_if_not_optimal,
+                act_block_h_override=self.act_block_h if self.act_block_h is not None else 0,
+            )
+        elif self.shard_layout == ttnn.TensorMemoryLayout.WIDTH_SHARDED:
+            sharding_strategy = WidthShardedStrategyConfiguration(
+                reshard_if_not_optimal=self.reshard_if_not_optimal,
+                act_block_w_div=self.act_block_w if self.act_block_w is not None else 1,
+            )
+        elif self.shard_layout == ttnn.TensorMemoryLayout.BLOCK_SHARDED:
+            sharding_strategy = BlockShardedStrategyConfiguration(
+                reshard_if_not_optimal=self.reshard_if_not_optimal,
+                act_block_h_override=self.act_block_h if self.act_block_h is not None else 0,
+                act_block_w_div=self.act_block_w if self.act_block_w is not None else 1,
+            )
+        else:
+            # Auto sharding or None
+            sharding_strategy = AutoShardedStrategyConfiguration()
+
+        # Handle num_cores_nhw override
         if self.num_cores_nhw is not None:
             shard_grid = get_shard_grid_from_num_cores(self.num_cores_nhw, device)
-            conv_config.core_grid = shard_grid
-            conv_config.override_sharding_config = True
+            # Create a new sharding strategy with override_core_grid
+            if isinstance(sharding_strategy, HeightShardedStrategyConfiguration):
+                sharding_strategy = HeightShardedStrategyConfiguration(
+                    reshard_if_not_optimal=sharding_strategy.reshard_if_not_optimal,
+                    override_core_grid=shard_grid,
+                    act_block_h_override=sharding_strategy.act_block_h_override,
+                )
+            elif isinstance(sharding_strategy, WidthShardedStrategyConfiguration):
+                sharding_strategy = WidthShardedStrategyConfiguration(
+                    reshard_if_not_optimal=sharding_strategy.reshard_if_not_optimal,
+                    override_core_grid=shard_grid,
+                    act_block_w_div=sharding_strategy.act_block_w_div,
+                )
+            elif isinstance(sharding_strategy, BlockShardedStrategyConfiguration):
+                sharding_strategy = BlockShardedStrategyConfiguration(
+                    reshard_if_not_optimal=sharding_strategy.reshard_if_not_optimal,
+                    override_core_grid=shard_grid,
+                    act_block_h_override=sharding_strategy.act_block_h_override,
+                    act_block_w_div=sharding_strategy.act_block_w_div,
+                )
+            else:
+                # For auto sharding, convert to height sharded with grid
+                sharding_strategy = HeightShardedStrategyConfiguration(
+                    reshard_if_not_optimal=self.reshard_if_not_optimal,
+                    override_core_grid=shard_grid,
+                    act_block_h_override=self.act_block_h if self.act_block_h is not None else 0,
+                )
 
-        if self.act_block_h is not None:
-            conv_config.act_block_h_override = self.act_block_h
-        if self.act_block_w is not None:
-            conv_config.act_block_w_div = self.act_block_w
-        [output_tensor, [_out_height, _out_width], [self.weights, self.bias]] = ttnn.conv2d(
-            input_tensor=input_tensor,
-            weight_tensor=self.weights,
-            bias_tensor=self.bias,
-            in_channels=input_shape[-1],
+        return sharding_strategy
+
+    def _convert_padding_to_2tuple(self):
+        """Convert padding from 4-tuple (top, bottom, left, right) or int to 2-tuple (h, w)."""
+        if isinstance(self.padding, tuple):
+            if len(self.padding) == 4:
+                # 4-tuple: (top, bottom, left, right) -> (h, w) = (top, left) assuming symmetric
+                return (self.padding[0], self.padding[2])
+            elif len(self.padding) == 2:
+                return self.padding
+        # int padding - already handled in __init__
+        if isinstance(self.padding, int):
+            return (self.padding, self.padding)
+        return self.padding
+
+    def __call__(self, device, input_tensor, input_shape):
+        # Extract dimensions from input_shape (NHWC format)
+        batch_size = input_shape[-4] if len(input_shape) >= 4 else input_shape[0]
+        input_height = input_shape[-3] if len(input_shape) >= 3 else input_shape[1]
+        input_width = input_shape[-2] if len(input_shape) >= 2 else input_shape[2]
+        in_channels = input_shape[-1] if len(input_shape) >= 1 else input_shape[3]
+
+        # Convert padding to 2-tuple format
+        padding_2tuple = self._convert_padding_to_2tuple()
+
+        # Create sharding strategy
+        sharding_strategy = self._create_sharding_strategy(device)
+
+        # Convert weights and bias to TTNN format if needed
+        # TtConv2d expects weights to be ttnn.Tensor, but we might have torch.Tensor
+        if isinstance(self.weights, torch.Tensor):
+            ttnn_weight = ttnn.from_torch(self.weights, dtype=ttnn.float32)
+        else:
+            ttnn_weight = self.weights
+
+        ttnn_bias = None
+        if self.bias is not None:
+            if isinstance(self.bias, torch.Tensor):
+                bias_reshaped = self.bias.reshape(1, 1, 1, -1) if len(self.bias.shape) == 1 else self.bias
+                ttnn_bias = ttnn.from_torch(bias_reshaped, dtype=ttnn.float32)
+            else:
+                ttnn_bias = self.bias
+
+        # Create Conv2dConfiguration
+        config = Conv2dConfiguration(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=in_channels,
             out_channels=self.out_channels,
-            device=device,
+            batch_size=batch_size,
             kernel_size=self.kernel_size,
             stride=self.stride,
-            padding=self.padding,
+            padding=padding_2tuple,
             dilation=self.dilation,
-            batch_size=input_shape[-4],
-            input_height=input_shape[-3],
-            input_width=input_shape[-2],
-            conv_config=conv_config,
-            compute_config=compute_config,
-            slice_config=self.slice_config,
             groups=self.groups,
-            return_weights_and_bias=True,
-            return_output_dim=True,
-            dtype=self.dtype,
-            memory_config=self.memory_config,
+            weight=ttnn_weight,
+            bias=ttnn_bias,
+            activation=self.activation,
+            activation_dtype=self.dtype,
+            weights_dtype=self.weights_dtype,
+            output_dtype=self.dtype,
+            math_fidelity=self.math_fidelity,
+            sharding_strategy=sharding_strategy,
+            deallocate_activation=self.deallocate_activation,
+            enable_act_double_buffer=self.enable_act_double_buffer,
+            enable_weights_double_buffer=self.enable_weights_double_buffer,
+            fp32_dest_acc_en=self.fp32_dest_acc_en,
+            packer_l1_acc=self.packer_l1_acc,
+            reallocate_halo_output=self.reallocate_halo_output,
+            # Note: slice_config is not directly supported in new API
+            # Users should migrate to slice_strategy if needed
+            slice_strategy=None,
         )
 
+        # Create TtConv2d instance
+        tt_conv2d = TtConv2d(config, device)
+
+        # Call TtConv2d
+        output_tensor, (h_out, w_out) = tt_conv2d(input_tensor, return_output_dim=True)
+
+        # Handle is_reshape logic if needed
         if self.is_reshape:
             output_tensor = ttnn.sharded_to_interleaved(output_tensor, ttnn.L1_MEMORY_CONFIG)
             output_tensor = ttnn.to_layout(output_tensor, ttnn.TILE_LAYOUT)
-            output_tensor = ttnn.reshape(
-                output_tensor, (input_tensor.shape[0], _out_height, _out_width, output_tensor.shape[-1])
-            )
+            output_tensor = ttnn.reshape(output_tensor, (batch_size, h_out, w_out, output_tensor.shape[-1]))
             output_tensor = ttnn.permute(output_tensor, (0, 3, 1, 2))
-        return output_tensor, (input_tensor.shape[0], _out_height, _out_width, output_tensor.shape[-1])
+
+        return output_tensor, (batch_size, h_out, w_out, output_tensor.shape[-1])
 
 
 class TTSplitConvTranspose2D:
