@@ -145,20 +145,36 @@ def test_tts_decoder_decode(device, input_dtype, weight_dtype):
     model.tts.float()  # DVAE/vocos need float32 for stability
     model = model.eval()
 
-    # Load test inputs
-    causal_mask = torch.load("tt_decoder_test/causal_mask.pt")
-    position_ids = torch.load("tt_decoder_test/position_ids.pt")
-    inputs_embeds = torch.load("tt_decoder_test/inputs_embeds.pt")
-    past_key_values = torch.load("tt_decoder_test/past_key_values.pt")
+    # Load test inputs (saved from _generate_mel_spec decode loop)
+    causal_mask = torch.load("_debug_decode_inputs/causal_mask.pt")
+    position_ids = torch.load("_debug_decode_inputs/position_ids.pt")
+    inputs_embeds = torch.load("_debug_decode_inputs/inputs_embeds.pt")
+    past_key_values = torch.load("_debug_decode_inputs/past_key_values.pt")
+    cache_position = torch.load("_debug_decode_inputs/cache_position.pt")
 
-    # Run PyTorch reference
+    logger.info(f"Loaded inputs:")
+    logger.info(f"  causal_mask shape: {causal_mask.shape}")
+    logger.info(f"  causal_mask values: min={causal_mask.min():.4f}, max={causal_mask.max():.4f}")
+    logger.info(f"  causal_mask sample: {causal_mask[0, 0, 0, :5]} ... {causal_mask[0, 0, 0, -5:]}")
+    logger.info(f"  position_ids: {position_ids}")
+    logger.info(f"  inputs_embeds shape: {inputs_embeds.shape}")
+    logger.info(f"  past_key_values: {len(past_key_values)} layers, K shape: {past_key_values[0][0].shape}")
+    logger.info(f"  cache_position: {cache_position}")
+
+    # Debug: Log input stats
+    logger.info(
+        f"Input embeds stats: min={inputs_embeds.min():.4f}, max={inputs_embeds.max():.4f}, mean={inputs_embeds.mean():.4f}"
+    )
+
+    # Run PyTorch reference with causal_mask (matching TT streaming mask behavior)
+    logger.info(f"Running PyTorch with causal_mask")
     outputs = model.tts.model(
-        attention_mask=None,
+        attention_mask=causal_mask,  # Use streaming TTS chunk mask
         position_ids=position_ids,
         past_key_values=past_key_values,
         inputs_embeds=inputs_embeds,
         use_cache=True,
-        cache_position=position_ids,
+        cache_position=cache_position,
     )
 
     # Initialize TTNN decoder with same config
@@ -187,22 +203,28 @@ def test_tts_decoder_decode(device, input_dtype, weight_dtype):
         memory_config=get_activations_memory_config(),
     )
 
-    # Run TTNN forward pass
+    # Run TTNN forward pass with causal_mask for streaming TTS chunk masking
     hidden_states_ttnn, _ = ttnn_decoder.forward(
         inputs_embeds=inputs_embeds_ttnn,
-        attention_mask=None,
+        attention_mask=causal_mask,  # Pass streaming TTS chunk mask
         position_ids=position_ids,
         past_key_values=past_key_values,
         use_cache=True,
-        cache_position=position_ids,
+        cache_position=cache_position,
     )
 
     # Compare outputs
-    tt_output = tt2torch_tensor(hidden_states_ttnn)
-    ref_outputs = outputs.last_hidden_state
+    tt_output = tt2torch_tensor(hidden_states_ttnn).float()
+    ref_outputs = outputs.last_hidden_state.float()
+
+    logger.info(f"Output comparison:")
+    logger.info(f"  TT output shape: {tt_output.shape}, PT output shape: {ref_outputs.shape}")
+    logger.info(f"  TT stats: min={tt_output.min():.4f}, max={tt_output.max():.4f}, mean={tt_output.mean():.4f}")
+    logger.info(f"  PT stats: min={ref_outputs.min():.4f}, max={ref_outputs.max():.4f}, mean={ref_outputs.mean():.4f}")
 
     # Handle shape mismatch if any
     if tt_output.shape != ref_outputs.shape:
+        logger.warning(f"Shape mismatch! TT: {tt_output.shape}, PT: {ref_outputs.shape}")
         slices = tuple(slice(0, s) for s in ref_outputs.shape)
         tt_output = tt_output[slices]
 
