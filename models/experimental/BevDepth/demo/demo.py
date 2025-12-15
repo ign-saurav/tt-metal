@@ -104,11 +104,10 @@ def load_images_and_mats(info):
 
     cam_info = info["cam_infos"]
 
-    # Using 256x640 for TTNN compatibility (official BEVDepth uses 256x704)
     ida_aug_conf = {
         "H": 900,
         "W": 1600,
-        "final_dim": [256, 640],
+        "final_dim": [256, 704],
         "bot_pct_lim": [0.0, 0.0],
         "resize_lim": [0.386, 0.55],
         "rot_lim": [0.0, 0.0],
@@ -465,6 +464,7 @@ def run_ttnn_inference(device, params, imgs, mats_dict):
         "depthnet_mid_channels": 512,
         "depthnet_context_channels": 80,
         "depthnet_depth_channels": 112,
+        "use_torch_conv2d_fallback": True,
     }
 
     ttnn_backbone = TtBaseLSSFPN(
@@ -728,7 +728,6 @@ def main():
     info = infos[0]
     logger.info(f"Loaded sample with token: {info['sample_token']}")
 
-    # Load images and transformation matrices (using 256x640 for TTNN compatibility)
     imgs, mats_dict, ego2global_rotation, ego2global_translation = load_images_and_mats(info)
     logger.info(f"Input images shape: {imgs.shape}")
 

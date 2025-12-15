@@ -47,7 +47,7 @@ def load_reference_model():
     return lightning_model
 
 
-def create_dummy_inputs(batch_size=1, num_sweeps=2, num_cameras=6, img_h=256, img_w=640):
+def create_dummy_inputs(batch_size=1, num_sweeps=2, num_cameras=6, img_h=256, img_w=704):
     """Create dummy input images and transformation matrices."""
     # Images: (B, num_sweeps, num_cameras, 3, H, W)
     imgs = torch.randn((batch_size, num_sweeps, num_cameras, 3, img_h, img_w), dtype=torch.float32, requires_grad=False)
@@ -460,14 +460,14 @@ class BackboneTestInfra:
     def _create_input_tensors(self):
         """Create synthetic input tensors."""
         batch_size = self.model_config.get("batch_size", 1)
-        shape = (batch_size, 2, 6, 3, 256, 640)  # (B, num_sweeps, num_cameras, 3, H, W)
+        shape = (batch_size, 2, 6, 3, 256, 704)  # (B, num_sweeps, num_cameras, 3, H, W)
         logger.info(f"Generating synthetic input images of shape {shape}")
         imgs, mats_dict = create_dummy_inputs(
             batch_size=batch_size,
             num_sweeps=2,
             num_cameras=6,
             img_h=256,
-            img_w=640,
+            img_w=704,
         )
         return imgs, mats_dict
 
@@ -520,8 +520,8 @@ model_config = {
     "depthnet_in_channels": 512,
     "depthnet_mid_channels": 512,
     "depthnet_context_channels": 80,
-    # depth_channels = len(torch.arange(2.0, 58.0, 0.5)) = 112 (from d_bound in lss_conf)
     "depthnet_depth_channels": 112,
+    "use_torch_conv2d_fallback": True,
 }
 
 

@@ -46,7 +46,7 @@ def load_reference_model():
     return lightning_model
 
 
-def create_dummy_inputs(batch_size=1, num_sweeps=2, num_cameras=6, img_h=256, img_w=640):
+def create_dummy_inputs(batch_size=1, num_sweeps=2, num_cameras=6, img_h=256, img_w=704):
     """Create dummy input images and transformation matrices."""
     imgs = torch.randn((batch_size, num_sweeps, num_cameras, 3, img_h, img_w), dtype=torch.float32, requires_grad=False)
 
@@ -229,7 +229,7 @@ def test_bevdepth_e2e(device):
     torch_model = reference_model.model
     torch_model.eval()
 
-    torch_input_imgs, mats_dict = create_dummy_inputs(batch_size=1, num_sweeps=2, num_cameras=6, img_h=256, img_w=640)
+    torch_input_imgs, mats_dict = create_dummy_inputs(batch_size=1, num_sweeps=2, num_cameras=6, img_h=256, img_w=704)
 
     lss_conf = {
         "x_bound": [-51.2, 51.2, 0.8],
@@ -253,6 +253,7 @@ def test_bevdepth_e2e(device):
         "depthnet_mid_channels": 512,
         "depthnet_context_channels": 80,
         "depthnet_depth_channels": 112,
+        "use_torch_conv2d_fallback": True,
     }
 
     logger.info("Initializing TTNN model...")

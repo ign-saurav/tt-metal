@@ -130,6 +130,75 @@ def test_num_cores_to_core_grid(num_cores, rows, cols):
     ), f"Expected number of cores to match (was {core_grid.num_cores()} but expected {num_cores})"
 
 
+STRIDED_CONV_CONFIGS = [
+    {
+        "input_height": 32,
+        "input_width": 88,
+        "in_channels": 512,
+        "out_channels": 128,
+        "kernel_size": (2, 2),
+        "stride": (2, 2),
+    },
+    {
+        "input_height": 64,
+        "input_width": 176,
+        "in_channels": 256,
+        "out_channels": 128,
+        "kernel_size": (4, 4),
+        "stride": (4, 4),
+    },
+]
+
+
+@pytest.mark.parametrize("device_params", [DEVICE_PARAMS], indirect=True)
+@pytest.mark.parametrize("strided_config", STRIDED_CONV_CONFIGS)
+@pytest.mark.parametrize("num_iterations", [2])
+def test_conv2d_kernel_equals_stride_repeated_calls(strided_config, num_iterations, device):
+    input_height = strided_config["input_height"]
+    input_width = strided_config["input_width"]
+    in_channels = strided_config["in_channels"]
+    out_channels = strided_config["out_channels"]
+    kernel_size = strided_config["kernel_size"]
+    stride = strided_config["stride"]
+
+    configuration = Conv2dConfiguration.with_random_weights(
+        input_height=input_height,
+        input_width=input_width,
+        in_channels=in_channels,
+        out_channels=out_channels,
+        batch_size=1,
+        kernel_size=kernel_size,
+        stride=stride,
+        padding=(0, 0),
+        sharding_strategy=AutoShardedStrategyConfiguration(),
+    )
+
+    weight, bias = configuration.weight, configuration.bias
+    torch_input_tensor, ttnn_input_tensor = create_conv2d_input_tensor(configuration)
+
+    torch_output_tensor = torch.nn.functional.conv2d(
+        torch_input_tensor,
+        ttnn.to_torch(weight),
+        ttnn.to_torch(bias).reshape(-1) if bias is not None else None,
+        stride=stride,
+        padding=(0, 0),
+    )
+
+    layer = TtConv2d(configuration, device)
+
+    for i in range(num_iterations):
+        ttnn_output_tensor = layer(ttnn_input_tensor)
+
+        output_height, output_width = torch_output_tensor.shape[-2:]
+        assert_with_pcc(
+            torch_output_tensor,
+            ttnn.to_torch(ttnn_output_tensor)
+            .reshape(configuration.batch_size, output_height, output_width, configuration.out_channels)
+            .permute(0, 3, 1, 2),
+            PCC_THRESHOLD,
+        )
+
+
 @pytest.mark.parametrize("device_params", [DEVICE_PARAMS], indirect=True)
 @pytest.mark.parametrize("input_size", INPUT_SIZES)  # Use first 2 sizes for faster tests
 @pytest.mark.parametrize("channel_config", CHANNEL_CONFIGS)  # Use first 2 channel configs

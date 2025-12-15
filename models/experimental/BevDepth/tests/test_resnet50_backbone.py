@@ -252,7 +252,7 @@ def enable_conv_bias(module):
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
 @pytest.mark.parametrize("batch_size", [1])
-@pytest.mark.parametrize("height, width", [(256, 640)])
+@pytest.mark.parametrize("height, width", [(256, 704)])
 def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
     """Test TTNN ResNet50 against BEVDepth reference model"""
 
@@ -411,7 +411,7 @@ if __name__ == "__main__":
     )
 
     try:
-        results = test_resnet50_bevdepth_pcc(device, batch_size=1, height=256, width=640)
+        results = test_resnet50_bevdepth_pcc(device, batch_size=1, height=256, width=704)
         print("\nPCC Results:")
         for layer, pcc in results.items():
             print(f"  {layer}: {pcc:.6f}")
