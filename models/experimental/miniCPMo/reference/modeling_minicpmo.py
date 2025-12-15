@@ -2997,45 +2997,28 @@ class ConditionalChatTTS(PreTrainedModel):
         #     cache_position=position_ids,  # which new positions will use this cache, basically the same as position_ids
         # )
 
-        # Use TT model only for first prefill (position_ids starts at 0)
-        # TTNN causal SDPA requires Q and K to have same seq length, so it can't handle incremental prefill
-        # TODO: TT prefill is disabled for now to test pure reference flow
-        is_first_prefill = position_ids[0, 0].item() == 0
-        use_tt = False  # Disabled for debugging
-        # use_tt = (
-        #     hasattr(self, "tt_device") and self.tt_device is not None and self.tt_model is not None and is_first_prefill
-        # )
-
-        if use_tt:
-            inputs_embeds_ttnn = torch_to_ttnn(
-                inputs_embeds,
-                self.tt_device,
-                memory_config=get_activations_memory_config(),
-            )
-            # Run TTNN forward pass (prefill mode: no past_key_values)
-            _, past_key_values_tt = self.tt_model.forward(
-                inputs_embeds=inputs_embeds_ttnn,
-                attention_mask=None,
-                position_ids=position_ids,
-                past_key_values=past_key_values_for_prefill,
-                use_cache=True,
-            )
-            # Convert each tensor in past_key_values from TTNN to PyTorch
-            past_key_values_for_prefill_updated = [
-                (tt2torch_tensor(k), tt2torch_tensor(v)) for k, v in past_key_values_tt
-            ]
-        else:
-            # Reference model forward
-            outputs_prefill: BaseModelOutputWithPast = self.model(
-                attention_mask=None,
-                position_ids=position_ids,
-                past_key_values=past_key_values_for_prefill,
-                inputs_embeds=inputs_embeds,
-                use_cache=True,
-                output_attentions=False,
-                cache_position=position_ids,
-            )
-            past_key_values_for_prefill_updated = outputs_prefill.past_key_values
+        # Use TT model for all prefill cases (both first prefill and incremental prefill)
+        # RoPE and manual attention fallback are implemented for incremental prefill
+        # TT is always used for prefill - no PyTorch fallback
+        print(
+            f"[TT PREFILL] seq_len={inputs_embeds.shape[1]}, positions={position_ids[0, 0].item()}-{position_ids[0, -1].item()}"
+        )
+        inputs_embeds_ttnn = torch_to_ttnn(
+            inputs_embeds,
+            self.tt_device,
+            memory_config=get_activations_memory_config(),
+        )
+        # Run TTNN forward pass (prefill mode)
+        _, past_key_values_tt = self.tt_model.forward(
+            inputs_embeds=inputs_embeds_ttnn,
+            attention_mask=None,
+            position_ids=position_ids,
+            past_key_values=past_key_values_for_prefill,
+            use_cache=True,
+            cache_position=position_ids,
+        )
+        # Convert each tensor in past_key_values from TTNN to PyTorch
+        past_key_values_for_prefill_updated = [(tt2torch_tensor(k), tt2torch_tensor(v)) for k, v in past_key_values_tt]
 
         # Update generated KV Cache to input `past_key_values`
         for layer_idx in range(len(past_key_values)):
@@ -3225,13 +3208,11 @@ class ConditionalChatTTS(PreTrainedModel):
                 streaming_text_chunk_size=self.streaming_text_chunk_size,
             )
 
-            # Model forward - use TT model if available (decode mode with single token)
-            # TODO: TT decode is disabled for now - mixing TT prefill with TT decode causes
-            # numerical differences that prevent EOS token from being sampled correctly.
-            # Enable once TT decode is verified for numerical accuracy.
-            use_tt = False  # hasattr(self, "tt_device") and self.tt_device is not None and self.tt_model is not None
+            # Model forward - use PyTorch for decode (TT decode is too slow due to RoPE host↔device transfers)
+            # TT is used for prefill, PyTorch for decode
+            use_tt_decode = False
 
-            if use_tt:
+            if use_tt_decode:
                 inputs_embeds_ttnn = torch_to_ttnn(
                     inputs_embeds,
                     self.tt_device,
@@ -3244,6 +3225,7 @@ class ConditionalChatTTS(PreTrainedModel):
                     position_ids=position_ids,
                     past_key_values=past_key_values,
                     use_cache=True,
+                    cache_position=cache_position,
                 )
                 # Convert outputs back to PyTorch
                 hidden_states = tt2torch_tensor(hidden_states_tt)
