@@ -2998,8 +2998,6 @@ class ConditionalChatTTS(PreTrainedModel):
         # )
 
         # Use TT model for all prefill cases (both first prefill and incremental prefill)
-        # RoPE and manual attention fallback are implemented for incremental prefill
-        # TT is always used for prefill - no PyTorch fallback
         print(
             f"[TT PREFILL] seq_len={inputs_embeds.shape[1]}, positions={position_ids[0, 0].item()}-{position_ids[0, -1].item()}"
         )
@@ -3008,8 +3006,7 @@ class ConditionalChatTTS(PreTrainedModel):
             self.tt_device,
             memory_config=get_activations_memory_config(),
         )
-        # Run TTNN forward pass (prefill mode)
-        _, past_key_values_tt = self.tt_model.forward(
+        hidden_states_tt, past_key_values_tt = self.tt_model.forward(
             inputs_embeds=inputs_embeds_ttnn,
             attention_mask=None,
             position_ids=position_ids,
@@ -3017,7 +3014,6 @@ class ConditionalChatTTS(PreTrainedModel):
             use_cache=True,
             cache_position=position_ids,
         )
-        # Convert each tensor in past_key_values from TTNN to PyTorch
         past_key_values_for_prefill_updated = [(tt2torch_tensor(k), tt2torch_tensor(v)) for k, v in past_key_values_tt]
 
         # Update generated KV Cache to input `past_key_values`
@@ -3208,42 +3204,24 @@ class ConditionalChatTTS(PreTrainedModel):
                 streaming_text_chunk_size=self.streaming_text_chunk_size,
             )
 
-            # Model forward - use PyTorch for decode (TT decode is too slow due to RoPE host↔device transfers)
-            # TT is used for prefill, PyTorch for decode
-            use_tt_decode = False
-
-            if use_tt_decode:
-                inputs_embeds_ttnn = torch_to_ttnn(
-                    inputs_embeds,
-                    self.tt_device,
-                    memory_config=get_activations_memory_config(),
-                )
-                # Run TTNN forward pass (decode mode: single token with KV cache)
-                hidden_states_tt, past_key_values_tt = self.tt_model.forward(
-                    inputs_embeds=inputs_embeds_ttnn,
-                    attention_mask=None,  # Decode mode uses causal mask internally
-                    position_ids=position_ids,
-                    past_key_values=past_key_values,
-                    use_cache=True,
-                    cache_position=cache_position,
-                )
-                # Convert outputs back to PyTorch
-                hidden_states = tt2torch_tensor(hidden_states_tt)
-                # Convert to float32 to match head_code layers (tts.float() was called)
-                hidden_states = hidden_states.float()
-                past_key_values = [(tt2torch_tensor(k), tt2torch_tensor(v)) for k, v in past_key_values_tt]
-            else:
-                outputs: BaseModelOutputWithPast = self.model(
-                    attention_mask=causal_mask,
-                    position_ids=position_ids,
-                    past_key_values=past_key_values,
-                    inputs_embeds=inputs_embeds,
-                    use_cache=True,
-                    output_attentions=False,
-                    cache_position=cache_position,
-                )
-                hidden_states = outputs.last_hidden_state
-                past_key_values = outputs.past_key_values
+            # Model forward - use TT for decode
+            if i == 0:
+                print(f"[TT DECODE] Starting decode loop")
+            inputs_embeds_ttnn = torch_to_ttnn(
+                inputs_embeds,
+                self.tt_device,
+                memory_config=get_activations_memory_config(),
+            )
+            hidden_states_tt, past_key_values_tt = self.tt_model.forward(
+                inputs_embeds=inputs_embeds_ttnn,
+                attention_mask=causal_mask,
+                position_ids=position_ids,
+                past_key_values=past_key_values,
+                use_cache=True,
+                cache_position=cache_position,
+            )
+            hidden_states = tt2torch_tensor(hidden_states_tt).float()
+            past_key_values = [(tt2torch_tensor(k), tt2torch_tensor(v)) for k, v in past_key_values_tt]
 
             del position_ids
             del inputs_embeds
