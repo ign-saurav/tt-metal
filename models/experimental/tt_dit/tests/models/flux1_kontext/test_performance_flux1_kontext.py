@@ -72,9 +72,7 @@ def test_flux1_kontext_pipeline_performance(
     input_image = load_image(
         "https://huggingface.co/datasets/huggingface/documentation-images/resolve/main/diffusers/yarn-art-pikachu.png"
     ).convert("RGB")
-    prompts = [
-        "Make Pikachu hold a sign that says 'TTNN is awesome', yarn art style, detailed, vibrant colors"
-    ]
+    prompts = ["Make Pikachu hold a sign that says 'TTNN is awesome', yarn art style, detailed, vibrant colors"]
     negative_prompts = [""] * len(prompts)
 
     # Warmup run (not timed)

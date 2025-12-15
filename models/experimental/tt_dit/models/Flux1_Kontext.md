@@ -1,7 +1,7 @@
 # FLUX.1 Kontext
 
 ## Introduction:
-[FLUX.1 Kontext](https://bfl.ai/models/flux-kontext) is Black Forest Labs’ in‑context image generation and editing family that unifies text‑to‑image and image‑guided editing in a single rectified‑flow transformer. It takes text + image inputs, performs local or global edits, preserves character/style consistency, and supports iterative, multi‑turn workflows at interactive speeds.It is a 12 billion parameter rectified flow transformer capable of editing images based on text instructions. 
+[FLUX.1 Kontext](https://bfl.ai/models/flux-kontext) is Black Forest Labs’ in‑context image generation and editing family that unifies text‑to‑image and image‑guided editing in a single rectified‑flow transformer. It takes text + image inputs, performs local or global edits, preserves character/style consistency, and supports iterative, multi‑turn workflows at interactive speeds.It is a 12 billion parameter rectified flow transformer capable of editing images based on text instructions.
 
 
 ## Details
@@ -16,10 +16,9 @@ Unlike diffusion models using CFG, Kontext uses [**learned guidance embeddings**
 Current performance and target performance for two systems are detailed below. Performance is measured in seconds per image, where the image size is 1024x1024px.
 
 
-
 ### Dev Variant (28 steps)
 
-| System    | CFG | SP | TP | Current Performance | 
+| System    | CFG | SP | TP | Current Performance |
 |-----------|-----|----|----|---------------------|
 | LoudBox   | 1   | 2  | 4  | 69.48s              |
 | LoudBox   | 2   | 1  | 4  | 62.13s              |
@@ -48,23 +47,8 @@ FLUX.1 Kontext is engineered for high scalability across heterogeneous compute e
 
 The model achieves this through advanced parallelization strategies. Two primary axes of parallelism are employed: sequence parallelism `(sp) `and tensor parallelism `(tp)`. Sequence parallelism fractures the input sequence across a mesh axis, enabling FeedForward layers to execute in parallel across sequence chunks. Attention layers use ring attention, which overlaps KV all-gather operations with computation to minimize latency. Tensor parallelism, on the other hand, distributes model weights across another axis, leveraging collective communication primitives like AllGather and ReduceScatter for synchronization. These techniques ensure balanced workload distribution and high throughput for both text-to-image generation and iterative editing.
 
-In addition to `sp` and `tp`, FLUX.1 Kontext introduces ring parallelism `(rp)` and ulysses parallelism `(up)`, which complement `sp` and `tp` for attention modules, further improving efficiency in large-scale deployments. Parallel configurations are defined as tuples like `((sp_factor, sp_axis), (tp_factor, tp_axis))`. 
+In addition to `sp` and `tp`, FLUX.1 Kontext introduces ring parallelism `(rp)` and ulysses parallelism `(up)`, which complement `sp` and `tp` for attention modules, further improving efficiency in large-scale deployments. Parallel configurations are defined as tuples like `((sp_factor, sp_axis), (tp_factor, tp_axis))`.
 
-For example, a 2×4 mesh uses `((2, 0), (4, 1))`. 
+For example, a 2×4 mesh uses `((2, 0), (4, 1))`.
 
 The text encoders (CLIP-L and T5-XXL) and the VAE decoder also benefit from tensor parallelism, ensuring that both conditioning and decoding stages scale effectively. This architecture enables FLUX.1 Kontext to deliver consistent performance and quality across diverse hardware setups, making it suitable for research, production, and enterprise environments.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-

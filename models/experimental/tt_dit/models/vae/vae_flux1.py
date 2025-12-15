@@ -19,6 +19,7 @@ if TYPE_CHECKING:
 
 """Adapted from models/experimental/tt_dit/models/vae/vae_sd35.py"""
 
+
 class ResnetBlock:
     def __init__(
         self,

@@ -103,7 +103,6 @@ class Conv2d(Module):
         (512, 512, 128, 256): 4,
         (256, 256, 256, 512): 8,
         (128, 128, 512, 32): 8,
-
     }
 
     # TODO: Allow weight initilization?
