@@ -362,12 +362,6 @@ class TtnnChatTTSDecoder:
         batch_size, seq_len, hidden_size = inputs_embeds.shape
 
         # Determine mode based on sequence length
-        is_prefill = seq_len > 1
-        mode = "prefill" if is_prefill else "decode"
-        logger.info(
-            f"[TtnnChatTTSDecoder.forward] Called in {mode} mode, batch_size={batch_size}, seq_len={seq_len}, use_cache={use_cache}"
-        )
-
         hidden_states = inputs_embeds
         new_past_key_values = [] if use_cache else None
 
@@ -375,7 +369,14 @@ class TtnnChatTTSDecoder:
         for layer_idx, layer_weights in enumerate(self.layers):
             past_key_value = past_key_values[layer_idx] if past_key_values is not None else None
             hidden_states, new_past_key_value = self._transformer_layer(
-                hidden_states, layer_weights, attention_mask, position_ids, past_key_value, use_cache, cache_position
+                hidden_states,
+                layer_weights,
+                attention_mask,
+                position_ids,
+                past_key_value,
+                use_cache,
+                cache_position,
+                layer_idx,
             )
             if use_cache:
                 new_past_key_values.append(new_past_key_value)
@@ -386,10 +387,6 @@ class TtnnChatTTSDecoder:
             weight=self.norm,
             epsilon=1e-5,
             memory_config=get_activations_memory_config(),
-        )
-
-        logger.info(
-            f"[TtnnChatTTSDecoder.forward] Completed, returning hidden_states shape={hidden_states.shape}, num_kv_layers={len(new_past_key_values) if new_past_key_values else 0}"
         )
         return hidden_states, new_past_key_values
 
@@ -402,6 +399,7 @@ class TtnnChatTTSDecoder:
         past_key_value: Optional[tuple] = None,
         use_cache: bool = False,
         cache_position: Optional["torch.Tensor"] = None,
+        layer_idx: int = -1,
     ) -> tuple:
         """
         Process one transformer layer.
@@ -745,6 +743,7 @@ class TtnnChatTTSDecoder:
                 past_key, past_value = past_key_value
                 # Convert from torch tensor to ttnn if needed
                 if not isinstance(past_key, ttnn.Tensor):
+                    # past_key is [batch, heads, seq, dim] - permute to [batch, seq, heads, dim]
                     past_key = torch_to_ttnn(
                         past_key.permute(0, 2, 1, 3),
                         self.device,
@@ -779,62 +778,62 @@ class TtnnChatTTSDecoder:
             key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
             value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
 
-            # Get current sequence position for decode
-            # After permute, key is [batch, heads, seq, dim], so seq is at index 2
-            current_seq_pos = key.shape[2] - 1
+            # Query is [batch, seq=1, heads, dim], Key/Value are [batch, heads, seq, dim]
+            # Permute query to match key/value format: [batch, heads, seq=1, dim]
+            query = ttnn.permute(query, (0, 2, 1, 3))
 
-            program_config = ttnn.SDPAProgramConfig(
-                compute_with_storage_grid_size=self.device.compute_with_storage_grid_size(),
-                q_chunk_size=self.num_attention_heads,
-                k_chunk_size=32,  # Must divide K sequence length (padded to tile size)
-                exp_approx_mode=False,
-            )
+            # Use manual attention for decode mode (simpler and avoids SDPA decode format issues)
+            # query: [batch, heads, seq=1, dim], key: [batch, heads, seq, dim], value: [batch, heads, seq, dim]
+            scale = 1.0 / (self.head_dim**0.5)
 
-            attn_output = ttnn.transformer.scaled_dot_product_attention_decode(
+            # Transpose key for matmul: [batch, heads, dim, seq]
+            key_t = ttnn.permute(key, (0, 1, 3, 2))
+
+            # Compute attention scores: [batch, heads, 1, seq]
+            attn_scores = ttnn.matmul(
                 query,
-                key,
-                value,
-                is_causal=True,
-                cur_pos=[current_seq_pos],
-                scale=1.0 / (self.head_dim**0.5),
-                program_config=program_config,
-                compute_kernel_config=self.compute_kernel_config_sdpa,
+                key_t,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                compute_kernel_config=self.compute_kernel_config_hifi4,
             )
 
-            # Convert to sharded for nlp_concat_heads_decode
-            num_cores_for_sharding = batch_size
+            # Scale
+            attn_scores = ttnn.multiply(attn_scores, scale, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-            shard_spec = ttnn.ShardSpec(
-                grid=ttnn.CoreRangeSet(
-                    {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(num_cores_for_sharding - 1, 0))}
-                ),
-                shard_shape=[32, 64],  # Must be tile-aligned
-                shard_orientation=ttnn.ShardOrientation.ROW_MAJOR,
-            )
-            sharded_mem_config = ttnn.MemoryConfig(
-                ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-                ttnn.BufferType.L1,
-                shard_spec,
-            )
-            attn_output = ttnn.to_memory_config(attn_output, sharded_mem_config)
+            # Apply attention mask if provided (for streaming TTS chunk masking)
+            # attention_mask is [batch, 1, 1, seq] with 0 for attend and -inf for mask
+            if attention_mask is not None:
+                # Convert attention_mask to ttnn and add to scores
+                if not isinstance(attention_mask, ttnn.Tensor):
+                    attn_mask_ttnn = torch_to_ttnn(
+                        attention_mask.to(torch.bfloat16),
+                        self.device,
+                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                        layout=ttnn.TILE_LAYOUT,
+                    )
+                else:
+                    attn_mask_ttnn = attention_mask
+                attn_scores = ttnn.add(attn_scores, attn_mask_ttnn, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-            # Use nlp_concat_heads_decode to reshape back
-            attn_output = ttnn.experimental.nlp_concat_heads_decode(
-                attn_output,
-                num_heads=self.num_attention_heads,
-            )
+            # Softmax over last dimension
+            attn_probs = ttnn.softmax(attn_scores, dim=-1, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-            # Slice to remove padding: nlp_concat_heads_decode pads to 32 users
-            attn_output = ttnn.to_memory_config(attn_output, ttnn.DRAM_MEMORY_CONFIG)
-            attn_output = ttnn.slice(
-                attn_output,
-                [0, 0, 0, 0],
-                [1, 1, batch_size, self.hidden_size],
-                memory_config=ttnn.L1_MEMORY_CONFIG,
+            # Apply attention to values: [batch, heads, 1, dim]
+            attn_output = ttnn.matmul(
+                attn_probs,
+                value,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                compute_kernel_config=self.compute_kernel_config_hifi4,
             )
 
-            attn_output = ttnn.squeeze(attn_output, dim=2)
+            # Cleanup
+            ttnn.deallocate(key_t)
+            ttnn.deallocate(attn_scores)
+            ttnn.deallocate(attn_probs)
+
+            # Reshape back: [batch, heads, 1, dim] -> [batch, 1, heads, dim] -> [batch, 1, hidden]
+            attn_output = ttnn.permute(attn_output, (0, 2, 1, 3))
+            attn_output = ttnn.reshape(attn_output, (batch_size, seq_len, self.hidden_size))
 
         # Output projection
         attn_output_4d = ttnn.unsqueeze(attn_output, dim=1)
