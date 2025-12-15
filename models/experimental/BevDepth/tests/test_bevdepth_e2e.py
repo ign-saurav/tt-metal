@@ -253,7 +253,7 @@ def test_bevdepth_e2e(device):
         "depthnet_mid_channels": 512,
         "depthnet_context_channels": 80,
         "depthnet_depth_channels": 112,
-        "use_torch_conv2d_fallback": True,
+        "use_torch_fallback": True,
     }
 
     logger.info("Initializing TTNN model...")

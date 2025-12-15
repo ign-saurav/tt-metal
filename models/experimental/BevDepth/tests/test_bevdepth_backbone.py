@@ -513,7 +513,6 @@ model_config = {
     "WEIGHTS_DTYPE": ttnn.bfloat16,
     "ACTIVATIONS_DTYPE": ttnn.bfloat16,
     "batch_size": 1,
-    # Match reference base_exp.py config
     "neck_in_channels": [256, 512, 1024, 2048],
     "neck_out_channels": [128, 128, 128, 128],
     "neck_upsample_strides": [0.25, 0.5, 1, 2],
@@ -521,7 +520,7 @@ model_config = {
     "depthnet_mid_channels": 512,
     "depthnet_context_channels": 80,
     "depthnet_depth_channels": 112,
-    "use_torch_conv2d_fallback": True,
+    "use_torch_fallback": True,
 }
 
 

@@ -464,7 +464,7 @@ def run_ttnn_inference(device, params, imgs, mats_dict):
         "depthnet_mid_channels": 512,
         "depthnet_context_channels": 80,
         "depthnet_depth_channels": 112,
-        "use_torch_conv2d_fallback": True,
+        "use_torch_fallback": True,
     }
 
     ttnn_backbone = TtBaseLSSFPN(

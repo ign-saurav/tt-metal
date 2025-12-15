@@ -5,6 +5,7 @@ import torch
 import ttnn
 from dataclasses import dataclass
 from models.experimental.BevDepth.tt.utils import ttnn_conv2d
+from models.tt_cnn.tt.builder import TtMaxPool2d, MaxPool2dConfiguration
 
 
 @dataclass
@@ -353,6 +354,25 @@ class ResNet50_BEVDepth:
         self.layer3 = self._make_layer(parameters.layer3, 256, 6, stride=2)
         self.layer4 = self._make_layer(parameters.layer4, 512, 3, stride=2)
 
+        self._maxpool_cache = {}
+
+    def _get_maxpool(self, height, width, batch_size):
+        cache_key = (height, width, batch_size)
+        if cache_key not in self._maxpool_cache:
+            config = MaxPool2dConfiguration(
+                input_height=height,
+                input_width=width,
+                channels=64,
+                batch_size=batch_size,
+                kernel_size=(3, 3),
+                stride=(2, 2),
+                padding=(1, 1),
+                dilation=(1, 1),
+                dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+            )
+            self._maxpool_cache[cache_key] = TtMaxPool2d(config, self.device)
+        return self._maxpool_cache[cache_key]
+
     def _get_conv1_weights(self):
         """Get conv1 weights in TTNN format (convert if needed, ROW_MAJOR_LAYOUT for host)
 
@@ -472,33 +492,19 @@ class ResNet50_BEVDepth:
         if len(x.shape) == 3:
             x = ttnn.reshape(x, (batch_size, height, width, 64))
 
-        # Store conv1 output for debugging (before maxpool)
         if self.return_block_outputs:
             features["conv1_output"] = x
 
-        # Reshape for maxpool - demo passes directly but we need to reshape for our format
-        # Ensure x is not sharded before reshape
         if x.is_sharded():
             x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
         pool_input = ttnn.reshape(x, (batch_size, 1, height * width, 64))
 
-        # MaxPool: 3x3, stride 2
-        x = ttnn.max_pool2d(
-            input_tensor=pool_input,
-            batch_size=batch_size,
-            input_h=height,
-            input_w=width,
-            channels=64,
-            kernel_size=[3, 3],
-            stride=[2, 2],
-            padding=[1, 1],
-            dilation=[1, 1],
-        )
+        maxpool = self._get_maxpool(height, width, batch_size)
+        x = maxpool(pool_input)
 
         height = height // 2
         width = width // 2
 
-        # Convert sharded to interleaved before reshape (required for reshape)
         if x.is_sharded():
             x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
         x = ttnn.reshape(x, (batch_size, height, width, 64))

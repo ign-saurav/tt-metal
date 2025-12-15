@@ -70,6 +70,13 @@ class TtBaseLSSFPN:
         )
 
         self._neck_params = neck_parameters
+        img_h, img_w = self.final_dim
+        neck_input_shapes = [
+            (img_h // 4, img_w // 4),
+            (img_h // 8, img_w // 8),
+            (img_h // 16, img_w // 16),
+            (img_h // 32, img_w // 32),
+        ]
         self.img_neck = SECONDFPN_TTNN(
             device=device,
             parameters=neck_parameters,
@@ -77,7 +84,9 @@ class TtBaseLSSFPN:
             out_channels=self.model_config.get("neck_out_channels", [128, 128, 128, 128]),
             upsample_strides=self.model_config.get("neck_upsample_strides", [0.25, 0.5, 1, 2]),
             model_config=self.model_config,
-            use_torch_conv2d_fallback=self.model_config.get("use_torch_conv2d_fallback", False),
+            input_shapes=neck_input_shapes,
+            batch_size=self.model_config.get("batch_size", 1),
+            use_torch_fallback=self.model_config.get("use_torch_fallback", False),
         )
 
         # DepthNet: Depth estimation network
@@ -222,8 +231,14 @@ class TtBaseLSSFPN:
                     feat_ttnn = ttnn.to_layout(feat_ttnn, ttnn.TILE_LAYOUT)
                     neck_inputs_ttnn.append(feat_ttnn)
 
-            # Process through neck - create fresh instance to avoid stale device state
             if neck_inputs_ttnn:
+                img_h, img_w = self.final_dim
+                neck_input_shapes = [
+                    (img_h // 4, img_w // 4),
+                    (img_h // 8, img_w // 8),
+                    (img_h // 16, img_w // 16),
+                    (img_h // 32, img_w // 32),
+                ]
                 fresh_neck = SECONDFPN_TTNN(
                     device=self.device,
                     parameters=self._neck_params,
@@ -231,7 +246,9 @@ class TtBaseLSSFPN:
                     out_channels=self.model_config.get("neck_out_channels", [128, 128, 128, 128]),
                     upsample_strides=self.model_config.get("neck_upsample_strides", [0.25, 0.5, 1, 2]),
                     model_config=self.model_config,
-                    use_torch_conv2d_fallback=self.model_config.get("use_torch_conv2d_fallback", False),
+                    input_shapes=neck_input_shapes,
+                    batch_size=1,
+                    use_torch_fallback=self.model_config.get("use_torch_fallback", False),
                 )
                 neck_output = fresh_neck(neck_inputs_ttnn, batch_size=1)
 

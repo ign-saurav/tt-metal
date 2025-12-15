@@ -483,9 +483,10 @@ class TtBEVDepthHead:
         trunk_outputs = self.trunk(x, device)
         x0, x1, x2, x3 = trunk_outputs
 
-        # TTNN neck: expects list of TTNN tensors in NHWC format
         neck_inputs = [x0, x1, x2, x3]
         x = self.neck(neck_inputs, batch_size=1)
+        if isinstance(x, list):
+            x = x[0]
         x = ttnn.to_device(x, device, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         # Shared conv: 256 -> 64 channels (64+64+128 = 256 from concatenation)
