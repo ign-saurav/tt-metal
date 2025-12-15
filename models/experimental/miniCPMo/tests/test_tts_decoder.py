@@ -60,6 +60,7 @@ def test_tts_decoder_prefill(device, input_dtype, weight_dtype):
         inputs_embeds=inputs_embeds,
         use_cache=True,
         output_attentions=False,
+        cache_position=position_ids,
     )
 
     # Initialize TTNN decoder with same config
@@ -93,6 +94,7 @@ def test_tts_decoder_prefill(device, input_dtype, weight_dtype):
         position_ids=position_ids,
         past_key_values=past_key_values_for_prefill,
         use_cache=True,
+        cache_position=position_ids,
     )
 
     # Compare outputs
@@ -156,6 +158,7 @@ def test_tts_decoder_decode(device, input_dtype, weight_dtype):
         past_key_values=past_key_values,
         inputs_embeds=inputs_embeds,
         use_cache=True,
+        cache_position=position_ids,
     )
 
     # Initialize TTNN decoder with same config
@@ -191,6 +194,7 @@ def test_tts_decoder_decode(device, input_dtype, weight_dtype):
         position_ids=position_ids,
         past_key_values=past_key_values,
         use_cache=True,
+        cache_position=position_ids,
     )
 
     # Compare outputs

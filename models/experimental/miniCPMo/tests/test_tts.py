@@ -64,6 +64,6 @@ def test_mini_cpm_o_tts_only(device, input_dtype, weight_dtype):
     outputs = AttrDict(torch.load("/home/ubuntu/_generate_mel_spec_outputs.pt"))
     answer = torch.load("/home/ubuntu/_generate_mel_spec_answer.pt")
 
-    # Generate mel spectrogram and audio
+    # Generate mel spectrogram and audio (TT prefill + PyTorch decode)
     mel_spec = model._generate_mel_spec(inputs, outputs, answer)
     wav, sr = model.decode_mel_to_audio(mel_spec, output_path="result_audio_tts_test.wav")
