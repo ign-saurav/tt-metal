@@ -5,6 +5,10 @@ import ttnn
 import torch
 from loguru import logger
 
+# Deformable Conv wrapper - TODO: Native TTNN implementation pending
+# See: https://github.com/tenstorrent/tt-metal/issues/25526
+from models.experimental.BevDepth.tt.deformable_conv import TtDeformConv2dPack
+
 
 class MLP_TTNN:
     """MLP implementation for camera-aware features"""
@@ -646,6 +650,31 @@ class DepthNet_TTNN:
         else:
             self.mlp_bn = None
 
+        # Initialize DCN (Deformable Conv) using wrapper
+        # TODO: Native TTNN implementation pending - https://github.com/tenstorrent/tt-metal/issues/25526
+        if hasattr(parameters, "dcn_weight"):
+            self.dcn = TtDeformConv2dPack(
+                device=device,
+                in_channels=mid_channels,
+                out_channels=mid_channels,
+                kernel_size=3,
+                stride=1,
+                padding=1,
+                dilation=1,
+                groups=1,
+                deform_groups=1,
+                conv_offset_weight=parameters.dcn_conv_offset.weight.data
+                if hasattr(parameters, "dcn_conv_offset")
+                else None,
+                conv_offset_bias=parameters.dcn_conv_offset.bias.data
+                if hasattr(parameters, "dcn_conv_offset")
+                else None,
+                dcn_weight=parameters.dcn_weight,
+                dcn_bias=parameters.dcn_bias,
+            )
+        else:
+            self.dcn = None
+
         logger.info(f"DepthNet init: in={in_channels}, mid={mid_channels}, depth={depth_channels}")
 
     def __call__(self, x, batch_size=1, mats_dict=None):
@@ -1014,75 +1043,18 @@ class DepthNet_TTNN:
         # Ensure depth is in DRAM before DCN conv
         if depth.is_sharded():
             depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
-        # Otherwise, assume it's already in DRAM
         if depth.layout != ttnn.TILE_LAYOUT:
             depth = ttnn.to_layout(depth, ttnn.TILE_LAYOUT)
             if depth.is_sharded():
                 depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
 
-        # DCN (Deformable Conv) - using torchvision's deform_conv2d
-        # Similar approach to uniad/vadv2: convert to PyTorch, run deform_conv2d, convert back
-        try:
-            from torchvision.ops import deform_conv2d as tv_deform_conv2d
-
-            # Convert TTNN tensor to PyTorch (NCHW format)
-            depth_torch = ttnn.to_torch(depth)
-            # Handle different tensor formats
-            if len(depth_torch.shape) == 4:
-                if depth_torch.shape[1] == 1 and depth_torch.shape[2] == height * width:
-                    # Flattened format: [B, 1, H*W, C] -> [B, H, W, C]
-                    depth_torch = depth_torch.reshape(batch_size, height, width, self.mid_channels)
-                elif depth_torch.shape[1] == height and depth_torch.shape[2] == width:
-                    # Already in [B, H, W, C] format
-                    pass
-                else:
-                    # Try to infer from total elements
-                    total_elements = depth_torch.numel()
-                    expected_elements = batch_size * height * width * self.mid_channels
-                    if total_elements == expected_elements:
-                        depth_torch = depth_torch.reshape(batch_size, height, width, self.mid_channels)
-            # Convert from [B, H, W, C] to [B, C, H, W] for PyTorch
-            depth_torch = depth_torch.permute(0, 3, 1, 2).contiguous().float()
-
-            # Generate offset using conv_offset layer (similar to DeformConv2dPack)
-            offset = self.params.dcn_conv_offset(depth_torch)
-
-            # Run torchvision's deform_conv2d
-            # torchvision uses [x, y] order for offsets, which matches our conv_offset output
-            depth_torch = tv_deform_conv2d(
-                input=depth_torch.float(),
-                offset=offset.float(),
-                weight=self.params.dcn_weight.float(),
-                bias=self.params.dcn_bias.float() if self.params.dcn_bias is not None else None,
-                stride=(1, 1),
-                padding=(1, 1),
-                dilation=(1, 1),
-            )
-
-            # Convert back to TTNN format [B, H, W, C]
-            depth_torch = depth_torch.permute(0, 2, 3, 1).contiguous()  # [B, C, H, W] -> [B, H, W, C]
-
-            # Convert back to TTNN tensor
-            depth = ttnn.from_torch(
-                depth_torch,
-                device=self.device,
-                dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                layout=ttnn.TILE_LAYOUT,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            )
-
-            # Ensure depth is in correct shape [batch, height, width, channels]
-            if len(depth.shape) == 4 and depth.shape[0] == 1 and depth.shape[1] == 1:
-                # Flattened format: [1, 1, B*H*W, C] -> [B, H, W, C]
-                depth = ttnn.reshape(depth, (batch_size, height, width, self.mid_channels))
-            elif len(depth.shape) == 3:
-                # [1, B*H*W, C] -> [B, H, W, C]
-                depth = ttnn.reshape(depth, (batch_size, height, width, self.mid_channels))
-
-            # Log PCC after DCN
-        except ImportError:
-            # Fallback to regular grouped conv if torchvision not available
-            logger.warning("torchvision.ops.deform_conv2d not available, using regular Conv2d as approximation")
+        # DCN (Deformable Conv) - using TtDeformConv2dPack wrapper
+        # TODO: Native TTNN implementation pending - https://github.com/tenstorrent/tt-metal/issues/25526
+        if self.dcn is not None:
+            depth, _, _ = self.dcn(depth, batch_size, height, width)
+        else:
+            # Fallback to regular conv if DCN not initialized
+            logger.warning("DCN not initialized, using regular Conv2d as approximation")
             depth = ttnn_conv2d(
                 input_tensor=depth,
                 weight_tensor=self.params.dcn_weight,
@@ -1103,15 +1075,10 @@ class DepthNet_TTNN:
                 shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
                 packer_l1_acc=False,
             )
-
-            # Convert sharded to interleaved if needed (must be done BEFORE reshape)
             if depth.is_sharded():
                 depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
-
             if len(depth.shape) == 3:
                 depth = ttnn.reshape(depth, (batch_size, height, width, self.mid_channels))
-
-            # Log PCC after DCN
 
         # Ensure depth is in DRAM before final conv
         if depth.is_sharded():
