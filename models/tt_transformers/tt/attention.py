@@ -324,6 +324,8 @@ class Attention(LightweightModule):
 
         if configuration.query_pre_attn_scalar is not None:
             self.scale = configuration.query_pre_attn_scalar**-0.5
+        elif configuration.attention_multiplier is not None:
+            self.scale = configuration.attention_multiplier
         else:
             self.scale = self.head_dim**-0.5
 

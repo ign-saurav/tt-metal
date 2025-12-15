@@ -135,7 +135,8 @@ class Transformer(LightweightModule):
         # Initialize on-device sampling if supported
         # Sampling on device is supported only if each device has maximum logits size of 64*1024
         sampling_splits = self.args.num_devices if list(self.mesh_device.shape) != [1, 1] else 2
-        self._supports_on_device_sampling = self.args.vocab_size // sampling_splits <= 64 * 1024
+        # self._supports_on_device_sampling = self.args.vocab_size // sampling_splits <= 64 * 1024
+        self._supports_on_device_sampling = False  # TODO: Checkout what is going wrong
         if self._supports_on_device_sampling:
             self.sampling = SamplingGenerator(
                 args=args,
@@ -144,6 +145,9 @@ class Transformer(LightweightModule):
             )
         else:
             self.sampling = None
+
+        self.embedding_multiplier = args.embedding_multiplier
+        self.logits_scaling = args.logits_scaling
 
     def process_logits_after_prefill_trace(self, logits, last_token_idx):
         get_last_token = (last_token_idx // 32) * 32
@@ -526,6 +530,9 @@ class Transformer(LightweightModule):
         get_last_token=-1,
         kv_cache=None,
     ):
+        if self.embedding_multiplier is not None:
+            ttnn.multiply_(x, self.embedding_multiplier)
+
         for i, layer in enumerate(self.layers):
             # No-op if callers already provide the right memory config
             activation_dtype = self.model_config["DECODERS_OPTIMIZATIONS"].get_tensor_dtype(
@@ -563,6 +570,9 @@ class Transformer(LightweightModule):
             x = ttnn.interleaved_to_sharded(x, self.model_config["LM_HEAD_INPUT_MEMCFG"])
 
         x = self.lm_head(x)
+
+        if self.logits_scaling is not None:
+            ttnn.multiply_(x, self.logits_scaling)
 
         if mode == "prefill":
             x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
