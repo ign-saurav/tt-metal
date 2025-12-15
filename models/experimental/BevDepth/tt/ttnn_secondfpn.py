@@ -5,7 +5,43 @@ import ttnn
 import torch
 import torch.nn.functional as F
 import numpy as np
+from dataclasses import dataclass
 from loguru import logger
+
+
+@dataclass
+class SECONDFPNOptimizations:
+    conv_transpose: dict
+    conv2d: dict
+
+
+secondfpn_optimizations = SECONDFPNOptimizations(
+    conv_transpose={
+        "deallocate_activation": False,
+        "reallocate_halo_output": False,
+        "enable_act_double_buffer": False,
+        "enable_weights_double_buffer": False,
+    },
+    conv2d={
+        "deallocate_activation": False,
+        "reallocate_halo_output": False,
+        "enable_act_double_buffer": False,
+        "enable_weights_double_buffer": False,
+    },
+)
+
+
+@dataclass
+class SECONDFPNHeadOptimizations:
+    conv_transpose: dict
+
+
+secondfpn_head_optimizations = SECONDFPNHeadOptimizations(
+    conv_transpose={
+        "deallocate_activation": False,
+        "output_layout": ttnn.TILE_LAYOUT,
+    },
+)
 
 
 class SECONDFPN_TTNN:
@@ -13,11 +49,12 @@ class SECONDFPN_TTNN:
         self,
         device,
         parameters,
-        in_channels=[256, 512, 1024, 2048],
-        out_channels=[128, 128, 128, 128],
-        upsample_strides=[0.25, 0.5, 1, 2],
-        model_config=None,
+        in_channels,
+        out_channels,
+        upsample_strides,
+        model_config,
         use_torch_conv2d_fallback=False,
+        optimizations=None,
     ):
         self.device = device
         self.in_channels = in_channels
@@ -25,12 +62,8 @@ class SECONDFPN_TTNN:
         self.upsample_strides = upsample_strides
         self.num_levels = len(in_channels)
         self.use_torch_conv2d_fallback = use_torch_conv2d_fallback
-
-        self.model_config = model_config or {
-            "WEIGHTS_DTYPE": ttnn.bfloat16,
-            "ACTIVATIONS_DTYPE": ttnn.bfloat16,
-            "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
-        }
+        self.model_config = model_config
+        self.optimizations = optimizations or secondfpn_optimizations
 
         self.deblocks = parameters.deblocks
         self._original_weights = []
@@ -315,17 +348,16 @@ def prepare_secondfpn_parameters(
 
 
 class SECONDFPN_Head_TTNN:
-    """Pure TTNN implementation of SecondFPN for BEVDepth Head (bev_neck)."""
-
     def __init__(
         self,
         device,
         parameters,
-        in_channels=[160, 160, 320, 640],
-        out_channels=[64, 64, 64, 64],
-        upsample_strides=[1, 2, 4, 8],
-        model_config=None,
+        in_channels,
+        out_channels,
+        upsample_strides,
+        model_config,
         use_slicing=True,
+        optimizations=None,
     ):
         self.device = device
         self.in_channels = in_channels
@@ -333,15 +365,10 @@ class SECONDFPN_Head_TTNN:
         self.upsample_strides = upsample_strides
         self.num_levels = len(in_channels)
         self.use_slicing = use_slicing
-
-        self.model_config = model_config or {
-            "WEIGHTS_DTYPE": ttnn.bfloat16,
-            "ACTIVATIONS_DTYPE": ttnn.bfloat16,
-            "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
-        }
-
+        self.model_config = model_config
+        self.optimizations = optimizations or secondfpn_head_optimizations
         self.deblocks = parameters.deblocks
-        logger.info(f"SECONDFPN_Head_TTNN init: {self.num_levels} levels, pure TTNN with DRAM slicing")
+        logger.info(f"SECONDFPN_Head_TTNN init: {self.num_levels} levels")
 
     def __call__(self, x_list, batch_size=1):
         ups = []

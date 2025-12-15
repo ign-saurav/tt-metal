@@ -1,82 +1,74 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-
 import torch
 import ttnn
+from dataclasses import dataclass
 from models.experimental.BevDepth.tt.utils import ttnn_conv2d
 
 
-def get_conv_config(conv_type, custom_overrides=None):
-    """
-    Get preset configuration for different convolution types in ResNet50.
+@dataclass
+class ResNet50Optimizations:
+    conv1_7x7: dict
+    bottleneck_1x1_first: dict
+    bottleneck_3x3: dict
+    bottleneck_1x1_last: dict
+    downsample_1x1: dict
 
-    Args:
-        conv_type: One of 'conv1_7x7', 'bottleneck_1x1_first', 'bottleneck_3x3',
-                   'bottleneck_1x1_last', 'downsample_1x1'
-        custom_overrides: Dict of parameters to override defaults
 
-    Returns:
-        Dict of parameters for ttnn_conv2d
-    """
+resnet50_optimizations = ResNet50Optimizations(
+    conv1_7x7={
+        "activation": ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        "deallocate_activation": True,
+        "reallocate_halo_output": False,
+        "packer_l1_acc": False,
+        "enable_act_double_buffer": False,
+        "enable_weights_double_buffer": False,
+    },
+    bottleneck_1x1_first={
+        "activation": ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        "deallocate_activation": True,
+        "reallocate_halo_output": False,
+        "packer_l1_acc": False,
+        "enable_act_double_buffer": False,
+        "enable_weights_double_buffer": False,
+    },
+    bottleneck_3x3={
+        "activation": ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        "deallocate_activation": True,
+        "reallocate_halo_output": True,
+        "packer_l1_acc": False,
+        "enable_act_double_buffer": False,
+        "enable_weights_double_buffer": False,
+    },
+    bottleneck_1x1_last={
+        "activation": None,
+        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        "deallocate_activation": True,
+        "reallocate_halo_output": False,
+        "packer_l1_acc": False,
+        "enable_act_double_buffer": False,
+        "enable_weights_double_buffer": False,
+    },
+    downsample_1x1={
+        "activation": None,
+        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        "deallocate_activation": True,
+        "reallocate_halo_output": False,
+        "packer_l1_acc": False,
+        "enable_act_double_buffer": False,
+        "enable_weights_double_buffer": False,
+    },
+)
 
-    configs = {
-        "conv1_7x7": {
-            "activation": ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": False,
-            "packer_l1_acc": False,
-            "enable_act_double_buffer": False,
-            "enable_weights_double_buffer": False,
-        },
-        "bottleneck_1x1_first": {
-            "activation": ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": False,
-            "packer_l1_acc": False,
-            "enable_act_double_buffer": False,
-            "enable_weights_double_buffer": False,
-        },
-        "bottleneck_3x3": {
-            "activation": ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": True,
-            "packer_l1_acc": False,
-            "enable_act_double_buffer": False,
-            "enable_weights_double_buffer": False,
-        },
-        "bottleneck_1x1_last": {
-            "activation": None,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": False,
-            "packer_l1_acc": False,
-            "enable_act_double_buffer": False,
-            "enable_weights_double_buffer": False,
-        },
-        "downsample_1x1": {
-            "activation": None,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": True,
-            "reallocate_halo_output": False,
-            "packer_l1_acc": False,
-            "enable_act_double_buffer": False,
-            "enable_weights_double_buffer": False,
-        },
-    }
 
-    if conv_type not in configs:
-        raise ValueError(f"Unknown conv_type: {conv_type}. Available: {list(configs.keys())}")
-
-    config = configs[conv_type].copy()
-
-    if custom_overrides:
-        config.update(custom_overrides)
-
-    return config
+def get_conv_config(conv_type, optimizations=None):
+    if optimizations is None:
+        optimizations = resnet50_optimizations
+    return getattr(optimizations, conv_type).copy()
 
 
 class Bottleneck:
@@ -332,13 +324,21 @@ class Bottleneck:
 
 class ResNet50_BEVDepth:
     def __init__(
-        self, device, parameters, batch_size, model_config, return_intermediate=True, return_block_outputs=False
+        self,
+        device,
+        parameters,
+        batch_size,
+        model_config,
+        return_intermediate=True,
+        return_block_outputs=False,
+        optimizations=None,
     ):
         self.device = device
         self.batch_size = batch_size
         self.model_config = model_config
         self.return_intermediate = return_intermediate
-        self.return_block_outputs = return_block_outputs  # Return outputs from each block
+        self.return_block_outputs = return_block_outputs
+        self.optimizations = optimizations or resnet50_optimizations
 
         # Conv1 - keep as PyTorch tensor, convert lazily
         self.conv1_weight_torch = parameters.conv1.weight

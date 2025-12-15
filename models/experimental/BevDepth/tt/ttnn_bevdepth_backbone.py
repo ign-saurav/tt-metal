@@ -50,12 +50,7 @@ class TtBaseLSSFPN:
             model_config: Model configuration dict (dtype, math fidelity, etc.)
         """
         self.device = device
-
-        self.model_config = model_config or {
-            "WEIGHTS_DTYPE": ttnn.bfloat16,
-            "ACTIVATIONS_DTYPE": ttnn.bfloat16,
-            "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
-        }
+        self.model_config = model_config
 
         # Store LSS configuration
         self.lss_conf = lss_conf or {}
