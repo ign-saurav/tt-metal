@@ -1658,6 +1658,10 @@ class ModelArgs:
         )
 
         self.query_pre_attn_scalar = text_config.get("query_pre_attn_scalar", None)
+        self.attention_multiplier = text_config.get("attention_multiplier", None)
+        self.residual_multiplier = text_config.get("residual_multiplier", None)
+        self.embedding_multiplier = text_config.get("embedding_multiplier", None)
+        self.logits_scaling = text_config.get("logits_scaling", None)
 
         # Sliding window attention
         self.sliding_window = text_config.get("sliding_window", None)

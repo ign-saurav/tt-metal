@@ -188,6 +188,8 @@ class TransformerBlock(LightweightModule):
             # If post_feedforward_layernorm is not in state_dict, we do not use it
             self.post_ff_norm = None
 
+        self.residual_multiplier = args.residual_multiplier
+
     def forward(
         self,
         x: ttnn.Tensor,
@@ -232,6 +234,8 @@ class TransformerBlock(LightweightModule):
         attn_out = ttnn.to_memory_config(attn_out, skip_mem_cfg)
 
         if self.pre_ff_norm is None:
+            if self.residual_multiplier is not None:
+                ttnn.multiply_(attn_out, self.residual_multiplier)
             hidden_states = ttnn.add(
                 residual, attn_out, memory_config=skip_mem_cfg, dtype=ttnn.bfloat16 if TG else None
             )
@@ -259,6 +263,8 @@ class TransformerBlock(LightweightModule):
                 )
 
                 hidden_states = ttnn.div(hidden_states, self.num_devices)
+            if self.residual_multiplier is not None:
+                ttnn.multiply_(hidden_states, self.residual_multiplier)
             hidden_states = ttnn.add(
                 residual, hidden_states, memory_config=skip_mem_cfg, dtype=ttnn.bfloat16 if TG else None
             )
@@ -294,6 +300,9 @@ class TransformerBlock(LightweightModule):
                 )
 
                 hidden_states = ttnn.div(hidden_states, self.num_devices)
+
+        if self.residual_multiplier is not None:
+            ttnn.multiply_(hidden_states, self.residual_multiplier)
 
         out = ttnn.add(
             residual,
