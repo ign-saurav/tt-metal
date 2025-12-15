@@ -2,16 +2,17 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+from time import time
+from loguru import logger
+
 import pytest
 import torch
 import ttnn
 
 from ....utils.check import assert_quality
-from ....models.vae import vae_flux1_kontext as vae_flux1
+from ....models.vae import vae_flux1
 from ....parallel.manager import CCLManager
-from ....parallel.config import vae_all_gather, VAEParallelConfig, ParallelFactor
-from time import time
-from loguru import logger
+from ....parallel.config import VAEParallelConfig, ParallelFactor
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 
 
