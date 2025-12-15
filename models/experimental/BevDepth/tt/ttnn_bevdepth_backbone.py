@@ -74,7 +74,6 @@ class TtBaseLSSFPN:
             return_block_outputs=False,
         )
 
-        # Neck: SECONDFPN - store parameters for creating fresh instances per image
         self._neck_params = neck_parameters
         self.img_neck = SECONDFPN_TTNN(
             device=device,
@@ -83,7 +82,7 @@ class TtBaseLSSFPN:
             out_channels=self.model_config.get("neck_out_channels", [128, 128, 128, 128]),
             upsample_strides=self.model_config.get("neck_upsample_strides", [0.25, 0.5, 1, 2]),
             model_config=self.model_config,
-            use_torch_conv2d_fallback=self.model_config.get("use_torch_conv2d_fallback", True),
+            use_torch_conv2d_fallback=self.model_config.get("use_torch_conv2d_fallback", False),
         )
 
         # DepthNet: Depth estimation network
@@ -237,7 +236,7 @@ class TtBaseLSSFPN:
                     out_channels=self.model_config.get("neck_out_channels", [128, 128, 128, 128]),
                     upsample_strides=self.model_config.get("neck_upsample_strides", [0.25, 0.5, 1, 2]),
                     model_config=self.model_config,
-                    use_torch_conv2d_fallback=self.model_config.get("use_torch_conv2d_fallback", True),
+                    use_torch_conv2d_fallback=self.model_config.get("use_torch_conv2d_fallback", False),
                 )
                 neck_output = fresh_neck(neck_inputs_ttnn, batch_size=1)
 

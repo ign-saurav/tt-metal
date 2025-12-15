@@ -33,7 +33,6 @@ class SECONDFPN_TTNN:
         }
 
         self.deblocks = parameters.deblocks
-        # Store deep copies of weights as float32 numpy to prevent any torch/ttnn corruption
         self._original_weights = []
         for i in range(self.num_levels):
             w = self.deblocks[i].conv_weight.detach().float().cpu().numpy().copy()
@@ -43,9 +42,6 @@ class SECONDFPN_TTNN:
                 else None
             )
             self._original_weights.append((w, b))
-        logger.info(
-            f"SECONDFPN init: {self.num_levels} levels, " f"use_torch_conv2d_fallback={use_torch_conv2d_fallback}"
-        )
 
     def __call__(self, x, batch_size=1):
         ups = []
@@ -153,7 +149,6 @@ class SECONDFPN_TTNN:
                     target_height = conv_out_height
                     target_width = conv_out_width
 
-                # kernel==stride case has precision issues in TTNN, use PyTorch fallback if enabled
                 kernel_equals_stride = kernel_size[0] == conv_stride and kernel_size[1] == conv_stride
                 use_pytorch_conv2d = kernel_equals_stride and self.use_torch_conv2d_fallback
 
