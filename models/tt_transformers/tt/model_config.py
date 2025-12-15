@@ -2617,6 +2617,10 @@ class ModelArgs:
         )
 
         self.query_pre_attn_scalar = text_config.get("query_pre_attn_scalar", None)
+        self.attention_multiplier = text_config.get("attention_multiplier", None)
+        self.residual_multiplier = text_config.get("residual_multiplier", None)
+        self.embedding_multiplier = text_config.get("embedding_multiplier", None)
+        self.logits_scaling = text_config.get("logits_scaling", None)
 
         # Configurable MLP activation type
         self.mlp_activation_type = self._get_hidden_activation_type(text_config)
