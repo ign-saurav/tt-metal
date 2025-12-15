@@ -768,6 +768,8 @@ def main():
             boxes_torch, classes_torch, scores_torch = decode_predictions(torch_preds, class_names, args.threshold)
             pred_corners_torch, pred_classes_torch = boxes_to_corners(boxes_torch, classes_torch, args.show_range)
             logger.info(f"Torch: Detected {len(pred_corners_torch)} objects")
+            for cls, score in zip(classes_torch, scores_torch):
+                logger.info(f"  Torch: {cls} score={score:.4f}")
 
     if args.mode in ["ttnn", "both"]:
         try:
@@ -781,6 +783,8 @@ def main():
                     boxes_ttnn, classes_ttnn, scores_ttnn = decode_predictions(ttnn_preds, class_names, args.threshold)
                     pred_corners_ttnn, pred_classes_ttnn = boxes_to_corners(boxes_ttnn, classes_ttnn, args.show_range)
                     logger.info(f"TTNN: Detected {len(pred_corners_ttnn)} objects")
+                    for cls, score in zip(classes_ttnn, scores_ttnn):
+                        logger.info(f"  TTNN: {cls} score={score:.4f}")
             finally:
                 ttnn.close_device(device)
         except ImportError:

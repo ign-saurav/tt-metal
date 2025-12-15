@@ -3,7 +3,10 @@ import torch
 from dataclasses import dataclass
 
 from models.experimental.BevDepth.tt.utils import TTConv2D, TTSplitConvTranspose2D
-from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_Head_TTNN, prepare_secondfpn_head_parameters
+from models.experimental.BevDepth.tt.ttnn_secondfpn import (
+    SECONDFPN_Head_TTNN,
+    prepare_secondfpn_head_parameters,
+)
 
 
 @dataclass

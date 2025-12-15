@@ -3,36 +3,97 @@
 
 import ttnn
 import torch
+from dataclasses import dataclass
 from loguru import logger
-
-# Deformable Conv wrapper - TODO: Native TTNN implementation pending
-# See: https://github.com/tenstorrent/tt-metal/issues/25526
 from models.experimental.BevDepth.tt.deformable_conv import TtDeformConv2dPack
 
 
-class MLP_TTNN:
-    """MLP implementation for camera-aware features"""
+@dataclass
+class DepthNetOptimizations:
+    reduce_conv: dict
+    mlp: dict
+    se_layer: dict
+    basic_block: dict
+    aspp: dict
+    context_conv: dict
+    depth_conv: dict
 
+
+depthnet_optimizations = DepthNetOptimizations(
+    reduce_conv={
+        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        "deallocate_activation": True,
+        "packer_l1_acc": False,
+    },
+    mlp={},
+    se_layer={
+        "shard_layout": None,
+        "packer_l1_acc": False,
+    },
+    basic_block={
+        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        "packer_l1_acc": False,
+    },
+    aspp={
+        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        "packer_l1_acc": False,
+    },
+    context_conv={
+        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        "packer_l1_acc": False,
+    },
+    depth_conv={
+        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        "packer_l1_acc": False,
+    },
+)
+
+
+class MLP_TTNN:
     def __init__(self, device, parameters, in_features, hidden_features, out_features, model_config):
         self.device = device
         self.in_features = in_features
         self.hidden_features = hidden_features
         self.out_features = out_features
         self.model_config = model_config
-        self.params = parameters
 
-    def __call__(self, x_torch):
-        """Forward pass: x_torch is PyTorch tensor [batch*num_cams, in_features]"""
-        # Convert input to bfloat16 to match weights dtype
-        if x_torch.dtype != torch.bfloat16:
-            x_torch = x_torch.to(torch.bfloat16)
+        self.fc1_weight = ttnn.from_torch(
+            parameters.fc1_weight.T.contiguous(),
+            dtype=model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            layout=ttnn.TILE_LAYOUT,
+            device=device,
+        )
+        self.fc1_bias = ttnn.from_torch(
+            parameters.fc1_bias.unsqueeze(0),
+            dtype=model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            layout=ttnn.TILE_LAYOUT,
+            device=device,
+        )
+        self.fc2_weight = ttnn.from_torch(
+            parameters.fc2_weight.T.contiguous(),
+            dtype=model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            layout=ttnn.TILE_LAYOUT,
+            device=device,
+        )
+        self.fc2_bias = ttnn.from_torch(
+            parameters.fc2_bias.unsqueeze(0),
+            dtype=model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
+            layout=ttnn.TILE_LAYOUT,
+            device=device,
+        )
 
-        # fc1: Linear(in_features, hidden_features)
-        x = torch.nn.functional.linear(x_torch, self.params.fc1_weight, self.params.fc1_bias)
-        # ReLU activation
-        x = torch.relu(x)
-        # fc2: Linear(hidden_features, out_features)
-        x = torch.nn.functional.linear(x, self.params.fc2_weight, self.params.fc2_bias)
+    def __call__(self, x):
+        if isinstance(x, torch.Tensor):
+            x = ttnn.from_torch(
+                x.to(torch.bfloat16),
+                dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+            )
+
+        x = ttnn.linear(x, self.fc1_weight, bias=self.fc1_bias)
+        x = ttnn.relu(x)
+        x = ttnn.linear(x, self.fc2_weight, bias=self.fc2_bias)
         return x
 
 
@@ -593,24 +654,20 @@ class DepthNet_TTNN:
         self,
         device,
         parameters,
-        in_channels=512,
-        mid_channels=256,
-        context_channels=512,
-        depth_channels=112,  # len(torch.arange(2.0, 58.0, 0.5)) from d_bound
-        model_config=None,
+        in_channels,
+        mid_channels,
+        context_channels,
+        depth_channels,
+        model_config,
+        optimizations=None,
     ):
         self.device = device
         self.in_channels = in_channels
         self.mid_channels = mid_channels
         self.context_channels = context_channels
         self.depth_channels = depth_channels
-
-        self.model_config = model_config or {
-            "WEIGHTS_DTYPE": ttnn.bfloat16,
-            "ACTIVATIONS_DTYPE": ttnn.bfloat16,
-            "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
-        }
-
+        self.model_config = model_config
+        self.optimizations = optimizations or depthnet_optimizations
         self.params = parameters
 
         # Initialize sub-modules
@@ -762,17 +819,16 @@ class DepthNet_TTNN:
                 mlp_input = mlp_input + self.mlp_bn.bias
             mlp_input = mlp_input.reshape(actual_batch_size, 1, num_cams, -1)  # [B, 1, num_cams, 27]
 
-        # Compute MLP outputs
-        mlp_input_flat = mlp_input.reshape(-1, mlp_input.shape[-1])  # [B*num_cams, 27]
+        mlp_input_flat = mlp_input.reshape(-1, mlp_input.shape[-1])
         if self.depth_mlp is not None:
-            depth_se_mlp = self.depth_mlp(mlp_input_flat)  # [B*num_cams, mid_channels]
-            depth_se_mlp = depth_se_mlp.view(actual_batch_size, 1, num_cams, -1)  # [B, 1, num_cams, mid_channels]
+            depth_se_mlp = self.depth_mlp(mlp_input_flat)
+            depth_se_mlp = ttnn.to_torch(depth_se_mlp).view(actual_batch_size, 1, num_cams, -1)
         else:
             depth_se_mlp = None
 
         if self.context_mlp is not None:
-            context_se_mlp = self.context_mlp(mlp_input_flat)  # [B*num_cams, mid_channels]
-            context_se_mlp = context_se_mlp.view(actual_batch_size, 1, num_cams, -1)  # [B, 1, num_cams, mid_channels]
+            context_se_mlp = self.context_mlp(mlp_input_flat)
+            context_se_mlp = ttnn.to_torch(context_se_mlp).view(actual_batch_size, 1, num_cams, -1)
         else:
             context_se_mlp = None
 
