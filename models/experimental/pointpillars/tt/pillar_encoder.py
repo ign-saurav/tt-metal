@@ -1,3 +1,8 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+
+# SPDX-License-Identifier: Apache-2.0
+
+
 import ttnn
 import torch
 from models.experimental.pointpillars.tt.utils import TtPointPillarsConv1D
@@ -29,7 +34,7 @@ class TtPillarEncoder:
             parameters["conv"],
             device=device,
             activation=None,
-            shard_layout=None,  # Disable sharding to free L1 for other ops
+            shard_layout=None,
             deallocate_activation=True,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
@@ -40,7 +45,6 @@ class TtPillarEncoder:
         coors_batch: torch tensor (p1+p2+...+pb, 4)
         npoints_per_pillar: torch tensor (p1+p2+...+pb,)
         """
-        # 1. calculate offset to the points center (in each pillar)
         offset_pt_center_tt = ttnn.from_torch(
             pillars[:, :, :3] - torch.sum(pillars[:, :, :3], dim=1, keepdim=True) / npoints_per_pillar[:, None, None],
             dtype=ttnn.bfloat16,
@@ -49,7 +53,6 @@ class TtPillarEncoder:
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
-        # 2. calculate offset to the pillar center
         x_offset_pi_center_tt = ttnn.from_torch(
             (pillars[:, :, :1] - (coors_batch[:, None, 1:2] * self.vx + self.x_offset)),
             dtype=ttnn.bfloat16,
@@ -74,7 +77,6 @@ class TtPillarEncoder:
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
-        # 3. encoder
         features_tt = ttnn.concat(
             [
                 x_offset_pi_center_tt,
@@ -85,7 +87,7 @@ class TtPillarEncoder:
                 y_offset_pi_center_tt,
             ],
             dim=-1,
-        )  # (p1 + p2 + ... + pb, num_points, 9)
+        )
 
         npoints_per_pillar_tt = ttnn.from_torch(
             npoints_per_pillar[None, :],
@@ -94,21 +96,18 @@ class TtPillarEncoder:
             layout=ttnn.TILE_LAYOUT,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
-        # 4. Apply mask
-        voxel_ids = ttnn.arange(0, pillars.size(1), dtype=ttnn.bfloat16, device=self.device)  # (num_points, )
-        mask = ttnn.unsqueeze(voxel_ids, dim=1) < npoints_per_pillar_tt  # (num_points, p1 + p2 + ... + pb)
-        mask = ttnn.permute(mask, (1, 0))  # (p1 + p2 + ... + pb, num_points)
+        voxel_ids = ttnn.arange(0, pillars.size(1), dtype=ttnn.bfloat16, device=self.device)
+        mask = ttnn.unsqueeze(voxel_ids, dim=1) < npoints_per_pillar_tt
+        mask = ttnn.permute(mask, (1, 0))
         mask = ttnn.unsqueeze(mask, dim=2)
 
         features_tt = features_tt * mask
         ttnn.deallocate(mask)
 
-        # 5. Apply conv1d as linear (treating each pillar independently)
         num_pillars, num_points, in_ch = features_tt.shape
 
         features_tt = self.conv1d(features_tt)
 
-        # Apply ReLU (keep in DRAM - tensor is ~25MB)
         features_tt = ttnn.to_memory_config(features_tt, ttnn.DRAM_MEMORY_CONFIG)
         features_tt = ttnn.relu(features_tt, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
@@ -119,16 +118,14 @@ class TtPillarEncoder:
         # Handle multi-device: use mesh_composer to aggregate tensor from all devices
         num_devices = self.device.get_num_devices() if hasattr(self.device, "get_num_devices") else 1
         if num_devices > 1:
-            # Data is replicated, so all devices have same result - concatenate and take first portion
             mesh_composer = ttnn.ConcatMeshToTensor(self.device, dim=0)
             pooling_features = ttnn.to_torch(features_tt, mesh_composer=mesh_composer)
-            pooling_features = pooling_features[:num_pillars]  # Take only first device's result
+            pooling_features = pooling_features[:num_pillars]
         else:
             pooling_features = ttnn.to_torch(features_tt)
         ttnn.deallocate(features_tt)
         pooling_features = pooling_features.reshape(-1, 64)
 
-        # 7. Pillar scatter
         batched_canvas = []
         bs = int(coors_batch[-1, 0].item()) + 1
 
@@ -137,10 +134,8 @@ class TtPillarEncoder:
             cur_coors = coors_batch[cur_coors_idx, :]
             cur_features = pooling_features[cur_coors_idx]
 
-            # Convert 2D coordinates to 1D indices
             flat_indices = cur_coors[:, 1].long() * self.y_l + cur_coors[:, 2].long()
 
-            # Create flattened canvas
             canvas_flat_tt = ttnn.zeros(
                 (self.x_l * self.y_l, self.out_channel),
                 dtype=ttnn.bfloat16,
@@ -154,7 +149,7 @@ class TtPillarEncoder:
                 dtype=ttnn.int32,
                 device=self.device,
                 layout=ttnn.ROW_MAJOR_LAYOUT,
-                memory_config=ttnn.L1_MEMORY_CONFIG,  # Small tensor, fits in L1
+                memory_config=ttnn.L1_MEMORY_CONFIG,
             )
 
             cur_features_tt = ttnn.from_torch(
@@ -162,13 +157,11 @@ class TtPillarEncoder:
                 dtype=ttnn.bfloat16,
                 device=self.device,
                 layout=ttnn.ROW_MAJOR_LAYOUT,
-                memory_config=ttnn.L1_MEMORY_CONFIG,  # Small tensor, fits in L1
+                memory_config=ttnn.L1_MEMORY_CONFIG,
             )
 
-            # Perform scatter (returns new tensor, not in-place)
             canvas_flat_tt = ttnn.scatter(canvas_flat_tt, 0, flat_indices_tt, cur_features_tt)
 
-            # Reshape back to 2D
             canvas = ttnn.view(canvas_flat_tt, (self.x_l, self.y_l, self.out_channel))
             ttnn.deallocate(canvas_flat_tt)
             canvas = ttnn.permute(canvas, (2, 1, 0))

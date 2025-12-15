@@ -39,13 +39,12 @@ def test_pillar_encoder(device, voxel_size, point_cloud_range, in_channel, out_c
 
         # Filter only Backbone weights
         pillar_encoder_state_dict = {}
-        prefix = "pillar_encoder."  # Adjust this based on your model's structure
+        prefix = "pillar_encoder."
         for key, value in state_dict.items():
             if key.startswith(prefix):
                 new_key = key.replace(prefix, "")
                 pillar_encoder_state_dict[new_key] = value
 
-        # Load the filtered weights into your model
         torch_model.load_state_dict(pillar_encoder_state_dict)
     except FileNotFoundError:
         logger.warning("Checkpoint file not found, using random weights")
@@ -53,7 +52,6 @@ def test_pillar_encoder(device, voxel_size, point_cloud_range, in_channel, out_c
     torch_model = torch_model.to(dtype=torch.bfloat16)
     torch_model.eval()
 
-    # Rest of the test remains the same
     num_pillars = 6169
     num_points = 32
     num_features = 4

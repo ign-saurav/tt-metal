@@ -27,11 +27,9 @@ def test_neck(device, in_channels, upsample_strides, out_channels, reset_seeds):
     # Create reference model
     torch_model = Neck(in_channels, upsample_strides, out_channels)
 
-    # Load pretrained weights from .pth file (optional)
     try:
         checkpoint = torch.load("epoch_160.pth", map_location="cpu")
 
-        # Extract Neck weights from the full model checkpoint
         if "state_dict" in checkpoint:
             state_dict = checkpoint["state_dict"]
         elif "model" in checkpoint:
@@ -41,13 +39,12 @@ def test_neck(device, in_channels, upsample_strides, out_channels, reset_seeds):
 
         # Filter only Neck weights
         neck_state_dict = {}
-        prefix = "neck."  # Adjust this based on your model's structure
+        prefix = "neck."
         for key, value in state_dict.items():
             if key.startswith(prefix):
                 new_key = key.replace(prefix, "")
                 neck_state_dict[new_key] = value
 
-        # Load the filtered weights into your model
         torch_model.load_state_dict(neck_state_dict)
     except FileNotFoundError:
         logger.warning("Checkpoint file not found, using random weights")
@@ -77,7 +74,7 @@ def test_neck(device, in_channels, upsample_strides, out_channels, reset_seeds):
     ttnn_inputs = []
     for torch_input in torch_inputs:
         ttnn_input = ttnn.from_torch(
-            torch_input.permute(0, 2, 3, 1),  # Convert NCHW to NHWC
+            torch_input.permute(0, 2, 3, 1),
             dtype=ttnn.bfloat16,
             device=device,
             layout=ttnn.TILE_LAYOUT,

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+
+# SPDX-License-Identifier: Apache-2.0
+
 import ttnn
 from models.experimental.pointpillars.tt.utils import TtPointPillarsConvTranspose2D, TtPointPillarsConvTranspose2DSplit
 
@@ -89,12 +93,12 @@ class TtNeck:
 
         x1 = ttnn.batch_norm(
             x1,
-            running_mean=self.parameters[f"decoder_1"]["bn_running_mean"],  # Shape: [1, C, 1, 1]
-            running_var=self.parameters[f"decoder_1"]["bn_running_var"],  # Shape: [1, C, 1, 1]
+            running_mean=self.parameters[f"decoder_1"]["bn_running_mean"],
+            running_var=self.parameters[f"decoder_1"]["bn_running_var"],
             training=False,
             eps=1e-05,
-            weight=self.parameters[f"decoder_1"]["bn_weight"],  # Shape: [1, C, 1, 1]
-            bias=self.parameters[f"decoder_1"]["bn_bias"],  # Shape: [1, C, 1, 1]
+            weight=self.parameters[f"decoder_1"]["bn_weight"],
+            bias=self.parameters[f"decoder_1"]["bn_bias"],
             compute_kernel_config=self.bn_config,
         )
 
@@ -111,12 +115,12 @@ class TtNeck:
 
         x2 = ttnn.batch_norm(
             x2,
-            running_mean=self.parameters[f"decoder_2"]["bn_running_mean"],  # Shape: [1, C, 1, 1]
-            running_var=self.parameters[f"decoder_2"]["bn_running_var"],  # Shape: [1, C, 1, 1]
+            running_mean=self.parameters[f"decoder_2"]["bn_running_mean"],
+            running_var=self.parameters[f"decoder_2"]["bn_running_var"],
             training=False,
             eps=1e-05,
-            weight=self.parameters[f"decoder_2"]["bn_weight"],  # Shape: [1, C, 1, 1]
-            bias=self.parameters[f"decoder_2"]["bn_bias"],  # Shape: [1, C, 1, 1]
+            weight=self.parameters[f"decoder_2"]["bn_weight"],
+            bias=self.parameters[f"decoder_2"]["bn_bias"],
             compute_kernel_config=self.bn_config,
         )
 
@@ -125,7 +129,6 @@ class TtNeck:
 
         outs.append(x2)
 
-        # Concatenate along channel dimension (dim=3 in NHWC format)
         out = ttnn.concat(outs, dim=3)
         ttnn.deallocate(x0)
         ttnn.deallocate(x1)

@@ -37,7 +37,6 @@ def test_pointpillars_full_pipeline(device, nclasses, reset_seeds):
     try:
         checkpoint = torch.load("epoch_160.pth", map_location="cpu")
 
-        # Extract state_dict from checkpoint
         if "state_dict" in checkpoint:
             state_dict = checkpoint["state_dict"]
         elif "model" in checkpoint:
@@ -45,22 +44,17 @@ def test_pointpillars_full_pipeline(device, nclasses, reset_seeds):
         else:
             state_dict = checkpoint
 
-        # Load the weights into the model
         torch_model.load_state_dict(state_dict)
         logger.info("Successfully loaded pretrained weights from epoch_160.pth")
     except FileNotFoundError:
         logger.warning("Checkpoint file 'epoch_160.pth' not found, using random weights")
 
-    # Convert model to bfloat16 AFTER loading weights
     torch_model = torch_model.to(dtype=torch.bfloat16)
     torch_model.eval()
 
-    # Create test input (point cloud)
-    batched_pts = [torch.randn(18221, 4, dtype=torch.bfloat16)]  # Example point cloud
-    # batched_pts = torch.load("real_input.pt")
+    batched_pts = [torch.randn(18221, 4, dtype=torch.bfloat16)]
     torch_cls, torch_reg, torch_dir = torch_model(batched_pts)
 
-    # Preprocess model parameters (excluding pillar_layer)
     parameters = preprocess_model_parameters(
         initialize_model=lambda: torch_model,
         custom_preprocessor=create_custom_mesh_preprocessor(mesh_mapper=None),
@@ -77,22 +71,19 @@ def test_pointpillars_full_pipeline(device, nclasses, reset_seeds):
         device=device,
     )
 
-    # Create TTNN model (no pillar_layer) - simplified constructor
     tt_model = TtPointPillars(
         nclasses=nclasses,
         parameters=parameters,
         device=device,
     )
 
-    # Preprocess point cloud to pillar features
     pillar_features = preprocessor.forward(batched_pts)
     pillar_features = ttnn.permute(pillar_features, (0, 2, 3, 1))  # NHWC to NCHW [1, 64, 496, 432] to [1, 496, 432, 64]
     pillar_features = ttnn.reshape(
         pillar_features,
         (pillar_features.shape[0], 1, pillar_features.shape[1] * pillar_features.shape[2], pillar_features.shape[3]),
-    )  # NHWC to NCHW [1, 496, 432, 64] to [1, 1, 214272, 64]
+    )
 
-    # Run TTNN model with preprocessed pillar features
     tt_cls, tt_reg, tt_dir = tt_model.forward(pillar_features)
 
     # Compare classification output

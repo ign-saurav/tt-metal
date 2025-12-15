@@ -69,7 +69,7 @@ def fold_batch_norm1d_into_conv1d(conv, bn):
     if not bn.track_running_stats:
         raise RuntimeError("BatchNorm1d must have track_running_stats=True to be folded into Conv1d")
 
-    weight = conv.weight  # Shape: [out_channels, in_channels, kernel_size]
+    weight = conv.weight
     bias = conv.bias
     running_mean = bn.running_mean
     running_var = bn.running_var
@@ -77,7 +77,6 @@ def fold_batch_norm1d_into_conv1d(conv, bn):
     scale = bn.weight
     shift = bn.bias
 
-    # For 1D: scale factor applied per output channel
     weight = weight * (scale / torch.sqrt(running_var + eps))[:, None, None]
 
     if bias is not None:
@@ -85,7 +84,6 @@ def fold_batch_norm1d_into_conv1d(conv, bn):
     else:
         bias = shift - running_mean * (scale / torch.sqrt(running_var + eps))
 
-    # For 1D convolutions, bias shape should be [1, 1, -1] instead of [1, 1, 1, -1]
     bias = bias.reshape(1, 1, 1, -1)
 
     return weight, bias
@@ -96,7 +94,7 @@ def fold_batch_norm2d_into_conv_transpose2d(conv_transpose, bn):
     if not bn.track_running_stats:
         raise RuntimeError("BatchNorm2d must have track_running_stats=True to be folded into ConvTranspose2d")
 
-    weight = conv_transpose.weight  # Shape: [in_channels, out_channels, kernel_h, kernel_w]
+    weight = conv_transpose.weight
     bias = conv_transpose.bias
     running_mean = bn.running_mean
     running_var = bn.running_var
@@ -104,7 +102,6 @@ def fold_batch_norm2d_into_conv_transpose2d(conv_transpose, bn):
     scale = bn.weight
     shift = bn.bias
 
-    # For ConvTranspose2d, scale along dimension 1 (out_channels), not dimension 0
     weight = weight * (scale / torch.sqrt(running_var + eps))[None, :, None, None]
 
     if bias is not None:
@@ -117,15 +114,14 @@ def fold_batch_norm2d_into_conv_transpose2d(conv_transpose, bn):
 
 def _extract_backbone(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
     """Extract and preprocess Backbone parameters with fused BatchNorm."""
-    assert isinstance(model, Backbone)  # Your Backbone class
+    assert isinstance(model, Backbone)
 
     for i in range(len(model.multi_blocks)):
         block = model.multi_blocks[i]
         parameters[f"block_{i}"] = {}
 
-        # Process each conv-bn-relu triplet in the block
         conv_idx = 0
-        for j in range(0, len(block), 3):  # Step by 3 (conv, bn, relu)
+        for j in range(0, len(block), 3):
             conv_layer = block[j]
             bn_layer = block[j + 1]
 
@@ -151,7 +147,6 @@ def _extract_pillar_encoder(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=
     assert isinstance(model, PillarEncoder)
     parameters["conv"] = {}
 
-    # Use the helper function
     weight, bias = fold_batch_norm1d_into_conv1d(model.conv, model.bn)
     parameters["conv"]["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
     parameters["conv"]["bias"] = ttnn.from_torch(bias, mesh_mapper=mesh_mapper)
@@ -168,11 +163,9 @@ def _extract_neck(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
         block = model.decoder_blocks[i]
         parameters[f"decoder_{i}"] = {}
 
-        # Extract ConvTranspose2d and BatchNorm2d
         conv_transpose_layer = block[0]
         bn_layer = block[1]
 
-        # Use the ConvTranspose2d-specific folding function
         if i == 0:
             weight, bias = fold_batch_norm2d_into_conv_transpose2d(conv_transpose_layer, bn_layer)
             parameters[f"decoder_{i}"]["weight"] = ttnn.from_torch(weight, dtype=dtype, mesh_mapper=mesh_mapper)
@@ -189,12 +182,10 @@ def _extract_neck(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
                 bias = bias.reshape((1, 1, 1, -1))
                 parameters[f"decoder_{i}"]["bias"] = bias, dtype = dtype, mesh_mapper = mesh_mapper
             else:
-                # Option 2: Create zero bias if needed
                 out_channels = conv_transpose_layer.out_channels
                 zero_bias = torch.zeros(1, 1, 1, out_channels)
                 parameters[f"decoder_{i}"]["bias"] = zero_bias
 
-            # Extract BatchNorm parameters separately
             parameters[f"decoder_{i}"]["bn_weight"] = ttnn.from_torch(
                 bn_layer.weight.view(1, -1, 1, 1), dtype=dtype, mesh_mapper=mesh_mapper, layout=ttnn.TILE_LAYOUT
             )
@@ -247,7 +238,6 @@ def custom_preprocessor(
     weight_dtype = ttnn.bfloat16
 
     if isinstance(model, PointPillars):
-        # Extract all sub-modules
         parameters["pillar_encoder"] = {}
         parameters["pillar_encoder"] = _extract_pillar_encoder(
             model.pillar_encoder, parameters["pillar_encoder"], dtype=weight_dtype, mesh_mapper=mesh_mapper

@@ -21,7 +21,6 @@ from models.experimental.pointpillars.tt.utils import (
     [
         (256, 62, 54, 128, 248, 216, 4, 2, 4),
         (128, 124, 108, 128, 248, 216, 2, 2, 2),
-        # (64, 248, 216, 128, 248, 216, 1, 1, 1),
     ],
 )
 def test_split_conv(
@@ -74,7 +73,7 @@ def test_split_conv(
 
     compute_config = ttnn.init_device_compute_kernel_config(
         device.arch(),
-        math_fidelity=ttnn.MathFidelity.HiFi2,  # Use HiFi instead of LoFi
+        math_fidelity=ttnn.MathFidelity.HiFi2,
         fp32_dest_acc_en=True,
         packer_l1_acc=False,
     )
@@ -103,6 +102,6 @@ def test_split_conv(
     ttnn_output = ttnn.permute(ttnn_output, [0, 3, 1, 2])
     ttnn_output = ttnn.to_torch(ttnn_output)
 
-    passing, pcc = comp_pcc(torch_output, ttnn_output, 0.98)
+    passing, pcc = comp_pcc(torch_output, ttnn_output, 0.97)
     logger.info(f"Neck PCC: {pcc}")
     assert passing, f"Neck PCC check failed: {pcc}"

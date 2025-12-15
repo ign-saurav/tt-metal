@@ -24,7 +24,7 @@ class PointPillarsPerformanceRunnerInfra:
         inputs_mesh_mapper=None,
         weights_mesh_mapper=None,
         outputs_mesh_composer=None,
-        checkpoint_path="models/experimental/pointpillars/reference/model/epoch_160.pth",
+        checkpoint_path=None,
     ):
         if not hasattr(self, "_model_initialized"):
             torch.manual_seed(0)
@@ -85,6 +85,10 @@ class PointPillarsPerformanceRunnerInfra:
         self.torch_output = None
 
     def _load_checkpoint(self):
+        if self.checkpoint_path is None:
+            logger.warning("No checkpoint path provided, using random weights")
+            return
+
         try:
             checkpoint = torch.load(self.checkpoint_path, map_location="cpu")
             if "state_dict" in checkpoint:

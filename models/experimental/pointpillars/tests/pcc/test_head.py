@@ -57,7 +57,6 @@ def test_head(device, in_channel, n_anchors, n_classes, reset_seeds):
     torch_model = torch_model.to(dtype=torch.bfloat16)
     torch_model.eval()
 
-    # Create input tensor with shape [1, 384, 248, 216] (NCHW format for PyTorch)
     batch_size = 1
     height = 248
     width = 216

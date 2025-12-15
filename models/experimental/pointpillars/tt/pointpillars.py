@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+
+# SPDX-License-Identifier: Apache-2.0
+
 import ttnn
 from models.experimental.pointpillars.tt.pillar_encoder import TtPillarEncoder
 from models.experimental.pointpillars.tt.backbone import TtBackbone
@@ -51,7 +55,6 @@ class TtPointPillars:
         self.device = device
         self.nclasses = nclasses
 
-        # Initialize only backbone, neck, and head
         self.backbone = TtBackbone(
             in_channel=64,
             out_channels=[64, 128, 256],
@@ -98,14 +101,10 @@ class TtPointPillars:
             bbox_pred: ttnn tensor (bs, n_anchors*7, 248, 216)
             bbox_dir_cls_pred: ttnn tensor (bs, n_anchors*2, 248, 216)
         """
-        # 1. Backbone: (bs, 64, 496, 432) -> [(bs, 64, 248, 216), (bs, 128, 124, 108), (bs, 256, 62, 54)]
-        # pillar_features = ttnn.permute(pillar_features, (0, 2, 3, 1))
         xs = self.backbone.forward(pillar_features)
 
-        # 2. Neck: [(bs, 64, 248, 216), (bs, 128, 124, 108), (bs, 256, 62, 54)] -> (bs, 384, 248, 216)
         x = self.neck.forward(xs)
 
-        # 3. Head: (bs, 384, 248, 216) -> 3 detection outputs
         bbox_cls_pred, bbox_pred, bbox_dir_cls_pred = self.head.forward(x)
 
         return bbox_cls_pred, bbox_pred, bbox_dir_cls_pred

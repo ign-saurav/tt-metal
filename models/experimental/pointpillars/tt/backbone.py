@@ -82,7 +82,6 @@ class TtBackbone:
         stride,
         block_idx,
     ):
-        # Move weights from device to host for proper conv2d preparation
         weight = parameters.weight
         if isinstance(weight, ttnn.Tensor) and ttnn.is_tensor_storage_on_device(weight):
             weight = ttnn.from_device(weight)
@@ -95,8 +94,6 @@ class TtBackbone:
 
         math_fidelity = ttnn.MathFidelity.HiFi4 if block_idx == 2 else ttnn.MathFidelity.HiFi2
 
-        # Reduce act_block_h_override for memory-intensive layers
-        # Smaller values use less L1 memory but may be slower
         act_block_h = 32 if out_channels >= 128 else 64
 
         return Conv2dConfiguration(
@@ -115,13 +112,12 @@ class TtBackbone:
             weights_dtype=self.dtype,
             output_dtype=self.dtype,
             sharding_strategy=HeightShardedStrategyConfiguration(
-                reshard_if_not_optimal=True, act_block_h_override=act_block_h  # Add this override
+                reshard_if_not_optimal=True, act_block_h_override=act_block_h
             ),
             math_fidelity=math_fidelity,
             fp32_dest_acc_en=True,
             deallocate_activation=True,
             enable_act_double_buffer=False,
-            # Add these memory optimizations
             enable_weights_double_buffer=False,
             reallocate_halo_output=True,
         )

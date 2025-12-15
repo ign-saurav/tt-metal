@@ -7,104 +7,6 @@ from models.common.lightweightmodule import LightweightModule
 import torch
 
 
-class TtPointPillarsConv2D(LightweightModule):
-    def __init__(
-        self,
-        conv,
-        conv_pth,
-        device=None,
-        cache={},
-        activation=None,
-        activation_dtype=ttnn.bfloat16,
-        weights_dtype=ttnn.bfloat16,
-        shard_layout=None,
-        is_dealloc_act=False,
-        return_dims=False,
-        reshape_output=False,
-        memory_config=None,
-        math_fidelity=ttnn.MathFidelity.LoFi,
-        math_approx_mode=False,
-    ):
-        super().__init__()
-        self.conv = conv
-        self.device = device
-        self.in_channels = conv.in_channels
-        self.out_channels = conv.out_channels
-        self.kernel_size = conv.kernel_size
-        self.padding = conv.padding
-        self.stride = conv.stride
-        self.groups = conv.groups
-        self.cache = cache
-        self.compute_config = ttnn.init_device_compute_kernel_config(
-            device.arch(),
-            math_fidelity=math_fidelity,
-            # fp32_dest_acc_en=False,
-            packer_l1_acc=False,
-            math_approx_mode=math_approx_mode,
-            fp32_dest_acc_en=True,
-        )
-        self.is_dealloc_act = is_dealloc_act
-        self.conv_config = ttnn.Conv2dConfig(
-            weights_dtype=weights_dtype,
-            shard_layout=shard_layout,
-            deallocate_activation=self.is_dealloc_act,
-            enable_act_double_buffer=False,
-            reshard_if_not_optimal=True,
-            activation=activation,
-        )
-        if conv_pth.bias is not None:
-            bias = ttnn.from_device(conv_pth.bias)
-            self.bias = bias
-        else:
-            self.bias = None
-
-        self.activation_dtype = activation_dtype
-        self.return_dims = return_dims
-        self.reshape_output = reshape_output
-        self.weight = ttnn.from_device(conv_pth.weight)
-        self.memory_config = memory_config
-
-    def forward(self, x, shape=None):
-        if shape is not None:
-            batch_size = shape[0]
-            input_height = shape[1]
-            input_width = shape[2]
-        else:
-            batch_size = x.shape[0]
-            input_height = x.shape[1]
-            input_width = x.shape[2]
-
-        [x, [_out_height, _out_width], [self.weight, self.bias]] = ttnn.conv2d(
-            input_tensor=x,
-            weight_tensor=self.weight,
-            bias_tensor=self.bias,
-            in_channels=self.conv.in_channels,
-            out_channels=self.conv.out_channels,
-            device=self.device,
-            kernel_size=self.conv.kernel_size,
-            stride=self.conv.stride,
-            padding=self.conv.padding,
-            dilation=self.conv.dilation,
-            groups=self.conv.groups,
-            batch_size=batch_size,
-            input_height=input_height,
-            input_width=input_width,
-            conv_config=self.conv_config,
-            compute_config=self.compute_config,
-            return_output_dim=True,
-            return_weights_and_bias=True,
-            dtype=self.activation_dtype,
-            memory_config=self.memory_config,
-        )
-        shape = (batch_size, _out_height, _out_width, x.shape[-1])
-        if self.reshape_output:
-            x = ttnn.reshape(x, shape)
-        if self.return_dims:
-            return x, shape
-        else:
-            return x
-
-
 class TtPointPillarsConv1D(LightweightModule):
     def __init__(
         self,
@@ -340,19 +242,17 @@ def prepare_split_conv_transpose2d_weights_bias(
     for i in range(len(split_weight_tensors)):
         split_weight_tensors[i] = torch.split(split_weight_tensors[i], split_input_channels, 1)
 
-    # FIXED: Use correct variable name and consider using float32 for better PCC
     ttnn_split_weights = [
         [
             ttnn.from_torch(
                 weight,
-                dtype=ttnn.bfloat16,  # Consider float32 for better numerical accuracy
+                dtype=ttnn.bfloat16,
             )
-            for weight in output_channel_split_weights  # FIXED: Correct variable name
+            for weight in output_channel_split_weights
         ]
         for output_channel_split_weights in split_weight_tensors
     ]
 
-    # Split bias - same as conv2d
     if conv_out_channel_split_factor > 1:
         split_bias_tensors = list(torch.split(torch_bias_tensor, split_output_channels, 3))
     else:
@@ -361,7 +261,7 @@ def prepare_split_conv_transpose2d_weights_bias(
     ttnn_split_bias = [
         ttnn.from_torch(
             bias,
-            dtype=ttnn.bfloat16,  # Match weights dtype
+            dtype=ttnn.bfloat16,
         )
         for bias in split_bias_tensors
     ]
@@ -406,17 +306,15 @@ def split_conv_transpose2d_and_run(
         "groups": 1,
         "device": device,
         "conv_config": conv_config,
-        "mirror_kernel": True,  # Required for conv_transpose2d
+        "mirror_kernel": True,
     }
 
     outputs = []
     # Pre-initialize device_weights to match conv_weight structure: [in_channel_slice][out_channel_slice]
     device_weights = [[] for _ in range(conv_in_channel_split_factor)]
     device_bias = []
-    # First loop goes over output channel slices and saves outputs in a list
     for out_channel_slice_id in range(conv_out_channel_split_factor):
         out_channel_slice_output = None
-        # Second loop goes over input channel slices and accumulates the outputs
         for in_channel_slice_id in range(conv_in_channel_split_factor):
             hidden_states_slice = hidden_states[
                 :, :, :, in_channel_slice_id * split_input_channels : (in_channel_slice_id + 1) * split_input_channels
@@ -430,12 +328,9 @@ def split_conv_transpose2d_and_run(
                 return_weights_and_bias=return_weights_and_bias,
                 dtype=conv_output_dtype,
             )
-            # results = ttnn.to_memory_config(results, ttnn.DRAM_MEMORY_CONFIG)
             hidden_states_slice.deallocate(True)
 
             if return_weights_and_bias:
-                # First time we call this function, weights and biases are passed in on host;
-                # Save them so that we can reuse them on the next calls
                 in_channel_slice_output, [weights, bias] = results
                 device_weights[in_channel_slice_id].append(weights)
                 if in_channel_slice_id == 0:
@@ -455,7 +350,6 @@ def split_conv_transpose2d_and_run(
                 out_channel_slice_output = ttnn.add(
                     out_channel_slice_output,
                     in_channel_slice_output,
-                    # memory_config=ttnn.DRAM_MEMORY_CONFIG,
                     dtype=ttnn.bfloat16,
                 )
                 in_channel_slice_output.deallocate(True)
@@ -466,7 +360,6 @@ def split_conv_transpose2d_and_run(
 
     hidden_states.deallocate(True)
 
-    # Concatenate the outputs, if we split by output channels
     if len(outputs) > 1:
         output = ttnn.concat(outputs, dim=-1)
         for output_slice in outputs:
@@ -527,8 +420,8 @@ class TtPointPillarsConvTranspose2DSplit(LightweightModule):
         conv_weights, conv_bias = prepare_split_conv_transpose2d_weights_bias(
             in_channels=self.in_channels,
             out_channels=self.out_channels,
-            conv_in_channel_split_factor=self.conv_in_channel_split_factor,  # Split 128 into 2x64
-            conv_out_channel_split_factor=self.conv_out_channel_split_factor,  # Split 128 into 2x64
+            conv_in_channel_split_factor=self.conv_in_channel_split_factor,
+            conv_out_channel_split_factor=self.conv_out_channel_split_factor,
             torch_weight_tensor=conv_transpose_pth.weight,
             torch_bias_tensor=conv_transpose_pth.bias,
         )
@@ -539,7 +432,7 @@ class TtPointPillarsConvTranspose2DSplit(LightweightModule):
 
         self.weight = conv_weights
         self.memory_config = memory_config
-        self._weights_prepared = False  # Track if weights have been prepared on device
+        self._weights_prepared = False
 
     def forward(self, x, shape=None):
         if shape is not None:
@@ -552,7 +445,6 @@ class TtPointPillarsConvTranspose2DSplit(LightweightModule):
             input_width = x.shape[2]
 
         if not self._weights_prepared:
-            # First call: prepare weights on device and store them
             output, self.weight, self.bias = split_conv_transpose2d_and_run(
                 hidden_states=x,
                 conv_weight=self.weight,
@@ -575,7 +467,6 @@ class TtPointPillarsConvTranspose2DSplit(LightweightModule):
             )
             self._weights_prepared = True
         else:
-            # Subsequent calls: use prepared weights, no write operation
             output = split_conv_transpose2d_and_run(
                 hidden_states=x,
                 conv_weight=self.weight,
