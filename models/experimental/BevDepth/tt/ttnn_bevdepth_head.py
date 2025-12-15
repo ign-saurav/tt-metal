@@ -207,7 +207,6 @@ class TtResNet:
         )
 
         layer3_params = parameters.get("layer3", {})
-        print(f"Layer3 params: {layer3_params}")
         self.layer3 = TtResLayer(
             320,
             640,
@@ -285,7 +284,6 @@ class TtSECONDFPN:
         self.layer_optimisations = layer_optimisations
 
         # Initialize 4 deblocks with parameters
-        # print(deblocks_params)
         self.deblocks = [
             TtDeblock(
                 in_channels=160,

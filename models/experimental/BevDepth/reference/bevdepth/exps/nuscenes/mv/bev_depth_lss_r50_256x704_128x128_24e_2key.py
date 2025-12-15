@@ -5,7 +5,6 @@
 
 
 import os
-
 import torch
 
 from models.experimental.BevDepth.reference.bevdepth.exps.nuscenes.base_exp import (
@@ -16,6 +15,10 @@ from models.experimental.BevDepth.reference.bevdepth.layers.heads.conv import (
     _TORCHVISION_DCN_AVAILABLE,
 )
 from models.experimental.BevDepth.reference.bevdepth.models.base_bev_depth import BaseBEVDepth
+
+from mmengine.logging import MMLogger
+
+MMLogger.get_instance("mmengine").setLevel("ERROR")
 
 
 class BEVDepthLightningModel(BaseBEVDepthLightningModel):

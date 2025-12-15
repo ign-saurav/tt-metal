@@ -5,18 +5,10 @@
 
 import torch
 import torch.nn.functional as F
-
-# from mmcv.cnn import build_conv_layer
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.conv import build_conv_layer
-
-# from mmdet3d.models import build_neck
-# from mmdet.models import build_backbone
-# from mmdet.models.backbones.resnet import BasicBlock
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.resnet import BasicBlock
 from torch import nn
 
-# from torch.cuda.amp.autocast_mode import autocast
-
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.conv import build_conv_layer
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.resnet import BasicBlock
 from models.experimental.BevDepth.reference.bevdepth.layers.heads.builder import build_backbone, build_neck
 
 try:
