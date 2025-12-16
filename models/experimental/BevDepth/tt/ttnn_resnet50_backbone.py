@@ -1,11 +1,16 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 import ttnn
 from dataclasses import dataclass
-from models.experimental.BevDepth.tt.utils import ttnn_conv2d
-from models.tt_cnn.tt.builder import TtMaxPool2d, MaxPool2dConfiguration
+
+from models.tt_cnn.tt.builder import TtConv2d, TtMaxPool2d
+from models.experimental.BevDepth.tt.utils import (
+    create_conv2d_config,
+    create_maxpool_config,
+    post_process_conv_output,
+    ensure_memory_config,
+)
 
 
 @dataclass
@@ -20,7 +25,7 @@ class ResNet50Optimizations:
 resnet50_optimizations = ResNet50Optimizations(
     conv1_7x7={
         "activation": ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        "shard_layout": None,  # Auto sharding for memory efficiency
         "deallocate_activation": True,
         "reallocate_halo_output": False,
         "packer_l1_acc": False,
@@ -29,8 +34,8 @@ resnet50_optimizations = ResNet50Optimizations(
     },
     bottleneck_1x1_first={
         "activation": ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-        "deallocate_activation": True,
+        "shard_layout": None,  # Auto sharding for memory efficiency
+        "deallocate_activation": False,  # Keep input for downsample path
         "reallocate_halo_output": False,
         "packer_l1_acc": False,
         "enable_act_double_buffer": False,
@@ -38,8 +43,8 @@ resnet50_optimizations = ResNet50Optimizations(
     },
     bottleneck_3x3={
         "activation": ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-        "deallocate_activation": True,
+        "shard_layout": None,  # Auto sharding for memory efficiency
+        "deallocate_activation": False,
         "reallocate_halo_output": True,
         "packer_l1_acc": False,
         "enable_act_double_buffer": False,
@@ -47,7 +52,7 @@ resnet50_optimizations = ResNet50Optimizations(
     },
     bottleneck_1x1_last={
         "activation": None,
-        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+        "shard_layout": None,  # Auto sharding for memory efficiency
         "deallocate_activation": True,
         "reallocate_halo_output": False,
         "packer_l1_acc": False,
@@ -56,8 +61,8 @@ resnet50_optimizations = ResNet50Optimizations(
     },
     downsample_1x1={
         "activation": None,
-        "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-        "deallocate_activation": True,
+        "shard_layout": None,  # Auto sharding for memory efficiency
+        "deallocate_activation": False,
         "reallocate_halo_output": False,
         "packer_l1_acc": False,
         "enable_act_double_buffer": False,
@@ -66,264 +71,167 @@ resnet50_optimizations = ResNet50Optimizations(
 )
 
 
-def get_conv_config(conv_type, optimizations=None):
-    if optimizations is None:
-        optimizations = resnet50_optimizations
-    return getattr(optimizations, conv_type).copy()
-
-
 class Bottleneck:
+    """
+    ResNet50 Bottleneck block using TtConv2d builder API directly.
+    """
+
     expansion = 4
 
-    def __init__(self, parameters, in_channels, out_channels, stride=1, downsample=None, model_config=None):
+    def __init__(
+        self, parameters, in_channels, out_channels, stride=1, downsample=None, model_config=None, optimizations=None
+    ):
         self.stride = stride
-        self.downsample = downsample
+        self.has_downsample = downsample is not None
         self.model_config = model_config
+        self.optimizations = optimizations or resnet50_optimizations
 
-        # Conv1: 1x1 - keep as PyTorch tensor, convert lazily
-        self.conv1_weight_torch = parameters.conv1.weight
-        self.conv1_bias_torch = parameters.conv1.bias if hasattr(parameters.conv1, "bias") else None
-        self.conv1_weight_ttnn = None  # Converted TTNN tensor (cached)
-        self.conv1_bias_ttnn = None
+        # Store weights as PyTorch tensors for lazy conversion
+        self.conv1_weight = parameters.conv1.weight
+        self.conv1_bias = parameters.conv1.bias if hasattr(parameters.conv1, "bias") else None
 
-        # Conv2: 3x3 - keep as PyTorch tensor, convert lazily
-        self.conv2_weight_torch = parameters.conv2.weight
-        self.conv2_bias_torch = parameters.conv2.bias if hasattr(parameters.conv2, "bias") else None
-        self.conv2_weight_ttnn = None
-        self.conv2_bias_ttnn = None
+        self.conv2_weight = parameters.conv2.weight
+        self.conv2_bias = parameters.conv2.bias if hasattr(parameters.conv2, "bias") else None
 
-        # Conv3: 1x1 - keep as PyTorch tensor, convert lazily
-        self.conv3_weight_torch = parameters.conv3.weight
-        self.conv3_bias_torch = parameters.conv3.bias if hasattr(parameters.conv3, "bias") else None
-        self.conv3_weight_ttnn = None
-        self.conv3_bias_ttnn = None
+        self.conv3_weight = parameters.conv3.weight
+        self.conv3_bias = parameters.conv3.bias if hasattr(parameters.conv3, "bias") else None
 
-        # Downsample if exists - keep as PyTorch tensor, convert lazily
-        if downsample:
-            self.downsample_conv_weight_torch = parameters.downsample[0].weight
-            self.downsample_conv_bias_torch = (
-                parameters.downsample[0].bias if hasattr(parameters.downsample[0], "bias") else None
-            )
-            self.downsample_conv_weight_ttnn = None
-            self.downsample_conv_bias_ttnn = None
+        if self.has_downsample:
+            self.downsample_weight = parameters.downsample[0].weight
+            self.downsample_bias = parameters.downsample[0].bias if hasattr(parameters.downsample[0], "bias") else None
         else:
-            self.downsample_conv_weight_torch = None
-            self.downsample_conv_bias_torch = None
+            self.downsample_weight = None
+            self.downsample_bias = None
 
-    def _convert_weight_to_ttnn(self, torch_weight, device):
-        """Convert PyTorch weight to TTNN format lazily (ROW_MAJOR_LAYOUT for host weights)"""
-        return ttnn.from_torch(
-            torch_weight,
-            dtype=ttnn.bfloat16,
-            layout=ttnn.ROW_MAJOR_LAYOUT,  # Host weights must be ROW_MAJOR_LAYOUT
-            # device=None keeps on host, TTNN will convert to TILE_LAYOUT when moving to device
-        )
+        # Cache for TtConv2d instances (keyed by input dimensions)
+        self._conv1_cache = {}
+        self._conv2_cache = {}
+        self._conv3_cache = {}
+        self._downsample_cache = {}
 
-    def _get_conv1_weights(self, device):
-        """Get conv1 weights in TTNN format (convert if needed, ROW_MAJOR_LAYOUT for host)"""
-        if self.conv1_weight_ttnn is None:
-            self.conv1_weight_ttnn = self._convert_weight_to_ttnn(self.conv1_weight_torch, device)
-        if self.conv1_bias_torch is not None and self.conv1_bias_ttnn is None:
-            self.conv1_bias_ttnn = ttnn.from_torch(
-                self.conv1_bias_torch.reshape(1, 1, 1, -1),
-                dtype=ttnn.bfloat16,
-                layout=ttnn.ROW_MAJOR_LAYOUT,  # Host weights must be ROW_MAJOR_LAYOUT
+    def _get_conv1(self, device, batch_size, height, width):
+        """Get or create TtConv2d for conv1 (1x1, ReLU)."""
+        cache_key = (batch_size, height, width)
+        if cache_key not in self._conv1_cache:
+            conv_config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=self.conv1_weight.shape[1],
+                out_channels=self.conv1_weight.shape[0],
+                batch_size=batch_size,
+                kernel_size=(1, 1),
+                weight=self.conv1_weight,
+                bias=self.conv1_bias,
+                model_config=self.model_config,
+                conv_config=self.optimizations.bottleneck_1x1_first,
             )
-        return self.conv1_weight_ttnn, self.conv1_bias_ttnn
+            self._conv1_cache[cache_key] = TtConv2d(conv_config, device)
+        return self._conv1_cache[cache_key]
 
-    def _get_conv2_weights(self, device):
-        """Get conv2 weights in TTNN format (convert if needed, ROW_MAJOR_LAYOUT for host)"""
-        if self.conv2_weight_ttnn is None:
-            self.conv2_weight_ttnn = self._convert_weight_to_ttnn(self.conv2_weight_torch, device)
-        if self.conv2_bias_torch is not None and self.conv2_bias_ttnn is None:
-            self.conv2_bias_ttnn = ttnn.from_torch(
-                self.conv2_bias_torch.reshape(1, 1, 1, -1),
-                dtype=ttnn.bfloat16,
-                layout=ttnn.ROW_MAJOR_LAYOUT,  # Host weights must be ROW_MAJOR_LAYOUT
+    def _get_conv2(self, device, batch_size, height, width):
+        """Get or create TtConv2d for conv2 (3x3, ReLU, possibly strided)."""
+        cache_key = (batch_size, height, width)
+        if cache_key not in self._conv2_cache:
+            conv_config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=self.conv2_weight.shape[1],
+                out_channels=self.conv2_weight.shape[0],
+                batch_size=batch_size,
+                kernel_size=(3, 3),
+                weight=self.conv2_weight,
+                bias=self.conv2_bias,
+                stride=(self.stride, self.stride),
+                padding=(1, 1),
+                model_config=self.model_config,
+                conv_config=self.optimizations.bottleneck_3x3,
             )
-        return self.conv2_weight_ttnn, self.conv2_bias_ttnn
+            self._conv2_cache[cache_key] = TtConv2d(conv_config, device)
+        return self._conv2_cache[cache_key]
 
-    def _get_conv3_weights(self, device):
-        """Get conv3 weights in TTNN format (convert if needed, ROW_MAJOR_LAYOUT for host)"""
-        if self.conv3_weight_ttnn is None:
-            self.conv3_weight_ttnn = self._convert_weight_to_ttnn(self.conv3_weight_torch, device)
-        if self.conv3_bias_torch is not None and self.conv3_bias_ttnn is None:
-            self.conv3_bias_ttnn = ttnn.from_torch(
-                self.conv3_bias_torch.reshape(1, 1, 1, -1),
-                dtype=ttnn.bfloat16,
-                layout=ttnn.ROW_MAJOR_LAYOUT,  # Host weights must be ROW_MAJOR_LAYOUT
+    def _get_conv3(self, device, batch_size, height, width):
+        """Get or create TtConv2d for conv3 (1x1, no activation)."""
+        cache_key = (batch_size, height, width)
+        if cache_key not in self._conv3_cache:
+            conv_config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=self.conv3_weight.shape[1],
+                out_channels=self.conv3_weight.shape[0],
+                batch_size=batch_size,
+                kernel_size=(1, 1),
+                weight=self.conv3_weight,
+                bias=self.conv3_bias,
+                model_config=self.model_config,
+                conv_config=self.optimizations.bottleneck_1x1_last,
             )
-        return self.conv3_weight_ttnn, self.conv3_bias_ttnn
+            self._conv3_cache[cache_key] = TtConv2d(conv_config, device)
+        return self._conv3_cache[cache_key]
 
-    def _get_downsample_weights(self, device):
-        """Get downsample weights in TTNN format (convert if needed, ROW_MAJOR_LAYOUT for host)"""
-        if self.downsample_conv_weight_torch is None:
-            return None, None
-        if self.downsample_conv_weight_ttnn is None:
-            self.downsample_conv_weight_ttnn = self._convert_weight_to_ttnn(self.downsample_conv_weight_torch, device)
-        if self.downsample_conv_bias_torch is not None and self.downsample_conv_bias_ttnn is None:
-            self.downsample_conv_bias_ttnn = ttnn.from_torch(
-                self.downsample_conv_bias_torch.reshape(1, 1, 1, -1),
-                dtype=ttnn.bfloat16,
-                layout=ttnn.ROW_MAJOR_LAYOUT,  # Host weights must be ROW_MAJOR_LAYOUT
+    def _get_downsample(self, device, batch_size, height, width):
+        """Get or create TtConv2d for downsample (1x1, strided, no activation)."""
+        if not self.has_downsample:
+            return None
+        cache_key = (batch_size, height, width)
+        if cache_key not in self._downsample_cache:
+            conv_config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=self.downsample_weight.shape[1],
+                out_channels=self.downsample_weight.shape[0],
+                batch_size=batch_size,
+                kernel_size=(1, 1),
+                weight=self.downsample_weight,
+                bias=self.downsample_bias,
+                stride=(self.stride, self.stride),
+                model_config=self.model_config,
+                conv_config=self.optimizations.downsample_1x1,
             )
-        return self.downsample_conv_weight_ttnn, self.downsample_conv_bias_ttnn
+            self._downsample_cache[cache_key] = TtConv2d(conv_config, device)
+        return self._downsample_cache[cache_key]
 
     def __call__(self, x, device, batch_size, height, width):
         identity = x
-        # if self.downsample:
-        #     identity = x  # Save reference before x is modified
-        # else:
-        #     identity = x
 
-        # Conv1 - 1x1 with ReLU - pass PyTorch tensor directly
-        config = get_conv_config("bottleneck_1x1_first")
-        if self.downsample:
-            config = config.copy()
-            config["deallocate_activation"] = False
-        config = config.copy()  # MUST copy before modifying
-        config["deallocate_activation"] = False
-        out = ttnn_conv2d(
-            input_tensor=x,
-            weight_tensor=self.conv1_weight_torch,  # Direct PyTorch tensor
-            bias_tensor=self.conv1_bias_torch,
-            device=device,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            in_channels=self.conv1_weight_torch.shape[1],
-            out_channels=self.conv1_weight_torch.shape[0],
-            kernel_size=(1, 1),
-            stride=(1, 1),
-            padding=(0, 0),
-            math_fidelity=self.model_config["MATH_FIDELITY"],
-            weights_dtype=self.model_config["WEIGHTS_DTYPE"],
-            activations_dtype=self.model_config["ACTIVATIONS_DTYPE"],
-            **config,
-        )
-        # Convert sharded to interleaved before reshape (required for reshape)
-        if out.is_sharded():
-            out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
-        # Convert sharded to interleaved before reshape (required for reshape)
-        if out.is_sharded():
-            out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
-        if len(out.shape) == 3:
-            out = ttnn.reshape(out, (batch_size, height, width, self.conv1_weight_torch.shape[0]))
+        # Conv1 - 1x1 with ReLU using TtConv2d builder API
+        conv1 = self._get_conv1(device, batch_size, height, width)
+        out, (out_h, out_w) = conv1(x, return_output_dim=True)
+        out = post_process_conv_output(out, batch_size, out_h, out_w, self.conv1_weight.shape[0])
 
-        # Conv2 - 3x3 with ReLU
-        out_height = height if self.stride == 1 else height // 2
-        out_width = width if self.stride == 1 else width // 2
+        # Conv2 - 3x3 with ReLU using TtConv2d builder API
+        conv2 = self._get_conv2(device, batch_size, height, width)
+        out, (out_h, out_w) = conv2(out, return_output_dim=True)
+        out = post_process_conv_output(out, batch_size, out_h, out_w, self.conv2_weight.shape[0])
 
-        config = get_conv_config("bottleneck_3x3")
-        config = config.copy()  # MUST copy before modifying
-        config["deallocate_activation"] = False
-        out = ttnn_conv2d(
-            input_tensor=out,
-            weight_tensor=self.conv2_weight_torch,  # Direct PyTorch tensor
-            bias_tensor=self.conv2_bias_torch,
-            device=device,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            in_channels=self.conv2_weight_torch.shape[1],
-            out_channels=self.conv2_weight_torch.shape[0],
-            kernel_size=(3, 3),
-            stride=(self.stride, self.stride),
-            padding=(1, 1),
-            math_fidelity=self.model_config["MATH_FIDELITY"],
-            weights_dtype=self.model_config["WEIGHTS_DTYPE"],
-            activations_dtype=self.model_config["ACTIVATIONS_DTYPE"],
-            **config,
-        )
-        # Convert sharded to interleaved before reshape (required for reshape)
-        if out.is_sharded():
-            out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
-        if len(out.shape) == 3:
-            out = ttnn.reshape(out, (batch_size, out_height, out_width, self.conv2_weight_torch.shape[0]))
+        # Conv3 - 1x1 without ReLU using TtConv2d builder API
+        conv3 = self._get_conv3(device, batch_size, out_h, out_w)
+        out, (final_h, final_w) = conv3(out, return_output_dim=True)
+        out = post_process_conv_output(out, batch_size, final_h, final_w, self.conv3_weight.shape[0])
 
-        # Conv3 - 1x1 without ReLU
-        config = get_conv_config("bottleneck_1x1_last")
-        config = config.copy()  # MUST copy before modifying
-        config["deallocate_activation"] = True  # Deallocate like the demo
-        out = ttnn_conv2d(
-            input_tensor=out,
-            weight_tensor=self.conv3_weight_torch,  # Direct PyTorch tensor
-            bias_tensor=self.conv3_bias_torch,
-            device=device,
-            batch_size=batch_size,
-            input_height=out_height,
-            input_width=out_width,
-            in_channels=self.conv3_weight_torch.shape[1],
-            out_channels=self.conv3_weight_torch.shape[0],
-            kernel_size=(1, 1),
-            stride=(1, 1),
-            padding=(0, 0),
-            math_fidelity=self.model_config["MATH_FIDELITY"],
-            weights_dtype=self.model_config["WEIGHTS_DTYPE"],
-            activations_dtype=self.model_config["ACTIVATIONS_DTYPE"],
-            **config,
-        )
-        # Convert sharded to interleaved before reshape (required for reshape)
-        if out.is_sharded():
-            out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
-        if len(out.shape) == 3:
-            out = ttnn.to_memory_config(out, ttnn.DRAM_MEMORY_CONFIG)
-            out = ttnn.reshape(out, (batch_size, out_height, out_width, self.conv3_weight_torch.shape[0]))
+        # Downsample path using TtConv2d builder API
+        if self.has_downsample:
+            downsample = self._get_downsample(device, batch_size, height, width)
+            identity, _ = downsample(identity, return_output_dim=True)
+            identity = post_process_conv_output(identity, batch_size, final_h, final_w, self.downsample_weight.shape[0])
 
-        if self.downsample:
-            config = get_conv_config("downsample_1x1")
-            config = config.copy()  # MUST copy before modifying
+        # Ensure memory configs match for add
+        identity = ensure_memory_config(identity, reference_tensor=out)
 
-            config["deallocate_activation"] = False
-            identity = ttnn_conv2d(
-                input_tensor=identity,
-                weight_tensor=self.downsample_conv_weight_torch,
-                bias_tensor=self.downsample_conv_bias_torch,
-                device=device,
-                batch_size=batch_size,
-                input_height=height,
-                input_width=width,
-                in_channels=self.downsample_conv_weight_torch.shape[1],
-                out_channels=self.downsample_conv_weight_torch.shape[0],
-                kernel_size=(1, 1),
-                stride=(self.stride, self.stride),
-                padding=(0, 0),
-                math_fidelity=self.model_config["MATH_FIDELITY"],
-                weights_dtype=self.model_config["WEIGHTS_DTYPE"],
-                activations_dtype=self.model_config["ACTIVATIONS_DTYPE"],
-                **config,
-            )
-            # Convert sharded to interleaved before reshape (required for reshape)
-            if identity.is_sharded():
-                identity = ttnn.sharded_to_interleaved(identity, ttnn.DRAM_MEMORY_CONFIG)
-            # Reshape identity if needed
-            if len(identity.shape) == 3:
-                identity = ttnn.reshape(
-                    identity, (batch_size, out_height, out_width, self.downsample_conv_weight_torch.shape[0])
-                )
-
-            # Ensure both tensors have matching memory config and layout
-            if identity.memory_config() != out.memory_config():
-                identity = ttnn.to_memory_config(identity, out.memory_config())
-            # if identity.layout != out.layout:
-            #     identity = ttnn.to_layout(identity, out.layout)
-
-        # Add and ReLU - use in-place add like the demo
-        # Ensure both tensors have matching memory config
-        if identity.memory_config() != out.memory_config():
-            identity = ttnn.to_memory_config(identity, out.memory_config())
-
-        # Use in-place add like the demo implementation
+        # Add and ReLU
         out = ttnn.add_(
             out,
             identity,
             activations=[ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)],
         )
 
-        return out, out_height, out_width
+        return out, final_h, final_w
 
 
 class ResNet50_BEVDepth:
+    """
+    ResNet50 backbone for BEVDepth using TtConv2d builder API directly.
+    """
+
     def __init__(
         self,
         device,
@@ -341,11 +249,13 @@ class ResNet50_BEVDepth:
         self.return_block_outputs = return_block_outputs
         self.optimizations = optimizations or resnet50_optimizations
 
-        # Conv1 - keep as PyTorch tensor, convert lazily
-        self.conv1_weight_torch = parameters.conv1.weight
-        self.conv1_bias_torch = parameters.conv1.bias if hasattr(parameters.conv1, "bias") else None
-        self.conv1_weight_ttnn = None  # Converted TTNN tensor (cached)
-        self.conv1_bias_ttnn = None
+        # Store conv1 weights for lazy conversion
+        self.conv1_weight = parameters.conv1.weight
+        self.conv1_bias = parameters.conv1.bias if hasattr(parameters.conv1, "bias") else None
+
+        # Cache for TtConv2d instance
+        self._conv1_cache = {}
+        self._maxpool_cache = {}
 
         # Build layers
         self.in_channels = 64
@@ -354,12 +264,32 @@ class ResNet50_BEVDepth:
         self.layer3 = self._make_layer(parameters.layer3, 256, 6, stride=2)
         self.layer4 = self._make_layer(parameters.layer4, 512, 3, stride=2)
 
-        self._maxpool_cache = {}
+    def _get_conv1(self, device, batch_size, height, width):
+        """Get or create TtConv2d for conv1 (7x7, stride 2, ReLU)."""
+        cache_key = (batch_size, height, width)
+        if cache_key not in self._conv1_cache:
+            conv_config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=3,
+                out_channels=64,
+                batch_size=batch_size,
+                kernel_size=(7, 7),
+                weight=self.conv1_weight,
+                bias=self.conv1_bias,
+                stride=(2, 2),
+                padding=(3, 3),
+                model_config=self.model_config,
+                conv_config=self.optimizations.conv1_7x7,
+            )
+            self._conv1_cache[cache_key] = TtConv2d(conv_config, device)
+        return self._conv1_cache[cache_key]
 
     def _get_maxpool(self, height, width, batch_size):
+        """Get or create TtMaxPool2d for maxpool (3x3, stride 2)."""
         cache_key = (height, width, batch_size)
         if cache_key not in self._maxpool_cache:
-            config = MaxPool2dConfiguration(
+            config = create_maxpool_config(
                 input_height=height,
                 input_width=width,
                 channels=64,
@@ -367,43 +297,10 @@ class ResNet50_BEVDepth:
                 kernel_size=(3, 3),
                 stride=(2, 2),
                 padding=(1, 1),
-                dilation=(1, 1),
                 dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
             )
             self._maxpool_cache[cache_key] = TtMaxPool2d(config, self.device)
         return self._maxpool_cache[cache_key]
-
-    def _get_conv1_weights(self):
-        """Get conv1 weights in TTNN format (convert if needed, ROW_MAJOR_LAYOUT for host)
-
-        Note: ttnn.conv2d expects weights in PyTorch format or TTNN ROW_MAJOR_LAYOUT format.
-        It will handle the conversion to TILE_LAYOUT internally.
-        """
-        if self.conv1_weight_ttnn is None:
-            # Convert weight to bfloat16 first to match reference model precision
-            weight_torch = self.conv1_weight_torch.to(torch.bfloat16)
-            self.conv1_weight_ttnn = ttnn.from_torch(
-                weight_torch,
-                dtype=self.model_config["WEIGHTS_DTYPE"],
-                layout=ttnn.ROW_MAJOR_LAYOUT,  # Host weights must be ROW_MAJOR_LAYOUT
-                # device=None keeps on host, TTNN will convert to TILE_LAYOUT when moving to device
-            )
-        if self.conv1_bias_torch is not None and self.conv1_bias_ttnn is None:
-            # Convert bias to bfloat16 first to match reference model precision
-            bias_torch = self.conv1_bias_torch.to(torch.bfloat16)
-            self.conv1_bias_ttnn = ttnn.from_torch(
-                bias_torch.reshape(1, 1, 1, -1),
-                dtype=self.model_config["WEIGHTS_DTYPE"],
-                layout=ttnn.ROW_MAJOR_LAYOUT,  # Host weights must be ROW_MAJOR_LAYOUT
-            )
-        return self.conv1_weight_ttnn, self.conv1_bias_ttnn
-
-        # Build layers
-        self.in_channels = 64
-        self.layer1 = self._make_layer(parameters.layer1, 64, 3, stride=1)
-        self.layer2 = self._make_layer(parameters.layer2, 128, 4, stride=2)
-        self.layer3 = self._make_layer(parameters.layer3, 256, 6, stride=2)
-        self.layer4 = self._make_layer(parameters.layer4, 512, 3, stride=2)
 
     def _make_layer(self, layer_params, planes, blocks, stride=1):
         layers = []
@@ -420,6 +317,7 @@ class ResNet50_BEVDepth:
                 stride=stride,
                 downsample=downsample,
                 model_config=self.model_config,
+                optimizations=self.optimizations,
             )
         )
         self.in_channels = planes * Bottleneck.expansion
@@ -433,6 +331,7 @@ class ResNet50_BEVDepth:
                     stride=1,
                     downsample=None,
                     model_config=self.model_config,
+                    optimizations=self.optimizations,
                 )
             )
 
@@ -446,55 +345,20 @@ class ResNet50_BEVDepth:
         else:
             height, width = input_height, input_width
 
-        # Initialize features dict early for debugging outputs
+        # Initialize features dict
         features = {}
-        block_outputs = {}  # Store block-level outputs for debugging
+        block_outputs = {}
 
-        # Conv1: 7x7, stride 2 with ReLU
-        # Use ttnn_conv2d wrapper to ensure proper weight/bias conversion
-        config = get_conv_config("conv1_7x7")
-        config = config.copy()  # MUST copy before modifying
-
-        # Use ttnn_conv2d wrapper which handles PyTorch->TTNN conversion properly
-        x = ttnn_conv2d(
-            input_tensor=x,
-            weight_tensor=self.conv1_weight_torch,  # Pass PyTorch tensor directly
-            bias_tensor=self.conv1_bias_torch,  # Pass PyTorch tensor directly
-            device=self.device,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            in_channels=3,
-            out_channels=64,
-            kernel_size=(7, 7),
-            stride=(2, 2),
-            padding=(3, 3),
-            math_fidelity=self.model_config["MATH_FIDELITY"],
-            weights_dtype=self.model_config["WEIGHTS_DTYPE"],
-            activations_dtype=self.model_config["ACTIVATIONS_DTYPE"],
-            activation=config.get("activation", ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)),
-            deallocate_activation=config.get("deallocate_activation", True),
-            reallocate_halo_output=config.get("reallocate_halo_output", False),
-            shard_layout=config.get("shard_layout", ttnn.TensorMemoryLayout.BLOCK_SHARDED),
-            packer_l1_acc=config.get("packer_l1_acc", True),
-            enable_act_double_buffer=config.get("enable_act_double_buffer", True),
-            enable_weights_double_buffer=config.get("enable_weights_double_buffer", False),
-        )
-
-        # Calculate output dimensions after conv1 (stride 2)
-        height = (height + 2 * 3 - 7) // 2 + 1  # (input_h + 2*padding - kernel_h) // stride_h + 1
-        width = (width + 2 * 3 - 7) // 2 + 1  # (input_w + 2*padding - kernel_w) // stride_w + 1
-
-        # Convert sharded to interleaved before reshape (required for reshape)
-        if x.is_sharded():
-            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
-        # Reshape if needed (ttnn_conv2d might return different shape)
-        if len(x.shape) == 3:
-            x = ttnn.reshape(x, (batch_size, height, width, 64))
+        # Conv1: 7x7, stride 2 with ReLU using TtConv2d builder API
+        conv1 = self._get_conv1(self.device, batch_size, height, width)
+        x, (out_h, out_w) = conv1(x, return_output_dim=True)
+        height, width = out_h, out_w
+        x = post_process_conv_output(x, batch_size, height, width, 64)
 
         if self.return_block_outputs:
             features["conv1_output"] = x
 
+        # MaxPool using TtMaxPool2d builder API
         if x.is_sharded():
             x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
         pool_input = ttnn.reshape(x, (batch_size, 1, height * width, 64))
@@ -509,27 +373,20 @@ class ResNet50_BEVDepth:
             x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
         x = ttnn.reshape(x, (batch_size, height, width, 64))
 
-        # Store layer1 input if requested
         if self.return_block_outputs:
             features["layer1_input"] = x
 
         # Layer1
         for i, block in enumerate(self.layer1):
             x, height, width = block(x, self.device, batch_size, height, width)
-
-            # Store block output if requested
             if self.return_block_outputs:
                 block_outputs[f"layer1_block{i}"] = x
 
         if self.return_intermediate:
             features["layer1"] = x
 
-        # Add block outputs to features if requested
         if self.return_block_outputs:
             features.update(block_outputs)
-
-        # x1 = ttnn.clone(x)
-        # ttnn.deallocate(x, force=True)
 
         # Layer2
         for i, block in enumerate(self.layer2):

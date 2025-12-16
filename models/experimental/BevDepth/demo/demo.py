@@ -507,12 +507,10 @@ def run_ttnn_inference(device, params, imgs, mats_dict):
         for key in output_keys:
             ttnn_tensor, shape = ttnn_output[task_idx][key]
             tensor_torch = ttnn.to_torch(ttnn_tensor)
-            # TTNN output is [N, 1, H*W, C] format - reshape to [N, C, H, W]
+            # TTNN output is [N, H, W, C] format - permute to [N, C, H, W]
             if len(tensor_torch.shape) == 4:
-                N, _, HW, C = tensor_torch.shape
-                H = W = int(HW**0.5)
-                # Reshape [N, 1, H*W, C] -> [N, H, W, C] -> [N, C, H, W]
-                tensor_torch = tensor_torch.reshape(N, H, W, C).permute(0, 3, 1, 2)
+                # shape is (out_h, out_w) from the new builder API
+                tensor_torch = tensor_torch.permute(0, 3, 1, 2).contiguous()
             task_dict[key] = tensor_torch
         torch_preds.append([task_dict])
 

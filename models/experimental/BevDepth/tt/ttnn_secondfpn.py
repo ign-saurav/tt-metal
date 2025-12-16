@@ -6,11 +6,23 @@ import torch
 import numpy as np
 from dataclasses import dataclass
 from loguru import logger
-from models.tt_cnn.tt.builder import (
-    Conv2dConfiguration,
-    TtConv2d,
-    AutoShardedStrategyConfiguration,
+
+from models.tt_cnn.tt.builder import TtConv2d
+from models.experimental.BevDepth.tt.utils import (
+    create_conv2d_config,
+    post_process_conv_output,
 )
+from dataclasses import dataclass
+
+
+@dataclass
+class ConvTransposeConfig:
+    in_channels: int
+    out_channels: int
+    kernel_size: tuple
+    stride: tuple
+    weight: ttnn.Tensor
+    bias: ttnn.Tensor
 
 
 @dataclass
@@ -47,19 +59,6 @@ secondfpn_head_optimizations = SECONDFPNHeadOptimizations(
 )
 
 
-@dataclass
-class ConvTransposeConfig:
-    in_channels: int
-    out_channels: int
-    kernel_size: tuple
-    stride: tuple
-    input_height: int
-    input_width: int
-    batch_size: int
-    weight: ttnn.Tensor
-    bias: ttnn.Tensor
-
-
 class SECONDFPN_TTNN:
     def __init__(
         self,
@@ -89,15 +88,14 @@ class SECONDFPN_TTNN:
             input_shapes = [(64, 176), (32, 88), (16, 44), (8, 22)]
         self.input_shapes = input_shapes
 
-        self.conv_layers = []
-        self.conv_transpose_configs = []
         self._torch_weights = []
+        self._conv_transpose_configs = []
+        self._conv_cache = {}
 
         for i in range(self.num_levels):
             kernel_size = self.deblocks[i].kernel_size
             stride = self.upsample_strides[i]
             use_conv_transpose = stride >= 1
-            input_h, input_w = self.input_shapes[i]
 
             weight = self.deblocks[i].conv_weight
             bias = self.deblocks[i].conv_bias
@@ -126,45 +124,41 @@ class SECONDFPN_TTNN:
                     out_channels=out_channels[i],
                     kernel_size=kernel_size,
                     stride=(int(stride), int(stride)),
-                    input_height=input_h,
-                    input_width=input_w,
-                    batch_size=batch_size,
                     weight=weight_ttnn,
                     bias=bias_ttnn,
                 )
-                self.conv_transpose_configs.append(config)
-                self.conv_layers.append(None)
+                self._conv_transpose_configs.append(config)
             else:
-                conv_stride = int(np.round(1 / stride))
+                self._conv_transpose_configs.append(None)
 
-                if not use_torch_fallback:
-                    weight_ttnn, bias_ttnn = Conv2dConfiguration.convert_torch_weight_and_bias_to_ttnn(weight, bias)
-                    config = Conv2dConfiguration(
-                        input_height=input_h,
-                        input_width=input_w,
-                        in_channels=in_channels[i],
-                        out_channels=out_channels[i],
-                        batch_size=batch_size,
-                        kernel_size=kernel_size,
-                        stride=(conv_stride, conv_stride),
-                        padding=(0, 0),
-                        weight=weight_ttnn,
-                        bias=bias_ttnn,
-                        activation_dtype=model_config["ACTIVATIONS_DTYPE"],
-                        weights_dtype=model_config["WEIGHTS_DTYPE"],
-                        output_dtype=model_config["ACTIVATIONS_DTYPE"],
-                        math_fidelity=model_config["MATH_FIDELITY"],
-                        sharding_strategy=AutoShardedStrategyConfiguration(),
-                        fp32_dest_acc_en=True,
-                        packer_l1_acc=False,
-                        **self.optimizations.conv2d,
-                    )
-                    self.conv_layers.append(TtConv2d(config, device))
-                else:
-                    self.conv_layers.append(None)
-                self.conv_transpose_configs.append(None)
+    def _get_conv(self, level_idx, batch_size, height, width):
+        cache_key = (level_idx, batch_size, height, width)
+        if cache_key not in self._conv_cache:
+            stride = self.upsample_strides[level_idx]
+            conv_stride = int(np.round(1 / stride))
+            kernel_size = self.deblocks[level_idx].kernel_size
+            weight, bias = self._torch_weights[level_idx]
 
-    def _create_conv_config(self):
+            conv_config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=self.in_channels[level_idx],
+                out_channels=self.out_channels[level_idx],
+                batch_size=batch_size,
+                kernel_size=kernel_size,
+                weight=weight,
+                bias=bias,
+                stride=(conv_stride, conv_stride),
+                padding=(0, 0),
+                model_config=self.model_config,
+                conv_config=self.optimizations.conv2d,
+                fp32_dest_acc_en=True,
+                packer_l1_acc=False,
+            )
+            self._conv_cache[cache_key] = TtConv2d(conv_config, self.device)
+        return self._conv_cache[cache_key]
+
+    def _create_conv_transpose_config(self):
         return ttnn.Conv2dConfig(
             weights_dtype=self.model_config["WEIGHTS_DTYPE"],
             shard_layout=None,
@@ -189,7 +183,7 @@ class SECONDFPN_TTNN:
         target_height = None
         target_width = None
 
-        conv_config = self._create_conv_config()
+        conv_config = self._create_conv_transpose_config()
         compute_config = self._create_compute_config()
 
         for i in range(self.num_levels):
@@ -216,7 +210,7 @@ class SECONDFPN_TTNN:
                     target_height = conv_out_height
                     target_width = conv_out_width
 
-                config = self.conv_transpose_configs[i]
+                config = self._conv_transpose_configs[i]
                 feat, [conv_out_height, conv_out_width] = ttnn.conv_transpose2d(
                     input_tensor=feat,
                     weight_tensor=config.weight,
@@ -242,6 +236,8 @@ class SECONDFPN_TTNN:
                 if feat.is_sharded():
                     feat = ttnn.sharded_to_interleaved(feat, ttnn.DRAM_MEMORY_CONFIG)
                 feat = ttnn.relu(feat)
+
+                feat = post_process_conv_output(feat, batch_size, conv_out_height, conv_out_width, self.out_channels[i])
             else:
                 conv_stride = int(np.round(1 / stride))
                 conv_out_height = (height - kernel_size[0]) // conv_stride + 1
@@ -269,16 +265,12 @@ class SECONDFPN_TTNN:
                         memory_config=ttnn.DRAM_MEMORY_CONFIG,
                     )
                 else:
-                    feat = self.conv_layers[i](feat)
-                    if feat.is_sharded():
-                        feat = ttnn.sharded_to_interleaved(feat, ttnn.DRAM_MEMORY_CONFIG)
+                    tt_conv = self._get_conv(i, batch_size, height, width)
+                    feat, (conv_out_height, conv_out_width) = tt_conv(feat, return_output_dim=True)
+                    feat = post_process_conv_output(
+                        feat, batch_size, conv_out_height, conv_out_width, self.out_channels[i]
+                    )
                     feat = ttnn.relu(feat)
-
-            if len(feat.shape) == 4:
-                if feat.shape[1] == 1 and feat.shape[2] != conv_out_height:
-                    feat = ttnn.reshape(feat, (batch_size, conv_out_height, conv_out_width, self.out_channels[i]))
-            elif len(feat.shape) == 3:
-                feat = ttnn.reshape(feat, (batch_size, conv_out_height, conv_out_width, self.out_channels[i]))
 
             ups.append(feat)
 
@@ -328,12 +320,11 @@ class SECONDFPN_Head_TTNN:
             input_shapes = [(128, 128), (64, 64), (32, 32), (16, 16)]
         self.input_shapes = input_shapes
 
-        self.conv_transpose_configs = []
+        self._conv_transpose_configs = []
 
         for i in range(self.num_levels):
             kernel_size = self.deblocks[i].kernel_size
             stride = int(self.upsample_strides[i])
-            input_h, input_w = self.input_shapes[i]
 
             weight = self.deblocks[i].conv_weight
             bias = self.deblocks[i].conv_bias
@@ -360,17 +351,14 @@ class SECONDFPN_Head_TTNN:
                 out_channels=out_channels[i],
                 kernel_size=kernel_size,
                 stride=(stride, stride),
-                input_height=input_h,
-                input_width=input_w,
-                batch_size=batch_size,
                 weight=weight_ttnn,
                 bias=bias_ttnn,
             )
-            self.conv_transpose_configs.append(config)
+            self._conv_transpose_configs.append(config)
 
         logger.info(f"SECONDFPN_Head_TTNN init: {self.num_levels} levels")
 
-    def _create_conv_config(self):
+    def _create_conv_transpose_config(self):
         return ttnn.Conv2dConfig(
             weights_dtype=self.model_config["WEIGHTS_DTYPE"],
             shard_layout=None,
@@ -392,7 +380,7 @@ class SECONDFPN_Head_TTNN:
         target_height = None
         target_width = None
 
-        conv_config = self._create_conv_config()
+        conv_config = self._create_conv_transpose_config()
         compute_config = self._create_compute_config()
 
         for i in range(self.num_levels):
@@ -418,7 +406,7 @@ class SECONDFPN_Head_TTNN:
                 num_slices = 8
                 slice_config = ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dDRAMSliceHeight, num_slices=num_slices)
 
-            config = self.conv_transpose_configs[i]
+            config = self._conv_transpose_configs[i]
 
             feat, [conv_out_height, conv_out_width] = ttnn.conv_transpose2d(
                 input_tensor=feat,
@@ -452,11 +440,7 @@ class SECONDFPN_Head_TTNN:
                 target_height = conv_out_height
                 target_width = conv_out_width
 
-            if len(feat.shape) == 4:
-                if feat.shape[1] == 1 and feat.shape[2] != conv_out_height:
-                    feat = ttnn.reshape(feat, (batch_size, conv_out_height, conv_out_width, self.out_channels[i]))
-            elif len(feat.shape) == 3:
-                feat = ttnn.reshape(feat, (batch_size, conv_out_height, conv_out_width, self.out_channels[i]))
+            feat = post_process_conv_output(feat, batch_size, conv_out_height, conv_out_width, self.out_channels[i])
 
             ups.append(feat)
 
