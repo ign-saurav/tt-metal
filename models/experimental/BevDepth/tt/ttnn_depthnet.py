@@ -5,6 +5,12 @@ import ttnn
 import torch
 from dataclasses import dataclass
 from loguru import logger
+
+from models.tt_cnn.tt.builder import TtConv2d
+from models.experimental.BevDepth.tt.utils import (
+    create_conv2d_config,
+    post_process_conv_output,
+)
 from models.experimental.BevDepth.tt.deformable_conv import TtDeformConv2dPack
 
 
@@ -98,91 +104,120 @@ class MLP_TTNN:
 
 
 class SELayer_TTNN:
-    """Squeeze-and-Excitation Layer"""
+    """Squeeze-and-Excitation Layer using TtConv2d builder API."""
 
     def __init__(self, device, parameters, channels, model_config):
         self.device = device
         self.channels = channels
         self.model_config = model_config
         self.params = parameters
+        self._conv_reduce_cache = {}
+        self._conv_expand_cache = {}
 
-    def __call__(self, x, x_se):
+    def _get_conv_reduce(self, batch_size, height, width):
+        cache_key = (batch_size, height, width)
+        if cache_key not in self._conv_reduce_cache:
+            config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=self.channels,
+                out_channels=self.channels,
+                batch_size=batch_size,
+                kernel_size=(1, 1),
+                weight=self.params.conv_reduce_weight,
+                bias=self.params.conv_reduce_bias,
+                model_config=self.model_config,
+                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+                shard_layout=None,
+                packer_l1_acc=False,
+            )
+            self._conv_reduce_cache[cache_key] = TtConv2d(config, self.device)
+        return self._conv_reduce_cache[cache_key]
+
+    def _get_conv_expand(self, batch_size, height, width):
+        cache_key = (batch_size, height, width)
+        if cache_key not in self._conv_expand_cache:
+            config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=self.channels,
+                out_channels=self.channels,
+                batch_size=batch_size,
+                kernel_size=(1, 1),
+                weight=self.params.conv_expand_weight,
+                bias=self.params.conv_expand_bias,
+                model_config=self.model_config,
+                activation=None,
+                shard_layout=None,
+                packer_l1_acc=False,
+            )
+            self._conv_expand_cache[cache_key] = TtConv2d(config, self.device)
+        return self._conv_expand_cache[cache_key]
+
+    def __call__(self, x, x_se, batch_size=None, height=None, width=None):
         """
         Forward pass:
         x: TTNN tensor [batch, height, width, channels]
         x_se: TTNN tensor [batch, height, width, channels] (from MLP output broadcasted)
+        batch_size, height, width: Optional explicit dimensions to use for reshaping
         """
-        from models.experimental.BevDepth.tt.utils import ttnn_conv2d
-
         if x_se.is_sharded():
             x_se = ttnn.sharded_to_interleaved(x_se, ttnn.DRAM_MEMORY_CONFIG)
         if x_se.layout != ttnn.TILE_LAYOUT:
             x_se = ttnn.to_layout(x_se, ttnn.TILE_LAYOUT)
 
-        batch_size, height, width, channels = x.shape
+        # Ensure x is in interleaved DRAM
+        if x.is_sharded():
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+        if x.layout != ttnn.TILE_LAYOUT:
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
 
-        # conv_reduce: 1x1 conv (channels -> channels)
-        x_se = ttnn_conv2d(
-            input_tensor=x_se,
-            weight_tensor=self.params.conv_reduce_weight,
-            bias_tensor=self.params.conv_reduce_bias,
-            device=self.device,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            in_channels=channels,
-            out_channels=channels,
-            kernel_size=(1, 1),
-            stride=(1, 1),
-            padding=(0, 0),
-            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-            shard_layout=None,
-            packer_l1_acc=False,
-        )
+        # Get dimensions from input or explicit parameters
+        if batch_size is None or height is None or width is None:
+            # Try to infer from x shape
+            if len(x.shape) == 4:
+                batch_size = x.shape[0]
+                height = x.shape[1]
+                width = x.shape[2]
+                channels = x.shape[3]
+            else:
+                raise ValueError(f"Cannot infer dimensions from x.shape={x.shape}")
+        else:
+            channels = self.channels
 
-        # Reshape if needed
-        if x_se.is_sharded():
-            x_se = ttnn.sharded_to_interleaved(x_se, ttnn.DRAM_MEMORY_CONFIG)
-        if len(x_se.shape) == 3:
-            x_se = ttnn.reshape(x_se, (batch_size, height, width, channels))
-        elif len(x_se.shape) == 4 and (x_se.shape[0] == 1 or x_se.shape[1] == 1):
-            x_se = ttnn.reshape(x_se, (batch_size, height, width, channels))
+        # Ensure x has proper shape
+        x = post_process_conv_output(x, batch_size, height, width, channels)
+        # Ensure x_se has proper shape
+        x_se = post_process_conv_output(x_se, batch_size, height, width, channels)
+
+        # conv_reduce: 1x1 conv (channels -> channels) with ReLU
+        conv_reduce = self._get_conv_reduce(batch_size, height, width)
+        x_se, (out_h, out_w) = conv_reduce(x_se, return_output_dim=True)
+        x_se = post_process_conv_output(x_se, batch_size, out_h, out_w, channels)
 
         # conv_expand: 1x1 conv (channels -> channels)
-        x_se = ttnn_conv2d(
-            input_tensor=x_se,
-            weight_tensor=self.params.conv_expand_weight,
-            bias_tensor=self.params.conv_expand_bias,
-            device=self.device,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            in_channels=channels,
-            out_channels=channels,
-            kernel_size=(1, 1),
-            stride=(1, 1),
-            padding=(0, 0),
-            activation=None,
-            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-            shard_layout=None,
-            packer_l1_acc=False,
-        )
-
-        # Reshape if needed
-        if x_se.is_sharded():
-            x_se = ttnn.sharded_to_interleaved(x_se, ttnn.DRAM_MEMORY_CONFIG)
-        if len(x_se.shape) == 3:
-            x_se = ttnn.reshape(x_se, (batch_size, height, width, channels))
-        elif len(x_se.shape) == 4 and (x_se.shape[0] == 1 or x_se.shape[1] == 1):
-            x_se = ttnn.reshape(x_se, (batch_size, height, width, channels))
+        conv_expand = self._get_conv_expand(batch_size, height, width)
+        x_se, (out_h, out_w) = conv_expand(x_se, return_output_dim=True)
+        x_se = post_process_conv_output(x_se, batch_size, out_h, out_w, channels)
 
         # Apply sigmoid (gate)
         x_se = ttnn.sigmoid(x_se)
+
+        # Ensure both tensors are in DRAM with interleaved memory config and TILE_LAYOUT
+        if x.is_sharded():
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+        if x_se.is_sharded():
+            x_se = ttnn.sharded_to_interleaved(x_se, ttnn.DRAM_MEMORY_CONFIG)
+
+        # Ensure both are in TILE_LAYOUT
+        if x.layout != ttnn.TILE_LAYOUT:
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+        if x_se.layout != ttnn.TILE_LAYOUT:
+            x_se = ttnn.to_layout(x_se, ttnn.TILE_LAYOUT)
+
+        # Ensure matching memory configs
+        x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+        x_se = ttnn.to_memory_config(x_se, ttnn.DRAM_MEMORY_CONFIG)
 
         # Element-wise multiply: x * gate(x_se)
         result = ttnn.multiply(x, x_se)
@@ -191,91 +226,89 @@ class SELayer_TTNN:
 
 
 class BasicBlock_TTNN:
+    """BasicBlock using TtConv2d builder API."""
+
     def __init__(self, device, parameters, in_channels, out_channels, model_config):
         self.device = device
         self.in_channels = in_channels
         self.out_channels = out_channels
         self.model_config = model_config
         self.params = parameters
+        self._conv1_cache = {}
+        self._conv2_cache = {}
+
+    def _get_conv1(self, batch_size, height, width):
+        cache_key = (batch_size, height, width)
+        if cache_key not in self._conv1_cache:
+            config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=self.in_channels,
+                out_channels=self.out_channels,
+                batch_size=batch_size,
+                kernel_size=(3, 3),
+                stride=(1, 1),
+                padding=(1, 1),
+                weight=self.params.conv1_weight,
+                bias=self.params.conv1_bias,
+                model_config=self.model_config,
+                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+                packer_l1_acc=False,
+            )
+            self._conv1_cache[cache_key] = TtConv2d(config, self.device)
+        return self._conv1_cache[cache_key]
+
+    def _get_conv2(self, batch_size, height, width):
+        cache_key = (batch_size, height, width)
+        if cache_key not in self._conv2_cache:
+            config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=self.out_channels,
+                out_channels=self.out_channels,
+                batch_size=batch_size,
+                kernel_size=(3, 3),
+                stride=(1, 1),
+                padding=(1, 1),
+                weight=self.params.conv2_weight,
+                bias=self.params.conv2_bias,
+                model_config=self.model_config,
+                activation=None,
+                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+                packer_l1_acc=False,
+            )
+            self._conv2_cache[cache_key] = TtConv2d(config, self.device)
+        return self._conv2_cache[cache_key]
 
     def __call__(self, x, batch_size, height, width):
-        from models.experimental.BevDepth.tt.utils import ttnn_conv2d
-
-        identity = x
-
         # Ensure tensor is in interleaved DRAM (not sharded) for stability
         if x.is_sharded():
             x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
-
         if x.layout != ttnn.TILE_LAYOUT:
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
 
+        # Ensure x is properly shaped before saving as identity
+        x = post_process_conv_output(x, batch_size, height, width, self.in_channels)
+        identity = x
+
         # Conv1: 3x3 with ReLU fused
-        out = ttnn_conv2d(
-            input_tensor=x,
-            weight_tensor=self.params.conv1_weight,
-            bias_tensor=self.params.conv1_bias,
-            device=self.device,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            in_channels=self.in_channels,
-            out_channels=self.out_channels,
-            kernel_size=(3, 3),
-            stride=(1, 1),
-            padding=(1, 1),
-            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            packer_l1_acc=False,
-        )
-
-        # Convert sharded to interleaved if needed (must be done BEFORE reshape)
-        if out.is_sharded():
-            out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
-
-        if len(out.shape) == 3:
-            out = ttnn.reshape(out, (batch_size, height, width, self.out_channels))
+        conv1 = self._get_conv1(batch_size, height, width)
+        out, (out_h, out_w) = conv1(x, return_output_dim=True)
+        out = post_process_conv_output(out, batch_size, out_h, out_w, self.out_channels)
 
         # Ensure out is in DRAM before conv2
         if out.is_sharded():
             out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
-        # Otherwise, assume it's already in DRAM
         if out.layout != ttnn.TILE_LAYOUT:
             out = ttnn.to_layout(out, ttnn.TILE_LAYOUT)
             if out.is_sharded():
                 out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
 
-        # Conv2: 3x3 (no activation) - use BLOCK_SHARDED to avoid L1 buffer overflow
-        out_conv2 = ttnn_conv2d(
-            input_tensor=out,
-            weight_tensor=self.params.conv2_weight,
-            bias_tensor=self.params.conv2_bias,
-            device=self.device,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            in_channels=self.out_channels,
-            out_channels=self.out_channels,
-            kernel_size=(3, 3),
-            stride=(1, 1),
-            padding=(1, 1),
-            activation=None,
-            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            packer_l1_acc=False,
-        )
-
-        # Convert sharded to interleaved if needed (must be done BEFORE reshape)
-        if out_conv2.is_sharded():
-            out_conv2 = ttnn.sharded_to_interleaved(out_conv2, ttnn.DRAM_MEMORY_CONFIG)
-
-        if len(out_conv2.shape) == 3:
-            out_conv2 = ttnn.reshape(out_conv2, (batch_size, height, width, self.out_channels))
+        # Conv2: 3x3 (no activation)
+        conv2 = self._get_conv2(batch_size, height, width)
+        out_conv2, (out_h2, out_w2) = conv2(out, return_output_dim=True)
+        out_conv2 = post_process_conv_output(out_conv2, batch_size, out_h2, out_w2, self.out_channels)
 
         # Add + ReLU
         out = ttnn.add(out_conv2, identity)
@@ -285,215 +318,160 @@ class BasicBlock_TTNN:
 
 
 class ASPP_TTNN:
+    """ASPP module using TtConv2d builder API."""
+
     def __init__(self, device, parameters, in_channels, mid_channels, model_config):
         self.device = device
         self.in_channels = in_channels
         self.mid_channels = mid_channels
         self.model_config = model_config
         self.params = parameters
+        # Conv caches for each branch
+        self._aspp1_cache = {}
+        self._aspp2_cache = {}
+        self._aspp3_cache = {}
+        self._aspp4_cache = {}
+        self._global_cache = {}
+        self._final_slice_caches = [{}, {}, {}, {}]
 
-    def __call__(self, x, batch_size, height, width):
-        from models.experimental.BevDepth.tt.utils import ttnn_conv2d
-        import torch
-
-        # Ensure input is in DRAM before conv2d
-        # Avoid calling memory_config() which might fail if buffer isn't allocated
-        if x.is_sharded():
-            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
-        # Otherwise, assume it's already in DRAM (from previous operations)
-
-        # Ensure TILE_LAYOUT (required for DRAM conv)
-        if x.layout != ttnn.TILE_LAYOUT:
-            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-            # After layout conversion, if it becomes sharded, convert to interleaved
-            if x.is_sharded():
-                x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
-
-        # Branch 1: 1x1 conv, dilation=1 - use BLOCK_SHARDED to avoid L1 buffer overflow
-        x1 = ttnn_conv2d(
-            input_tensor=x,
-            weight_tensor=self.params.aspp1_weight,
-            bias_tensor=self.params.aspp1_bias,
-            device=self.device,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            in_channels=self.in_channels,
-            out_channels=self.mid_channels,
-            kernel_size=(1, 1),
-            stride=(1, 1),
-            padding=(0, 0),
-            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            packer_l1_acc=False,
-        )
-        # Convert sharded to interleaved DRAM before reshape (required for reshape)
-        if x1.is_sharded():
-            x1 = ttnn.sharded_to_interleaved(x1, ttnn.DRAM_MEMORY_CONFIG)
-        # Ensure tensor is in DRAM (not L1)
-        if x1.is_allocated() and x1.memory_config().buffer_type != ttnn.BufferType.DRAM:
-            x1 = ttnn.to_memory_config(x1, ttnn.DRAM_MEMORY_CONFIG)
-        # Ensure TILE_LAYOUT
-        if x1.layout != ttnn.TILE_LAYOUT:
-            x1 = ttnn.to_layout(x1, ttnn.TILE_LAYOUT)
-
-        # Verify tensor is allocated
-        if not x1.is_allocated():
-            raise RuntimeError(f"x1 is not allocated before reshape: shape={x1.shape}")
-        if x1.is_sharded():
-            raise RuntimeError(f"x1 is still sharded after conversion: shape={x1.shape}")
-
-        # Reshape x1 if needed (ttnn.conv2d returns flattened tensor)
-        expected_elements = batch_size * height * width * self.mid_channels
-        actual_elements = 1
-        for dim in x1.shape:
-            actual_elements *= dim
-
-        if actual_elements != expected_elements:
-            raise RuntimeError(
-                f"Cannot reshape x1: shape={x1.shape}, expected elements={expected_elements}, actual={actual_elements}"
-            )
-
-        # Only reshape if shape doesn't already match
-        if (
-            len(x1.shape) != 4
-            or x1.shape[0] != batch_size
-            or x1.shape[1] != height
-            or x1.shape[2] != width
-            or x1.shape[3] != self.mid_channels
-        ):
-            x1 = ttnn.reshape(x1, (batch_size, height, width, self.mid_channels))
-
-        # Branch 2-4: 3x3 conv with dilation using native TTNN dilation support
-        def run_dilated_conv_ttnn(x_ttnn, weight, bias, dilation_val, branch_name):
-            # Ensure input is in correct format
-            if x_ttnn.is_sharded():
-                x_ttnn = ttnn.sharded_to_interleaved(x_ttnn, ttnn.DRAM_MEMORY_CONFIG)
-            if x_ttnn.layout != ttnn.TILE_LAYOUT:
-                x_ttnn = ttnn.to_layout(x_ttnn, ttnn.TILE_LAYOUT)
-
-            # Prepare weight tensor
-            weight_ttnn = weight
-            if isinstance(weight, torch.Tensor):
-                weight_ttnn = ttnn.from_torch(
-                    weight.to(torch.bfloat16), dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
-                )
-
-            # Prepare bias tensor
-            bias_ttnn = None
-            if bias is not None:
-                if isinstance(bias, torch.Tensor):
-                    bias_reshaped = bias.reshape(1, 1, 1, -1).to(torch.bfloat16)
-                    bias_ttnn = ttnn.from_torch(bias_reshaped, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
-                else:
-                    bias_ttnn = bias
-
-            conv_config = ttnn.Conv2dConfig(
-                weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-                output_layout=ttnn.TILE_LAYOUT,
-            )
-            compute_config = ttnn.init_device_compute_kernel_config(
-                self.device.arch(),
-                math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-                fp32_dest_acc_en=True,
-            )
-
-            # Native TTNN conv2d with dilation parameter
-            out, [out_h, out_w] = ttnn.conv2d(
-                input_tensor=x_ttnn,
-                weight_tensor=weight_ttnn,
-                bias_tensor=bias_ttnn,
-                device=self.device,
+    def _get_aspp1(self, batch_size, height, width):
+        """Branch 1: 1x1 conv with ReLU."""
+        cache_key = (batch_size, height, width)
+        if cache_key not in self._aspp1_cache:
+            config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
                 in_channels=self.in_channels,
                 out_channels=self.mid_channels,
                 batch_size=batch_size,
+                kernel_size=(1, 1),
+                stride=(1, 1),
+                padding=(0, 0),
+                weight=self.params.aspp1_weight,
+                bias=self.params.aspp1_bias,
+                model_config=self.model_config,
+                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+                packer_l1_acc=False,
+            )
+            self._aspp1_cache[cache_key] = TtConv2d(config, self.device)
+        return self._aspp1_cache[cache_key]
+
+    def _get_dilated_conv(self, cache, batch_size, height, width, dilation, weight, bias):
+        """Get dilated conv for ASPP branches 2-4."""
+        cache_key = (batch_size, height, width)
+        if cache_key not in cache:
+            config = create_conv2d_config(
                 input_height=height,
                 input_width=width,
+                in_channels=self.in_channels,
+                out_channels=self.mid_channels,
+                batch_size=batch_size,
                 kernel_size=(3, 3),
                 stride=(1, 1),
-                padding=(dilation_val, dilation_val),
-                dilation=(dilation_val, dilation_val),
-                conv_config=conv_config,
-                compute_config=compute_config,
-                return_output_dim=True,
-                dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+                padding=(dilation, dilation),
+                dilation=(dilation, dilation),
+                weight=weight,
+                bias=bias,
+                model_config=self.model_config,
+                activation=None,  # Apply ReLU after
+                shard_layout=None,
+                packer_l1_acc=False,
             )
+            cache[cache_key] = TtConv2d(config, self.device)
+        return cache[cache_key]
 
-            if out.is_sharded():
-                out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
-            out = ttnn.relu(out)
+    def _get_global_conv(self, batch_size):
+        """Global pooling branch: 1x1 conv."""
+        cache_key = (batch_size, 1, 1)
+        if cache_key not in self._global_cache:
+            config = create_conv2d_config(
+                input_height=1,
+                input_width=1,
+                in_channels=self.in_channels,
+                out_channels=self.mid_channels,
+                batch_size=batch_size,
+                kernel_size=(1, 1),
+                stride=(1, 1),
+                padding=(0, 0),
+                weight=self.params.global_weight,
+                bias=self.params.global_bias,
+                model_config=self.model_config,
+                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+                packer_l1_acc=False,
+            )
+            self._global_cache[cache_key] = TtConv2d(config, self.device)
+        return self._global_cache[cache_key]
 
-            # Reshape to [B, H, W, C]
-            if len(out.shape) == 4 and out.shape[1] == 1:
-                out = ttnn.reshape(out, (batch_size, out_h, out_w, self.mid_channels))
-            elif len(out.shape) == 3:
-                out = ttnn.reshape(out, (batch_size, out_h, out_w, self.mid_channels))
+    def __call__(self, x, batch_size, height, width):
+        import torch
 
-            return out
+        # Ensure input is in DRAM before conv2d
+        if x.is_sharded():
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+        if x.layout != ttnn.TILE_LAYOUT:
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+            if x.is_sharded():
+                x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
 
-        # x2: 3x3 conv with dilation=6 (native TTNN)
-        x2 = run_dilated_conv_ttnn(x, self.params.aspp2_weight, self.params.aspp2_bias, 6, "x2")
+        # Branch 1: 1x1 conv with ReLU
+        aspp1_conv = self._get_aspp1(batch_size, height, width)
+        x1, (out_h1, out_w1) = aspp1_conv(x, return_output_dim=True)
+        x1 = post_process_conv_output(x1, batch_size, out_h1, out_w1, self.mid_channels)
 
-        # x3: 3x3 conv with dilation=12 (native TTNN)
-        x3 = run_dilated_conv_ttnn(x, self.params.aspp3_weight, self.params.aspp3_bias, 12, "x3")
+        # Branch 2: 3x3 conv with dilation=6
+        aspp2_conv = self._get_dilated_conv(
+            self._aspp2_cache, batch_size, height, width, 6, self.params.aspp2_weight, self.params.aspp2_bias
+        )
+        x2, (out_h2, out_w2) = aspp2_conv(x, return_output_dim=True)
+        x2 = post_process_conv_output(x2, batch_size, out_h2, out_w2, self.mid_channels)
+        x2 = ttnn.relu(x2)
 
-        # x4: 3x3 conv with dilation=18 (native TTNN)
-        x4 = run_dilated_conv_ttnn(x, self.params.aspp4_weight, self.params.aspp4_bias, 18, "x4")
+        # Branch 3: 3x3 conv with dilation=12
+        aspp3_conv = self._get_dilated_conv(
+            self._aspp3_cache, batch_size, height, width, 12, self.params.aspp3_weight, self.params.aspp3_bias
+        )
+        x3, (out_h3, out_w3) = aspp3_conv(x, return_output_dim=True)
+        x3 = post_process_conv_output(x3, batch_size, out_h3, out_w3, self.mid_channels)
+        x3 = ttnn.relu(x3)
+
+        # Branch 4: 3x3 conv with dilation=18
+        aspp4_conv = self._get_dilated_conv(
+            self._aspp4_cache, batch_size, height, width, 18, self.params.aspp4_weight, self.params.aspp4_bias
+        )
+        x4, (out_h4, out_w4) = aspp4_conv(x, return_output_dim=True)
+        x4 = post_process_conv_output(x4, batch_size, out_h4, out_w4, self.mid_channels)
+        x4 = ttnn.relu(x4)
 
         # Global pooling branch
         x5 = ttnn.global_avg_pool2d(x)
-        # Ensure x5 is in DRAM
         if x5.is_sharded():
             x5 = ttnn.sharded_to_interleaved(x5, ttnn.DRAM_MEMORY_CONFIG)
-        # Otherwise, assume it's already in DRAM
         if x5.layout != ttnn.TILE_LAYOUT:
             x5 = ttnn.to_layout(x5, ttnn.TILE_LAYOUT)
             if x5.is_sharded():
                 x5 = ttnn.sharded_to_interleaved(x5, ttnn.DRAM_MEMORY_CONFIG)
-        x5 = ttnn_conv2d(
-            input_tensor=x5,
-            weight_tensor=self.params.global_weight,
-            bias_tensor=self.params.global_bias,
-            device=self.device,
-            batch_size=batch_size,
-            input_height=1,
-            input_width=1,
-            in_channels=self.in_channels,
-            out_channels=self.mid_channels,
-            kernel_size=(1, 1),
-            stride=(1, 1),
-            padding=(0, 0),
-            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            packer_l1_acc=False,
-        )
-        # Convert sharded to interleaved before upsample (required)
+
+        global_conv = self._get_global_conv(batch_size)
+        x5, (out_h5, out_w5) = global_conv(x5, return_output_dim=True)
+
+        # Convert sharded to interleaved before upsample
         if x5.is_sharded():
             x5 = ttnn.sharded_to_interleaved(x5, ttnn.DRAM_MEMORY_CONFIG)
 
-        # Reshape x5 to [batch, 1, 1, channels] if needed (from global pooling + conv)
+        # Reshape x5 to [batch, 1, 1, channels]
         if len(x5.shape) == 4 and x5.shape[0] == 1 and x5.shape[1] == 1:
-            # Format: [1, 1, batch, channels] or [1, 1, 1, channels] - need to check
             if x5.shape[2] == batch_size:
-                # Format: [1, 1, batch, channels]
                 x5 = ttnn.reshape(x5, (batch_size, 1, 1, self.mid_channels))
             elif x5.shape[2] == 1:
-                # Format: [1, 1, 1, channels]
                 x5 = ttnn.reshape(x5, (batch_size, 1, 1, self.mid_channels))
         elif len(x5.shape) == 3 and x5.shape[0] == 1:
-            # Format: [1, batch, channels] or [1, 1, channels]
             if x5.shape[1] == batch_size:
                 x5 = ttnn.reshape(x5, (batch_size, 1, 1, self.mid_channels))
             elif x5.shape[1] == 1:
                 x5 = ttnn.reshape(x5, (batch_size, 1, 1, self.mid_channels))
         elif len(x5.shape) != 4 or x5.shape[0] != batch_size or x5.shape[1] != 1 or x5.shape[2] != 1:
-            # Need to reshape - check total elements match
             expected_elements = batch_size * 1 * 1 * self.mid_channels
             actual_elements = 1
             for dim in x5.shape:
@@ -508,15 +486,12 @@ class ASPP_TTNN:
         # Upsample from 1x1 to height x width using TtUpsample with channel slicing
         from models.tt_cnn.tt.builder import TtUpsample, UpsampleConfiguration, ChannelSliceStrategyConfiguration
 
-        # Convert to ROW_MAJOR for upsample
         if x5.is_sharded():
             x5 = ttnn.sharded_to_interleaved(x5, ttnn.DRAM_MEMORY_CONFIG)
         x5 = ttnn.to_layout(x5, ttnn.ROW_MAJOR_LAYOUT)
 
-        # Use channel slicing to avoid L1 OOM for large scale factors
-        # Need more slices for larger output sizes: output_size = channels * H * W * 2 bytes
         output_bytes = self.mid_channels * height * width * 2
-        l1_bank_size = 1363712  # ~1.3MB
+        l1_bank_size = 1363712
         num_slices = max(4, (output_bytes // l1_bank_size) + 1)
         upsample_config = UpsampleConfiguration(
             input_height=1,
@@ -530,14 +505,12 @@ class ASPP_TTNN:
         upsample_layer = TtUpsample(upsample_config, self.device)
         x5 = upsample_layer(x5)
 
-        # Convert back to TILE_LAYOUT
         x5 = ttnn.to_layout(x5, ttnn.TILE_LAYOUT)
         x5 = ttnn.to_memory_config(x5, ttnn.DRAM_MEMORY_CONFIG)
 
-        # Concatenate all 5 branches: x1, x2, x3, x4, x5
+        # Concatenate all 5 branches
         out = ttnn.concat([x1, x2, x3, x4, x5], dim=-1)
 
-        # Ensure out is in DRAM before final conv (force DRAM slicing)
         if out.is_sharded():
             out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
         if out.is_allocated() and out.memory_config().buffer_type != ttnn.BufferType.DRAM:
@@ -545,74 +518,59 @@ class ASPP_TTNN:
         if out.layout != ttnn.TILE_LAYOUT:
             out = ttnn.to_layout(out, ttnn.TILE_LAYOUT)
 
-        # Final conv - 2560->512, 1x1 kernel: Use channel slicing directly (4x 640->512)
-        # This avoids L1 OOM errors for large channel count
-        import torch
-
+        # Final conv - 2560->512, 1x1 kernel: Use channel slicing (4x 640->512)
         num_slices = 4
-        channels_per_slice = (self.mid_channels * 5) // num_slices  # 640
+        channels_per_slice = (self.mid_channels * 5) // num_slices
 
-        # Split input along channel dimension into 4 slices
         out_slices = []
-        weight_slices = []
         for i in range(num_slices):
             start_ch = i * channels_per_slice
             end_ch = (i + 1) * channels_per_slice if i < num_slices - 1 else self.mid_channels * 5
             out_slices.append(ttnn.slice(out, [0, 0, 0, start_ch], [batch_size, height, width, end_ch]))
 
-        # Split weights: [out_channels, in_channels, kernel_h, kernel_w] = [512, 2560, 1, 1]
         weight_torch = (
             self.params.conv1_weight
             if isinstance(self.params.conv1_weight, torch.Tensor)
             else ttnn.to_torch(self.params.conv1_weight)
         )
+        weight_slices = []
         for i in range(num_slices):
             start_ch = i * channels_per_slice
             end_ch = (i + 1) * channels_per_slice if i < num_slices - 1 else self.mid_channels * 5
             weight_slices.append(weight_torch[:, start_ch:end_ch, :, :])
 
-        # Run each slice separately, accumulating results
+        # Run each slice separately using TtConv2d
         out_accum = None
         for i in range(num_slices):
-            out_i = ttnn_conv2d(
-                input_tensor=out_slices[i],
-                weight_tensor=weight_slices[i],
-                bias_tensor=None,  # Apply bias once at the end
-                device=self.device,
-                batch_size=batch_size,
-                input_height=height,
-                input_width=width,
-                in_channels=weight_slices[i].shape[1],  # Actual channels in this slice
-                out_channels=self.mid_channels,
-                kernel_size=(1, 1),
-                stride=(1, 1),
-                padding=(0, 0),
-                activation=None,  # Apply ReLU after sum
-                math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-                weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-                activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                shard_layout=None,
-                packer_l1_acc=False,
-            )
+            cache_key = (batch_size, height, width)
+            if cache_key not in self._final_slice_caches[i]:
+                config = create_conv2d_config(
+                    input_height=height,
+                    input_width=width,
+                    in_channels=weight_slices[i].shape[1],
+                    out_channels=self.mid_channels,
+                    batch_size=batch_size,
+                    kernel_size=(1, 1),
+                    stride=(1, 1),
+                    padding=(0, 0),
+                    weight=weight_slices[i],
+                    bias=None,
+                    model_config=self.model_config,
+                    activation=None,
+                    shard_layout=None,
+                    packer_l1_acc=False,
+                )
+                self._final_slice_caches[i][cache_key] = TtConv2d(config, self.device)
 
-            # Move output to DRAM and reshape if needed
-            if out_i.is_sharded():
-                out_i = ttnn.sharded_to_interleaved(out_i, ttnn.DRAM_MEMORY_CONFIG)
-            if out_i.is_allocated() and out_i.memory_config().buffer_type != ttnn.BufferType.DRAM:
-                out_i = ttnn.to_memory_config(out_i, ttnn.DRAM_MEMORY_CONFIG)
-            if out_i.layout != ttnn.TILE_LAYOUT:
-                out_i = ttnn.to_layout(out_i, ttnn.TILE_LAYOUT)
+            conv_layer = self._final_slice_caches[i][cache_key]
+            out_i, (out_h_i, out_w_i) = conv_layer(out_slices[i], return_output_dim=True)
+            out_i = post_process_conv_output(out_i, batch_size, out_h_i, out_w_i, self.mid_channels)
 
-            if len(out_i.shape) == 3:
-                out_i = ttnn.reshape(out_i, (batch_size, height, width, self.mid_channels))
-
-            # Accumulate results
             if out_accum is None:
                 out_accum = out_i
             else:
                 out_accum = ttnn.add(out_accum, out_i)
 
-            # Deallocate input slice to free L1
             out_slices[i].deallocate(True)
 
         out = out_accum
@@ -631,16 +589,8 @@ class ASPP_TTNN:
                 )
             out = ttnn.add(out, bias_ttnn)
 
-        # Apply ReLU activation
         out = ttnn.relu(out)
 
-        # Apply dropout (0.5) - in eval mode, dropout is a no-op (just return input)
-        # For inference, we can skip dropout or multiply by (1 - p) = 0.5
-        # But since we're in eval mode, dropout should be disabled, so we skip it
-        # Reference: self.dropout(x) where dropout=0.5, but in eval mode it returns x unchanged
-        # So we don't need to apply dropout for inference
-
-        # Ensure out is in correct format
         if out.is_sharded():
             out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
         if out.layout != ttnn.TILE_LAYOUT:
@@ -650,6 +600,8 @@ class ASPP_TTNN:
 
 
 class DepthNet_TTNN:
+    """DepthNet using TtConv2d builder API."""
+
     def __init__(
         self,
         device,
@@ -669,6 +621,12 @@ class DepthNet_TTNN:
         self.model_config = model_config
         self.optimizations = optimizations or depthnet_optimizations
         self.params = parameters
+
+        # Conv caches for TtConv2d instances
+        self._reduce_slice_caches = [{}, {}]  # 2 slices for reduce_conv
+        self._context_conv_cache = {}
+        self._dcn_fallback_cache = {}
+        self._final_conv_cache = {}
 
         # Initialize sub-modules
         self.block1 = BasicBlock_TTNN(device, parameters.block1, mid_channels, mid_channels, self.model_config)
@@ -734,6 +692,99 @@ class DepthNet_TTNN:
 
         logger.info(f"DepthNet init: in={in_channels}, mid={mid_channels}, depth={depth_channels}")
 
+    def _get_reduce_conv_slice(self, slice_idx, batch_size, height, width, weight_slice):
+        """Get cached TtConv2d for reduce_conv slice."""
+        cache_key = (batch_size, height, width)
+        channels_per_slice = self.in_channels // 2
+        if cache_key not in self._reduce_slice_caches[slice_idx]:
+            config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=channels_per_slice,
+                out_channels=self.mid_channels,
+                batch_size=batch_size,
+                kernel_size=(3, 3),
+                stride=(1, 1),
+                padding=(1, 1),
+                weight=weight_slice,
+                bias=None,
+                model_config=self.model_config,
+                activation=None,
+                shard_layout=None,
+                packer_l1_acc=False,
+            )
+            self._reduce_slice_caches[slice_idx][cache_key] = TtConv2d(config, self.device)
+        return self._reduce_slice_caches[slice_idx][cache_key]
+
+    def _get_context_conv(self, batch_size, height, width):
+        """Get cached TtConv2d for context_conv."""
+        cache_key = (batch_size, height, width)
+        if cache_key not in self._context_conv_cache:
+            config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=self.mid_channels,
+                out_channels=self.context_channels,
+                batch_size=batch_size,
+                kernel_size=(1, 1),
+                stride=(1, 1),
+                padding=(0, 0),
+                weight=self.params.context_weight,
+                bias=self.params.context_bias,
+                model_config=self.model_config,
+                activation=None,
+                shard_layout=None,
+                packer_l1_acc=False,
+            )
+            self._context_conv_cache[cache_key] = TtConv2d(config, self.device)
+        return self._context_conv_cache[cache_key]
+
+    def _get_dcn_fallback_conv(self, batch_size, height, width):
+        """Get cached TtConv2d for DCN fallback."""
+        cache_key = (batch_size, height, width)
+        if cache_key not in self._dcn_fallback_cache:
+            config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=self.mid_channels,
+                out_channels=self.mid_channels,
+                batch_size=batch_size,
+                kernel_size=(3, 3),
+                stride=(1, 1),
+                padding=(1, 1),
+                weight=self.params.dcn_weight,
+                bias=self.params.dcn_bias,
+                model_config=self.model_config,
+                activation=None,
+                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+                packer_l1_acc=False,
+            )
+            self._dcn_fallback_cache[cache_key] = TtConv2d(config, self.device)
+        return self._dcn_fallback_cache[cache_key]
+
+    def _get_final_conv(self, batch_size, height, width):
+        """Get cached TtConv2d for final depth conv."""
+        cache_key = (batch_size, height, width)
+        if cache_key not in self._final_conv_cache:
+            config = create_conv2d_config(
+                input_height=height,
+                input_width=width,
+                in_channels=self.mid_channels,
+                out_channels=self.depth_channels,
+                batch_size=batch_size,
+                kernel_size=(1, 1),
+                stride=(1, 1),
+                padding=(0, 0),
+                weight=self.params.final_weight,
+                bias=self.params.final_bias,
+                model_config=self.model_config,
+                activation=None,
+                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+                packer_l1_acc=False,
+            )
+            self._final_conv_cache[cache_key] = TtConv2d(config, self.device)
+        return self._final_conv_cache[cache_key]
+
     def __call__(self, x, batch_size=1, mats_dict=None):
         """
         Forward pass for DepthNet
@@ -744,7 +795,6 @@ class DepthNet_TTNN:
             mats_dict: Optional dict with camera matrices. If None, uses identity matrices.
                 Required keys: intrin_mats, ida_mats, sensor2ego_mats, bda_mat
         """
-        from models.experimental.BevDepth.tt.utils import ttnn_conv2d
         import torch
 
         height, width = x.shape[1], x.shape[2]
@@ -857,60 +907,14 @@ class DepthNet_TTNN:
         weight_slice1_torch = weight_torch[:, 0:channels_per_slice, :, :]  # [512, 256, 3, 3]
         weight_slice2_torch = weight_torch[:, channels_per_slice:, :, :]  # [512, 256, 3, 3]
 
-        # Run each slice separately - each produces ALL output channels
-        out_slice1 = ttnn_conv2d(
-            input_tensor=x_slice1,
-            weight_tensor=weight_slice1_torch,
-            bias_tensor=None,  # No bias in slices, apply once at the end
-            device=self.device,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            in_channels=channels_per_slice,
-            out_channels=self.mid_channels,
-            kernel_size=(3, 3),
-            stride=(1, 1),
-            padding=(1, 1),
-            activation=None,  # Apply ReLU after sum
-            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-            shard_layout=None,
-            packer_l1_acc=False,
-        )
+        # Run each slice separately using TtConv2d - each produces ALL output channels
+        conv_slice1 = self._get_reduce_conv_slice(0, batch_size, height, width, weight_slice1_torch)
+        out_slice1, (out_h1, out_w1) = conv_slice1(x_slice1, return_output_dim=True)
+        out_slice1 = post_process_conv_output(out_slice1, batch_size, out_h1, out_w1, self.mid_channels)
 
-        out_slice2 = ttnn_conv2d(
-            input_tensor=x_slice2,
-            weight_tensor=weight_slice2_torch,
-            bias_tensor=None,
-            device=self.device,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            in_channels=channels_per_slice,
-            out_channels=self.mid_channels,
-            kernel_size=(3, 3),
-            stride=(1, 1),
-            padding=(1, 1),
-            activation=None,
-            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-            shard_layout=None,
-            packer_l1_acc=False,
-        )
-
-        # Convert sharded to interleaved if needed (must be done BEFORE reshape)
-        if out_slice1.is_sharded():
-            out_slice1 = ttnn.sharded_to_interleaved(out_slice1, ttnn.DRAM_MEMORY_CONFIG)
-        if out_slice2.is_sharded():
-            out_slice2 = ttnn.sharded_to_interleaved(out_slice2, ttnn.DRAM_MEMORY_CONFIG)
-
-        # Reshape outputs if needed
-        if len(out_slice1.shape) == 3:
-            out_slice1 = ttnn.reshape(out_slice1, (batch_size, height, width, self.mid_channels))
-        if len(out_slice2.shape) == 3:
-            out_slice2 = ttnn.reshape(out_slice2, (batch_size, height, width, self.mid_channels))
+        conv_slice2 = self._get_reduce_conv_slice(1, batch_size, height, width, weight_slice2_torch)
+        out_slice2, (out_h2, out_w2) = conv_slice2(x_slice2, return_output_dim=True)
+        out_slice2 = post_process_conv_output(out_slice2, batch_size, out_h2, out_w2, self.mid_channels)
 
         # SUM the outputs (not concatenate) - each output channel depends on all input channels
         x = ttnn.add(out_slice1, out_slice2)
@@ -986,7 +990,7 @@ class DepthNet_TTNN:
             context_se_flat = context_se_mlp[:, 0, :, :]  # [actual_B, num_cams, C]
             context_se_flat = context_se_flat.reshape(actual_B * num_cams_mlp, -1)  # [actual_B * num_cams, C]
             context_se_torch = context_se_flat.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, C]
-            context_se_torch = context_se_torch.expand(batch_size, height, width, self.mid_channels)
+            context_se_torch = context_se_torch.expand(batch_size, height, width, self.mid_channels).contiguous()
 
             # Convert to TTNN tensor
             context_se_ttnn = ttnn.from_torch(
@@ -998,60 +1002,14 @@ class DepthNet_TTNN:
             )
 
             # Apply SELayer: x * gate(conv_expand(relu(conv_reduce(x_se))))
-            x_context = self.context_se(x, context_se_ttnn)
+            x_context = self.context_se(x, context_se_ttnn, batch_size=batch_size, height=height, width=width)
             # Log PCC after context SELayer
         else:
             x_context = x
 
-        context = ttnn_conv2d(
-            input_tensor=x_context,
-            weight_tensor=self.params.context_weight,
-            bias_tensor=self.params.context_bias,
-            device=self.device,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            in_channels=self.mid_channels,
-            out_channels=self.context_channels,
-            kernel_size=(1, 1),
-            stride=(1, 1),
-            padding=(0, 0),
-            activation=None,
-            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-            shard_layout=None,  # None defaults to HEIGHT_SHARDED, which uses DRAM
-            packer_l1_acc=False,
-        )
-
-        # Convert sharded to interleaved if needed (must be done BEFORE reshape)
-        if context.is_sharded():
-            context = ttnn.sharded_to_interleaved(context, ttnn.DRAM_MEMORY_CONFIG)
-
-        # Reshape flattened tensor to [batch, height, width, channels]
-        if len(context.shape) == 4 and context.shape[0] == 1 and context.shape[1] == 1:
-            context = ttnn.reshape(context, (batch_size, height, width, self.context_channels))
-        elif len(context.shape) == 3 and context.shape[0] == 1:
-            context = ttnn.reshape(context, (batch_size, height, width, self.context_channels))
-        elif (
-            len(context.shape) != 4
-            or context.shape[0] != batch_size
-            or context.shape[1] != height
-            or context.shape[2] != width
-        ):
-            expected_elements = batch_size * height * width * self.context_channels
-            actual_elements = 1
-            for dim in context.shape:
-                actual_elements *= dim
-            if actual_elements == expected_elements:
-                context = ttnn.reshape(context, (batch_size, height, width, self.context_channels))
-            else:
-                raise RuntimeError(
-                    f"Cannot reshape context: shape={context.shape}, expected={expected_elements}, actual={actual_elements}"
-                )
-        else:
-            logger.error(f"Unexpected context tensor shape after conv2d: {context.shape}")
-            raise RuntimeError(f"Cannot reshape unexpected context conv2d output shape: {context.shape}")
+        context_conv = self._get_context_conv(batch_size, height, width)
+        context, (out_h_ctx, out_w_ctx) = context_conv(x_context, return_output_dim=True)
+        context = post_process_conv_output(context, batch_size, out_h_ctx, out_w_ctx, self.context_channels)
 
         # Depth branch: Apply SELayer before depth_conv
         if x.shape[-1] != self.mid_channels:
@@ -1071,7 +1029,7 @@ class DepthNet_TTNN:
             depth_se_flat = depth_se_mlp[:, 0, :, :]  # [actual_B, num_cams, C]
             depth_se_flat = depth_se_flat.reshape(actual_B * num_cams_mlp, -1)  # [actual_B * num_cams, C]
             depth_se_torch = depth_se_flat.unsqueeze(1).unsqueeze(2)  # [batch_size, 1, 1, C]
-            depth_se_torch = depth_se_torch.expand(batch_size, height, width, self.mid_channels)
+            depth_se_torch = depth_se_torch.expand(batch_size, height, width, self.mid_channels).contiguous()
 
             # Convert to TTNN tensor
             depth_se_ttnn = ttnn.from_torch(
@@ -1083,7 +1041,7 @@ class DepthNet_TTNN:
             )
 
             # Apply SELayer: x * gate(conv_expand(relu(conv_reduce(x_se))))
-            x_depth = self.depth_se(x, depth_se_ttnn)
+            x_depth = self.depth_se(x, depth_se_ttnn, batch_size=batch_size, height=height, width=width)
             # Log PCC after depth SELayer
         else:
             x_depth = x
@@ -1111,30 +1069,9 @@ class DepthNet_TTNN:
         else:
             # Fallback to regular conv if DCN not initialized
             logger.warning("DCN not initialized, using regular Conv2d as approximation")
-            depth = ttnn_conv2d(
-                input_tensor=depth,
-                weight_tensor=self.params.dcn_weight,
-                bias_tensor=self.params.dcn_bias,
-                device=self.device,
-                batch_size=batch_size,
-                input_height=height,
-                input_width=width,
-                in_channels=self.mid_channels,
-                out_channels=self.mid_channels,
-                kernel_size=(3, 3),
-                stride=(1, 1),
-                padding=(1, 1),
-                activation=None,
-                math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-                weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-                activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-                shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-                packer_l1_acc=False,
-            )
-            if depth.is_sharded():
-                depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
-            if len(depth.shape) == 3:
-                depth = ttnn.reshape(depth, (batch_size, height, width, self.mid_channels))
+            dcn_fallback = self._get_dcn_fallback_conv(batch_size, height, width)
+            depth, (out_h_dcn, out_w_dcn) = dcn_fallback(depth, return_output_dim=True)
+            depth = post_process_conv_output(depth, batch_size, out_h_dcn, out_w_dcn, self.mid_channels)
 
         # Ensure depth is in DRAM before final conv
         if depth.is_sharded():
@@ -1145,34 +1082,10 @@ class DepthNet_TTNN:
             if depth.is_sharded():
                 depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
 
-        # Final depth conv - TTNN implementation
-        depth = ttnn_conv2d(
-            input_tensor=depth,
-            weight_tensor=self.params.final_weight,
-            bias_tensor=self.params.final_bias,
-            device=self.device,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            in_channels=self.mid_channels,
-            out_channels=self.depth_channels,
-            kernel_size=(1, 1),
-            stride=(1, 1),
-            padding=(0, 0),
-            activation=None,
-            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-            activations_dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-            shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            packer_l1_acc=False,
-        )
-
-        # Convert sharded to interleaved if needed (must be done BEFORE reshape)
-        if depth.is_sharded():
-            depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
-
-        if len(depth.shape) == 3:
-            depth = ttnn.reshape(depth, (batch_size, height, width, self.depth_channels))
+        # Final depth conv - using TtConv2d
+        final_conv = self._get_final_conv(batch_size, height, width)
+        depth, (out_h_final, out_w_final) = final_conv(depth, return_output_dim=True)
+        depth = post_process_conv_output(depth, batch_size, out_h_final, out_w_final, self.depth_channels)
 
         # Log PCC after final depth conv
 

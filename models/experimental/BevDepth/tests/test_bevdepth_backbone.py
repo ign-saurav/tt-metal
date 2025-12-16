@@ -502,7 +502,6 @@ class BackboneTestInfra:
         logger.info(f"PCC: {pcc_value:.6f}")
 
         # Assert PCC threshold
-        # Fix the pcc as it should be > 0.99
         assert pcc_value > 0.99, f"PCC {pcc_value:.6f} is below threshold 0.99"
 
         return pcc_value
