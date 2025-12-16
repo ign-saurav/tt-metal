@@ -139,10 +139,19 @@ class TtnnChatTTSDecoder:
         # Precompute rotary embeddings (cos/sin tables)
         self.rotary_cos, self.rotary_sin = _compute_rotary_cos_sin(self.head_dim, max_position_embeddings)
 
+        # TTNN cos/sin cache for native RoPE (will be initialized when device is set)
+        # Shape: [1, 1, max_pos, head_dim] for ttnn.experimental.rotary_embedding
+        self.rotary_cos_ttnn = None
+        self.rotary_sin_ttnn = None
+
         # Compute kernel configs (following TTNN LLM patterns)
         self.compute_kernel_config_hifi2 = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi2)
         self.compute_kernel_config_hifi4 = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4)
         self.compute_kernel_config_sdpa = ttnn.WormholeComputeKernelConfig(math_fidelity=ttnn.MathFidelity.HiFi4)
+
+        # Core grid for matmul operations
+        # Use smaller grid for decode (small tensors) to reduce overhead
+        self.core_grid = ttnn.CoreGrid(y=4, x=8)  # 32 cores
 
         # Initialize components that will be loaded
         self.projector = None  # LLM hidden state projector
@@ -194,6 +203,17 @@ class TtnnChatTTSDecoder:
 
     def load_weights(self, weights_dict: dict):
         """Load weights from PyTorch state dict."""
+        # Initialize TTNN cos/sin cache for native RoPE (decode mode optimization)
+        if self.rotary_cos_ttnn is None:
+            cos_cache = self.rotary_cos.unsqueeze(0).unsqueeze(0).to(torch.bfloat16)  # [1, 1, max_pos, head_dim]
+            sin_cache = self.rotary_sin.unsqueeze(0).unsqueeze(0).to(torch.bfloat16)
+            self.rotary_cos_ttnn = ttnn.from_torch(
+                cos_cache, device=self.device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+            )
+            self.rotary_sin_ttnn = ttnn.from_torch(
+                sin_cache, device=self.device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16
+            )
+
         # LLM projector
         if "projector.linear1.weight" in weights_dict:
             # MLP projector
@@ -486,6 +506,9 @@ class TtnnChatTTSDecoder:
         # Determine mode based on sequence length
         is_prefill = seq_len > 1
 
+        # Initialize storage variable (used in decode path)
+        new_past_key_value_storage = None
+
         # Reshape to 4D for ttnn.linear
         hidden_states_4d = ttnn.unsqueeze(hidden_states, dim=1)
 
@@ -496,6 +519,7 @@ class TtnnChatTTSDecoder:
             bias=None,
             compute_kernel_config=self.compute_kernel_config_hifi4,
             memory_config=get_activations_memory_config(),
+            core_grid=self.core_grid,
         )
 
         key = ttnn.linear(
@@ -504,6 +528,7 @@ class TtnnChatTTSDecoder:
             bias=None,
             compute_kernel_config=self.compute_kernel_config_hifi4,
             memory_config=get_activations_memory_config(),
+            core_grid=self.core_grid,
         )
 
         value = ttnn.linear(
@@ -512,6 +537,7 @@ class TtnnChatTTSDecoder:
             bias=None,
             compute_kernel_config=self.compute_kernel_config_hifi4,
             memory_config=get_activations_memory_config(),
+            core_grid=self.core_grid,
         )
 
         # Squeeze back to 3D: [batch, seq_len, hidden_size]
@@ -539,6 +565,7 @@ class TtnnChatTTSDecoder:
                 # For initial prefill, create sequential positions
                 rope_positions = torch.arange(seq_len, dtype=torch.long).unsqueeze(0)
 
+            # For prefill mode, use PyTorch RoPE (TTNN RoPE without token_idx has different behavior)
             # Convert Q, K to torch for RoPE application
             query_torch = ttnn.to_torch(query).to(torch.bfloat16)
             key_torch = ttnn.to_torch(key).to(torch.bfloat16)
@@ -586,7 +613,7 @@ class TtnnChatTTSDecoder:
             # Store current key/value for next iteration if caching
             new_past_key_value = (key, value) if use_cache else None
 
-            # Move to DRAM for SDPA
+            # SDPA requires inputs in DRAM
             query = ttnn.to_memory_config(query, ttnn.DRAM_MEMORY_CONFIG)
             key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
             value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
@@ -636,6 +663,7 @@ class TtnnChatTTSDecoder:
                     key_t,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,
                     compute_kernel_config=self.compute_kernel_config_hifi4,
+                    core_grid=self.core_grid,
                 )
 
                 # Scale
@@ -653,6 +681,7 @@ class TtnnChatTTSDecoder:
                     value,
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,
                     compute_kernel_config=self.compute_kernel_config_hifi4,
+                    core_grid=self.core_grid,
                 )
 
                 # Cleanup
@@ -697,97 +726,121 @@ class TtnnChatTTSDecoder:
             )
             ttnn.deallocate(xqkv_fused)
 
-            # Apply RoPE to the new single-token Q and K
+            # Apply RoPE to the new single-token Q and K using TTNN native RoPE
             # Determine position for this decode step
             if cache_position is not None:
-                rope_pos = cache_position
+                rope_pos = cache_position.item() if cache_position.numel() == 1 else cache_position[0, 0].item()
             elif position_ids is not None:
-                rope_pos = position_ids
+                rope_pos = position_ids.item() if position_ids.numel() == 1 else position_ids[0, 0].item()
             elif past_key_value is not None:
                 # Infer position from past KV cache length (shape is [batch, heads, seq, dim])
                 past_len = past_key_value[0].shape[2] if hasattr(past_key_value[0], "shape") else 0
-                rope_pos = torch.tensor([[past_len]], dtype=torch.long)
+                rope_pos = past_len
             else:
-                rope_pos = torch.tensor([[0]], dtype=torch.long)
+                rope_pos = 0
 
-            # Convert Q, K to torch for RoPE (decode Q/K are small - single token)
+            # Move Q, K to DRAM for RoPE processing (convert from HEIGHT_SHARDED)
             query = ttnn.to_memory_config(query, ttnn.DRAM_MEMORY_CONFIG)
-            key_for_rope = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
+            key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
 
+            # nlp_create_qkv_heads_decode outputs [batch=1, seq=1, heads=12, dim=64]
+            # Apply TTNN native RoPE per-head (TTNN RoPE requires dim[1]=1)
+            # Convert to torch for slicing, process in TTNN, convert back
             query_torch = ttnn.to_torch(query).to(torch.bfloat16)
-            key_torch = ttnn.to_torch(key_for_rope).to(torch.bfloat16)
+            key_torch = ttnn.to_torch(key).to(torch.bfloat16)
 
-            # nlp_create_qkv_heads_decode outputs [batch, seq=1, heads, dim]
-            # We need [batch, heads, seq, dim] for RoPE
-            orig_shape = query_torch.shape
-            if query_torch.dim() == 4 and query_torch.shape[1] == 1:
-                query_torch = query_torch.permute(0, 2, 1, 3)  # [batch, heads, 1, dim]
-                key_torch = key_torch.permute(0, 2, 1, 3)
+            q_rope_results = []
+            k_rope_results = []
 
-            query_torch, key_torch = _apply_rotary_pos_emb(
-                query_torch, key_torch, self.rotary_cos, self.rotary_sin, rope_pos
-            )
+            for head_idx in range(self.num_attention_heads):
+                # Extract single head: [1, 1, 1, 64]
+                q_head = query_torch[:, :, head_idx : head_idx + 1, :]
+                k_head = key_torch[:, :, head_idx : head_idx + 1, :]
 
-            # Permute back to [batch, seq=1, heads, dim]
-            if orig_shape[1] == 1:
-                query_torch = query_torch.permute(0, 2, 1, 3)
-                key_torch = key_torch.permute(0, 2, 1, 3)
+                # Permute for TTNN RoPE: [batch=1, seq=1, 1, 64] -> [seq=1, 1, batch=1, 64]
+                q_transposed = q_head.permute(1, 2, 0, 3)
+                k_transposed = k_head.permute(1, 2, 0, 3)
 
+                # Convert to TTNN and apply RoPE
+                q_tt = ttnn.from_torch(q_transposed, device=self.device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+                k_tt = ttnn.from_torch(k_transposed, device=self.device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+
+                q_rope_tt = ttnn.experimental.rotary_embedding(
+                    q_tt, self.rotary_cos_ttnn, self.rotary_sin_ttnn, rope_pos
+                )
+                k_rope_tt = ttnn.experimental.rotary_embedding(
+                    k_tt, self.rotary_cos_ttnn, self.rotary_sin_ttnn, rope_pos
+                )
+
+                # Convert back, slice off tile padding, permute to original format
+                q_rope = ttnn.to_torch(q_rope_tt)[:1, :1, :1, : self.head_dim].permute(2, 0, 1, 3)
+                k_rope = ttnn.to_torch(k_rope_tt)[:1, :1, :1, : self.head_dim].permute(2, 0, 1, 3)
+
+                q_rope_results.append(q_rope)
+                k_rope_results.append(k_rope)
+
+            # Concatenate all heads: [1, 1, 12, 64]
+            query_torch = torch.cat(q_rope_results, dim=2)
+            key_torch = torch.cat(k_rope_results, dim=2)
+
+            # Convert back to TTNN
             query = torch_to_ttnn(
                 query_torch, self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT
             )
             key = torch_to_ttnn(key_torch, self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG, layout=ttnn.TILE_LAYOUT)
 
             # KV caching: concatenate with past key/value if provided
+            # Internal storage: [batch, seq, heads, dim] (concat-friendly on dim=1)
+            # Pipeline expects: [batch, heads, seq, dim]
             if past_key_value is not None:
                 past_key, past_value = past_key_value
                 # Convert from torch tensor to ttnn if needed
                 if not isinstance(past_key, ttnn.Tensor):
-                    # past_key is [batch, heads, seq, dim] - permute to [batch, seq, heads, dim]
+                    # torch past_key is [batch, heads, seq, dim] - permute to storage format
                     past_key = torch_to_ttnn(
-                        past_key.permute(0, 2, 1, 3),
+                        past_key.permute(0, 2, 1, 3),  # to [batch, seq, heads, dim]
                         self.device,
                         memory_config=ttnn.DRAM_MEMORY_CONFIG,
                         layout=ttnn.TILE_LAYOUT,
                     )
-                if not isinstance(past_value, ttnn.Tensor):
                     past_value = torch_to_ttnn(
                         past_value.permute(0, 2, 1, 3),
                         self.device,
                         memory_config=ttnn.DRAM_MEMORY_CONFIG,
                         layout=ttnn.TILE_LAYOUT,
                     )
+                # else: ttnn KV is already in storage format [batch, seq, heads, dim]
 
-                # Convert new K/V to interleaved to match cache format
+                # Current key/value from RoPE are [batch, seq=1, heads, dim] - already in storage format
+                # Concat along seq dim (dim=1)
                 key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
                 value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
-
-                # Concatenate with past tensors
                 key = ttnn.concat([past_key, key], dim=1)
                 value = ttnn.concat([past_value, value], dim=1)
 
-                # Permute to SDPA decode format [batch, heads, seq, dim]
-                key = ttnn.permute(key, (0, 2, 1, 3))
-                value = ttnn.permute(value, (0, 2, 1, 3))
+            # key/value are in storage format [batch, seq, heads, dim]
+            # Store in storage format (will be converted to pipeline format on return)
+            new_past_key_value_storage = (key, value) if use_cache else None
 
-            # Store current key/value for next iteration if caching
-            new_past_key_value = (key, value) if use_cache else None
+            # Permute to SDPA format [batch, heads, seq, dim] for attention
+            key_sdpa = ttnn.permute(key, (0, 2, 1, 3))
+            value_sdpa = ttnn.permute(value, (0, 2, 1, 3))
 
-            # SDPA requires all inputs to be in DRAM
+            # Ensure inputs are in DRAM for attention
             query = ttnn.to_memory_config(query, ttnn.DRAM_MEMORY_CONFIG)
-            key = ttnn.to_memory_config(key, ttnn.DRAM_MEMORY_CONFIG)
-            value = ttnn.to_memory_config(value, ttnn.DRAM_MEMORY_CONFIG)
+            key_sdpa = ttnn.to_memory_config(key_sdpa, ttnn.DRAM_MEMORY_CONFIG)
+            value_sdpa = ttnn.to_memory_config(value_sdpa, ttnn.DRAM_MEMORY_CONFIG)
 
             # Query is [batch, seq=1, heads, dim], Key/Value are [batch, heads, seq, dim]
             # Permute query to match key/value format: [batch, heads, seq=1, dim]
             query = ttnn.permute(query, (0, 2, 1, 3))
 
-            # Use manual attention for decode mode (simpler and avoids SDPA decode format issues)
-            # query: [batch, heads, seq=1, dim], key: [batch, heads, seq, dim], value: [batch, heads, seq, dim]
+            # Use manual attention for decode mode
+            # query: [batch, heads, seq=1, dim], key_sdpa/value_sdpa: [batch, heads, seq, dim]
             scale = 1.0 / (self.head_dim**0.5)
 
             # Transpose key for matmul: [batch, heads, dim, seq]
-            key_t = ttnn.permute(key, (0, 1, 3, 2))
+            key_t = ttnn.permute(key_sdpa, (0, 1, 3, 2))
 
             # Compute attention scores: [batch, heads, 1, seq]
             attn_scores = ttnn.matmul(
@@ -795,15 +848,14 @@ class TtnnChatTTSDecoder:
                 key_t,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 compute_kernel_config=self.compute_kernel_config_hifi4,
+                core_grid=self.core_grid,
             )
 
             # Scale
             attn_scores = ttnn.multiply(attn_scores, scale, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
             # Apply attention mask if provided (for streaming TTS chunk masking)
-            # attention_mask is [batch, 1, 1, seq] with 0 for attend and -inf for mask
             if attention_mask is not None:
-                # Convert attention_mask to ttnn and add to scores
                 if not isinstance(attention_mask, ttnn.Tensor):
                     attn_mask_ttnn = torch_to_ttnn(
                         attention_mask.to(torch.bfloat16),
@@ -821,12 +873,15 @@ class TtnnChatTTSDecoder:
             # Apply attention to values: [batch, heads, 1, dim]
             attn_output = ttnn.matmul(
                 attn_probs,
-                value,
+                value_sdpa,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 compute_kernel_config=self.compute_kernel_config_hifi4,
+                core_grid=self.core_grid,
             )
 
-            # Cleanup
+            # Cleanup temporary tensors
+            ttnn.deallocate(key_sdpa)
+            ttnn.deallocate(value_sdpa)
             ttnn.deallocate(key_t)
             ttnn.deallocate(attn_scores)
             ttnn.deallocate(attn_probs)
@@ -844,10 +899,21 @@ class TtnnChatTTSDecoder:
             bias=None,
             compute_kernel_config=self.compute_kernel_config_hifi4,
             memory_config=get_activations_memory_config(),
+            core_grid=self.core_grid,
         )
 
         # Squeeze back to 3D
         attn_output = ttnn.squeeze(attn_output, dim=1)
+
+        # For decode path: convert storage format [batch, seq, heads, dim] to pipeline format [batch, heads, seq, dim]
+        if new_past_key_value_storage is not None:
+            storage_k, storage_v = new_past_key_value_storage
+            # Permute to pipeline format [batch, heads, seq, dim]
+            new_past_key_value = (
+                ttnn.permute(storage_k, (0, 2, 1, 3)),
+                ttnn.permute(storage_v, (0, 2, 1, 3)),
+            )
+        # For prefill path: new_past_key_value is already set in the correct format
 
         return attn_output, new_past_key_value
 
@@ -863,6 +929,7 @@ class TtnnChatTTSDecoder:
             bias=None,
             compute_kernel_config=self.compute_kernel_config_hifi4,
             memory_config=get_activations_memory_config(),
+            core_grid=self.core_grid,
         )
 
         # Up projection
@@ -872,6 +939,7 @@ class TtnnChatTTSDecoder:
             bias=None,
             compute_kernel_config=self.compute_kernel_config_hifi4,
             memory_config=get_activations_memory_config(),
+            core_grid=self.core_grid,
         )
 
         # SiLU activation on gate
@@ -887,6 +955,7 @@ class TtnnChatTTSDecoder:
             bias=None,
             compute_kernel_config=self.compute_kernel_config_hifi4,
             memory_config=get_activations_memory_config(),
+            core_grid=self.core_grid,
         )
 
         # Squeeze back to 3D
@@ -916,6 +985,7 @@ class TtnnChatTTSDecoder:
                 bias=None,
                 compute_kernel_config=self.compute_kernel_config_hifi4,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                core_grid=self.core_grid,
             )
             logit = ttnn.squeeze(logit_4d, dim=1)
             logits.append(logit)

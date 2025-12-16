@@ -1526,6 +1526,23 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
                         input_ids=text_input_ids, position_ids=position_ids, past_key_values=past_key_values
                     )
 
+            # Save inputs for debugging
+            import os
+
+            save_dir = "_debug_generate_inputs"
+            if not os.path.exists(save_dir):
+                os.makedirs(save_dir)
+                torch.save(audio_input_ids, f"{save_dir}/audio_input_ids.pt")
+                torch.save([(k.clone(), v.clone()) for k, v in past_key_values], f"{save_dir}/past_key_values.pt")
+                torch.save(streaming_tts_text_mask, f"{save_dir}/streaming_tts_text_mask.pt")
+                torch.save(torch.tensor([0.1, 0.3, 0.1, 0.3], dtype=torch.float), f"{save_dir}/temperature.pt")
+                torch.save(torch.tensor([625], dtype=torch.long), f"{save_dir}/eos_token.pt")
+                torch.save(output_chunk_size, f"{save_dir}/max_new_token.pt")
+                print(f"Saved generate inputs to {save_dir}/")
+                import pytest
+
+                pytest.skip("Saved generate inputs for debugging")
+
             outputs = self.tts.generate(
                 input_ids=audio_input_ids,
                 past_key_values=past_key_values,
