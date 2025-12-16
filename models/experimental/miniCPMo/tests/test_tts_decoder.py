@@ -334,3 +334,92 @@ def test_tts_decoder_incremental_prefill(device, input_dtype, weight_dtype):
     passing, pcc_message = check_with_pcc(tt_output, ref_output, 0.90)
     logger.info(f"Incremental prefill PCC: {pcc_message}")
     assert passing, f"Incremental prefill PCC check failed: {pcc_message}"
+
+
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
+def test_ttnn_native_rope_in_decoder(device):
+    """
+    Test TTNN native RoPE as a drop-in replacement for PyTorch RoPE in decode mode.
+
+    This validates that ttnn.experimental.rotary_embedding can be used to eliminate
+    the device-to-host-to-device roundtrip for RoPE in the decode hot path.
+    """
+    torch.manual_seed(42)
+
+    from models.experimental.miniCPMo.tt.ttnn_chattts_decoder import _compute_rotary_cos_sin, _apply_rotary_pos_emb
+
+    # ChatTTS decoder parameters
+    batch_size = 1
+    num_heads = 12
+    head_dim = 64
+    hidden_size = num_heads * head_dim  # 768
+
+    # Simulate decode mode: single token at various positions
+    test_positions = [0, 50, 100, 200, 300]
+
+    # Precompute cos/sin cache (matching decoder initialization)
+    rotary_cos, rotary_sin = _compute_rotary_cos_sin(head_dim, max_position_embeddings=4096)
+
+    # Prepare TTNN cos/sin cache
+    cos_cache_ttnn = rotary_cos.unsqueeze(0).unsqueeze(0).to(torch.bfloat16)  # [1, 1, max_pos, head_dim]
+    sin_cache_ttnn = rotary_sin.unsqueeze(0).unsqueeze(0).to(torch.bfloat16)
+
+    cos_tt = ttnn.from_torch(cos_cache_ttnn, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+    sin_tt = ttnn.from_torch(sin_cache_ttnn, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+
+    for position in test_positions:
+        # Create random Q, K tensors simulating decode mode
+        # Shape after nlp_create_qkv_heads_decode and permute: [batch, heads, seq=1, head_dim]
+        q = torch.randn(batch_size, num_heads, 1, head_dim, dtype=torch.bfloat16)
+        k = torch.randn(batch_size, num_heads, 1, head_dim, dtype=torch.bfloat16)
+
+        position_ids = torch.tensor([[position]], dtype=torch.long)
+
+        # === PyTorch Reference RoPE (current implementation) ===
+        q_pt, k_pt = _apply_rotary_pos_emb(q, k, rotary_cos, rotary_sin, position_ids)
+
+        # === TTNN Native RoPE ===
+        q_results = []
+        k_results = []
+
+        for head_idx in range(num_heads):
+            # Extract single head: [batch, 1, seq=1, head_dim]
+            q_head = q[:, head_idx : head_idx + 1, :, :]
+            k_head = k[:, head_idx : head_idx + 1, :, :]
+
+            # Permute for TTNN: [batch, 1, seq, dim] -> [seq, 1, batch, dim]
+            q_transposed = q_head.permute(2, 1, 0, 3)  # [1, 1, 1, 64]
+            k_transposed = k_head.permute(2, 1, 0, 3)
+
+            # Convert to TTNN
+            q_tt = ttnn.from_torch(q_transposed, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+            k_tt = ttnn.from_torch(k_transposed, device=device, layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16)
+
+            # Apply TTNN RoPE
+            q_rope_tt = ttnn.experimental.rotary_embedding(q_tt, cos_tt, sin_tt, position)
+            k_rope_tt = ttnn.experimental.rotary_embedding(k_tt, cos_tt, sin_tt, position)
+
+            # Convert back and slice (handle tile padding)
+            q_rope = ttnn.to_torch(q_rope_tt)[:1, :1, :1, :head_dim].permute(2, 1, 0, 3)
+            k_rope = ttnn.to_torch(k_rope_tt)[:1, :1, :1, :head_dim].permute(2, 1, 0, 3)
+
+            q_results.append(q_rope)
+            k_results.append(k_rope)
+
+        # Concatenate heads: [batch, heads, seq=1, head_dim]
+        q_ttnn = torch.cat(q_results, dim=1).float()
+        k_ttnn = torch.cat(k_results, dim=1).float()
+
+        # Compare
+        q_pt_float = q_pt.float()
+        k_pt_float = k_pt.float()
+
+        passing_q, pcc_q = check_with_pcc(q_ttnn, q_pt_float, 0.99)
+        passing_k, pcc_k = check_with_pcc(k_ttnn, k_pt_float, 0.99)
+
+        logger.info(f"Position {position}: Q PCC={pcc_q}, K PCC={pcc_k}")
+
+        assert passing_q, f"Q PCC failed at position {position}: {pcc_q}"
+        assert passing_k, f"K PCC failed at position {position}: {pcc_k}"
+
+    logger.info("✓ TTNN native RoPE matches PyTorch RoPE for all test positions")
