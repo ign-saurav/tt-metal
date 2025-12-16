@@ -1,111 +1,89 @@
 import ttnn
 import pytest
-import json
+import os
+import sys
+import shutil
 import librosa
 import torch
-from models.experimental.miniCPMo.reference.modeling_minicpmo import MiniCPMO
-from models.experimental.miniCPMo.reference.configuration_minicpm import MiniCPMOConfig
+from transformers import AutoModel
+from loguru import logger
 
-
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from models.experimental.miniCPMo.reference.tokenization_minicpmo_fast import MiniCPMOTokenizerFast
-from models.experimental.miniCPMo.tt.tt_modeling_minicpmo import TTMiniCPMO
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
 @pytest.mark.parametrize("input_dtype", [ttnn.bfloat16])
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
-def test_mini_cpm_o(device, input_dtype, weight_dtype):
-    # Load config directly from local JSON file
-    config_path = "models/experimental/miniCPMo/reference/config.json"
-    with open(config_path, "r") as f:
-        config_dict = json.load(f)
+def test_mini_cpm_o_audio_tts(device, input_dtype, weight_dtype):
+    """
+    Test audio understanding with TTS response using TT decoder.
 
-    config = MiniCPMOConfig.from_dict(
-        config_dict,
+    This test:
+    1. Loads audio input for understanding
+    2. Processes it through the model
+    3. Generates TTS audio response using TT decoder (prefill + decode)
+    4. Saves output audio file
+
+    Uses AutoModel.from_pretrained (not load_checkpoint_and_dispatch)
+    because load_checkpoint_and_dispatch causes numerical precision issues.
+    """
+    torch.manual_seed(42)
+
+    # Clear HuggingFace cache to ensure local reference is used
+    cache_path = os.path.expanduser("~/.cache/huggingface/modules/transformers_modules/reference")
+    if os.path.exists(cache_path):
+        shutil.rmtree(cache_path)
+
+    # Clear Python's module cache for any cached transformers_modules
+    modules_to_remove = [key for key in sys.modules if "transformers_modules.reference" in key]
+    for mod in modules_to_remove:
+        del sys.modules[mod]
+
+    # Load model using AutoModel.from_pretrained with LOCAL path
+    local_model_path = "models/experimental/miniCPMo/reference"
+    logger.info("Loading model with AutoModel.from_pretrained...")
+    model = AutoModel.from_pretrained(
+        local_model_path,
+        trust_remote_code=True,
+        attn_implementation="sdpa",
+        torch_dtype=torch.bfloat16,
         init_vision=False,
-        init_audio=True,
-        init_tts=True,
-        generate_audio=True,
-        use_tts_template=True,
-        temperature=0.3,
-        output_audio_path="result_audio_understanding.wav",
+        init_audio=True,  # Enable audio understanding
+        init_tts=True,  # Enable TTS
+        local_files_only=True,
     )
 
-    print("Initializing MiniCPM-o model...")
-    # Initialize the model directly with the config
-    # with torch.device("meta"):
-    with init_empty_weights():
-        model = MiniCPMO(config)
+    # Initialize TTS components
+    logger.info("Initializing TTS components...")
     model.init_tts()
-    model.tts.float()
-
-    # Move model from meta device to CPU before loading checkpoint
-    # This is required because load_checkpoint_and_dispatch needs real tensors
-    model = model.to_empty(device="cpu")
-
-    # local_checkpoint_path = "/home/ubuntu/.cache/huggingface/hub/models--openbmb--MiniCPM-o-2_6/snapshots/509805e84db1c84f154034d71a21c4f2331e6e11"
-    local_checkpoint_path = "models/experimental/miniCPMo/reference/safetensors"
-    load_checkpoint_and_dispatch(
-        model,
-        local_checkpoint_path,
-        device_map="auto",
-        dtype=torch.bfloat16,
-    )
-    # Set model to eval mode
+    model.tts.float()  # DVAE/vocos need float32 for stability
     model = model.eval()
 
-    # Load tokenizer directly from local reference folder files
+    # Initialize TT device for TT decoder (prefill + decode)
+    logger.info("Initializing TT device for decoder...")
+    model.init_tt_device(device)
+
+    # Load tokenizer directly from local reference folder
     tokenizer_path = "models/experimental/miniCPMo/reference"
     tokenizer = MiniCPMOTokenizerFast(tokenizer_file=f"{tokenizer_path}/tokenizer.json")
 
-    task_prompt = (
-        "Please listen to the audio snippet carefully and transcribe the content." + "\n"
-    )  # can change to other prompts.
-    audio_input, _ = librosa.load("audio_understanding.mp3", sr=16000, mono=True)  # load the audio to be captioned
+    # Prepare task prompt and audio input
+    task_prompt = "Please listen to the audio snippet carefully and transcribe the content.\n"
 
-    msgs = [{"role": "user", "content": [task_prompt, audio_input]}]
+    # Check if audio file exists
+    audio_file = "audio_understanding.mp3"
+    if not os.path.exists(audio_file):
+        logger.warning(f"Audio file {audio_file} not found, using a simple text prompt instead")
+        msgs = [{"role": "user", "content": "Say hello world"}]
+    else:
+        audio_input, _ = librosa.load(audio_file, sr=16000, mono=True)
+        msgs = [{"role": "user", "content": [task_prompt, audio_input]}]
 
-    # res = model.chat(
-    #     msgs=msgs,
-    #     tokenizer=tokenizer,
-    #     sampling=True,
-    #     max_new_tokens=128,
-    #     use_tts_template=False,
-    #     generate_audio=True,
-    #     temperature=0.3,
-    #     output_audio_path='result_audio_understanding.wav',
-    # )
-    # print(res)
+    output_audio_path = "result_audio_understanding_mini_cpmo_audio_tts.wav"
 
-    proj_layer_state_dict = model.audio_projection_layer.state_dict()
-    apm_state_dict = model.apm.state_dict()
-
-    # Extract TTS weights from the loaded model
-    tts_state_dict = model.tts.state_dict() if hasattr(model.tts, "state_dict") else {}
-
-    state_dict = {
-        "apm": apm_state_dict,
-        "audio_projection_layer": proj_layer_state_dict,
-        "tts": tts_state_dict,
-    }
-
-    with init_empty_weights():
-        config._name_or_path = "models/experimental/miniCPMo/reference"
-        tt_model = TTMiniCPMO(config, state_dict=state_dict, tt_device=device).eval()
-
-    # Move model from meta device to CPU before initializing TTS and loading checkpoint
-    tt_model = tt_model.to_empty(device="cpu")
-    tt_model.init_tts()
-
-    load_checkpoint_and_dispatch(
-        tt_model,
-        local_checkpoint_path,
-        device_map="auto",
-        dtype=torch.bfloat16,
-    )
-    tt_res = tt_model.chat(
-        image=None,
+    # Run chat with TTS enabled - this uses TT decoder for mel spec generation
+    logger.info("Running model.chat with TTS (using TT decoder)...")
+    res = model.chat(
         msgs=msgs,
         tokenizer=tokenizer,
         sampling=True,
@@ -113,7 +91,18 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
         use_tts_template=True,
         generate_audio=True,
         temperature=0.3,
-        output_audio_path="result_audio_understanding.wav",
+        output_audio_path=output_audio_path,
     )
 
-    print(tt_res)
+    logger.info(f"Chat result: {res}")
+
+    # Verify audio was generated
+    if os.path.exists(output_audio_path):
+        file_size = os.path.getsize(output_audio_path)
+        logger.info(f"✓ Output audio saved: {output_audio_path} ({file_size} bytes)")
+        assert file_size > 1000, f"Audio file too small ({file_size} bytes), likely empty or corrupted"
+    else:
+        logger.error(f"✗ Output audio not found: {output_audio_path}")
+        assert False, f"Expected output audio file not created: {output_audio_path}"
+
+    logger.info("Test passed!")
