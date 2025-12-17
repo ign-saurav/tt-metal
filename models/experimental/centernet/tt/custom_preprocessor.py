@@ -14,6 +14,60 @@ from models.experimental.centernet.reference.network.dlav0 import (
 from ttnn.dot_access import make_dot_access_dict
 
 
+def fold_bn_into_conv(conv, bn):
+    """
+    Fold BatchNorm parameters into Conv2d weights.
+
+    Args:
+        conv: nn.Conv2d layer
+        bn: nn.BatchNorm2d layer
+
+    Returns:
+        folded_weight: Tensor (out_channels, in_channels, kH, kW)
+        folded_bias: Tensor (out_channels,)
+    """
+    gamma = bn.weight.data
+    beta = bn.bias.data
+    mean = bn.running_mean
+    var = bn.running_var
+    eps = bn.eps
+
+    std = torch.sqrt(var + eps)
+    scale = gamma / std
+
+    folded_weight = conv.weight.data * scale.view(-1, 1, 1, 1)
+    folded_bias = beta - mean * scale
+
+    return folded_weight, folded_bias
+
+
+def create_basic_block_preprocessor():
+    """
+    Creates a custom preprocessor for BasicBlock that folds BatchNorm into Conv weights.
+    """
+
+    def preprocessor(model, name, ttnn_module_args):
+        parameters = {}
+
+        if hasattr(model, "conv1") and hasattr(model, "bn1"):
+            weight, bias = fold_bn_into_conv(model.conv1, model.bn1)
+            parameters["conv1"] = {
+                "weight": ttnn.from_torch(weight, dtype=ttnn.bfloat16),
+                "bias": ttnn.from_torch(bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16),
+            }
+
+        if hasattr(model, "conv2") and hasattr(model, "bn2"):
+            weight, bias = fold_bn_into_conv(model.conv2, model.bn2)
+            parameters["conv2"] = {
+                "weight": ttnn.from_torch(weight, dtype=ttnn.bfloat16),
+                "bias": ttnn.from_torch(bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16),
+            }
+
+        return parameters
+
+    return preprocessor
+
+
 class ConvArgs(ModuleArgs):
     __getattr__ = dict.__getitem__
     __delattr__ = dict.__delitem__
