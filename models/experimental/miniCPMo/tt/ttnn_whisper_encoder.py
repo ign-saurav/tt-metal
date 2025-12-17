@@ -357,6 +357,8 @@ class TtnnWhisperEncoder:
         Returns:
             Audio features [batch, seq_len, d_model]
         """
+        logger.info(f"Running TT Whisper audio encoder forward")
+
         # Convert weights to TTNN format
         parameters = self._convert_weights_to_ttnn(weights_mesh_mapper)
 
