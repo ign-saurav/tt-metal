@@ -21,46 +21,80 @@ def _deform_conv2d_torchvision(
     groups: int = 1,
     bias: Tensor = None,
 ) -> Tensor:
-    """Use torchvision's deform_conv2d as a fallback when MMCV extensions aren't available."""
+    """Use torchvision's deform_conv2d when MMCV extensions aren't available.
+
+    BEVDepth DepthNet uses DCN with:
+        - kernel_size=3
+        - groups=4
+        - im2col_step=128 (MMCV-specific, not used in torchvision)
+        - deform_groups=1 (default)
+
+    Note on torchvision.ops.deform_conv2d (torchvision >= 0.9.0):
+        Signature: deform_conv2d(input, offset, weight, bias=None, stride=(1, 1),
+                                 padding=(0, 0), dilation=(1, 1), mask=None)
+
+        - Does NOT have explicit 'groups' parameter
+        - Groups are inferred from weight shape: (out_channels, in_channels // groups, kH, kW)
+        - 'mask' parameter is for DCNv2 (modulated), not used in DCNv1 (BEVDepth uses DCNv1)
+        - 'im2col_step' is MMCV-specific and not applicable to torchvision
+
+    Note on MMCV vs torchvision:
+        - MMCV's deform_conv2d: supports explicit 'groups' and 'deform_groups' parameters
+        - torchvision's deform_conv2d: groups inferred from weight shape
+        - Both should produce equivalent results when weight shapes match
+    """
     try:
         from torchvision.ops import deform_conv2d as tv_deform_conv2d
 
+        # torchvision's deform_conv2d infers groups from weight shape
+        # Weight shape should be: (out_channels, in_channels // groups, kH, kW)
+        # When groups > 1, the weight's second dimension reflects this division
         return tv_deform_conv2d(input, offset, weight, bias, stride, padding, dilation)
     except ImportError:
         raise ImportError("torchvision.ops.deform_conv2d is required for DCN fallback")
 
 
 class DeformConv2d(nn.Module):
-    """Deformable Convolution 2D layer.
+    """Deformable Convolution 2D layer (DCNv1).
 
     This is a standalone implementation that uses torchvision's deform_conv2d
     when MMCV's compiled extensions are not available.
 
+    BEVDepth DepthNet configuration:
+        - in_channels=512 (mid_channels)
+        - out_channels=512 (mid_channels)
+        - kernel_size=3
+        - padding=1
+        - groups=4
+        - im2col_step=128 (MMCV-specific, stored but not used with torchvision)
+        - deform_groups=1 (default)
+
     Args:
-        in_channels (int): Number of input channels.
-        out_channels (int): Number of output channels.
-        kernel_size (int or tuple): Size of the convolving kernel.
-        stride (int or tuple): Stride of the convolution.
-        padding (int or tuple): Zero-padding added to both sides of the input.
-        dilation (int or tuple): Spacing between kernel elements.
-        groups (int): Number of blocked connections from input to output channels.
-        deform_groups (int): Number of deformable group partitions.
-        bias (bool): If True, adds a learnable bias to the output. Default: False.
-        im2col_step (int): Number of samples processed by im2col_cuda_kernel per call.
+        in_channels (int): Number of input channels. BEVDepth uses 512.
+        out_channels (int): Number of output channels. BEVDepth uses 512.
+        kernel_size (int or tuple): Size of the convolving kernel. Default: 3.
+        stride (int or tuple): Stride of the convolution. Default: 1.
+        padding (int or tuple): Zero-padding added to both sides. Default: 0 (set to 1 for BEVDepth's 3x3 kernel).
+        dilation (int or tuple): Spacing between kernel elements. Default: 1.
+        groups (int): Number of blocked connections from input to output. Default: 1 (BEVDepth uses 4).
+        deform_groups (int): Number of deformable group partitions. Default: 1.
+        bias (bool): If True, adds a learnable bias. Default: False (DCN doesn't support bias).
+        im2col_step (int): MMCV-specific batch size for im2col. Default: 128 (BEVDepth uses 128).
+            Note: This parameter is only used by MMCV's implementation, not torchvision.
     """
 
     def __init__(
         self,
         in_channels: int,
         out_channels: int,
-        kernel_size: Union[int, Tuple[int, ...]],
+        kernel_size: Union[int, Tuple[int, ...]] = 3,
         stride: Union[int, Tuple[int, ...]] = 1,
         padding: Union[int, Tuple[int, ...]] = 0,
         dilation: Union[int, Tuple[int, ...]] = 1,
         groups: int = 1,
         deform_groups: int = 1,
         bias: bool = False,
-        im2col_step: int = 32,
+        im2col_step: int = 128,
     ):
         super(DeformConv2d, self).__init__()
 

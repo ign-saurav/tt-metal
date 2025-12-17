@@ -79,22 +79,25 @@ def build_conv_layer(cfg, *args, **kwargs):
         if _TORCHVISION_DCN_AVAILABLE and DeformConv2dPack is not None:
             # Primary option: Use torchvision's deform_conv2d (no compiled extensions needed)
             # This matches the approach used in uniad/vadv2 models
+            #
+            # BEVDepth DepthNet DCN config:
+            #   kernel_size=3, padding=1, groups=4, im2col_step=128, deform_groups=1
+            #
             # Extract DCN parameters
             deform_groups = cfg_.pop("deform_groups", 1)
             cfg_.pop("fallback_on_stride", None)
-            im2col_step = cfg_.pop("im2col_step", 32)
+            im2col_step = cfg_.pop("im2col_step", 128)  # BEVDepth uses 128
             cfg_.pop("with_modulated_dcn", None)
             # Set bias=False (DCN doesn't support bias)
             cfg_["bias"] = False
             # Create DCN layer using torchvision backend
+            # Note: im2col_step is MMCV-specific and stored but not used by torchvision
             return DeformConv2dPack(deform_groups=deform_groups, im2col_step=im2col_step, *args, **kwargs, **cfg_)
         elif _MMCV_DCN_AVAILABLE and mmcv_build_conv_layer is not None:
             # Fallback: Use MMCV's build_conv_layer with compiled CUDA extensions
             # Only used if torchvision is not available
             return mmcv_build_conv_layer(cfg, *args, **kwargs)
         else:
-            # Last resort: Fallback to regular Conv2d
-            # Note: This will NOT match the original model's behavior exactly
             import warnings
 
             warnings.warn(

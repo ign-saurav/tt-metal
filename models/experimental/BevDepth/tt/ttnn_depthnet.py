@@ -666,7 +666,7 @@ class DepthNet_TTNN:
             self.mlp_bn = None
 
         # Initialize DCN (Deformable Conv) using wrapper
-        # TODO: Native TTNN implementation pending - https://github.com/tenstorrent/tt-metal/issues/25526
+        # TODO: Native TTNN implementation pending - https://github.com/tenstorrent/tt-metal/issues/#17076
         if hasattr(parameters, "dcn_weight"):
             self.dcn = TtDeformConv2dPack(
                 device=device,

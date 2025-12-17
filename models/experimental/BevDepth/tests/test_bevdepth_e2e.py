@@ -7,6 +7,7 @@ from loguru import logger
 import ttnn
 
 from models.common.utility_functions import comp_pcc
+import tracy
 
 
 def download_bevdepth_weights():
@@ -291,7 +292,9 @@ def test_bevdepth_e2e(device):
         device=device,
     )
     ttnn_bev_input = ttnn.to_device(ttnn_bev_input, device, memory_config=ttnn.L1_MEMORY_CONFIG)
+    tracy.signpost("TTNN Head Forward Start")
     ttnn_output = ttnn_head(ttnn_bev_input, device=device)
+    tracy.signpost("TTNN Head Forward End")
 
     # Check all 36 outputs (6 task groups × 6 output types)
     # Reference structure: ref_output[task_group][batch_idx][key] -> tensor
@@ -341,16 +344,3 @@ def test_bevdepth_e2e(device):
     assert (
         len(failed_outputs) == 0
     ), f"E2E PCC check failed: {len(failed_outputs)}/{len(all_pcc_values)} outputs below threshold."
-
-
-if __name__ == "__main__":
-    device = ttnn.open_device(device_id=0, l1_small_size=32768)
-
-    try:
-        logger.info("\n" + "=" * 50)
-        logger.info("BEVDepth E2E Test")
-        logger.info("=" * 50)
-        test_bevdepth_e2e(device)
-
-    finally:
-        ttnn.close_device(device)
