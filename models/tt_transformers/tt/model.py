@@ -152,9 +152,6 @@ class Transformer(LightweightModule):
         else:
             self.sampling = None
 
-        self.embedding_multiplier = args.embedding_multiplier
-        self.logits_scaling = args.logits_scaling
-
     def process_logits_after_prefill_trace(self, logits, last_token_idx):
         get_last_token = (last_token_idx // 32) * 32
         logits = ttnn.slice(
@@ -596,9 +593,6 @@ class Transformer(LightweightModule):
         get_last_token=-1,
         kv_cache=None,
     ):
-        if self.embedding_multiplier is not None:
-            ttnn.multiply_(x, self.embedding_multiplier)
-
         for i, layer in enumerate(self.layers):
             # No-op if callers already provide the right memory config
             activation_dtype = self.args.decoders_optimizations.get_tensor_dtype(
@@ -650,9 +644,6 @@ class Transformer(LightweightModule):
             x = ttnn.to_memory_config(x, self.args.get_lm_head_input_mem_config(mode, self.prefetcher))
 
         x = self.lm_head(x)
-
-        if self.logits_scaling is not None:
-            ttnn.multiply_(x, self.logits_scaling)
 
         if mode == "prefill":
             x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
