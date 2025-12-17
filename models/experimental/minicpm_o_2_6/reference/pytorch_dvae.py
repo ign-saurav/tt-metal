@@ -64,7 +64,7 @@ class PyTorchDVAE(nn.Module):
             nn.Conv2d(512, bn_dim, (1, 3), padding=(0, 1)),
             nn.GELU(),  # Production: GELU instead of ReLU
             nn.Conv2d(bn_dim, hidden_dim, (1, 3), padding=(0, 1)),
-            nn.GELU(),  # Production: GELU instead of ReLU
+            # nn.GELU(),  # Production: GELU instead of ReLU
         )
 
         # Encoder blocks (2D ConvNeXt)
@@ -75,10 +75,10 @@ class PyTorchDVAE(nn.Module):
 
         # Decoder input (Production: decoder processes 1024 channels from encoder)
         self.decoder_input = nn.Sequential(
-            nn.Conv2d(1024, bn_dim, (1, 3), padding=(0, 1)),  # Production: 1024 input channels from encoder
+            nn.Conv2d(512, bn_dim, (1, 3), padding=(0, 1)),  # Production: 512 input channels from encoder
             nn.GELU(),  # Production: GELU instead of ReLU
             nn.Conv2d(bn_dim, hidden_dim, (1, 3), padding=(0, 1)),
-            nn.GELU(),  # Production: GELU instead of ReLU
+            # nn.GELU(),  # Production: GELU instead of ReLU
         )
 
         # Decoder blocks
@@ -114,6 +114,17 @@ class PyTorchDVAE(nn.Module):
         else:
             # Bypass quantization - pass through unchanged
             quantized = encoded
+
+        quantized = (
+            quantized.view(
+                (1, 1, quantized.size(2), 2, quantized.size(3) // 2),
+            )
+            .permute(0, 1, 4, 2, 3)
+            .flatten(3)
+            .permute(0, 1, 3, 2)
+        )
+
+        print(quantized.shape)
 
         # Decoder
         reconstructed = self._decode(quantized)

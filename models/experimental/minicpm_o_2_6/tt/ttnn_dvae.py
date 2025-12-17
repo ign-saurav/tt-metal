@@ -536,7 +536,7 @@ class TtnnDVAE:
         # Decoder projection - NEW: hidden_dim -> 512 channels (1x1 conv)
         # Weights should NOT be on device for conv2d
         self.decoder_proj = ttnn.from_torch(
-            weights_dict["decoder.proj.weight"],
+            weights_dict["decoder.conv_out.weight"],
             dtype=ttnn.bfloat16,
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
@@ -583,7 +583,7 @@ class TtnnDVAE:
             quantized = encoded_flat
 
         # Reshape back to [batch, 1, seq, dim] for decoder
-        quantized_4d = ttnn.reshape(quantized, [batch, 1, seq, dim])
+        quantized_4d = ttnn.reshape(quantized, [batch, 1, seq * 2, dim // 2])
 
         # Decoder
         reconstructed = self._decode(quantized_4d, debug_ops)
@@ -667,7 +667,7 @@ class TtnnDVAE:
                 )
             # Convert to TILE_LAYOUT for ReLU
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-            x = ttnn.relu(x)
+            x = ttnn.gelu(x)
             # Convert back to ROW_MAJOR_LAYOUT for next conv2d
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
 
@@ -696,6 +696,12 @@ class TtnnDVAE:
                     memory_config=get_activations_memory_config(),
                     return_output_dim=True,
                 )
+
+                # Convert to TILE_LAYOUT for GELU
+                x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+                x = ttnn.gelu(x)
+                # Convert back to ROW_MAJOR_LAYOUT for next conv2d
+                x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
             else:
                 # Weight: [hidden_dim, bn_dim, 1, 3]
                 # Output: [batch, 1, time_steps//2, hidden_dim]
@@ -718,11 +724,6 @@ class TtnnDVAE:
                     memory_config=get_activations_memory_config(),
                     return_output_dim=True,
                 )
-            # Convert to TILE_LAYOUT for GELU
-            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-            x = ttnn.gelu(x)
-            # Convert back to ROW_MAJOR_LAYOUT for next conv2d
-            x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
 
         # Encoder ConvNeXt blocks (PRODUCTION: 12 blocks enabled)
         for block_weights in self.encoder_blocks:
@@ -819,6 +820,12 @@ class TtnnDVAE:
                     memory_config=get_activations_memory_config(),
                     return_output_dim=True,
                 )
+
+                # Convert to TILE_LAYOUT for GELU
+                x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+                x = ttnn.gelu(x)
+                # Convert back to ROW_MAJOR_LAYOUT for next conv2d
+                x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
             else:
                 # Weight: [hidden_dim, bn_dim, 1, 3]
                 # Output: [batch, 1, time_steps//2, hidden_dim]
@@ -841,11 +848,6 @@ class TtnnDVAE:
                     memory_config=get_activations_memory_config(),
                     return_output_dim=True,
                 )
-            # Convert to TILE_LAYOUT for GELU
-            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-            x = ttnn.gelu(x)
-            # Convert back to ROW_MAJOR_LAYOUT for next conv2d
-            x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
 
         # Decoder ConvNeXt blocks (PRODUCTION: 12 blocks enabled)
         for block_weights in self.decoder_blocks:

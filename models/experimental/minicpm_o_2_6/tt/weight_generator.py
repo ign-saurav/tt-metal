@@ -308,13 +308,13 @@ def generate_dvae_weights(
 
     # Decoder input/output convolutions (2D format)
     # Production: decoder input is 1024 channels from encoder
-    weights["decoder.conv_in.0.weight"] = torch.randn(bn_dim, 1024, 1, 3)  # Production: 1024 input channels
+    weights["decoder.conv_in.0.weight"] = torch.randn(bn_dim, 512, 1, 3)  # Production: 1024 input channels
     weights["decoder.conv_in.0.bias"] = torch.randn(1, 1, 1, bn_dim)  # TTNN bias format
     weights["decoder.conv_in.2.weight"] = torch.randn(hidden_dim, bn_dim, 1, 3)
     weights["decoder.conv_in.2.bias"] = torch.randn(1, 1, 1, hidden_dim)  # TTNN bias format
 
     # Decoder projection: hidden_dim -> 512 channels (NEW layer)
-    weights["decoder.proj.weight"] = torch.randn(512, hidden_dim, 1, 1)  # 1x1 conv
+    weights["decoder.conv_out.weight"] = torch.randn(512, hidden_dim, 1, 1)  # 1x1 conv
 
     weights["out_conv.weight"] = torch.randn(num_mel_bins, 512, 1, 3)  # Production: 512 output channels
 

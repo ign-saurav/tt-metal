@@ -64,7 +64,6 @@ def test_dvae_forward_pcc(device):
 
     logger.info("Testing TTNN DVAE forward pass...")
     logger.info(f"GFSQ quantization: {'ENABLED' if enable_gfsq else 'DISABLED'}")
-
     # Generate weights
     weights = generate_dvae_weights(
         num_encoder_layers=num_encoder_layers,
@@ -73,6 +72,14 @@ def test_dvae_forward_pcc(device):
         num_mel_bins=num_mel_bins,
         seed=42,
     )
+
+    # for k in weights:
+    #     print(k)
+
+    # weights = torch.load("models/experimental/minicpm_o_2_6/tests/dvae_weights.pt")
+    # og_weights = torch.load("models/experimental/minicpm_o_2_6/tests/dvae_weights.pt")
+    # for k in og_weights:
+    #     print(k)
 
     # Create models
     ttnn_model = TtnnDVAE(mesh_device=device)
@@ -119,7 +126,7 @@ def test_dvae_forward_pcc(device):
         )  # Convert [1,1,1,hidden_dim] -> [hidden_dim]
 
         # Decoder projection
-        pt_model.decoder_proj.weight.copy_(weights["decoder.proj.weight"])
+        pt_model.decoder_proj.weight.copy_(weights["decoder.conv_out.weight"])
 
         # Output conv
         pt_model.decoder_output.weight.copy_(weights["out_conv.weight"])
