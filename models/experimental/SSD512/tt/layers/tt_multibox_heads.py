@@ -144,50 +144,6 @@ def multibox_heads(
     return loc_layers_config, conf_layers_config
 
 
-def create_multibox_layers_with_weights(loc_layers_config, conf_layers_config, device=None, dtype=ttnn.bfloat16):
-    """Create multibox layers with initialized weights and biases."""
-    from models.experimental.SSD512.common import create_conv2d_weights_and_bias
-
-    loc_layers_with_weights = []
-    conf_layers_with_weights = []
-
-    # process location layers
-    for layer in loc_layers_config:
-        if layer["type"] == "conv":
-            in_channels = layer["in_channels"]
-            out_channels = layer["out_channels"]
-            kernel_size = layer["config"]["kernel_size"]
-
-            # Use common function to create weights and bias
-            weight_ttnn, bias_ttnn = create_conv2d_weights_and_bias(
-                in_channels, out_channels, kernel_size, device=device, dtype=dtype, init_method="kaiming_normal"
-            )
-
-            layer_with_weights = layer.copy()
-            layer_with_weights["weight"] = weight_ttnn
-            layer_with_weights["bias"] = bias_ttnn
-            loc_layers_with_weights.append(layer_with_weights)
-
-    # Process confidence layers (same logic)
-    for layer in conf_layers_config:
-        if layer["type"] == "conv":
-            in_channels = layer["in_channels"]
-            out_channels = layer["out_channels"]
-            kernel_size = layer["config"]["kernel_size"]
-
-            # Use common function to create weights and bias
-            weight_ttnn, bias_ttnn = create_conv2d_weights_and_bias(
-                in_channels, out_channels, kernel_size, device=device, dtype=dtype, init_method="kaiming_normal"
-            )
-
-            layer_with_weights = layer.copy()
-            layer_with_weights["weight"] = weight_ttnn
-            layer_with_weights["bias"] = bias_ttnn
-            conf_layers_with_weights.append(layer_with_weights)
-
-    return loc_layers_with_weights, conf_layers_with_weights
-
-
 def apply_multibox_heads(
     sources, loc_layers_with_weights, conf_layers_with_weights, device=None, dtype=ttnn.bfloat8_b, memory_config=None
 ):

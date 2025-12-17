@@ -133,35 +133,6 @@ def vgg_backbone(cfg, input_channels=3, batch_norm=False, device=None):
     return layers
 
 
-def create_vgg_layers_with_weights(layers_config, device=None, dtype=ttnn.bfloat16):
-    """
-    Create VGG layers with initialized weights and biases.
-    """
-    from models.experimental.SSD512.common import create_conv2d_weights_and_bias
-
-    layers_with_weights = []
-
-    for layer in layers_config:
-        if layer["type"] == "conv":
-            in_channels = layer["in_channels"]
-            out_channels = layer["out_channels"]
-            kernel_size = layer["config"]["kernel_size"]
-
-            # Use common function to create weights and bias
-            weight_ttnn, bias_ttnn = create_conv2d_weights_and_bias(
-                in_channels, out_channels, kernel_size, device=device, dtype=dtype, init_method="kaiming_normal"
-            )
-
-            layer_with_weights = layer.copy()
-            layer_with_weights["weight"] = weight_ttnn
-            layer_with_weights["bias"] = bias_ttnn
-            layers_with_weights.append(layer_with_weights)
-        else:
-            layers_with_weights.append(layer.copy())
-
-    return layers_with_weights
-
-
 _weight_device_cache = {}
 
 
