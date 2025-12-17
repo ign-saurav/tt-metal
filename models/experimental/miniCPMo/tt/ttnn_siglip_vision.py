@@ -261,7 +261,7 @@ class TtSiglipEncoderLayer:
         self.weights_memory_config = get_weights_memory_config()
         self.activations_memory_config = get_activations_memory_config()
 
-        logger.info(f"✅ TtSiglipEncoderLayer {layer_idx} initialized")
+        logger.debug(f"TtSiglipEncoderLayer {layer_idx} initialized")
 
     def load_weights(self, weights_dict: Dict[str, torch.Tensor], layer_prefix: str):
         """Load weights for this layer"""
@@ -432,8 +432,6 @@ class TtSiglipEncoderLayer:
                 device=self.mesh_device,
                 mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh_device),
             )
-
-        logger.info(f"✅ Loaded weights for SigLip encoder layer {self.layer_idx}")
 
     def forward(self, hidden_states: ttnn.Tensor) -> ttnn.Tensor:
         """
@@ -686,6 +684,8 @@ class TtSiglipVisionTransformer:
         """
         if self.post_layernorm_weight is None:
             raise RuntimeError("Weights not loaded. Call load_weights() first.")
+
+        logger.info(f"🚀 Running TT SigLip vision encoder forward")
 
         # Apply patch embeddings
         hidden_states = self.embeddings(pixel_values, position_embeddings)
