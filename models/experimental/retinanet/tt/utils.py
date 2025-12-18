@@ -4,10 +4,10 @@
 import ttnn
 from tests.ttnn.ttnn_utility_fuction import get_shard_grid_from_num_cores
 
-
 import ttnn
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
+    MaxPool2dConfiguration,
     AutoShardedStrategyConfiguration,
     L1FullSliceStrategyConfiguration,
 )
@@ -17,6 +17,23 @@ conv_config = {
     "WEIGHTS_DTYPE": ttnn.bfloat16,
     "ACTIVATIONS_DTYPE": ttnn.bfloat16,
 }
+
+
+# @dataclass
+class MaxPoolConfiguration(MaxPool2dConfiguration):
+    @classmethod
+    def from_model_args(cls, maxpool2d_args, **kwargs):
+        return cls(
+            input_height=maxpool2d_args.input_height,
+            input_width=maxpool2d_args.input_width,
+            channels=maxpool2d_args.input_channels,
+            batch_size=maxpool2d_args.batch_size,
+            kernel_size=(maxpool2d_args.kernel_size, maxpool2d_args.kernel_size),
+            stride=(maxpool2d_args.stride, maxpool2d_args.stride),
+            padding=(maxpool2d_args.padding, maxpool2d_args.padding),
+            dilation=(maxpool2d_args.dilation, maxpool2d_args.dilation),
+            **kwargs,
+        )
 
 
 def post_conv_reshape(x, out_height=1, out_width=1):
