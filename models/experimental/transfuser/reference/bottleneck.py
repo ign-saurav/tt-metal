@@ -214,11 +214,12 @@ class Bottleneck(nn.Module):
         """Forward pass."""
         shortcut = x
         x = self.conv1(x)
-        return x
         x = self.conv2(x)
         x = self.se(x)
         x = self.conv3(x)
+        return x
         if self.downsample is not None:
+            return self.downsample(shortcut)
             x = self.drop_path(x) + self.downsample(shortcut)
         x = self.act3(x)
         return x

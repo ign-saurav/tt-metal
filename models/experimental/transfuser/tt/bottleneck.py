@@ -83,114 +83,137 @@ class TTRegNetBottleneck:
                 is_reshape=is_reshape,
             )
 
+        conv1_params = parameters_torch["conv1"]["conv"]
         # ------------------------- conv1: 1x1 + ReLU -------------------------
         conv1_config = self._create_conv_config(
             parameters=parameters["conv1"],
-            batch_size=parameters_torch["conv1"]["conv"]["batch_size"],
-            input_height=parameters_torch["conv1"]["conv"]["input_height"],
-            input_width=parameters_torch["conv1"]["conv"]["input_width"],
-            in_channels=parameters_torch["conv1"]["conv"]["in_channels"],
-            out_channels=parameters_torch["conv1"]["conv"]["out_channels"],
-            stride=parameters_torch["conv1"]["conv"]["stride"],
-            kernel_size=parameters_torch["conv1"]["conv"]["kernel_size"],  # Pass directly
-            padding=parameters_torch["conv1"]["conv"]["padding"],  # Pass directly
+            batch_size=conv1_params["batch_size"],
+            input_height=conv1_params["input_height"],
+            input_width=conv1_params["input_width"],
+            in_channels=conv1_params["in_channels"],
+            out_channels=conv1_params["out_channels"],
+            stride=conv1_params["stride"],
+            kernel_size=conv1_params["kernel_size"],
+            padding=conv1_params["padding"],
+            groups=conv1_params["groups"],
         )
         self.conv1 = TtConv2d(conv1_config, device=device)
 
+        conv2_params = parameters_torch["conv2"]["conv"]
+        conv2_config = self._create_conv_config(
+            parameters=parameters["conv2"],
+            batch_size=conv2_params["batch_size"],
+            input_height=conv2_params["input_height"],
+            input_width=conv2_params["input_width"],
+            in_channels=conv2_params["in_channels"],
+            out_channels=conv2_params["out_channels"],
+            stride=conv2_params["stride"],
+            kernel_size=conv2_params["kernel_size"],
+            padding=conv2_params["padding"],
+            groups=conv2_params["groups"],
+        )
         # --------------------- conv2: 3x3 grouped + ReLU ---------------------
-        self.conv2 = make_conv2d(
-            "conv2",
-            kernel_size=3,
-            stride=stride,
-            padding=1,
-            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            cfg_overrides=conv2_cfg,
-            groups=groups,
-            is_reshape=False,
-        )
-
+        self.conv2 = TtConv2d(conv2_config, device=device)
         # --------------------------- SE: fc1 (1x1 + ReLU) --------------------
-        self.se_fc1 = TTConv2D(
-            kernel_size=1,
-            stride=1,
-            padding=0,
+        # Extract SE fc1 parameters (you'll need to get these from your parameters_torch or similar source)
+        se_fc1_params = parameters_torch["se"]["fc1"]  # Adjust based on your actual parameter structure
+
+        # Create configuration for SE fc1
+        se_fc1_config = self._create_conv_config(
             parameters=parameters["se"]["fc1"],
-            kernel_fidelity=model_config,
-            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            shard_layout=se_fc1_cfg.get("shard_layout", ttnn.TensorMemoryLayout.HEIGHT_SHARDED),
-            act_block_h=se_fc1_cfg.get("act_block_h", None),
-            memory_config=se_fc1_cfg.get("memory_config", ttnn.L1_MEMORY_CONFIG),
-            enable_act_double_buffer=True,
-            enable_weights_double_buffer=True,
-            deallocate_activation=True,
-            reallocate_halo_output=True,
-            reshard_if_not_optimal=True,
-            dtype=ttnn.bfloat16,
-            fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
-            packer_l1_acc=model_config.get("packer_l1_acc", True),
-            math_approx_mode=model_config.get("math_approx_mode", False),
-            is_reshape=False,
+            batch_size=se_fc1_params["batch_size"],
+            input_height=se_fc1_params["input_height"],
+            input_width=se_fc1_params["input_width"],
+            in_channels=se_fc1_params["in_channels"],
+            out_channels=se_fc1_params["out_channels"],
+            stride=se_fc1_params["stride"],
+            kernel_size=se_fc1_params["kernel_size"],
+            padding=se_fc1_params["padding"],
+            groups=se_fc1_params["groups"],
         )
-
+        self.se_fc1 = TtConv2d(se_fc1_config, device=device)
         # --------------------------- SE: fc2 (1x1, no act) -------------------
-        self.se_fc2 = TTConv2D(
-            kernel_size=1,
-            stride=1,
-            padding=0,
+        # Extract SE fc2 parameters
+        se_fc2_params = parameters_torch["se"]["fc2"]
+
+        # Create configuration for SE fc2
+        se_fc2_config = self._create_conv_config(
             parameters=parameters["se"]["fc2"],
-            kernel_fidelity=model_config,
+            batch_size=se_fc2_params["batch_size"],
+            input_height=se_fc2_params["input_height"],
+            input_width=se_fc2_params["input_width"],
+            in_channels=se_fc2_params["in_channels"],
+            out_channels=se_fc2_params["out_channels"],
+            stride=se_fc2_params["stride"],
+            kernel_size=se_fc2_params["kernel_size"],
+            padding=se_fc2_params["padding"],
+            groups=se_fc2_params["groups"],
             activation=None,
-            shard_layout=se_fc2_cfg.get("shard_layout", ttnn.TensorMemoryLayout.HEIGHT_SHARDED),
-            act_block_h=se_fc2_cfg.get("act_block_h", None),
-            memory_config=se_fc1_cfg.get("memory_config", ttnn.L1_MEMORY_CONFIG),
-            enable_act_double_buffer=True,
-            enable_weights_double_buffer=True,
-            deallocate_activation=True,
-            reallocate_halo_output=True,
-            reshard_if_not_optimal=True,
-            dtype=ttnn.bfloat16,
-            fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
-            packer_l1_acc=model_config.get("packer_l1_acc", True),
-            math_approx_mode=model_config.get("math_approx_mode", False),
-            is_reshape=False,
+            # enable_act_double_buffer=True,
+            # enable_weights_double_buffer=True,
+            # deallocate_activation=True,
+            # reallocate_halo_output=True,
+            # reshard_if_not_optimal=True,
         )
 
+        self.se_fc2 = TtConv2d(se_fc2_config, device=device)
         # ----------------------- conv3: 1x1 projection (no act) --------------
-        self.conv3 = make_conv2d(
-            "conv3",
-            kernel_size=1,
-            stride=1,
-            padding=0,
+        conv3_params = parameters_torch["conv3"]["conv"]
+
+        conv3_config = self._create_conv_config(
+            parameters=parameters["conv3"],
+            batch_size=conv3_params["batch_size"],
+            input_height=conv3_params["input_height"],
+            input_width=conv3_params["input_width"],
+            in_channels=conv3_params["in_channels"],
+            out_channels=conv3_params["out_channels"],
+            stride=conv3_params["stride"],
+            kernel_size=conv3_params["kernel_size"],
+            padding=conv3_params["padding"],
+            groups=conv3_params["groups"],
             activation=None,
-            cfg_overrides=conv3_cfg,
-            groups=1,
-            is_reshape=False,
         )
+        self.conv3 = TtConv2d(conv3_config, device=device)
 
         # ------------------------------ optional downsample -------------------
-        if downsample:
-            self.downsample_layer = TTConv2D(
-                kernel_size=1,
-                stride=stride,
-                padding=0,
-                parameters=parameters["downsample"],
-                kernel_fidelity=model_config,
-                activation=None,
-                shard_layout=downsample_cfg.get("shard_layout", ttnn.TensorMemoryLayout.HEIGHT_SHARDED),
-                act_block_h=downsample_cfg.get("act_block_h", None),
-                memory_config=se_fc1_cfg.get("memory_config", ttnn.L1_MEMORY_CONFIG),
-                enable_act_double_buffer=True,
-                enable_weights_double_buffer=True,
-                deallocate_activation=True,
-                reallocate_halo_output=True,
-                reshard_if_not_optimal=True,
-                dtype=ttnn.bfloat16,
-                fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
-                packer_l1_acc=model_config.get("packer_l1_acc", True),
-                math_approx_mode=model_config.get("math_approx_mode", False),
-            )
-        else:
-            self.downsample_layer = None
+        # if downsample:
+        #     downsample_conv_params = parameters_torch.downsample[0]
+        #     downsample_conv_config = self._create_conv_config(
+        #         parameters=parameters["downsample"],
+        #         batch_size=downsample_conv_params["batch_size"],
+        #         input_height=downsample_conv_params["input_height"],
+        #         input_width=downsample_conv_params["input_width"],
+        #         in_channels=downsample_conv_params["in_channels"],
+        #         out_channels=downsample_conv_params["out_channels"],
+        #         stride=downsample_conv_params["stride"],
+        #         kernel_size=downsample_conv_params["kernel_size"],
+        #         padding=downsample_conv_params["padding"],
+        #         groups=downsample_conv_params["groups"],
+        #         activation=None,
+        #     )
+        #     self.downsample_layer = TtConv2d(downsample_conv_config, device=device)
+        #     # self.downsample_layer = TTConv2D(
+        #     #     kernel_size=1,
+        #     #     stride=stride,
+        #     #     padding=0,
+        #     #     parameters=parameters["downsample"],
+        #     #     kernel_fidelity=model_config,
+        #     #     activation=None,
+        #     #     shard_layout=downsample_cfg.get("shard_layout", ttnn.TensorMemoryLayout.HEIGHT_SHARDED),
+        #     #     act_block_h=downsample_cfg.get("act_block_h", None),
+        #     #     memory_config=se_fc1_cfg.get("memory_config", ttnn.L1_MEMORY_CONFIG),
+        #     #     enable_act_double_buffer=True,
+        #     #     enable_weights_double_buffer=True,
+        #     #     deallocate_activation=True,
+        #     #     reallocate_halo_output=True,
+        #     #     reshard_if_not_optimal=True,
+        #     #     dtype=ttnn.bfloat16,
+        #     #     fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
+        #     #     packer_l1_acc=model_config.get("packer_l1_acc", True),
+        #     #     math_approx_mode=model_config.get("math_approx_mode", False),
+        #     # )
+        # else:
+        #     self.downsample_layer = None
 
     def _create_conv_config(
         self,
@@ -203,6 +226,8 @@ class TTRegNetBottleneck:
         stride,
         kernel_size,
         padding,
+        groups,
+        activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
     ):
         # Convert weights to float32 format (required by tt_cnn builder)
         weight = parameters.weight
@@ -211,7 +236,7 @@ class TTRegNetBottleneck:
 
         # Convert bias to shape (1, 1, 1, out_channels) in float32
         bias = None
-        if hasattr(parameters, "bias") and parameters.bias is not None:
+        if "bias" in parameters and parameters.bias is not None:
             bias_torch = ttnn.to_torch(parameters.bias).reshape(1, 1, 1, -1)
             bias = ttnn.from_torch(bias_torch, dtype=ttnn.float32)
 
@@ -245,9 +270,10 @@ class TTRegNetBottleneck:
             kernel_size=kernel_size,
             stride=stride_list,  # List format
             padding=padding_list,  # List format
+            groups=groups,
             weight=weight,
             bias=bias,
-            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+            activation=activation,
             activation_dtype=self.dtype,
             weights_dtype=self.dtype,
             output_dtype=self.dtype,
@@ -265,20 +291,20 @@ class TTRegNetBottleneck:
         identity_shape = input_shape
 
         # conv1- 1x1 convolution (using new TtConv2d interface)
-        out, (height, width) = self.conv1(x, return_output_dim=True)
-
-        return out, (1, height, width, out.shape[-1])
+        out = self.conv1(x)
 
         # The rest of the code remains the same but would need similar updates
         # to use the new TtConv2d interface consistently        # conv2- 3x3 grouped convolution
-        out, shape_ = self.conv2(device, out, shape_)
+        out, (height, width) = self.conv2(out, return_output_dim=True)
+        # return out, out
 
         # SE module
         # reduce mean
         out1 = ttnn.reallocate(out)
         # Reshape to 4D for mean operation
-        out_4d = ttnn.reshape(out, shape_)
-        se_out = ttnn.mean(out_4d, dim=[1, 2], keepdim=True)
+        out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
+        out = ttnn.reshape(out, (1, height, width, out.shape[-1]))
+        se_out = ttnn.mean(out, dim=[1, 2], keepdim=True)
         if self.use_fallback and self.torch_model is not None:
             # Falling Back SE module
             se_out_torch = ttnn.to_torch(
@@ -300,28 +326,29 @@ class TTRegNetBottleneck:
 
         else:
             # SE fc1
-            se_out, se_shape = self.se_fc1(device, se_out, se_out.shape)
+            se_out = self.se_fc1(se_out)
+            # se_out, se_shape = self.se_fc1(device, se_out, se_out.shape)
 
             # SE fc2
-            se_out, se_shape = self.se_fc2(device, se_out, se_shape)
+            se_out = self.se_fc2(se_out)
             se_out = ttnn.sigmoid(se_out)
-
         out_4d = ttnn.multiply(out1, se_out)
         # Flatten back to match identity format
-        batch, height, width, channels = shape_
+        batch, channels = out_4d.shape[0], out_4d.shape[-1]
         out = ttnn.reshape(out_4d, (1, 1, batch * height * width, channels))
 
         # conv3: 1x1 projection - now in flattened format
-        out, shape_ = self.conv3(device, out, (batch, height, width, channels))
-
+        out = self.conv3(out)
+        return out, out
         # Handle downsample - identity is already in flattened format
         if self.downsample_layer is not None:
             # downsample
-            identity, _ = self.downsample_layer(device, identity, identity_shape)
+            identity = self.downsample_layer(identity)
 
+        return identity, identity
         # Add
         # Both tensors are now in flattened format
         out = ttnn.add(out, identity)
         out = ttnn.relu(out)
 
-        return out, shape_
+        return out, out
