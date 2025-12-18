@@ -12,7 +12,6 @@ from loguru import logger
 # from models.experimental.SSD512.reference.ssd import add_extras
 from models.common.utility_functions import comp_pcc
 from tests.ttnn.utils_for_testing import assert_with_pcc
-from models.experimental.SSD512.tt.utils import extract_extras_parameters_from_torch
 from models.experimental.SSD512.tt.layers.tt_extras_backbone_ver2 import (
     TtExtrasBackbone,
 )
@@ -35,13 +34,13 @@ def add_extras(cfg, i, batch_norm=False):
         layers += [nn.Conv2d(in_channels, 256, kernel_size=4, padding=1)]  # Fix padding to match Caffe version (pad=1).
     return layers
 
-    # def create_custom_mesh_preprocessor(mesh_mapper=None):
-    #     """Return a closure that can be passed to TTNN's preprocess pipeline."""
+    # # def create_custom_mesh_preprocessor(mesh_mapper=None):
+    # #     """Return a closure that can be passed to TTNN's preprocess pipeline."""
 
-    #     def custom_fpn_preprocessor(model, name, *, ttnn_module_args=None, convert_to_ttnn=True):
-    #         return fpn_to_params(model, mesh_mapper)
+    # #     def custom_fpn_preprocessor(model, name, *, ttnn_module_args=None, convert_to_ttnn=True):
+    # #         return fpn_to_params(model, mesh_mapper)
 
-    return custom_fpn_preprocessor
+    # return custom_fpn_preprocessor
 
 
 @pytest.mark.parametrize("pcc", ((0.99),))
@@ -67,46 +66,27 @@ def test_extras_backbone(device, pcc, size, reset_seeds):
     ttnn_input_tensor = ttnn.from_torch(
         torch_input.permute(0, 2, 3, 1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, device=device
     )
-    parameters = extract_extras_parameters_from_torch(torch_model, input_height=512, input_width=512)
+    # parameters = extract_extras_parameters_from_torch(torch_model, input_height=512, input_width=512)
 
     with torch.no_grad():
         x = torch_input
         for i, layer in enumerate(torch_model):
             print(layer.__class__.__name__, x.shape)
-            parameters[i]["input_height"] = x.shape[-2]
-            parameters[i]["input_width"] = x.shape[-1]
-            parameters[i]["input_channel"] = x.shape[-2]
-            # myconf=Conv2dConfiguration.from_torch(layer, input_height=x.shape[-2], input_width=x.shape[-1], batch_size=batch_size)
+            # parameters[i]["input_height"] = x.shape[-2]
+            # parameters[i]["input_width"] = x.shape[-1]
+            # parameters[i]["input_channel"] = x.shape[-2]
             x = torch.nn.functional.relu(layer(x), inplace=True)
-            parameters[i]["output_channel"] = x.shape[-3]
-            # print(layer.)
+            # parameters[i]["output_channel"] = x.shape[-3]
         torch_output = x
-
-    ########################3
-    #     # Preprocess parameters for TTNN
-    # parameters = preprocess_model_parameters(
-    #     initialize_model=lambda: torch_model,
-    #     custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
-    #     device=None,
-    #     # run_model=True,
-    # )
-    # conv_args = infer_ttnn_module_args(
-    #         model=torch_model, run_model=lambda model: torch_model(torch_input), device=device
-    #     )
-    #############################
 
     tt_extras = TtExtrasBackbone(
         size=size,
         input_channels=input_channels,
         batch_size=batch_size,
-        parameters=parameters,
         device=device,
         torch_model=torch_model,
         torch_input=torch_input,
     )
-    # tt_extras = TtExtrasBackbone(
-    #     size=size, input_channels=input_channels, batch_size=batch_size, parameters=parameters, device=device
-    # )
 
     tt_output_ttnn = tt_extras(device, ttnn_input_tensor)
     tt_output = ttnn.to_torch(tt_output_ttnn)
