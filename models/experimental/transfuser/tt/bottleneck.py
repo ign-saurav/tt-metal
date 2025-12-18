@@ -15,6 +15,7 @@ class TTRegNetBottleneck:
         self,
         device,
         parameters,
+        model_args,
         model_config,
         layer_config,
         stride=1,
@@ -22,7 +23,6 @@ class TTRegNetBottleneck:
         groups=1,
         shard_layout=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
         torch_model=None,
-        parameters_torch=None,
         use_fallback=False,
         block_name=None,
         stage_name=None,
@@ -37,9 +37,8 @@ class TTRegNetBottleneck:
         self.use_fallback = use_fallback
         self.block_name = block_name
         self.stage_name = stage_name
-
         # ------------------------- conv1: 1x1 + ReLU -------------------------
-        conv1_params = parameters_torch["conv1"]["conv"]
+        conv1_params = model_args["conv1"]["conv"]
         conv1_config = self._create_conv_config(
             parameters=parameters["conv1"],
             batch_size=conv1_params["batch_size"],
@@ -55,7 +54,7 @@ class TTRegNetBottleneck:
         self.conv1 = TtConv2d(conv1_config, device=device)
 
         # --------------------- conv2: 3x3 grouped + ReLU ---------------------
-        conv2_params = parameters_torch["conv2"]["conv"]
+        conv2_params = model_args["conv2"]["conv"]
         conv2_config = self._create_conv_config(
             parameters=parameters["conv2"],
             batch_size=conv2_params["batch_size"],
@@ -70,7 +69,7 @@ class TTRegNetBottleneck:
         )
         self.conv2 = TtConv2d(conv2_config, device=device)
         # --------------------------- SE: fc1 (1x1 + ReLU) --------------------
-        se_fc1_params = parameters_torch["se"]["fc1"]
+        se_fc1_params = model_args["se"]["fc1"]
         se_fc1_config = self._create_conv_config(
             parameters=parameters["se"]["fc1"],
             batch_size=se_fc1_params["batch_size"],
@@ -85,7 +84,7 @@ class TTRegNetBottleneck:
         )
         self.se_fc1 = TtConv2d(se_fc1_config, device=device)
         # --------------------------- SE: fc2 (1x1, no act) -------------------
-        se_fc2_params = parameters_torch["se"]["fc2"]
+        se_fc2_params = model_args["se"]["fc2"]
         se_fc2_config = self._create_conv_config(
             parameters=parameters["se"]["fc2"],
             batch_size=se_fc2_params["batch_size"],
@@ -107,7 +106,7 @@ class TTRegNetBottleneck:
 
         self.se_fc2 = TtConv2d(se_fc2_config, device=device)
         # ----------------------- conv3: 1x1 projection (no act) --------------
-        conv3_params = parameters_torch["conv3"]["conv"]
+        conv3_params = model_args["conv3"]["conv"]
 
         conv3_config = self._create_conv_config(
             parameters=parameters["conv3"],
@@ -125,7 +124,10 @@ class TTRegNetBottleneck:
         self.conv3 = TtConv2d(conv3_config, device=device)
         # ------------------------------ optional downsample -------------------
         if downsample:
-            downsample_conv_params = parameters_torch.downsample["0"]
+            try:
+                downsample_conv_params = model_args.downsample["conv"]
+            except:
+                downsample_conv_params = model_args.downsample["0"]
             downsample_conv_config = self._create_conv_config(
                 parameters=parameters["downsample"],
                 batch_size=downsample_conv_params["batch_size"],
@@ -266,10 +268,10 @@ class TTRegNetBottleneck:
 
         if self.downsample_layer is not None:
             # downsample
-            identity = self.downsample_layer(downsample_input)
+            downsample_input = self.downsample_layer(downsample_input)
 
         # Add
-        out = ttnn.add(out, identity)
+        out = ttnn.add(out, downsample_input)
         out = ttnn.relu(out)
 
         return out

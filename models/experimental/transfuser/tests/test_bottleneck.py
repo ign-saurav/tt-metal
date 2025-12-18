@@ -38,7 +38,7 @@ class TransfuserBottleneckInfra:
         # Build reference torch model
         torch_model = PyTorchBottleneck(in_chs=in_chs, out_chs=out_chs, stride=stride, group_size=24)
         torch_model.eval()
-        parameters_torch = infer_ttnn_module_args_torch(
+        model_args = infer_ttnn_module_args_torch(
             model=torch_model, run_model=lambda model: model(torch.randn(self.input_size)), device=None
         )
 
@@ -65,12 +65,12 @@ class TransfuserBottleneckInfra:
         self.ttnn_model = TTRegNetBottleneck(
             device=self.device,
             parameters=parameters,
+            model_args=model_args,
             model_config=self.model_config,
             stride=self.stride,
             downsample=downsample,
             groups=groups,
             layer_config=layer_config,
-            parameters_torch=parameters_torch,
         )
         self.tt_input = ttnn.from_torch(
             self.torch_input,

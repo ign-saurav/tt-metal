@@ -15,6 +15,7 @@ from ttnn.model_preprocessing import (
     preprocess_model_parameters,
 )
 from tests.ttnn.utils_for_testing import check_with_pcc
+from ttnn.model_preprocessing import infer_ttnn_module_args as infer_ttnn_module_args_torch
 
 
 def filter_checkpoint(ckpt_dict, stage_name="layer1", model_prefix="image_encoder.features"):
@@ -114,7 +115,11 @@ class StageInfra:
 
         # # Prepare golden inputs/outputs
         self.torch_input = torch.randn(self.input_shape)
-
+        model_args = infer_ttnn_module_args_torch(
+            model=torch_model, run_model=lambda model: model(self.torch_input), device=None
+        )
+        stage_key = "s" + stage_name.replace("layer", "")
+        model_args = model_args[stage_key]
         with torch.no_grad():
             self.torch_output = torch_model(
                 self.torch_input,
@@ -129,7 +134,9 @@ class StageInfra:
         parameters = getattr(parameters, stage_name)
         # Build TTNN model
         self.ttnn_model = Ttstages(
+            device=self.device,
             parameters=parameters,
+            model_args=model_args,
             stride=2,
             model_config=model_config,
             stage_name=stage_name,
@@ -169,7 +176,7 @@ class StageInfra:
         return None, None, None
 
     def run(self):
-        self.output_tensor, _ = self.ttnn_model(self.tt_input, self.device)
+        self.output_tensor = self.ttnn_model(self.tt_input, self.device)
         return self.output_tensor
 
     def validate(self, model_config, output_tensor=None):
