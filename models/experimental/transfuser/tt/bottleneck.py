@@ -6,7 +6,7 @@ import ttnn
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
     TtConv2d,
-    HeightShardedStrategyConfiguration,
+    AutoShardedStrategyConfiguration,
 )
 
 
@@ -207,7 +207,7 @@ class TTRegNetBottleneck:
             activation_dtype=self.dtype,
             weights_dtype=self.dtype,
             output_dtype=self.dtype,
-            sharding_strategy=HeightShardedStrategyConfiguration(reshard_if_not_optimal=True),
+            sharding_strategy=AutoShardedStrategyConfiguration(),
             math_fidelity=math_fidelity,
             fp32_dest_acc_en=True,
             deallocate_activation=True,
