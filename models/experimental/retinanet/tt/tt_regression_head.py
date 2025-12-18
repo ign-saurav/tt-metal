@@ -2,438 +2,129 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-from typing import List
-from typing import Optional
-from dataclasses import dataclass
-from typing import Optional
-from loguru import logger
-import tt_lib.fallback_ops as fallback_ops
 import os
-
-
-@dataclass
-class RetinaNetHeadOptimizer:
-    """Optimization configuration for RetinaNet head conv blocks"""
-
-    fpn0_conv_blocks: dict
-    fpn1_conv_blocks: dict
-    fpn2_conv_blocks: dict
-    fpn3_conv_blocks: dict
-    fpn4_conv_blocks: dict
-
-    # cls_logits configs (one per FPN level)
-    fpn0_final_conv: dict
-    fpn1_final_conv: dict
-    fpn2_final_conv: dict
-    fpn3_final_conv: dict
-    fpn4_final_conv: dict
-
-
-retinanet_head_optimizations = {
-    "optimized": RetinaNetHeadOptimizer(
-        # Conv block 0 - First convolution in the sequence
-        # FPN Level 0: Largest spatial (64x64)
-        fpn0_conv_blocks={
-            "act_block_h_override": 1024,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-        },
-        fpn0_final_conv={
-            "act_block_h_override": 1024,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-        },
-        # FPN Level 1: Medium-large spatial (32x32)
-        fpn1_conv_blocks={
-            "act_block_h_override": 256,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-        },
-        fpn1_final_conv={
-            "act_block_h_override": 256,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-        },
-        # FPN Level 2: Medium spatial (16x16)
-        fpn2_conv_blocks={
-            "act_block_h_override": 256,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-        },
-        fpn2_final_conv={
-            "act_block_h_override": 256,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-        },
-        # FPN Level 3: Small spatial (8x8)
-        fpn3_conv_blocks={
-            "act_block_h_override": 256,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-        },
-        fpn3_final_conv={
-            "act_block_h_override": 256,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-        },
-        # FPN Level 4: Smallest spatial (4x4)
-        fpn4_conv_blocks={
-            "act_block_h_override": 32,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-        },
-        fpn4_final_conv={
-            "act_block_h_override": 32,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
-        },
-    ),
-}
+from models.tt_cnn.tt.builder import (
+    TtConv2d,
+    Conv2dConfiguration,
+    AutoShardedStrategyConfiguration,
+)
 
 
 class Conv2dNormActivation:
-    """
-    TTNN implementation of Conv2d + GroupNorm + ReLU block.
-    """
-
     def __init__(
         self,
-        parameters: dict,
-        device: ttnn.Device,
-        in_channels: int = 256,
-        out_channels: int = 256,
-        kernel_size: tuple = (3, 3),
-        stride: tuple = (1, 1),
-        padding: tuple = (1, 1),
-        num_groups: int = 32,
-        grid_size: Optional[ttnn.CoreGrid] = None,
-        input_mask: Optional[ttnn.Tensor] = None,
-        model_config: dict = None,
-        compute_config: Optional[ttnn.DeviceComputeKernelConfig] = None,
-        conv_config: Optional[ttnn.Conv2dConfig] = None,
+        device,
+        parameters,
+        model_config,
     ):
-        """
-        Args:
-            parameters: Dict with keys 'weight', 'norm_weight', 'norm_bias'
-            device: TTNN device
-            in_channels: Number of input channels
-            out_channels: Number of output channels
-            kernel_size: Convolution kernel size
-            stride: Convolution stride
-            padding: Convolution padding
-            num_groups: Number of groups for GroupNorm
-            grid_size: CoreGrid for GroupNorm (defaults to 8x8)
-            input_mask: Pre-created input mask for GroupNorm
-        """
         self.device = device
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.kernel_size = kernel_size
-        self.stride = stride
-        self.padding = padding
-        self.num_groups = num_groups
+        self.parameters = parameters
         self.model_config = model_config
-        self.compute_config = compute_config
-        self.conv_config = conv_config
-        # Store parameters
-        self.conv_weight = parameters["weight"]
-        self.conv_bias = parameters["bias"]
-        # Store formatted weights for TTNN native GroupNorm
+        self.fallback_on_groupnorm = os.environ.get("FALLBACK_ON_GROUPNORM", "0") == "1"
         self.norm_weight = parameters["norm_weight"]
         self.norm_bias = parameters["norm_bias"]
-        # Use standard FALLBACK_ON_GROUPNORM flag (default "1" = PyTorch fallback enabled)
-        self.fallback_on_groupnorm = os.environ.get("FALLBACK_ON_GROUPNORM", "1") == "1"
-        # Grid size for GroupNorm
-        self.grid_size = grid_size if grid_size is not None else ttnn.CoreGrid(y=8, x=8)
-
-        # Input mask for GroupNorm
-        self.input_mask = input_mask
-
-        # DRAM slicing config for conv2d
-        self.slice_config = ttnn.Conv2dSliceConfig(
-            slice_type=ttnn.Conv2dDRAMSliceHeight,
+        self.conv_config = Conv2dConfiguration(
+            input_height=parameters["input_height"],
+            input_width=parameters["input_width"],
+            in_channels=256,
+            out_channels=256,
+            batch_size=1,
+            kernel_size=(3, 3),
+            stride=(1, 1),
+            padding=(1, 1),
+            groups=1,
+            dilation=(1, 1),
+            weight=parameters["conv_weight"],
+            bias=parameters["conv_bias"],
+            math_fidelity=model_config["MATH_FIDELITY"],
+            weights_dtype=model_config["WEIGHTS_DTYPE"],
+            activation_dtype=model_config["ACTIVATIONS_DTYPE"],
         )
 
-    def __call__(
-        self,
-        x: ttnn.Tensor,
-        batch_size: int,
-        input_height: int,
-        input_width: int,
-        fpn_level: int = None,
-        conv_block_idx: int = None,
-    ) -> ttnn.Tensor:
-        """
-        Forward pass: Conv2d -> GroupNorm -> ReLU
+        self.conv = TtConv2d(self.conv_config, device)
 
-        Args:
-            x: Input tensor in NHWC format
-            batch_size: Batch size
-            input_height: Input height
-            input_width: Input width
-            fpn_level: FPN level
-            conv_block_idx: Index of the convolution block
+    def __call__(self, x):
+        shape_list = list(x.shape)
+        N, H_out, W_out, C = shape_list[-4:]
 
-        Returns:
-            Output tensor after Conv2d + GroupNorm + ReLU
-        """
+        if x.is_sharded():
+            x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
 
-        # Create hierarchical log prefix
-        prefix = (
-            f"[FPN{fpn_level}][Conv{conv_block_idx}]"
-            if fpn_level is not None and conv_block_idx is not None
-            else "[Conv]"
-        )
+        x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
 
-        x, [H_out, W_out], [prepared_weight, prepared_bias] = ttnn.conv2d(
-            input_tensor=x,
-            weight_tensor=self.conv_weight,
-            in_channels=self.in_channels,
-            out_channels=self.out_channels,
-            device=self.device,
-            bias_tensor=self.conv_bias,
-            kernel_size=list(self.kernel_size),
-            stride=list(self.stride),
-            padding=list(self.padding),
-            batch_size=batch_size,
-            input_height=input_height,
-            input_width=input_width,
-            slice_config=self.slice_config,
-            compute_config=self.compute_config,
-            conv_config=self.conv_config,
-            return_output_dim=True,
-            return_weights_and_bias=True,  # ADD THIS
-        )
-
-        # Get output shape after conv
-        N, H_out, W_out, C = x.shape
+        x = self.conv(x)
 
         if self.fallback_on_groupnorm:
-            x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-            x = ttnn.reshape(x, (N, H_out, W_out, C))
-            x = ttnn.permute(x, (0, 3, 1, 2))
-
-            # Use PyTorch's GroupNorm
-            x = fallback_ops.group_norm(
-                x,
-                num_groups=self.num_groups,
-                weight=self.norm_weight,
-                bias=self.norm_bias,
-            )
-            # CRITICAL: Move tensor back to device after fallback
-            x = x.to(self.device)
-            # Convert back to NHWC
-            x = ttnn.permute(x, (0, 2, 3, 1))  # NCHW -> NHWC
-            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-
+            x_nchw = ttnn.to_torch(x).permute(0, 3, 1, 2)
+            x_normalized = torch.nn.functional.group_norm(
+                x_nchw, num_groups=32, weight=self.torch_norm_weight, bias=self.torch_norm_bias, eps=1e-5
+            ).permute(0, 2, 3, 1)
+            x = ttnn.from_torch(x_normalized, device=self.device, dtype=ttnn.bfloat16)
         else:
-            # Use TTNN native GroupNorm (when FALLBACK_ON_GROUPNORM=0)
-            logger.debug(f"{prefix} Using TTNN native GroupNorm")
-
-            # GroupNorm requires H_out * W_out divisible by (grid_size.y * 32)
-            spatial_size = H_out * W_out
-            required_size = ((spatial_size + self.grid_size.y * 32 - 1) // (self.grid_size.y * 32)) * (
-                self.grid_size.y * 32
-            )
-
-            if spatial_size != required_size:
-                # Pad spatial dimension to required size
-                pad_amount = required_size - spatial_size
-
-                # Reshape to (N, 1, H*W, C) for padding
-                x_flat = ttnn.reshape(x, (N, 1, spatial_size, C))
-
-                # Pad along spatial dimension
-                x_padded = ttnn.pad(x_flat, padding=((0, 0), (0, 0), (0, pad_amount), (0, 0)), value=0.0)
-            else:
-                # Reshape to (N, 1, H*W, C) without padding
-                x_padded = ttnn.reshape(x, (N, 1, spatial_size, C))
-
-            # Apply GroupNorm
-            x_normalized = ttnn.group_norm(
-                x_padded,
-                num_groups=self.num_groups,
-                input_mask=self.input_mask,
-                weight=self.norm_weight,
-                bias=self.norm_bias,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                core_grid=self.grid_size,
-                inplace=False,
-                compute_kernel_config=self.compute_config,
-            )
-
-            # Unpad
-            if spatial_size != required_size:
-                # Slice back to original spatial size
-                x_normalized = x_normalized[:, :, :spatial_size, :]
-
-            # Reshape back using PRESERVED dimensions
-            x = ttnn.reshape(x_normalized, (N, input_height, input_width, C))
-
-        H_out = input_height
-        W_out = input_width
-
-        # ReLU activation
-        x = ttnn.relu(x)
+            x = ttnn.group_norm(x, num_groups=32, weight=self.norm_weight, bias=self.norm_bias, epsilon=1e-5)
 
         return x
 
 
-# Usage in ttnn_retinanet_regression_head
 def ttnn_retinanet_regression_head(
-    feature_maps: List[ttnn.Tensor],
-    parameters: dict,
-    device: ttnn.Device,
-    in_channels: int = 256,
-    num_anchors: int = 9,
-    batch_size: int = 1,
-    input_shapes: List[tuple] = None,
-    model_config: dict = None,
-    optimization_profile: str = "optimized",
-) -> ttnn.Tensor:
-    # Get optimization config
-    opt_config = retinanet_head_optimizations[optimization_profile]
-
-    # Map FPN level index to config attributes
-    fpn_conv_configs = [
-        opt_config.fpn0_conv_blocks,
-        opt_config.fpn1_conv_blocks,
-        opt_config.fpn2_conv_blocks,
-        opt_config.fpn3_conv_blocks,
-        opt_config.fpn4_conv_blocks,
-    ]
-
-    fpn_final_configs = [
-        opt_config.fpn0_final_conv,
-        opt_config.fpn1_final_conv,
-        opt_config.fpn2_final_conv,
-        opt_config.fpn3_final_conv,
-        opt_config.fpn4_final_conv,
-    ]
-
+    fpn_heads,
+    parameters,
+    device,
+    model_config,
+    num_anchors=9,
+):
     all_bbox_regression = []
 
-    # Setup shared resources
-    grid_size = ttnn.CoreGrid(y=8, x=8)
-    input_mask_tensor = ttnn.create_group_norm_input_mask(in_channels, 32, grid_size.y)
-    input_mask_tensor = ttnn.from_torch(
-        input_mask_tensor,
-        dtype=model_config["ACTIVATIONS_DTYPE"],
-        layout=ttnn.TILE_LAYOUT,
-        device=device,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-    )
-    compute_config = ttnn.init_device_compute_kernel_config(
-        device.arch(),
-        math_fidelity=model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-        math_approx_mode=model_config.get("MATH_APPROX_MODE", False),
-        fp32_dest_acc_en=model_config.get("FP32_DEST_ACC_EN", True),
-        packer_l1_acc=model_config.get("PACKER_L1_ACC", False),
-    )
+    for fpn_idx, x in enumerate(fpn_heads):
+        N = x.shape[-4]
+        H_actual = x.shape[-3]
+        W_actual = x.shape[-2]
+        C = x.shape[-1]
 
-    # Process each FPN level
-    for fpn_idx, feature_map in enumerate(feature_maps):
-        N, H, W, C = feature_map.shape
-
-        # Get configs for THIS FPN level
-        conv_blocks_config = fpn_conv_configs[fpn_idx]
-        final_conv_config = fpn_final_configs[fpn_idx]
-
-        # Create Conv2dConfig for this FPN's conv blocks
-        if conv_blocks_config is not None:
-            conv_config = ttnn.Conv2dConfig(**conv_blocks_config)
-        else:
-            conv_config = None
-
-        # Create 4 Conv2dNormActivation blocks for THIS FPN level
-        conv_blocks = []
         for conv_idx in range(4):
+            conv_key = f"conv_block_{fpn_idx}_{conv_idx}"
+
+            parameters[conv_key]["input_height"] = H_actual
+            parameters[conv_key]["input_width"] = W_actual
+
             conv_block = Conv2dNormActivation(
-                parameters=parameters["conv"][conv_idx],
                 device=device,
-                in_channels=in_channels,
-                out_channels=in_channels,
-                kernel_size=(3, 3),
-                stride=(1, 1),
-                padding=(1, 1),
-                num_groups=32,
-                grid_size=grid_size,
-                input_mask=input_mask_tensor,
+                parameters=parameters[conv_key],
                 model_config=model_config,
-                compute_config=compute_config,
-                conv_config=conv_config,
             )
-            conv_blocks.append(conv_block)
+            x = conv_block(x)
 
-        # Apply conv blocks to feature map
-        x = feature_map
-        for conv_idx, conv_block in enumerate(conv_blocks):
-            x = conv_block(
-                x, batch_size=batch_size, input_height=H, input_width=W, fpn_level=fpn_idx, conv_block_idx=conv_idx
-            )
+        bbox_key = f"bbox_reg_{fpn_idx}"
 
-        # Final bbox_reg conv layer with config
-        bbox_reg_slice_config = ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dDRAMSliceHeight, num_slices=4)
-        if final_conv_config is not None:
-            bbox_reg_config = ttnn.Conv2dConfig(**final_conv_config)
-        else:
-            bbox_reg_config = None
+        parameters[bbox_key]["input_height"] = H_actual
+        parameters[bbox_key]["input_width"] = W_actual
 
-        bbox_regression = ttnn.conv2d(
-            input_tensor=x,
-            weight_tensor=parameters["bbox_reg"]["weight"],
-            in_channels=in_channels,
-            out_channels=num_anchors * 4,
-            device=device,
-            bias_tensor=parameters["bbox_reg"]["bias"],
+        final_conv_config = Conv2dConfiguration(
+            input_height=H_actual,
+            input_width=W_actual,
+            in_channels=256,
+            out_channels=36,
+            batch_size=1,
             kernel_size=(3, 3),
             stride=(1, 1),
             padding=(1, 1),
-            batch_size=batch_size,
-            input_height=H,
-            input_width=W,
-            slice_config=bbox_reg_slice_config,
-            compute_config=compute_config,
-            conv_config=bbox_reg_config,
+            groups=1,
+            dilation=(1, 1),
+            weight=parameters[bbox_key]["conv_weight"],
+            bias=parameters[bbox_key]["conv_bias"],
+            math_fidelity=model_config["MATH_FIDELITY"],
+            weights_dtype=model_config["WEIGHTS_DTYPE"],
+            activation_dtype=model_config["ACTIVATIONS_DTYPE"],
+            sharding_strategy=AutoShardedStrategyConfiguration(),
         )
 
-        # Reshape to (N, H*W*num_anchors, 4)
+        tt_bbox_reg_conv = TtConv2d(final_conv_config, device)
+        bbox_regression = tt_bbox_reg_conv(x)
+
         N, H_final, W_final, C_final = bbox_regression.shape
         bbox_regression = ttnn.reshape(bbox_regression, (N, H_final, W_final, num_anchors, 4))
         bbox_regression = ttnn.reshape(bbox_regression, (N, H_final * W_final * num_anchors, 4))
-
         all_bbox_regression.append(bbox_regression)
 
-    # Concatenate all FPN levels
     output = ttnn.concat(all_bbox_regression, dim=1)
     return output
