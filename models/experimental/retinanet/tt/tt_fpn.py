@@ -4,8 +4,14 @@
 
 import ttnn
 from dataclasses import dataclass
-from models.experimental.retinanet.tt.utils import TTConv2D, TTUpsample
+from models.experimental.retinanet.tt.utils import TTUpsample
 from collections import OrderedDict
+
+from models.tt_cnn.tt.builder import TtConv2d
+from models.experimental.retinanet.tt.utils import _create_conv_config_from_params
+from models.tt_cnn.tt.builder import (
+    AutoShardedStrategyConfiguration,
+)
 
 
 @dataclass
@@ -91,89 +97,199 @@ fpn_optimisations = FpnOptimizer(
 class resnet50Fpn:
     def __init__(
         self,
+        device,
         parameters,
         model_config,
         layer_optimisations=fpn_optimisations,
     ) -> None:
-        self.conv1 = TTConv2D(
+        # self.conv1 = TTConv2D(
+        #     kernel_size=1,
+        #     stride=1,
+        #     padding=0,
+        #     parameters=parameters["inner_blocks"].get("0", {}).get("0", None),
+        #     kernel_fidelity=model_config,
+        #     activation=None,
+        #     **layer_optimisations.conv1,
+        # )
+
+        self.conv_config_1 = _create_conv_config_from_params(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=parameters["inner_blocks"].get("0", {}).get("0", None)["weight"].shape[1],
+            out_channels=parameters["inner_blocks"].get("0", {}).get("0", None)["weight"].shape[0],
             kernel_size=1,
-            stride=1,
-            padding=0,
+            batch_size=1,
             parameters=parameters["inner_blocks"].get("0", {}).get("0", None),
-            kernel_fidelity=model_config,
             activation=None,
-            **layer_optimisations.conv1,
+            sharding_strategy=AutoShardedStrategyConfiguration(),
         )
+        self.conv1 = TtConv2d(self.conv_config_1, device)
 
-        self.conv2 = TTConv2D(
+        # self.conv2 = TTConv2D(
+        #     kernel_size=1,
+        #     stride=1,
+        #     padding=0,
+        #     parameters=parameters["inner_blocks"].get("1", {}).get("0", None),
+        #     kernel_fidelity=model_config,
+        #     activation=None,
+        #     **layer_optimisations.conv2,
+        # )
+
+        self.conv_config_2 = _create_conv_config_from_params(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=parameters["inner_blocks"].get("1", {}).get("0", None)["weight"].shape[1],
+            out_channels=parameters["inner_blocks"].get("1", {}).get("0", None)["weight"].shape[0],
             kernel_size=1,
-            stride=1,
-            padding=0,
+            batch_size=1,
             parameters=parameters["inner_blocks"].get("1", {}).get("0", None),
-            kernel_fidelity=model_config,
             activation=None,
-            **layer_optimisations.conv2,
+            sharding_strategy=AutoShardedStrategyConfiguration(),
         )
+        self.conv2 = TtConv2d(self.conv_config_2, device)
 
-        self.conv3 = TTConv2D(
+        # self.conv3 = TTConv2D(
+        #     kernel_size=1,
+        #     stride=1,
+        #     padding=0,
+        #     parameters=parameters["inner_blocks"].get("2", {}).get("0", None),
+        #     kernel_fidelity=model_config,
+        #     activation=None,
+        #     **layer_optimisations.conv3,
+        # )
+
+        self.conv_config_3 = _create_conv_config_from_params(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=parameters["inner_blocks"].get("2", {}).get("0", None)["weight"].shape[1],
+            out_channels=parameters["inner_blocks"].get("2", {}).get("0", None)["weight"].shape[0],
             kernel_size=1,
-            stride=1,
-            padding=0,
+            batch_size=1,
             parameters=parameters["inner_blocks"].get("2", {}).get("0", None),
-            kernel_fidelity=model_config,
             activation=None,
-            **layer_optimisations.conv3,
+            sharding_strategy=AutoShardedStrategyConfiguration(),
         )
+        self.conv3 = TtConv2d(self.conv_config_3, device)
 
-        self.conv4 = TTConv2D(
+        # self.conv4 = TTConv2D(
+        #     kernel_size=3,
+        #     stride=1,
+        #     padding=1,
+        #     parameters=parameters["layer_blocks"].get("0", {}).get("0", None),
+        #     kernel_fidelity=model_config,
+        #     activation=None,
+        #     **layer_optimisations.conv4,
+        # )
+
+        self.conv_config_4 = _create_conv_config_from_params(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=parameters["layer_blocks"].get("0", {}).get("0", None)["weight"].shape[1],
+            out_channels=parameters["layer_blocks"].get("0", {}).get("0", None)["weight"].shape[0],
             kernel_size=3,
-            stride=1,
-            padding=1,
+            batch_size=1,
+            padding=(1, 1),
             parameters=parameters["layer_blocks"].get("0", {}).get("0", None),
-            kernel_fidelity=model_config,
             activation=None,
-            **layer_optimisations.conv4,
+            sharding_strategy=AutoShardedStrategyConfiguration(),
         )
+        self.conv4 = TtConv2d(self.conv_config_4, device)
 
-        self.conv5 = TTConv2D(
+        # self.conv5 = TTConv2D(
+        #     kernel_size=3,
+        #     stride=1,
+        #     padding=1,
+        #     parameters=parameters["layer_blocks"].get("1", {}).get("0", None),
+        #     kernel_fidelity=model_config,
+        #     activation=None,
+        #     **layer_optimisations.conv5,
+        # )
+
+        self.conv_config_5 = _create_conv_config_from_params(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=parameters["layer_blocks"].get("1", {}).get("0", None)["weight"].shape[1],
+            out_channels=parameters["layer_blocks"].get("1", {}).get("0", None)["weight"].shape[0],
             kernel_size=3,
-            stride=1,
-            padding=1,
+            batch_size=1,
+            padding=(1, 1),
             parameters=parameters["layer_blocks"].get("1", {}).get("0", None),
-            kernel_fidelity=model_config,
             activation=None,
-            **layer_optimisations.conv5,
+            sharding_strategy=AutoShardedStrategyConfiguration(),
         )
+        self.conv5 = TtConv2d(self.conv_config_5, device)
 
-        self.conv6 = TTConv2D(
+        # self.conv6 = TTConv2D(
+        #     kernel_size=3,
+        #     stride=1,
+        #     padding=1,
+        #     parameters=parameters["layer_blocks"].get("2", {}).get("0", None),
+        #     kernel_fidelity=model_config,
+        #     activation=None,
+        #     **layer_optimisations.conv6,
+        # )
+
+        self.conv_config_6 = _create_conv_config_from_params(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=parameters["layer_blocks"].get("2", {}).get("0", None)["weight"].shape[1],
+            out_channels=parameters["layer_blocks"].get("2", {}).get("0", None)["weight"].shape[0],
             kernel_size=3,
-            stride=1,
-            padding=1,
+            batch_size=1,
+            padding=(1, 1),
             parameters=parameters["layer_blocks"].get("2", {}).get("0", None),
-            kernel_fidelity=model_config,
             activation=None,
-            **layer_optimisations.conv6,
+            sharding_strategy=AutoShardedStrategyConfiguration(),
         )
+        self.conv6 = TtConv2d(self.conv_config_6, device)
 
-        self.conv7 = TTConv2D(
+        # self.conv7 = TTConv2D(
+        #     kernel_size=3,
+        #     stride=2,
+        #     padding=1,
+        #     parameters=getattr(parameters.extra_blocks, "p6", None),
+        #     kernel_fidelity=model_config,
+        #     activation=None,
+        #     **layer_optimisations.conv7,
+        # )
+
+        self.conv_config_7 = _create_conv_config_from_params(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=getattr(parameters.extra_blocks, "p6", None)["weight"].shape[1],
+            out_channels=getattr(parameters.extra_blocks, "p6", None)["weight"].shape[0],
             kernel_size=3,
-            stride=2,
-            padding=1,
+            batch_size=1,
+            padding=(1, 1),
             parameters=getattr(parameters.extra_blocks, "p6", None),
-            kernel_fidelity=model_config,
             activation=None,
-            **layer_optimisations.conv7,
+            sharding_strategy=AutoShardedStrategyConfiguration(),
         )
+        self.conv7 = TtConv2d(self.conv_config_7, device)
 
-        self.conv8 = TTConv2D(
+        # self.conv8 = TTConv2D(
+        #     kernel_size=3,
+        #     stride=2,
+        #     padding=1,
+        #     parameters=getattr(parameters.extra_blocks, "p7", None),
+        #     kernel_fidelity=model_config,
+        #     activation=None,
+        #     **layer_optimisations.conv8,
+        # )
+
+        self.conv_config_8 = _create_conv_config_from_params(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=getattr(parameters.extra_blocks, "p7", None)["weight"].shape[1],
+            out_channels=getattr(parameters.extra_blocks, "p7", None)["weight"].shape[0],
             kernel_size=3,
-            stride=2,
-            padding=1,
+            batch_size=1,
+            padding=(1, 1),
             parameters=getattr(parameters.extra_blocks, "p7", None),
-            kernel_fidelity=model_config,
             activation=None,
-            **layer_optimisations.conv8,
+            sharding_strategy=AutoShardedStrategyConfiguration(),
         )
+        self.conv8 = TtConv2d(self.conv_config_8, device)
 
         self.upsample1 = TTUpsample(
             scale_factor=(2),
@@ -199,9 +315,9 @@ class resnet50Fpn:
         C3, C4, C5 = x.values()
         C5_clone = ttnn.clone(C5)
 
-        L3, _ = self.conv1(device, C3, C3.shape)
-        L4, _ = self.conv2(device, C4, C4.shape)
-        L5, _ = self.conv3(device, C5, C5.shape)
+        L3, [_out_height, _out_width] = self.conv1(C3, return_output_dim=True)
+        L4, [_out_height, _out_width] = self.conv2(C4, return_output_dim=True)
+        L5, [_out_height, _out_width] = self.conv3(C5, return_output_dim=True)
 
         P5 = L5
         P5_interpolated = self.upsample1(device, P5, P5.shape, reshape_output=False, sent_to_dram=False)
@@ -211,13 +327,13 @@ class resnet50Fpn:
 
         P3 = ttnn.add(L3, P4_interpolated)
 
-        P3, _ = self.conv4(device, P3, P3.shape)
-        P4, _ = self.conv5(device, P4, P4.shape)
-        P5, _ = self.conv6(device, P5, P5.shape)
+        P3, [_out_height, _out_width] = self.conv4(P3, return_output_dim=True)
+        P4, [_out_height, _out_width] = self.conv5(P4, return_output_dim=True)
+        P5, [_out_height, _out_width] = self.conv6(P5, return_output_dim=True)
 
-        P6, _ = self.conv7(device, C5_clone, C5_clone.shape)
+        P6, [_out_height, _out_width] = self.conv7(C5_clone, return_output_dim=True)
         P6_relu = ttnn.relu(P6)
-        P7, _ = self.conv8(device, P6_relu, P6_relu.shape)
+        P7, [_out_height, _out_width] = self.conv8(P6_relu, return_output_dim=True)
 
         out = OrderedDict([("0", P3), ("1", P4), ("2", P5), ("p6", P6), ("p7", P7)])
         return out
