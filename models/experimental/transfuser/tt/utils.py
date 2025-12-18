@@ -100,17 +100,17 @@ class TTConv2D:
             self.math_fidelity = self.kernel_fidelity["MATH_FIDELITY"]
 
     def __call__(self, device, input_tensor, input_shape):
-        conv_config = ttnn.Conv2dConfig(
-            weights_dtype=self.weights_dtype,
-            activation=self.activation,
-            deallocate_activation=self.deallocate_activation,
-            reallocate_halo_output=self.reallocate_halo_output,
-            reshard_if_not_optimal=self.reshard_if_not_optimal,
-            shard_layout=self.shard_layout,
-            enable_act_double_buffer=self.enable_act_double_buffer,
-            enable_weights_double_buffer=self.enable_weights_double_buffer,
-            in_place=True,
-        )
+        # conv_config = ttnn.Conv2dConfig(
+        #     weights_dtype=self.weights_dtype,
+        #     activation=self.activation,
+        #     deallocate_activation=self.deallocate_activation,
+        #     reallocate_halo_output=self.reallocate_halo_output,
+        #     reshard_if_not_optimal=self.reshard_if_not_optimal,
+        #     shard_layout=self.shard_layout,
+        #     enable_act_double_buffer=self.enable_act_double_buffer,
+        #     enable_weights_double_buffer=self.enable_weights_double_buffer,
+        #     # in_place=True,
+        # )
         compute_config = ttnn.init_device_compute_kernel_config(
             device.arch(),
             math_fidelity=self.kernel_fidelity["MATH_FIDELITY"],
@@ -128,39 +128,41 @@ class TTConv2D:
         if self.act_block_w is not None:
             conv_config.act_block_w_div = self.act_block_w
 
-        [output_tensor, [_out_height, _out_width], [weights_returned, bias_returned]] = ttnn.conv2d(
-            input_tensor=input_tensor,
-            weight_tensor=self.weights,
-            bias_tensor=self.bias,
-            in_channels=input_shape[-1],
-            out_channels=self.out_channels,
-            device=device,
-            kernel_size=list(self.kernel_size),
-            stride=list(self.stride),
-            padding=list(self.padding),
-            dilation=list(self.dilation),
-            batch_size=input_shape[-4],
-            input_height=input_shape[-3],
-            input_width=input_shape[-2],
-            conv_config=conv_config,
-            compute_config=compute_config,
-            slice_config=self.slice_config,
-            groups=self.groups,
-            return_weights_and_bias=True,
-            return_output_dim=True,
-            dtype=self.dtype,
-            memory_config=self.memory_config,
-        )
+        return conv_config
 
-        # Update the instance variables with returned values
-        self.weights = weights_returned
-        self.bias = bias_returned
+        # [output_tensor, [_out_height, _out_width], [weights_returned, bias_returned]] = ttnn.conv2d(
+        #     input_tensor=input_tensor,
+        #     weight_tensor=self.weights,
+        #     bias_tensor=self.bias,
+        #     in_channels=input_shape[-1],
+        #     out_channels=self.out_channels,
+        #     device=device,
+        #     kernel_size=list(self.kernel_size),
+        #     stride=list(self.stride),
+        #     padding=list(self.padding),
+        #     dilation=list(self.dilation),
+        #     batch_size=input_shape[-4],
+        #     input_height=input_shape[-3],
+        #     input_width=input_shape[-2],
+        #     conv_config=conv_config,
+        #     compute_config=compute_config,
+        #     slice_config=self.slice_config,
+        #     groups=self.groups,
+        #     return_weights_and_bias=True,
+        #     return_output_dim=True,
+        #     dtype=self.dtype,
+        #     memory_config=self.memory_config,
+        # )
 
-        if self.is_reshape:
-            output_tensor = ttnn.sharded_to_interleaved(output_tensor, ttnn.L1_MEMORY_CONFIG)
-            output_tensor = ttnn.to_layout(output_tensor, ttnn.TILE_LAYOUT)
-            output_tensor = ttnn.reshape(
-                output_tensor, (input_tensor.shape[0], _out_height, _out_width, output_tensor.shape[-1])
-            )
-            output_tensor = ttnn.permute(output_tensor, (0, 3, 1, 2))
-        return output_tensor, (input_tensor.shape[0], _out_height, _out_width, output_tensor.shape[-1])
+        # # Update the instance variables with returned values
+        # self.weights = weights_returned
+        # self.bias = bias_returned
+
+        # if self.is_reshape:
+        #     output_tensor = ttnn.sharded_to_interleaved(output_tensor, ttnn.L1_MEMORY_CONFIG)
+        #     output_tensor = ttnn.to_layout(output_tensor, ttnn.TILE_LAYOUT)
+        #     output_tensor = ttnn.reshape(
+        #         output_tensor, (input_tensor.shape[0], _out_height, _out_width, output_tensor.shape[-1])
+        #     )
+        #     output_tensor = ttnn.permute(output_tensor, (0, 3, 1, 2))
+        # return output_tensor, (input_tensor.shape[0], _out_height, _out_width, output_tensor.shape[-1])

@@ -1,6 +1,7 @@
 import torch
 import pytest
 import ttnn
+from ttnn.model_preprocessing import infer_ttnn_module_args as infer_ttnn_module_args_torch
 from models.experimental.transfuser.reference.bottleneck import Bottleneck as PyTorchBottleneck
 from models.experimental.transfuser.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from models.experimental.transfuser.tt.stages import optimization_dict
@@ -37,6 +38,9 @@ class TransfuserBottleneckInfra:
         # Build reference torch model
         torch_model = PyTorchBottleneck(in_chs=in_chs, out_chs=out_chs, stride=stride, group_size=24)
         torch_model.eval()
+        parameters_torch = infer_ttnn_module_args_torch(
+            model=torch_model, run_model=lambda model: model(torch.randn(self.input_size)), device=None
+        )
 
         # Create test input
         self.torch_input = torch.randn(self.input_size)
@@ -59,12 +63,14 @@ class TransfuserBottleneckInfra:
         layer_config = optimization_dict[stage_name]
 
         self.ttnn_model = TTRegNetBottleneck(
+            device=self.device,
             parameters=parameters,
             model_config=self.model_config,
             stride=self.stride,
             downsample=downsample,
             groups=groups,
             layer_config=layer_config,
+            parameters_torch=parameters_torch,
         )
         self.tt_input = ttnn.from_torch(
             self.torch_input,
