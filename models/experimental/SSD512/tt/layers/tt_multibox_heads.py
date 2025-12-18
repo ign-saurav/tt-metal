@@ -192,6 +192,19 @@ def clear_multibox_weight_cache():
 
 def apply_multibox_head(input_tensor, layer_with_weights, device=None, dtype=ttnn.bfloat16, memory_config=None):
     """Apply a single multibox head (location or confidence) to input tensor."""
+    # Get weight channels first to help determine format
+    weight = layer_with_weights["weight"]
+    if isinstance(weight, ttnn.Tensor):
+        weight_shape = weight.shape
+        if len(weight_shape) >= 2:
+            actual_weight_in_channels = weight_shape[1] if len(weight_shape) == 4 else None
+        else:
+            actual_weight_in_channels = None
+    elif isinstance(weight, torch.Tensor):
+        actual_weight_in_channels = weight.shape[1]
+    else:
+        actual_weight_in_channels = None
+
     if isinstance(input_tensor, torch.Tensor):
         batch_size = 1
         input_height = input_tensor.shape[2]
@@ -201,42 +214,118 @@ def apply_multibox_head(input_tensor, layer_with_weights, device=None, dtype=ttn
         shape = input_tensor.shape
         batch_size = 1
 
-        # Check expected input channels from layer config
-        config = layer_with_weights.get("config", {})
-        expected_in_channels = layer_with_weights.get("in_channels", config.get("in_channels", None))
+        # If we have weight channel information, always try both formats explicitly
+        # This is more reliable than trying to guess the format
+        if actual_weight_in_channels is not None:
+            # Try both formats from the original tensor
+            x_original = input_tensor
 
-        input_height_nhwc = shape[1]
-        input_width_nhwc = shape[2]
-        in_channels_nhwc = shape[3]
+            # Format 1: Assume it's already NHWC (channels at index 3)
+            x_try1 = x_original
+            if x_try1.layout != ttnn.ROW_MAJOR_LAYOUT:
+                x_try1 = ttnn.to_layout(x_try1, ttnn.ROW_MAJOR_LAYOUT)
+            # No permute - assume already NHWC
+            if x_try1.layout != ttnn.TILE_LAYOUT:
+                x_try1 = ttnn.to_layout(x_try1, ttnn.TILE_LAYOUT)
+            channels_try1 = x_try1.shape[3] if len(x_try1.shape) >= 4 else None
 
-        in_channels_nchw = shape[1]
-        input_height_nchw = shape[2]
-        input_width_nchw = shape[3]
+            # Format 2: Assume it's NCHW (channels at index 1, permute to NHWC)
+            x_try2 = x_original
+            if x_try2.layout != ttnn.ROW_MAJOR_LAYOUT:
+                x_try2 = ttnn.to_layout(x_try2, ttnn.ROW_MAJOR_LAYOUT)
+            x_try2 = ttnn.permute(x_try2, (0, 2, 3, 1))  # NCHW -> NHWC
+            if x_try2.layout != ttnn.TILE_LAYOUT:
+                x_try2 = ttnn.to_layout(x_try2, ttnn.TILE_LAYOUT)
+            channels_try2 = x_try2.shape[3] if len(x_try2.shape) >= 4 else None
 
-        # Determine format based on expected channels
-        needs_permute = False
-        if expected_in_channels is not None:
-            if in_channels_nchw == expected_in_channels:
-                # Tensor is in NCHW format, need to permute to NHWC
-                needs_permute = True
-                input_height = input_height_nchw
-                input_width = input_width_nchw
-                in_channels = in_channels_nchw
-            elif in_channels_nhwc == expected_in_channels:
-                # Tensor is already in NHWC format
-                input_height = input_height_nhwc
-                input_width = input_width_nhwc
-                in_channels = in_channels_nhwc
+            # Use whichever format matches the weight channels
+            if channels_try1 == actual_weight_in_channels:
+                x = x_try1
+                in_channels = channels_try1
+                input_height = x.shape[1]
+                input_width = x.shape[2]
+            elif channels_try2 == actual_weight_in_channels:
+                x = x_try2
+                in_channels = channels_try2
+                input_height = x.shape[1]
+                input_width = x.shape[2]
             else:
-                # Default to NHWC interpretation
+                # Neither format matches - use the one that's closer or default to try1
+                if channels_try1 is not None and channels_try2 is not None:
+                    if abs(channels_try1 - actual_weight_in_channels) <= abs(channels_try2 - actual_weight_in_channels):
+                        x = x_try1
+                        in_channels = channels_try1
+                        input_height = x.shape[1]
+                        input_width = x.shape[2]
+                    else:
+                        x = x_try2
+                        in_channels = channels_try2
+                        input_height = x.shape[1]
+                        input_width = x.shape[2]
+                elif channels_try1 is not None:
+                    x = x_try1
+                    in_channels = channels_try1
+                    input_height = x.shape[1]
+                    input_width = x.shape[2]
+                elif channels_try2 is not None:
+                    x = x_try2
+                    in_channels = channels_try2
+                    input_height = x.shape[1]
+                    input_width = x.shape[2]
+                else:
+                    # Fallback to default format detection
+                    input_height = shape[1]
+                    input_width = shape[2]
+                    in_channels = shape[3]
+                    x = input_tensor
+                    if x.layout != ttnn.TILE_LAYOUT:
+                        if x.layout != ttnn.ROW_MAJOR_LAYOUT:
+                            x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
+                        x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+        else:
+            # No weight info - use format detection based on expected channels
+            config = layer_with_weights.get("config", {})
+            expected_in_channels = layer_with_weights.get("in_channels", config.get("in_channels", None))
+
+            input_height_nhwc = shape[1]
+            input_width_nhwc = shape[2]
+            in_channels_nhwc = shape[3]
+
+            in_channels_nchw = shape[1]
+            input_height_nchw = shape[2]
+            input_width_nchw = shape[3]
+
+            # Determine format based on expected channels
+            needs_permute = False
+            if expected_in_channels is not None:
+                if in_channels_nchw == expected_in_channels:
+                    needs_permute = True
+                    input_height = input_height_nchw
+                    input_width = input_width_nchw
+                    in_channels = in_channels_nchw
+                elif in_channels_nhwc == expected_in_channels:
+                    input_height = input_height_nhwc
+                    input_width = input_width_nhwc
+                    in_channels = in_channels_nhwc
+                else:
+                    # Default to NHWC
+                    input_height = input_height_nhwc
+                    input_width = input_width_nhwc
+                    in_channels = in_channels_nhwc
+            else:
+                # Default to NHWC
                 input_height = input_height_nhwc
                 input_width = input_width_nhwc
                 in_channels = in_channels_nhwc
-        else:
-            # No expected channels, default to NHWC
-            input_height = input_height_nhwc
-            input_width = input_width_nhwc
-            in_channels = in_channels_nhwc
+
+            x = input_tensor
+            if needs_permute:
+                if x.layout != ttnn.ROW_MAJOR_LAYOUT:
+                    x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
+                x = ttnn.permute(x, (0, 2, 3, 1))
+
+            if x.layout != ttnn.TILE_LAYOUT:
+                x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
 
     # Use L1 for smaller feature maps (<=128x128), DRAM for larger ones
     tensor_size_estimate = batch_size * input_height * input_width * in_channels
@@ -254,22 +343,10 @@ def apply_multibox_head(input_tensor, layer_with_weights, device=None, dtype=ttn
             layout=ttnn.TILE_LAYOUT,
             memory_config=memory_config,
         )
-    else:
-        # Input is already a TTNN tensor
-        x = input_tensor
+        in_channels = input_tensor.shape[1]
+        input_height = input_tensor.shape[2]
+        input_width = input_tensor.shape[3]
 
-        # Permute from NCHW to NHWC if needed (must be done before layout conversion)
-        if needs_permute:
-            # Convert to ROW_MAJOR for permute if needed
-            if x.layout != ttnn.ROW_MAJOR_LAYOUT:
-                x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-            x = ttnn.permute(x, (0, 2, 3, 1))
-
-        # Ensure it's in TILE_LAYOUT for operations
-        if x.layout != ttnn.TILE_LAYOUT:
-            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-
-    weight = layer_with_weights["weight"]
     bias = layer_with_weights.get("bias", None)
     config = layer_with_weights["config"]
     out_channels = layer_with_weights["out_channels"]
@@ -282,20 +359,22 @@ def apply_multibox_head(input_tensor, layer_with_weights, device=None, dtype=ttn
     dilation = config["dilation"]
     groups = config["groups"]
 
-    if isinstance(weight, ttnn.Tensor):
-        weight_shape = weight.shape
-        if len(weight_shape) >= 2:
-            actual_weight_in_channels = weight_shape[1] if len(weight_shape) == 4 else None
-        else:
-            actual_weight_in_channels = None
-    elif isinstance(weight, torch.Tensor):
-        actual_weight_in_channels = weight.shape[1]
-    else:
-        raise ValueError("Weight must be either a TTNN tensor or torch tensor")
-
     if actual_weight_in_channels is not None and actual_weight_in_channels != in_channels:
+        # Provide detailed error message with tensor shape information
+        if isinstance(input_tensor, torch.Tensor):
+            tensor_shape_str = str(input_tensor.shape)
+        else:
+            tensor_shape_str = str(input_tensor.shape)
+            if hasattr(input_tensor, "layout"):
+                tensor_shape_str += f" (layout: {input_tensor.layout})"
+
         raise ValueError(
-            f"Input tensor channels ({in_channels}) don't match weight's expected input channels ({actual_weight_in_channels})!"
+            f"Input tensor channels ({in_channels}) don't match weight's expected input channels ({actual_weight_in_channels})!\n"
+            f"  Tensor shape: {tensor_shape_str}\n"
+            f"  Expected channels: {expected_in_channels}\n"
+            f"  Weight channels: {actual_weight_in_channels}\n"
+            f"  Detected channels: {in_channels}\n"
+            f"  Input height: {input_height}, width: {input_width}"
         )
 
     is_1x1_conv = kernel_size == (1, 1) or (kernel_size[0] == 1 and kernel_size[1] == 1)

@@ -603,7 +603,7 @@ class SSD512Network:
 
         # Build network components
         self.vgg_config = build_vgg_backbone(size=512, input_channels=3, device=device)
-        self.extras_config = build_extras_backbone(size=512, input_channels=1024, device=device)
+        self.extras_backbone = build_extras_backbone(size=512, input_channels=1024, device=device)
 
         # L2Norm for conv4_3
         self.l2norm = TtL2Norm(n_channels=512, scale=20, device=device)
@@ -637,9 +637,7 @@ class SSD512Network:
         )
 
         # Load extras weights
-        self.extras_config = load_extras_weights_from_torch(
-            self.extras_config, torch_model.extras, self.device, dtype, weight_device=weight_device_placement
-        )
+        self.extras_backbone.load_weights_from_torch(torch_model.extras)
 
         # Load multibox head weights
         self.loc_config, self.conf_config = load_multibox_weights_from_torch(
@@ -683,18 +681,11 @@ class SSD512Network:
             sources = [conv7]
 
         # Forward through extras
-        conv7_h = conv7.shape[1]
-        conv7_w = conv7.shape[2]
-        extra_sources = forward_extras(
-            conv7,
-            self.extras_config,
-            batch_size=batch_size,
-            input_height=conv7_h,
-            input_width=conv7_w,
-            device=self.device,
-            dtype=dtype,
-            memory_config=memory_config,
-        )
+        # Convert conv7 from NCHW to NHWC if needed
+        if len(conv7.shape) == 4 and conv7.shape[1] > conv7.shape[3]:
+            conv7 = ttnn.permute(conv7, (0, 2, 3, 1))
+
+        _, extra_sources = self.extras_backbone(conv7, return_sources=True)
         sources.extend(extra_sources)
 
         expected_channels = [512, 1024, 512, 256, 256, 256, 256]
@@ -706,29 +697,52 @@ class SSD512Network:
                 dim1_val = source_shape[1]
                 dim3_val = source_shape[3]
 
+                # Determine if source is in NCHW or NHWC format
+                # Check which dimension matches the expected channels
+                needs_permute = False
                 if expected_c is not None:
-                    if dim1_val == expected_c:
-                        source = ttnn.permute(source, (0, 2, 3, 1))
-                    elif dim3_val == expected_c:
-                        pass
+                    if dim1_val == expected_c and dim3_val != expected_c:
+                        # NCHW format - channels at index 1
+                        needs_permute = True
+                    elif dim3_val == expected_c and dim1_val != expected_c:
+                        # Already NHWC format - channels at index 3
+                        needs_permute = False
                     else:
+                        # Ambiguous - check if we can determine from weight channels
+                        # Default: if dim3 > dim1, assume NHWC, else check further
                         if dim3_val > dim1_val:
-                            if dim3_val == expected_c:
-                                pass
+                            # Likely NHWC (channels usually larger than height for feature maps)
+                            needs_permute = False
+                        else:
+                            # Could be either - check if dim1 matches a reasonable channel count
+                            # For SSD512, channels are typically 256, 512, or 1024
+                            if dim1_val in [256, 512, 1024] and dim3_val not in [256, 512, 1024]:
+                                needs_permute = True
                             else:
-                                source = ttnn.permute(source, (0, 2, 3, 1))
+                                needs_permute = False
                 else:
+                    # No expected channels - default based on dimension sizes
                     if dim3_val > dim1_val:
-                        pass
+                        needs_permute = False  # Likely NHWC
                     else:
-                        source = ttnn.permute(source, (0, 2, 3, 1))
+                        needs_permute = False  # Default to assuming already NHWC
+
+                # Apply permute if needed
+                if needs_permute:
+                    if source.layout != ttnn.ROW_MAJOR_LAYOUT:
+                        source = ttnn.to_layout(source, ttnn.ROW_MAJOR_LAYOUT)
+                    source = ttnn.permute(source, (0, 2, 3, 1))
+                    if source.layout != ttnn.TILE_LAYOUT:
+                        source = ttnn.to_layout(source, ttnn.TILE_LAYOUT)
             processed_sources.append(source)
 
         loc_outputs = []
         conf_outputs = []
         for idx, source in enumerate(processed_sources):
-            source_h, source_w = source.shape[1], source.shape[2]
-            source_channels = source.shape[3]
+            # Get source dimensions (assume NHWC after first processing loop)
+            source_shape = source.shape
+            source_h, source_w = source_shape[1], source_shape[2]
+            source_channels = source_shape[3]
             tensor_size_estimate = batch_size * source_h * source_w * source_channels
             use_l1_for_this_layer = source_h <= 128 and source_w <= 128 and tensor_size_estimate <= 2 * 1024 * 1024
             source_memory_config = ttnn.L1_MEMORY_CONFIG
@@ -744,11 +758,17 @@ class SSD512Network:
                     else:
                         actual_weight_channels = None
 
-                if source_channels != self.loc_config[idx].get("in_channels", 0):
-                    if actual_weight_channels is not None and actual_weight_channels == source_channels:
+                # Update in_channels if weight channels match source channels
+                if actual_weight_channels is not None:
+                    if actual_weight_channels == source_channels:
                         self.loc_config[idx]["in_channels"] = source_channels
                         if "config" in self.loc_config[idx]:
                             self.loc_config[idx]["config"]["in_channels"] = source_channels
+                    elif source_channels != self.loc_config[idx].get("in_channels", 0):
+                        # Mismatch - update to match actual weight channels
+                        self.loc_config[idx]["in_channels"] = actual_weight_channels
+                        if "config" in self.loc_config[idx]:
+                            self.loc_config[idx]["config"]["in_channels"] = actual_weight_channels
 
             if idx < len(self.conf_config):
                 actual_weight_channels = None
@@ -761,11 +781,17 @@ class SSD512Network:
                     else:
                         actual_weight_channels = None
 
-                if source_channels != self.conf_config[idx].get("in_channels", 0):
-                    if actual_weight_channels is not None and actual_weight_channels == source_channels:
+                # Update in_channels if weight channels match source channels
+                if actual_weight_channels is not None:
+                    if actual_weight_channels == source_channels:
                         self.conf_config[idx]["in_channels"] = source_channels
                         if "config" in self.conf_config[idx]:
                             self.conf_config[idx]["config"]["in_channels"] = source_channels
+                    elif source_channels != self.conf_config[idx].get("in_channels", 0):
+                        # Mismatch - update to match actual weight channels
+                        self.conf_config[idx]["in_channels"] = actual_weight_channels
+                        if "config" in self.conf_config[idx]:
+                            self.conf_config[idx]["config"]["in_channels"] = actual_weight_channels
 
             loc_out = apply_multibox_head(
                 source, self.loc_config[idx], device=self.device, dtype=dtype, memory_config=source_memory_config
