@@ -76,7 +76,7 @@ def test_dvae_forward_pcc(device):
     # for k in weights:
     #     print(k)
 
-    # weights = torch.load("models/experimental/minicpm_o_2_6/tests/dvae_weights.pt")
+    weights = torch.load("models/experimental/minicpm_o_2_6/tests/dvae_weights.pt")
     # og_weights = torch.load("models/experimental/minicpm_o_2_6/tests/dvae_weights.pt")
     # for k in og_weights:
     #     print(k)
@@ -101,35 +101,35 @@ def test_dvae_forward_pcc(device):
         pt_model.coef.copy_(weights["coef"])
 
         # Downsample convs - TTNN format is [out, in, H, W], PyTorch expects [out, in, H, W]
-        pt_model.encoder_downsample[0].weight.copy_(weights["downsample_conv.0.weight"])
+        pt_model.encoder_downsample[0].weight.copy_(weights["downsample_conv.0.weight"].unsqueeze(-2))
         pt_model.encoder_downsample[0].bias.copy_(weights["downsample_conv.0.bias"].squeeze())
-        pt_model.encoder_downsample[2].weight.copy_(weights["downsample_conv.2.weight"])
+        pt_model.encoder_downsample[2].weight.copy_(weights["downsample_conv.2.weight"].unsqueeze(-2))
         pt_model.encoder_downsample[2].bias.copy_(weights["downsample_conv.2.bias"].squeeze())
 
         # Encoder input convs
-        pt_model.encoder_input[0].weight.copy_(weights["encoder.conv_in.0.weight"])
+        pt_model.encoder_input[0].weight.copy_(weights["encoder.conv_in.0.weight"].unsqueeze(-2))
         pt_model.encoder_input[0].bias.copy_(weights["encoder.conv_in.0.bias"].squeeze())
-        pt_model.encoder_input[2].weight.copy_(weights["encoder.conv_in.2.weight"])
+        pt_model.encoder_input[2].weight.copy_(weights["encoder.conv_in.2.weight"].unsqueeze(-2))
         pt_model.encoder_input[2].bias.copy_(weights["encoder.conv_in.2.bias"].squeeze())
 
         # Encoder output - [1024, 256, 1, 1] -> [1024, 256, 1, 1] (no squeeze needed)
-        pt_model.encoder_output.weight.copy_(weights["encoder.conv_out.weight"])
+        pt_model.encoder_output.weight.copy_(weights["encoder.conv_out.weight"].unsqueeze(-2))
 
         # Decoder input convs
-        pt_model.decoder_input[0].weight.copy_(weights["decoder.conv_in.0.weight"])
+        pt_model.decoder_input[0].weight.copy_(weights["decoder.conv_in.0.weight"].unsqueeze(-2))
         pt_model.decoder_input[0].bias.copy_(
             weights["decoder.conv_in.0.bias"].squeeze()
         )  # Convert [1,1,1,bn_dim] -> [bn_dim]
-        pt_model.decoder_input[2].weight.copy_(weights["decoder.conv_in.2.weight"])
+        pt_model.decoder_input[2].weight.copy_(weights["decoder.conv_in.2.weight"].unsqueeze(-2))
         pt_model.decoder_input[2].bias.copy_(
             weights["decoder.conv_in.2.bias"].squeeze()
         )  # Convert [1,1,1,hidden_dim] -> [hidden_dim]
 
         # Decoder projection
-        pt_model.decoder_proj.weight.copy_(weights["decoder.conv_out.weight"])
+        pt_model.decoder_proj.weight.copy_(weights["decoder.conv_out.weight"].unsqueeze(-2))
 
         # Output conv
-        pt_model.decoder_output.weight.copy_(weights["out_conv.weight"])
+        pt_model.decoder_output.weight.copy_(weights["out_conv.weight"].unsqueeze(-2))
 
         # ConvNeXt blocks (simplified - skip for now due to complexity)
 
