@@ -12,6 +12,7 @@ from loguru import logger
 from models.experimental.SSD512.reference.ssd import multibox, base, mbox, vgg
 from models.common.utility_functions import comp_pcc
 from models.experimental.SSD512.tt.utils import Conv2dNormActivation
+from tests.ttnn.utils_for_testing import assert_with_pcc
 
 SSD512_NUM_CLASSES = 21
 
@@ -93,6 +94,7 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
             sources.append(torch.randn(batch_size, 256, 1, 1))
     #####################################################################3
     # from models.tt_cnn.tt.builder import ( Conv2dConfiguration, )
+    # sources=sources[:2]
     loc_config_layers = []
     conf_config_layers = []
     for source_idx, source in enumerate(sources):
@@ -105,7 +107,7 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
                     input_width=source.shape[-1],
                     batch_size=source.shape[0],
                     device=device,
-                    activation_layer=ttnn.relu
+                    # activation_layer=ttnn.relu
                     # **model_config,
                 )
             )
@@ -117,7 +119,7 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
                     input_width=source.shape[-1],
                     batch_size=source.shape[0],
                     device=device,
-                    activation_layer=ttnn.relu
+                    # activation_layer=ttnn.relu
                     # **model_config,
                 )
             )
@@ -179,5 +181,5 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
         _, pcc_message_conf = comp_pcc(torch_conf, tt_conf, pcc)
         logger.info(f"Confidence head {source_idx} PCC: {pcc_message_conf}")
 
-        # assert_with_pcc(torch_loc, tt_loc, pcc)
-        # assert_with_pcc(torch_conf, tt_conf, pcc)
+        assert_with_pcc(torch_loc, tt_loc, pcc)
+        assert_with_pcc(torch_conf, tt_conf, pcc)

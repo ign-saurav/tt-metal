@@ -9,7 +9,8 @@ from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
     MaxPool2dConfiguration,
 )
-from models.tt_cnn.tt.builder import TtConv2d
+from models.tt_cnn.tt.builder import TtConv2d, TtMaxPool2d
+import torch.nn as nn
 
 # conv_config = {
 #     "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
@@ -90,6 +91,36 @@ class Conv2dNormActivation:
         return input_tensor
 
 
+class Maxpool2DOperation:
+    def __init__(
+        self,
+        # conv_config=None,
+        layer,
+        input_height,
+        input_width,
+        channels,
+        batch_size,
+        device=None,
+        # activation_layer=None,
+    ):
+        # self.conv_config = conv_config
+        self.pool_config = MaxPool2dConfiguration.from_torch(
+            layer,
+            input_height=input_height,
+            input_width=input_width,
+            channels=input_width,
+            batch_size=batch_size,
+            # **dtype= ttnne.bfloat8_b
+        )
+
+        self.pool = TtMaxPool2d(self.pool_config, device)
+
+    def __call__(self, device, input_tensor, return_output_dim=True):
+        input_tensor = self.pool(input_tensor)
+
+        return input_tensor
+
+
 class CreateConfigLayers:
     def __init__(self, torch_model, torch_input, device, activation_layer, model_config=None):
         # def create_config_layers(torch_model, torch_input,device, activation_layer, model_config=conv_config):
@@ -114,12 +145,13 @@ class CreateConfigLayers:
 
             elif isinstance(layer, nn.MaxPool2d):
                 kernel_config_layer.append(
-                    MaxPool2dConfiguration.from_torch(
+                    Maxpool2DOperation(
                         layer,
                         input_height=x.shape[-2],
                         input_width=x.shape[-1],
                         channels=x.shape[-3],
                         batch_size=x.shape[0],
+                        device=device,
                         # **dtype= ttnne.bfloat8_b
                     )
                 )
@@ -198,55 +230,55 @@ class CreateConfigLayers:
 #     )
 
 
-import torch.nn as nn
+# import torch.nn as nn
 
 
-def extract_extras_parameters_from_torch(torch_model, input_height, input_width, batch_size=1):
-    """
-    torch_model: typically torch_model.extras (nn.Sequential)
-    input_height, input_width: spatial size of the tensor coming into extras
-    """
-    parameters = []
-    h, w = input_height, input_width
+# def extract_extras_parameters_from_torch(torch_model, input_height, input_width, batch_size=1):
+#     """
+#     torch_model: typically torch_model.extras (nn.Sequential)
+#     input_height, input_width: spatial size of the tensor coming into extras
+#     """
+#     parameters = []
+#     h, w = input_height, input_width
 
-    for layer in torch_model:
-        if isinstance(layer, nn.Conv2d):
-            weight = layer.weight.data
-            bias = layer.bias.data if layer.bias is not None else None
+#     for layer in torch_model:
+#         if isinstance(layer, nn.Conv2d):
+#             weight = layer.weight.data
+#             bias = layer.bias.data if layer.bias is not None else None
 
-            # store weights + shape metadata
-            layer_params = {
-                "weight": weight,
-                "bias": bias,
-                "batch_size": batch_size,
-                "input_height": h,
-                "input_width": w,
-                "in_channels": layer.in_channels,
-                "out_channels": layer.out_channels,
-                "kernel_size": layer.kernel_size,
-                "stride": layer.stride,
-                "padding": layer.padding,
-                "dilation": layer.dilation,
-                "groups": layer.groups,
-            }
-            parameters.append(layer_params)
+#             # store weights + shape metadata
+#             layer_params = {
+#                 "weight": weight,
+#                 "bias": bias,
+#                 "batch_size": batch_size,
+#                 "input_height": h,
+#                 "input_width": w,
+#                 "in_channels": layer.in_channels,
+#                 "out_channels": layer.out_channels,
+#                 "kernel_size": layer.kernel_size,
+#                 "stride": layer.stride,
+#                 "padding": layer.padding,
+#                 "dilation": layer.dilation,
+#                 "groups": layer.groups,
+#             }
+#             parameters.append(layer_params)
 
-            # update h, w for the next layer using the conv2d formula
-            kh, kw = (
-                layer.kernel_size if isinstance(layer.kernel_size, tuple) else (layer.kernel_size, layer.kernel_size)
-            )
-            sh, sw = layer.stride if isinstance(layer.stride, tuple) else (layer.stride, layer.stride)
-            ph, pw = layer.padding if isinstance(layer.padding, tuple) else (layer.padding, layer.padding)
-            dh, dw = layer.dilation if isinstance(layer.dilation, tuple) else (layer.dilation, layer.dilation)
+#             # update h, w for the next layer using the conv2d formula
+#             kh, kw = (
+#                 layer.kernel_size if isinstance(layer.kernel_size, tuple) else (layer.kernel_size, layer.kernel_size)
+#             )
+#             sh, sw = layer.stride if isinstance(layer.stride, tuple) else (layer.stride, layer.stride)
+#             ph, pw = layer.padding if isinstance(layer.padding, tuple) else (layer.padding, layer.padding)
+#             dh, dw = layer.dilation if isinstance(layer.dilation, tuple) else (layer.dilation, layer.dilation)
 
-            h = (h + 2 * ph - dh * (kh - 1) - 1) // sh + 1
-            w = (w + 2 * pw - dw * (kw - 1) - 1) // sw + 1
+#             h = (h + 2 * ph - dh * (kh - 1) - 1) // sh + 1
+#             w = (w + 2 * pw - dw * (kw - 1) - 1) // sw + 1
 
-        else:
-            # non-conv layers: assume no spatial change (adjust if you add pools, etc.)
-            continue
+#         else:
+#             # non-conv layers: assume no spatial change (adjust if you add pools, etc.)
+#             continue
 
-    return parameters
+#     return parameters
 
 
 # # Helper function to create Conv2dConfiguration from parameters
