@@ -2,10 +2,14 @@
 # SPDX-License-Identifier: Apache-2.0
 import torch
 import ttnn
-from models.experimental.transfuser.tt.utils import TTConv2D
 from models.experimental.transfuser.tt.gpt import TTGpt
 from models.experimental.transfuser.tt.topdown import TtTopDown
 from models.experimental.transfuser.tt.stages import Ttstages
+from models.tt_cnn.tt.builder import (
+    Conv2dConfiguration,
+    TtConv2d,
+    AutoShardedStrategyConfiguration,
+)
 
 
 class TtTransfuserBackbone:
@@ -13,6 +17,7 @@ class TtTransfuserBackbone:
         self,
         device,
         parameters,
+        model_args,
         stride,
         model_config,
         config,
@@ -23,30 +28,80 @@ class TtTransfuserBackbone:
         self.config = config
         self.inplanes = 32
 
-        # ---------- Small factories ----------
-        def make_stem(params):
-            return TTConv2D(
-                kernel_size=3,
-                stride=2,
-                padding=1,
-                parameters=params,
-                kernel_fidelity=model_config,
-                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-                shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+        def _create_conv_config(
+            self,
+            parameters,
+            batch_size,
+            input_height,
+            input_width,
+            in_channels,
+            out_channels,
+            stride,
+            kernel_size,
+            padding,
+            groups,
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+        ):
+            # Convert weights to float32 format (required by tt_cnn builder)
+            weight = parameters.weight
+            if isinstance(weight, ttnn.Tensor):
+                weight = ttnn.from_torch(ttnn.to_torch(weight), dtype=ttnn.float32)
+
+            # Convert bias to shape (1, 1, 1, out_channels) in float32
+            bias = None
+            if "bias" in parameters and parameters.bias is not None:
+                bias_torch = ttnn.to_torch(parameters.bias).reshape(1, 1, 1, -1)
+                bias = ttnn.from_torch(bias_torch, dtype=ttnn.float32)
+
+            # Convert stride to list format (required by ttnn.conv2d)
+            if isinstance(stride, int):
+                stride_list = [stride, stride]
+            elif isinstance(stride, tuple) and len(stride) == 2:
+                stride_list = list(stride)
+            else:
+                stride_list = stride
+
+            # Convert padding to list format (required by ttnn.conv2d)
+            if isinstance(padding, int):
+                padding_list = [padding, padding]
+            elif isinstance(padding, tuple) and len(padding) == 2:
+                padding_list = list(padding)
+            elif isinstance(padding, tuple) and len(padding) == 4:
+                padding_list = list(padding)
+            else:
+                padding_list = padding
+
+            # Select math fidelity based on block (HiFi4 for block 2 for better accuracy)
+            math_fidelity = ttnn.MathFidelity.HiFi4
+
+            return Conv2dConfiguration(
+                input_height=input_height,
+                input_width=input_width,
+                in_channels=in_channels,
+                out_channels=out_channels,
+                batch_size=batch_size,
+                kernel_size=kernel_size,
+                stride=stride_list,  # List format
+                padding=padding_list,  # List format
+                groups=groups,
+                weight=weight,
+                bias=bias,
+                activation=activation,
+                activation_dtype=self.dtype,
+                weights_dtype=self.dtype,
+                output_dtype=self.dtype,
+                sharding_strategy=AutoShardedStrategyConfiguration(),
+                math_fidelity=math_fidelity,
+                fp32_dest_acc_en=True,
                 deallocate_activation=True,
-                reallocate_halo_output=True,
-                reshard_if_not_optimal=True,
-                enable_act_double_buffer=True,
-                enable_weights_double_buffer=True,
-                dtype=ttnn.bfloat16,
-                fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
-                packer_l1_acc=model_config.get("packer_l1_acc", True),
-                math_approx_mode=model_config.get("math_approx_mode", False),
+                enable_act_double_buffer=False,
             )
 
-        def make_stage(params, *, planes, blocks, s, groups, stage_name, with_torch):
+        def make_stage(params, model_args, *, planes, blocks, s, groups, stage_name, with_torch):
             return Ttstages._make_layer(
+                device=self.device,
                 parameters=params,
+                model_args=model_args,
                 planes=planes,
                 blocks=blocks,
                 stride=s,
@@ -57,25 +112,40 @@ class TtTransfuserBackbone:
                 use_fallback=(use_fallback if with_torch else False),
             )
 
-        def make_1x1(params):
-            return TTConv2D(
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                parameters=params,
-                kernel_fidelity=model_config,
-                shard_layout=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                dtype=ttnn.bfloat16,
-            )
-
         # ---------- Parameter roots ----------
         img = parameters.image_encoder.features
         lidar = parameters.lidar_encoder._model
 
         # ---------- Stems ----------
-        self.conv1 = make_stem(img.conv1)
-        self.lidar_conv1 = make_stem(lidar.conv1)
+        conv1_params = model_args["image_encoder"].conv1
+        conv1_config = _create_conv_config(
+            parameters=img.conv1,
+            batch_size=conv1_params["batch_size"],
+            input_height=conv1_params["input_height"],
+            input_width=conv1_params["input_width"],
+            in_channels=conv1_params["in_channels"],
+            out_channels=conv1_params["out_channels"],
+            stride=conv1_params["stride"],
+            kernel_size=conv1_params["kernel_size"],
+            padding=conv1_params["padding"],
+            groups=conv1_params["groups"],
+        )
+        self.conv1 = TtConv2d(conv1_config, device=device)
+
+        lidar_conv1_params = model_args["lidar_encoder"].conv1
+        lidar_conv1_config = _create_conv_config(
+            parameters=lidar.conv1,
+            batch_size=lidar_conv1_params["batch_size"],
+            input_height=lidar_conv1_params["input_height"],
+            input_width=lidar_conv1_params["input_width"],
+            in_channels=lidar_conv1_params["in_channels"],
+            out_channels=lidar_conv1_params["out_channels"],
+            stride=lidar_conv1_params["stride"],
+            kernel_size=lidar_conv1_params["kernel_size"],
+            padding=lidar_conv1_params["padding"],
+            groups=lidar_conv1_params["groups"],
+        )
+        self.lidar_conv1 = TtConv2d(lidar_conv1_config, device=device)
 
         # ---------- Stage specs (shared for image & lidar) ----------
         # (name, planes, blocks, stride, groups)
@@ -88,6 +158,9 @@ class TtTransfuserBackbone:
 
         # Build image stages (with torch_model/use_fallback), and lidar stages (pure TT)
         for name, planes, blocks, s, groups in specs:
+            import pdb
+
+            pdb.set_trace()
             setattr(
                 self,
                 f"image_{name}",
@@ -150,8 +223,34 @@ class TtTransfuserBackbone:
 
         # ---------- Optional channel adapters ----------
         if self.config.perception_output_features != 1512:
-            self.change_channel_conv_image = make_1x1(parameters.change_channel_conv_image)
-            self.change_channel_conv_lidar = make_1x1(parameters.change_channel_conv_lidar)
+            conv1x1_params = model_args["image_encoder"].change_channel_conv_image
+            conv1x1_config = _create_conv_config(
+                parameters=parameters.change_channel_conv_image,
+                batch_size=conv1x1_params["batch_size"],
+                input_height=conv1x1_params["input_height"],
+                input_width=conv1x1_params["input_width"],
+                in_channels=conv1x1_params["in_channels"],
+                out_channels=conv1x1_params["out_channels"],
+                stride=conv1x1_params["stride"],
+                kernel_size=conv1x1_params["kernel_size"],
+                padding=conv1x1_params["padding"],
+                groups=conv1x1_params["groups"],
+            )
+            lidar_conv1x1_params = model_args["lidar_encoder"].change_channel_conv_image
+            lidar_conv1x1_config = _create_conv_config(
+                parameters=parameters.change_channel_conv_lidar,
+                batch_size=lidar_conv1x1_params["batch_size"],
+                input_height=lidar_conv1x1_params["input_height"],
+                input_width=lidar_conv1x1_params["input_width"],
+                in_channels=lidar_conv1x1_params["in_channels"],
+                out_channels=lidar_conv1x1_params["out_channels"],
+                stride=lidar_conv1x1_params["stride"],
+                kernel_size=lidar_conv1x1_params["kernel_size"],
+                padding=lidar_conv1x1_params["padding"],
+                groups=lidar_conv1x1_params["groups"],
+            )
+            self.change_channel_conv_image = TtConv2d(conv1x1_config, device=device)
+            self.change_channel_conv_lidar = TtConv2d(lidar_conv1x1_config, device=device)
 
         # ---------- Top-down head ----------
         self.top_down = TtTopDown(

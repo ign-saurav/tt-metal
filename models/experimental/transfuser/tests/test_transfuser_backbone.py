@@ -13,6 +13,7 @@ from models.experimental.transfuser.reference.config import GlobalConfig
 from models.experimental.transfuser.reference.transfuser_backbone import TransfuserBackbone
 from models.experimental.transfuser.tt.custom_preprocessing import create_custom_mesh_preprocessor
 
+from ttnn.model_preprocessing import infer_ttnn_module_args as infer_ttnn_module_args_torch
 from models.experimental.transfuser.tests.test_gpt import create_gpt_preprocessor
 from models.experimental.transfuser.tt.transfuser_backbone import TtTransfuserBackbone
 from ttnn.model_preprocessing import (
@@ -165,6 +166,15 @@ class TransfuserBackboneInfra:
         self.torch_image_input = inputs["image"]  # RGB camera image tensor
         self.torch_lidar_input = inputs["lidar"]  # LiDAR BEV tensor
         self.torch_velocity_input = inputs["velocity"]  # Ego velocity tensor
+        model_args = infer_ttnn_module_args_torch(
+            model=torch_model,
+            run_model=lambda model: model(self.torch_image_input, self.torch_lidar_input, self.torch_velocity_input),
+            device=None,
+        )
+        import pdb
+
+        pdb.set_trace()
+
         with torch.no_grad():
             self.torch_features, self.torch_image_grid, self.torch_fused = torch_model(
                 self.torch_image_input,
@@ -201,6 +211,7 @@ class TransfuserBackboneInfra:
         self.ttnn_model = TtTransfuserBackbone(
             device,
             parameters=parameters,
+            model_args=model_args,
             stride=2,
             model_config=model_config,
             config=self.config,
