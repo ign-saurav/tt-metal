@@ -12,12 +12,7 @@ from loguru import logger
 # from models.experimental.SSD512.reference.ssd import add_extras
 from models.common.utility_functions import comp_pcc
 from tests.ttnn.utils_for_testing import assert_with_pcc
-from models.experimental.SSD512.tt.layers.tt_extras_backbone_ver2 import (
-    TtExtrasBackbone,
-)
-from models.tt_cnn.tt.builder import (
-    Conv2dConfiguration,
-)
+from models.experimental.SSD512.tt.utils import CreateConfigLayers
 
 
 def add_extras(cfg, i, batch_norm=False):
@@ -66,25 +61,35 @@ def test_extras_backbone(device, pcc, size, reset_seeds):
         for i, layer in enumerate(torch_model):
             print(layer.__class__.__name__, x.shape)
             # Create Conv2dConfiguration from the current layer, given torch input height, width, batch_size
-            conv_config_layers.append(
-                Conv2dConfiguration.from_torch(
-                    layer,
-                    input_height=x.shape[-2],
-                    input_width=x.shape[-1],
-                    batch_size=x.shape[0],
-                )
-            )
+            # conv_config_layers.append(
+            #     Conv2dConfiguration.from_torch(
+            #         layer,
+            #         input_height=x.shape[-2],
+            #         input_width=x.shape[-1],
+            #         batch_size=x.shape[0],
+            #     )
+            # )
 
             x = torch.nn.functional.relu(layer(x), inplace=True)
         torch_output = x
 
-    tt_extras = TtExtrasBackbone(
-        conv_config_layer=conv_config_layers,
-        batch_size=batch_size,
-        device=device,
-    )
+    # tt_extras = TtExtrasBackbone(
+    #     conv_config_layer=conv_config_layers,
+    #     batch_size=batch_size,
+    #     device=device,
+    # )
 
-    tt_output_ttnn = tt_extras(device, ttnn_input_tensor)
+    ############################333
+    tt_extras2 = CreateConfigLayers(
+        torch_model,
+        torch_input=torch_input,
+        # batch_size=batch_size,
+        device=device,
+        activation_layer=ttnn.relu,
+    )
+    ###################################
+
+    tt_output_ttnn = tt_extras2(device, ttnn_input_tensor)
     tt_output = ttnn.to_torch(tt_output_ttnn)
 
     expected_shape = torch_output.shape

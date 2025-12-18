@@ -9,51 +9,132 @@ from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
     MaxPool2dConfiguration,
 )
+from models.tt_cnn.tt.builder import TtConv2d
 
 # conv_config = {
 #     "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
 #     "WEIGHTS_DTYPE": ttnn.bfloat16,
 #     "ACTIVATIONS_DTYPE": ttnn.bfloat16,
 # }
-conv_config = {
+conv_config_optmised = {
     "math_fidelity": ttnn.MathFidelity.LoFi,
     "weights_dtype": ttnn.bfloat8_b,
     "activation_dtype": ttnn.bfloat8_b,
 }
 
 
-def create_config_layers(torch_model, torch_input, model_config=conv_config):
-    conv_config_layers = []
-    # with torch.no_grad():
-    x = torch_input
-    for i, layer in enumerate(torch_model):
-        print(layer.__class__.__name__, x.shape)
-        # Create Conv2dConfiguration from the current layer, given torch input height, width, batch_size
-        if isinstance(layer, nn.Conv2d):
-            conv_config_layers.append(
-                Conv2dConfiguration.from_torch(
-                    layer,
-                    input_height=x.shape[-2],
-                    input_width=x.shape[-1],
-                    batch_size=x.shape[0],
-                    **model_config,
+# def create_config_layers(torch_model, torch_input, model_config=conv_config):
+#     conv_config_layers = []
+#     # with torch.no_grad():
+#     x = torch_input
+#     for i, layer in enumerate(torch_model):
+#         print(layer.__class__.__name__, x.shape)
+#         # Create Conv2dConfiguration from the current layer, given torch input height, width, batch_size
+#         if isinstance(layer, nn.Conv2d):
+#             conv_config_layers.append(
+#                 Conv2dConfiguration.from_torch(
+#                     layer,
+#                     input_height=x.shape[-2],
+#                     input_width=x.shape[-1],
+#                     batch_size=x.shape[0],
+#                     **model_config,
+#                 )
+#             )
+#         elif isinstance(layer, nn.MaxPool2d):
+#             conv_config_layers.append(
+#                 MaxPool2dConfiguration.from_torch(
+#                     layer,
+#                     input_height=x.shape[-2],
+#                     input_width=x.shape[-1],
+#                     channels=x.shape[-3],
+#                     batch_size=x.shape[0],
+#                     # **dtype= ttnne.bfloat8_b
+#                 )
+#             )
+#         # x = torch.nn.functional.relu(layer(x), inplace=True)
+#         x = layer(x)
+#     torch_output = x
+#     return conv_config_layers, torch_output
+
+
+class Conv2dNormActivation:
+    def __init__(
+        self,
+        layer,
+        input_height,
+        input_width,
+        batch_size,
+        device=None,
+        activation_layer=None,
+    ):
+        # if activation_layer == ttnn.relu:
+        #     # self.activation_layer = None
+        #     activation = ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)
+        # else:
+        #     self.activation_layer = activation_layer
+        #     activation = None
+
+        self.conv_config = Conv2dConfiguration.from_torch(
+            layer, input_height=input_height, input_width=input_width, batch_size=batch_size
+        )
+        # self.conv_config = conv_config
+        self.activation_layer = activation_layer
+
+        self.conv = TtConv2d(self.conv_config, device)
+
+    def __call__(self, device, input_tensor, return_output_dim=True):
+        [input_tensor, [_out_height, _out_width]] = self.conv(input_tensor, return_output_dim=True)
+        # input_tensor = post_conv_reshape(input_tensor, out_height=_out_height, out_width=_out_width)
+        if self.activation_layer is not None:
+            input_tensor = self.activation_layer(input_tensor)
+        return input_tensor
+
+
+class CreateConfigLayers:
+    def __init__(self, torch_model, torch_input, device, activation_layer, model_config=None):
+        # def create_config_layers(torch_model, torch_input,device, activation_layer, model_config=conv_config):
+        kernel_config_layer = []
+        # with torch.no_grad():
+        x = torch_input
+        for i, layer in enumerate(torch_model):
+            print(layer.__class__.__name__, x.shape)
+            # Create Conv2dConfiguration from the current layer, given torch input height, width, batch_size
+            if isinstance(layer, nn.Conv2d):
+                kernel_config_layer.append(
+                    Conv2dNormActivation(
+                        layer,
+                        input_height=x.shape[-2],
+                        input_width=x.shape[-1],
+                        batch_size=x.shape[0],
+                        device=device,
+                        activation_layer=activation_layer
+                        # **model_config,
+                    )
                 )
-            )
-        elif isinstance(layer, nn.MaxPool2d):
-            conv_config_layers.append(
-                MaxPool2dConfiguration.from_torch(
-                    layer,
-                    input_height=x.shape[-2],
-                    input_width=x.shape[-1],
-                    channels=x.shape[-3],
-                    batch_size=x.shape[0],
-                    # **dtype= ttnne.bfloat8_b
+
+            elif isinstance(layer, nn.MaxPool2d):
+                kernel_config_layer.append(
+                    MaxPool2dConfiguration.from_torch(
+                        layer,
+                        input_height=x.shape[-2],
+                        input_width=x.shape[-1],
+                        channels=x.shape[-3],
+                        batch_size=x.shape[0],
+                        # **dtype= ttnne.bfloat8_b
+                    )
                 )
-            )
-        # x = torch.nn.functional.relu(layer(x), inplace=True)
-        x = layer(x)
-    torch_output = x
-    return conv_config_layers, torch_output
+            # x = torch.nn.functional.relu(layer(x), inplace=True)
+            x = layer(x)
+            self.block = kernel_config_layer
+
+    def __call__(self, device, input):
+        for i, layer in enumerate(self.block):
+            if i == 0:
+                result = layer(device, input)
+            else:
+                result = layer(device, result)
+
+        return result
 
 
 # def _create_conv_config_from_params(

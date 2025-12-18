@@ -83,8 +83,8 @@ class TtVGGBackbone:
             else:
                 raise ValueError(f"Unsupported layer configuration found: {type(conv_config)}")
 
-            if i > 2:
-                break
+            # if i > 2:
+            #     break
         self.block = layers
 
     def __call__(self, device, input):
