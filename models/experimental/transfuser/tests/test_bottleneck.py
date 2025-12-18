@@ -94,7 +94,7 @@ class TransfuserBottleneckInfra:
         return None, None, None
 
     def run(self):
-        self.tt_output, _ = self.ttnn_model(self.tt_input, self.device)
+        self.tt_output = self.ttnn_model(self.tt_input, self.device)
         return self.tt_output
 
     def validate(self, model_config):
