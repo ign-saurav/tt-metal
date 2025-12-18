@@ -1,5 +1,4 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
-
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
@@ -9,7 +8,7 @@ import ttnn
 from loguru import logger
 
 from models.experimental.SSD512.reference.ssd import add_extras, extras
-from models.experimental.SSD512.tt.layers.tt_extras_backbone import build_extras_backbone, apply_extras_backbone
+from models.experimental.SSD512.tt.layers.tt_extras_backbone import build_extras_backbone
 from models.common.utility_functions import comp_pcc
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
@@ -36,43 +35,20 @@ def test_extras_backbone(device, pcc, size, reset_seeds):
             x = torch.nn.functional.relu(layer(x), inplace=True)
         torch_output = x
 
-    layers_config = build_extras_backbone(size=size, input_channels=input_channels, device=device)
+    tt_extras = build_extras_backbone(size=size, input_channels=input_channels, batch_size=batch_size, device=device)
+    tt_extras.load_weights_from_torch(torch_model)
 
-    torch_conv_idx = 0
-    layers_with_weights = []
-
-    for layer in layers_config:
-        if layer["type"] == "conv":
-            while torch_conv_idx < len(torch_model):
-                torch_layer = torch_model[torch_conv_idx]
-                if isinstance(torch_layer, nn.Conv2d):
-                    break
-                torch_conv_idx += 1
-
-            torch_conv = torch_model[torch_conv_idx]
-            torch_conv_idx += 1
-
-            weight = torch_conv.weight.data.clone()
-            bias = torch_conv.bias.data.clone() if torch_conv.bias is not None else None
-
-            weight_ttnn = ttnn.from_torch(weight, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
-            bias_ttnn = None
-            if bias is not None:
-                bias_reshaped = bias.reshape((1, 1, 1, -1))
-                bias_ttnn = ttnn.from_torch(
-                    bias_reshaped, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
-                )
-
-            layer_with_weights = layer.copy()
-            layer_with_weights["weight"] = weight_ttnn
-            layer_with_weights["bias"] = bias_ttnn
-            layers_with_weights.append(layer_with_weights)
-        else:
-            layers_with_weights.append(layer.copy())
-
-    tt_output_ttnn = apply_extras_backbone(torch_input, layers_with_weights, device=device, dtype=ttnn.bfloat8_b)
+    tt_output_ttnn = tt_extras(torch_input)
     tt_output = ttnn.to_torch(tt_output_ttnn)
 
+    # Ensure correct shape before permutation
+    expected_shape = torch_output.shape
+    if tt_output.shape != (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1]):
+        # Reshape from flattened or incorrect shape to NHWC
+        B, C, H, W = expected_shape
+        tt_output = tt_output.reshape(B, H, W, C)
+
+    # Convert NHWC to NCHW
     if len(tt_output.shape) == 4:
         tt_output = tt_output.permute(0, 3, 1, 2)
     tt_output = tt_output.float()
@@ -82,7 +58,6 @@ def test_extras_backbone(device, pcc, size, reset_seeds):
         min_shape = [min(s1, s2) for s1, s2 in zip(torch_output.shape, tt_output.shape)]
         torch_output = torch_output[tuple(slice(0, s) for s in min_shape)]
         tt_output = tt_output[tuple(slice(0, s) for s in min_shape)]
-
     _, pcc_message = comp_pcc(torch_output, tt_output, pcc)
     logger.info(f"Extras Backbone PCC: {pcc_message}")
     assert_with_pcc(torch_output, tt_output, pcc)
