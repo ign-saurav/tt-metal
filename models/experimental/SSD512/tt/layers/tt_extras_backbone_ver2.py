@@ -8,14 +8,6 @@ from models.tt_cnn.tt.builder import (
 )
 import torch
 
-# @dataclass
-# class ExtraBlockConfig:
-#     in_channels: int
-#     out_channels: int
-#     kernel_size: int
-#     stride: int
-#     padding: int
-
 
 class Conv2dNormActivation:
     def __init__(
@@ -25,14 +17,15 @@ class Conv2dNormActivation:
         batch_size=1,
         input_height=1,
         input_width=1,
-        activation_layer=ttnn.relu,
+        activation_layer=None,
     ):
         # if activation_layer == ttnn.relu:
-        #     self.activation_layer = None
+        #     # self.activation_layer = None
         #     activation = ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)
         # else:
         #     self.activation_layer = activation_layer
         #     activation = None
+
         self.activation_layer = activation_layer
         self.conv_config = Conv2dConfiguration.from_torch(
             layer, input_height=input_height, input_width=input_width, batch_size=batch_size
@@ -43,9 +36,8 @@ class Conv2dNormActivation:
     def __call__(self, device, input_tensor, return_output_dim=True):
         [input_tensor, [_out_height, _out_width]] = self.conv(input_tensor, return_output_dim=True)
         # input_tensor = post_conv_reshape(input_tensor, out_height=_out_height, out_width=_out_width)
-        # if self.activation_layer is not None:
-        #     input_tensor = self.activation_layer(input_tensor)
-        input_tensor = self.activation_layer(input_tensor)
+        if self.activation_layer is not None:
+            input_tensor = self.activation_layer(input_tensor)
         return input_tensor
 
 
@@ -61,7 +53,12 @@ class TtExtrasBackbone:
             print(layer.__class__.__name__, x.shape)
             layers.append(
                 Conv2dNormActivation(
-                    layer, device=device, batch_size=batch_size, input_height=x.shape[-2], input_width=x.shape[-1]
+                    layer,
+                    device=device,
+                    batch_size=batch_size,
+                    input_height=x.shape[-2],
+                    input_width=x.shape[-1],
+                    activation_layer=ttnn.relu,
                 )
             )
             x = torch.nn.functional.relu(layer(x), inplace=True)
