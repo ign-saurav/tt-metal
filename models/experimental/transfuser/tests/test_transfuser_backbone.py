@@ -82,6 +82,56 @@ def delete_incompatible_keys(state_dict: Dict[str, Any], keys_to_delete: List[st
     return new_state_dict
 
 
+def split_encoder_key(key: str):
+    parts = key.split(".")
+
+    encoder = parts[0]  # image_encoder / lidar_encoder
+    parts = [p for p in parts[1:] if p not in {"features", "_model"}]
+
+    return encoder, parts
+
+
+def normalize_leaf_dict(d):
+    out = {}
+    for k, v in d.items():
+        key = k.split(".")[-1]
+        out[key] = normalize_leaf_dict(v) if isinstance(v, dict) else v
+    return out
+
+
+def insert_nested(d, path, value):
+    cur = d
+    for p in path[:-1]:
+        cur = cur.setdefault(p, {})
+
+    leaf = path[-1]
+
+    if isinstance(value, dict):
+        cur[leaf] = normalize_leaf_dict(value)
+    else:
+        cur[leaf] = value
+
+
+def regroup_model_args(model_args):
+    out = {}
+
+    for k, v in model_args.items():
+        encoder, path = split_encoder_key(k)
+
+        enc_dict = out.setdefault(encoder, {})
+
+        if not path:
+            if isinstance(v, dict):
+                enc_dict.update(normalize_leaf_dict(v))
+            else:
+                raise RuntimeError(f"Unhandled leaf value at encoder root: {k}")
+            continue
+
+        insert_nested(enc_dict, path, v)
+
+    return out
+
+
 class TransfuserBackboneInfra:
     def __init__(
         self,
@@ -171,9 +221,7 @@ class TransfuserBackboneInfra:
             run_model=lambda model: model(self.torch_image_input, self.torch_lidar_input, self.torch_velocity_input),
             device=None,
         )
-        import pdb
-
-        pdb.set_trace()
+        model_args = regroup_model_args(model_args)
 
         with torch.no_grad():
             self.torch_features, self.torch_image_grid, self.torch_fused = torch_model(

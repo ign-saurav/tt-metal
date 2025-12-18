@@ -125,7 +125,7 @@ class TTRegNetBottleneck:
         # ------------------------------ optional downsample -------------------
         if downsample:
             try:
-                downsample_conv_params = model_args.downsample["conv"]
+                downsample_conv_params = model_args["downsample"]["conv"]
             except:
                 downsample_conv_params = model_args.downsample["0"]
             downsample_conv_config = self._create_conv_config(
