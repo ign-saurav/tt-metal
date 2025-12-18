@@ -59,7 +59,6 @@ def test_extras_backbone(device, pcc, size, reset_seeds):
     batch_size = 1
     input_channels = 1024
     input_height = 64 if size == 512 else 38
-    # input_heigt=512
     input_width = input_height
 
     torch_input = torch.randn(batch_size, input_channels, input_height, input_width)
@@ -73,15 +72,11 @@ def test_extras_backbone(device, pcc, size, reset_seeds):
         for i, layer in enumerate(torch_model):
             print(layer.__class__.__name__, x.shape)
             # parameters[i]["input_height"] = x.shape[-2]
-            # parameters[i]["input_width"] = x.shape[-1]
-            # parameters[i]["input_channel"] = x.shape[-2]
+
             x = torch.nn.functional.relu(layer(x), inplace=True)
-            # parameters[i]["output_channel"] = x.shape[-3]
         torch_output = x
 
     tt_extras = TtExtrasBackbone(
-        size=size,
-        input_channels=input_channels,
         batch_size=batch_size,
         device=device,
         torch_model=torch_model,

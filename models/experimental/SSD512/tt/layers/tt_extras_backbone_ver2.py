@@ -43,7 +43,7 @@ class Conv2dNormActivation:
 
 class TtExtrasBackbone:
     # def __init__(self, size: int, input_channels: int, batch_size: int, parameters: list, device):
-    def __init__(self, size: int, input_channels: int, batch_size: int, device, torch_model, torch_input):
+    def __init__(self, batch_size: int, device, torch_model, torch_input):
         self.batch_size = batch_size
         self.device = device
 
