@@ -8,9 +8,6 @@ from models.experimental.SSD512.tt.layers.tt_vgg_backbone import (
     build_vgg_backbone,
     apply_vgg_backbone,
 )
-from models.experimental.SSD512.tt.layers.tt_extras_backbone import (
-    build_extras_backbone,
-)
 from models.experimental.SSD512.tt.layers.tt_multibox_heads import (
     build_multibox_heads,
     apply_multibox_head,
@@ -25,6 +22,10 @@ from models.tt_cnn.tt.builder import (
     WidthSliceStrategyConfiguration,
 )
 
+from models.experimental.SSD512.tt.layers.tt_extras_backbone import (
+    TtExtrasBackbone,
+)
+from models.experimental.SSD512.tt.utils import extract_extras_parameters_from_torch
 
 # Extra layers configuration for SSD
 extras = {
@@ -599,47 +600,40 @@ class SSD512Network:
     def __init__(self, num_classes=21, device=None):
         self.num_classes = num_classes
         self.device = device
-        self.size = 512
 
-        # Build network components
-        self.vgg_config = build_vgg_backbone(size=512, input_channels=3, device=device)
-        self.extras_backbone = build_extras_backbone(size=512, input_channels=1024, device=device)
+        self.vgg_config = build_vgg_backbone(device=device)
 
-        # L2Norm for conv4_3
-        self.l2norm = TtL2Norm(n_channels=512, scale=20, device=device)
-
-        # Multibox heads
         self.loc_config, self.conf_config = build_multibox_heads(
-            size=512,
             num_classes=num_classes,
-            vgg_channels=[512, 1024],
-            extra_channels=[512, 256, 256, 256, 256, 256],
             device=device,
         )
 
-    def load_weights_from_torch(self, torch_model, dtype=ttnn.bfloat16, weight_device=None):
-        """
-        Load weights from PyTorch model to TTNN configuration.
-        """
+        self.l2norm = TtL2Norm(512, 20, device=device)
+        self.extras_backbone = None
+
+    def load_weights_from_torch(self, torch_model, weight_device=None):
         weight_device_placement = weight_device if weight_device is not None else self.device
 
         self.vgg_config = load_vgg_weights_from_torch(
-            self.vgg_config, torch_model.base, self.device, dtype, weight_device=weight_device_placement
+            self.vgg_config,
+            torch_model.base,
+            self.device,
+            dtype=ttnn.bfloat16,
+            weight_device=weight_device_placement,
         )
 
-        # Load L2Norm weights
-        l2norm_weight = torch_model.L2Norm.weight.data
-        self.l2norm.weight = ttnn.from_torch(
-            l2norm_weight.reshape(1, -1, 1, 1),
-            device=weight_device_placement,
+        self.l2norm.gamma = ttnn.from_torch(
+            torch_model.L2Norm.weight.reshape(1, 1, 1, -1),
+            device=self.device,
             dtype=ttnn.bfloat16,
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
 
-        # Load extras weights
-        self.extras_backbone.load_weights_from_torch(torch_model.extras)
+        parameters = extract_extras_parameters_from_torch(torch_model.extras)
+        self.extras_backbone = TtExtrasBackbone(
+            size=512, input_channels=1024, batch_size=1, parameters=parameters, device=self.device
+        )
 
-        # Load multibox head weights
         self.loc_config, self.conf_config = load_multibox_weights_from_torch(
             self.loc_config,
             self.conf_config,

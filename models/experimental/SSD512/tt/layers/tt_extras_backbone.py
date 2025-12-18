@@ -52,75 +52,6 @@ class ConvBlock:
         return x, self.out_height, self.out_width
 
 
-class OptimizedConv1x1:
-    def __init__(
-        self,
-        input_height: int,
-        input_width: int,
-        in_channels: int,
-        out_channels: int,
-        batch_size: int,
-        parameters: dict,
-        device,
-    ):
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.input_height = input_height
-        self.input_width = input_width
-        self.batch_size = batch_size
-
-        weight = parameters["weight"]
-        bias = parameters.get("bias")
-
-        if isinstance(weight, ttnn.Tensor):
-            self.weight = ttnn.permute(ttnn.reshape(weight, (out_channels, in_channels)), (1, 0))
-            if self.weight.layout != ttnn.TILE_LAYOUT:
-                self.weight = ttnn.to_layout(self.weight, ttnn.TILE_LAYOUT)
-        else:
-            weight_2d = weight.reshape(out_channels, in_channels).permute(1, 0)
-            self.weight = ttnn.from_torch(
-                weight_2d,
-                device=device,
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                memory_config=ttnn.L1_MEMORY_CONFIG,
-            )
-
-        if bias is not None:
-            if isinstance(bias, ttnn.Tensor):
-                self.bias = bias
-            else:
-                bias_reshaped = bias.reshape(1, 1, 1, out_channels)
-                self.bias = ttnn.from_torch(
-                    bias_reshaped,
-                    device=device,
-                    dtype=ttnn.float32,
-                    layout=ttnn.ROW_MAJOR_LAYOUT,
-                    memory_config=ttnn.L1_MEMORY_CONFIG,
-                )
-                self.bias = ttnn.to_layout(self.bias, ttnn.TILE_LAYOUT)
-        else:
-            self.bias = None
-
-    def __call__(self, x):
-        B, H, W, C = x.shape
-        x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-        x_2d = ttnn.reshape(x, (1, 1, B * H * W, C))
-        x_2d = ttnn.to_layout(x_2d, ttnn.TILE_LAYOUT)
-
-        out = ttnn.matmul(x_2d, self.weight)
-
-        if self.bias is not None:
-            out = ttnn.add(out, self.bias)
-
-        out = ttnn.to_layout(out, ttnn.ROW_MAJOR_LAYOUT)
-        out = ttnn.reshape(out, (B, H, W, self.out_channels))
-        out = ttnn.to_layout(out, ttnn.TILE_LAYOUT)
-        out = ttnn.relu(out)
-
-        return out, H, W
-
-
 class ExtraBlock:
     def __init__(
         self,
@@ -131,19 +62,14 @@ class ExtraBlock:
         parameters: dict,
         device,
     ):
-        if config.kernel_size == 1 and config.stride == 1 and config.padding == 0:
-            self.block = OptimizedConv1x1(
-                input_height, input_width, config.in_channels, config.out_channels, batch_size, parameters, device
-            )
-        else:
-            self.block = ConvBlock(input_height, input_width, config, batch_size, parameters, device)
+        self.block = ConvBlock(input_height, input_width, config, batch_size, parameters, device)
 
     def __call__(self, x):
         return self.block(x)
 
 
 class TtExtrasBackbone:
-    def __init__(self, size: int, input_channels: int, batch_size: int, parameters: dict, device):
+    def __init__(self, size: int, input_channels: int, batch_size: int, parameters: list, device):
         self.size = size
         self.batch_size = batch_size
         self.device = device
