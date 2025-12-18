@@ -15,6 +15,9 @@ from tests.ttnn.utils_for_testing import assert_with_pcc
 from models.experimental.SSD512.tt.layers.tt_extras_backbone_ver2 import (
     TtExtrasBackbone,
 )
+from models.tt_cnn.tt.builder import (
+    Conv2dConfiguration,
+)
 
 
 def add_extras(cfg, i, batch_norm=False):
@@ -33,14 +36,6 @@ def add_extras(cfg, i, batch_norm=False):
     if len(cfg) == 13:
         layers += [nn.Conv2d(in_channels, 256, kernel_size=4, padding=1)]  # Fix padding to match Caffe version (pad=1).
     return layers
-
-    # # def create_custom_mesh_preprocessor(mesh_mapper=None):
-    # #     """Return a closure that can be passed to TTNN's preprocess pipeline."""
-
-    # #     def custom_fpn_preprocessor(model, name, *, ttnn_module_args=None, convert_to_ttnn=True):
-    # #         return fpn_to_params(model, mesh_mapper)
-
-    # return custom_fpn_preprocessor
 
 
 @pytest.mark.parametrize("pcc", ((0.99),))
@@ -65,22 +60,28 @@ def test_extras_backbone(device, pcc, size, reset_seeds):
     ttnn_input_tensor = ttnn.from_torch(
         torch_input.permute(0, 2, 3, 1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, device=device
     )
-    # parameters = extract_extras_parameters_from_torch(torch_model, input_height=512, input_width=512)
-
+    conv_config_layers = []
     with torch.no_grad():
         x = torch_input
         for i, layer in enumerate(torch_model):
             print(layer.__class__.__name__, x.shape)
-            # parameters[i]["input_height"] = x.shape[-2]
+            # Create Conv2dConfiguration from the current layer, given torch input height, width, batch_size
+            conv_config_layers.append(
+                Conv2dConfiguration.from_torch(
+                    layer,
+                    input_height=x.shape[-2],
+                    input_width=x.shape[-1],
+                    batch_size=x.shape[0],
+                )
+            )
 
             x = torch.nn.functional.relu(layer(x), inplace=True)
         torch_output = x
 
     tt_extras = TtExtrasBackbone(
+        conv_config_layer=conv_config_layers,
         batch_size=batch_size,
         device=device,
-        torch_model=torch_model,
-        torch_input=torch_input,
     )
 
     tt_output_ttnn = tt_extras(device, ttnn_input_tensor)
