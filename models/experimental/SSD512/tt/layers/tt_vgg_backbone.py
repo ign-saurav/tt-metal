@@ -11,7 +11,7 @@ This module provides:
 """
 
 import ttnn
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
     MaxPool2dConfiguration,
@@ -19,7 +19,7 @@ from models.tt_cnn.tt.builder import (
     BlockShardedStrategyConfiguration,
     HeightShardedStrategyConfiguration,
 )
-from models.experimental.SSD512.tt.utils import Conv2dNormActivation, Maxpool2DOperation
+from models.experimental.SSD512.tt.utils import Conv2dNormActivation, Maxpool2DOperation, override_conv_config
 
 
 @dataclass
@@ -112,34 +112,6 @@ vgg_backbone_optimizations = VGGBackboneOptimizationConfig(
         "deallocate_activation": True,
     },
 )
-
-# Backward compatibility alias
-vgg_backbone_optimisations = vgg_backbone_optimizations
-
-
-def override_conv_config(config, override_dict):
-    """
-    Create a new Conv2dConfiguration with overridden parameters.
-
-    Since Conv2dConfiguration is a frozen dataclass, we cannot modify it in-place.
-    This function uses dataclasses.replace() to create a new instance with
-    the specified parameters overridden.
-
-    Args:
-        config: Conv2dConfiguration instance to override
-        override_dict: Dictionary of parameter names and values to override
-
-    Returns:
-        New Conv2dConfiguration instance with overridden parameters, or the
-        original config if it's not a Conv2dConfiguration
-
-    Example:
-        >>> override_dict = {"sharding_strategy": BlockShardedStrategyConfiguration()}
-        >>> new_config = override_conv_config(old_config, override_dict)
-    """
-    if not isinstance(config, Conv2dConfiguration):
-        return config
-    return replace(config, **override_dict)
 
 
 class TtVGGBackbone:

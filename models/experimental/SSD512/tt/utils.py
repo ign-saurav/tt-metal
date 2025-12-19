@@ -13,6 +13,7 @@ from models.tt_cnn.tt.builder import (
 )
 from models.tt_cnn.tt.builder import TtConv2d, TtMaxPool2d
 import torch.nn as nn
+from dataclasses import replace
 
 
 def post_conv_reshape(x, out_height=1, out_width=1):
@@ -22,14 +23,13 @@ def post_conv_reshape(x, out_height=1, out_width=1):
     return ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
 
 
-conv_config_optmised = {
+DEFAUlT_CONFIG = {
     "weights_dtype": ttnn.bfloat8_b,
     "output_dtype": ttnn.bfloat8_b,
     "activation_dtype": ttnn.bfloat8_b,
     "math_fidelity": ttnn.MathFidelity.LoFi,
     "sharding_strategy": AutoShardedStrategyConfiguration(),
     "slice_strategy": L1FullSliceStrategyConfiguration(),
-    # "deallocate_activation": True,
 }
 # Optimized config for MaxPool2d layers (only includes applicable parameters)
 pool_config = {
@@ -38,7 +38,7 @@ pool_config = {
 }
 
 
-def create_config_layers(torch_model, torch_input, model_config=conv_config_optmised, return_out=False):
+def create_config_layers(torch_model, torch_input, model_config=DEFAUlT_CONFIG, return_out=False):
     conv_config_layers = []
     # with torch.no_grad():
     x = torch_input
@@ -104,3 +104,28 @@ class Maxpool2DOperation:
         input_tensor = self.pool(input_tensor)
 
         return input_tensor
+
+
+def override_conv_config(config, override_dict):
+    """
+    Create a new Conv2dConfiguration with overridden parameters.
+
+    Since Conv2dConfiguration is a frozen dataclass, we cannot modify it in-place.
+    This function uses dataclasses.replace() to create a new instance with
+    the specified parameters overridden.
+
+    Args:
+        config: Conv2dConfiguration instance to override
+        override_dict: Dictionary of parameter names and values to override
+
+    Returns:
+        New Conv2dConfiguration instance with overridden parameters, or the
+        original config if it's not a Conv2dConfiguration
+
+    Example:
+        >>> override_dict = {"sharding_strategy": BlockShardedStrategyConfiguration()}
+        >>> new_config = override_conv_config(old_config, override_dict)
+    """
+    if not isinstance(config, Conv2dConfiguration):
+        return config
+    return replace(config, **override_dict)
