@@ -279,9 +279,11 @@ class TransfuserBackbone(nn.Module):
         lidar_features = self.lidar_encoder._model.bn1(lidar_features)
         lidar_features = self.lidar_encoder._model.act1(lidar_features)
         lidar_features = self.lidar_encoder._model.maxpool(lidar_features)
+        # return image_features, lidar_features #pass
         image_features = self.image_encoder.features.layer1(image_features)
         lidar_features = self.lidar_encoder._model.layer1(lidar_features)
 
+        # return image_features, lidar_features #pass
         # Image fusion at (B, 72, 40, 176)
         # Lidar fusion at (B, 72, 64, 64)
         image_embd_layer1 = self.avgpool_img(image_features)
@@ -304,6 +306,7 @@ class TransfuserBackbone(nn.Module):
 
         image_features = self.image_encoder.features.layer2(image_features)
         lidar_features = self.lidar_encoder._model.layer2(lidar_features)
+        # return image_features, lidar_features #pass
         # Image fusion at (B, 216, 20, 88)
         # Image fusion at (B, 216, 32, 32)
         image_embd_layer2 = self.avgpool_img(image_features)
@@ -324,8 +327,12 @@ class TransfuserBackbone(nn.Module):
         image_features = image_features + image_features_layer2
         lidar_features = lidar_features + lidar_features_layer2
 
+        # return image_features, lidar_features #pass
+
         image_features = self.image_encoder.features.layer3(image_features)
         lidar_features = self.lidar_encoder._model.layer3(lidar_features)
+        return image_features, lidar_features  # fail
+
         # Image fusion at (B, 576, 10, 44)
         # Image fusion at (B, 576, 16, 16)
         image_embd_layer3 = self.avgpool_img(image_features)
