@@ -24,6 +24,17 @@ import torch.nn as nn
 #     "weights_dtype": ttnn.bfloat8_b,
 #     "activation_dtype": ttnn.bfloat8_b,
 # }
+
+
+####################33
+def post_conv_reshape(x, out_height=1, out_width=1):
+    """Convert sharded conv output to [N,1,1,C] tile layout for SE block."""
+    x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
+    x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT)
+    x = ttnn.reshape(x, (x.shape[0], out_height, out_width, x.shape[3]))
+    return ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
+
+
 conv_config_optmised = {
     "weights_dtype": ttnn.bfloat8_b,
     "output_dtype": ttnn.bfloat8_b,

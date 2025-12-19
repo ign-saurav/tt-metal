@@ -1,4 +1,4 @@
-from models.experimental.SSD512.tt.utils import create_config_layers
+from models.experimental.SSD512.tt.utils import create_config_layers, post_conv_reshape
 from models.experimental.SSD512.tt.layers.tt_extras_backbone_ver2 import TtExtrasBackbone
 from models.experimental.SSD512.tt.layers.tt_vgg_backbone import TtVGGBackbone
 from models.tt_cnn.tt.builder import (
@@ -89,14 +89,6 @@ class TtSSD:
         tt_loc_preds = []
         tt_conf_preds = []
         tt_vgg_out, vgg_sources = self.tt_vgg_backbone(device, input, return_source=True)
-
-        ####################33
-        def post_conv_reshape(x, out_height=1, out_width=1):
-            """Convert sharded conv output to [N,1,1,C] tile layout for SE block."""
-            x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
-            x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT)
-            x = ttnn.reshape(x, (x.shape[0], out_height, out_width, x.shape[3]))
-            return ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
 
         input_tensor = post_conv_reshape(vgg_sources[0], out_height=64, out_width=64)
         #########################
