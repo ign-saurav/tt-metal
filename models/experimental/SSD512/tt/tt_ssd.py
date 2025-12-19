@@ -1,5 +1,5 @@
 from models.experimental.SSD512.tt.utils import create_config_layers, post_conv_reshape
-from models.experimental.SSD512.tt.layers.tt_extras_backbone_ver2 import TtExtrasBackbone
+from models.experimental.SSD512.tt.layers.tt_extras_backbone import TtExtrasBackbone
 from models.experimental.SSD512.tt.layers.tt_vgg_backbone import TtVGGBackbone
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,

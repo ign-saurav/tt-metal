@@ -13,7 +13,7 @@ from loguru import logger
 from models.common.utility_functions import comp_pcc
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from models.experimental.SSD512.tt.utils import create_config_layers
-from models.experimental.SSD512.tt.layers.tt_extras_backbone_ver2 import TtExtrasBackbone
+from models.experimental.SSD512.tt.layers.tt_extras_backbone import TtExtrasBackbone
 
 
 def add_extras(cfg, i, batch_norm=False):
