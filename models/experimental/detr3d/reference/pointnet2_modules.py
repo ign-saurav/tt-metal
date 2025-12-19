@@ -51,6 +51,7 @@ class PointnetSAModuleVotes(nn.Module):
             self.sigma = self.radius / 2
         self.normalize_xyz = normalize_xyz
         self.ret_unique_cnt = ret_unique_cnt
+        self.maxpool = torch.nn.MaxPool2d(kernel_size=[1, 1])
 
         if npoint is not None:
             self.grouper = pointnet2_utils.QueryAndGroup(
@@ -113,7 +114,8 @@ class PointnetSAModuleVotes(nn.Module):
 
         new_features = self.mlp_module(grouped_features)  # (B, mlp[-1], npoint, nsample)
         if self.pooling == "max":
-            new_features = F.max_pool2d(new_features, kernel_size=[1, new_features.size(3)])  # (B, mlp[-1], npoint, 1)
+            self.maxpool.kernel_size = [1, new_features.size(3)]
+            new_features = self.maxpool(new_features)
         elif self.pooling == "avg":
             new_features = F.avg_pool2d(new_features, kernel_size=[1, new_features.size(3)])  # (B, mlp[-1], npoint, 1)
         elif self.pooling == "rbf":

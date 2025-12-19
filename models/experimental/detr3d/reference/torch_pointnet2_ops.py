@@ -47,7 +47,7 @@ def furthest_point_sample(xyz: torch.Tensor, npoint: int) -> torch.Tensor:
     batch_indices = torch.arange(B, dtype=torch.long, device=device)
 
     # Compute magnitude to filter out points
-    mag = torch.sum(xyz**2, dim=-1)  # (B, N)
+    mag = torch.sum(torch.pow(xyz, 2), dim=-1)  # (B, N)
 
     for i in range(npoint):
         idx[:, i] = farthest
@@ -58,7 +58,7 @@ def furthest_point_sample(xyz: torch.Tensor, npoint: int) -> torch.Tensor:
 
             # Compute squared distance from centroid to all points
             # d = (x2-x1)^2 + (y2-y1)^2 + (z2-z1)^2
-            dist = torch.sum((xyz - centroid.unsqueeze(1)) ** 2, dim=-1)  # (B, N)
+            dist = torch.sum(torch.pow(xyz - centroid.unsqueeze(1), 2), dim=-1)  # (B, N)
 
             # Filter out points with magnitude <= 1e-3
             # Set their distances to -infinity so they won't be selected
@@ -122,7 +122,7 @@ def query_ball_point(new_xyz: torch.Tensor, xyz: torch.Tensor, radius: float, ns
 
     # Compute pairwise squared distances
     diff = new_xyz.unsqueeze(2) - xyz.unsqueeze(1)  # (B, M, N, 3)
-    dist2 = torch.sum(diff**2, dim=-1)  # (B, M, N)
+    dist2 = torch.sum(torch.pow(diff, 2), dim=-1)  # (B, M, N)
 
     # Square the radius
     radius2 = radius * radius

@@ -296,6 +296,9 @@ def build_ttnn_preencoder(args):
 def build_ttnn_encoder(args):
     if args.enc_type in ["masked"]:
         encoder_layer = TtnnTransformerEncoderLayer
+        import pdb
+
+        pdb.set_trace()
         interim_downsampling = TtnnPointnetSAModuleVotes(
             radius=0.4,
             nsample=32,
@@ -303,6 +306,7 @@ def build_ttnn_encoder(args):
             mlp=[args.enc_dim, 256, 256, args.enc_dim],
             normalize_xyz=True,
             parameters=args.parameters.encoder.interim_downsampling.mlp_module,
+            layer_params=args.layer_args.interim_downsampling,
             device=args.device,
         )
 

@@ -6,6 +6,7 @@ import ttnn
 import torch
 import numpy as np
 from models.common.lightweightmodule import LightweightModule
+from models.tt_cnn.tt.builder import TtMaxPool2d, MaxPool2dConfiguration
 
 
 class TtnnConv1D(LightweightModule):
@@ -93,101 +94,68 @@ class TtnnConv1D(LightweightModule):
         return tt_output_tensor_on_device
 
 
-class TtnnConv2D(LightweightModule):
+class TtnnMaxPool2DSlice(LightweightModule):
     def __init__(
         self,
-        conv,
-        conv_pth,
+        maxpool_args,
+        num_maxpool_slice,
         device=None,
-        cache={},
-        activation=None,
-        activation_dtype=ttnn.bfloat16,
-        weights_dtype=ttnn.bfloat16,
-        shard_layout=None,
-        is_dealloc_act=False,
-        return_dims=False,
-        reshape_output=False,
-        memory_config=None,
         math_fidelity=ttnn.MathFidelity.LoFi,
         math_approx_mode=False,
     ):
         super().__init__()
-        self.conv = conv
-        self.device = device
-        self.in_channels = conv.in_channels
-        self.out_channels = conv.out_channels
-        self.kernel_size = conv.kernel_size
-        self.padding = conv.padding
-        self.stride = conv.stride
-        self.groups = conv.groups
-        self.cache = cache
-        self.compute_config = ttnn.init_device_compute_kernel_config(
-            device.arch(),
-            math_fidelity=math_fidelity,
-            fp32_dest_acc_en=False,
-            packer_l1_acc=False,
-            math_approx_mode=math_approx_mode,
+        self.maxpool_args = maxpool_args
+        self.num_maxpool_slice = num_maxpool_slice
+        self.slice_h = maxpool_args.input_height // num_maxpool_slice
+        self.maxpool = TtMaxPool2d(
+            configuration=MaxPool2dConfiguration(
+                input_height=maxpool_args.input_height // num_maxpool_slice,
+                input_width=maxpool_args.input_width,
+                channels=maxpool_args.input_channels,
+                batch_size=maxpool_args.batch_size,
+                kernel_size=maxpool_args.kernel_size,
+                stride=maxpool_args.stride,
+                padding=(maxpool_args.padding, maxpool_args.padding),
+                dilation=(maxpool_args.dilation, maxpool_args.dilation),
+                deallocate_input=True,
+                output_layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.bfloat16,
+            ),
+            device=device,
         )
-        self.is_dealloc_act = is_dealloc_act
-        self.conv_config = ttnn.Conv2dConfig(
-            weights_dtype=weights_dtype,
-            shard_layout=shard_layout,
-            deallocate_activation=self.is_dealloc_act,
-            enable_act_double_buffer=False,
-            reshard_if_not_optimal=True,
-            activation=activation,
+
+    def forward(self, x):
+        x = ttnn.reshape(
+            x,
+            (
+                self.maxpool_args.batch_size,
+                self.maxpool_args.input_height,
+                self.maxpool_args.input_width,
+                self.maxpool_args.input_channels,
+            ),
         )
-        if conv_pth.bias is not None:
-            bias = ttnn.from_device(conv_pth.bias)
-            self.bias = bias
-        else:
-            self.bias = None
+        B, H, W, C = (x.shape[-4], self.slice_h, x.shape[-2], x.shape[-1])
 
-        self.activation_dtype = activation_dtype
-        self.return_dims = return_dims
-        self.reshape_output = reshape_output
-        self.weight = ttnn.from_device(conv_pth.weight)
-        self.memory_config = memory_config
+        partial_maxpool_out = []
 
-    def forward(self, x, shape=None):
-        if shape is not None:
-            batch_size = shape[0]
-            input_height = shape[1]
-            input_width = shape[2]
-        else:
-            batch_size = x.shape[0]
-            input_height = x.shape[1]
-            input_width = x.shape[2]
+        for slice in range(self.num_maxpool_slice):
+            slice_input = x[:, self.slice_h * slice : self.slice_h * (slice + 1), :, :]
+            slice_input = ttnn.reallocate(slice_input)
+            slice_input = ttnn.reshape(slice_input, (1, 1, B * H * W, C))
+            partial_maxpool_out.append(ttnn.sharded_to_interleaved(self.maxpool(slice_input), ttnn.L1_MEMORY_CONFIG))
 
-        [x, [_out_height, _out_width], [self.weight, self.bias]] = ttnn.conv2d(
-            input_tensor=x,
-            weight_tensor=self.weight,
-            bias_tensor=self.bias,
-            in_channels=self.conv.in_channels,
-            out_channels=self.conv.out_channels,
-            device=self.device,
-            kernel_size=self.conv.kernel_size,
-            stride=self.conv.stride,
-            padding=self.conv.padding,
-            dilation=self.conv.dilation,
-            groups=self.conv.groups,
-            batch_size=batch_size,
-            input_height=input_height,
-            input_width=input_width,
-            conv_config=self.conv_config,
-            compute_config=self.compute_config,
-            return_output_dim=True,
-            return_weights_and_bias=True,
-            dtype=self.activation_dtype,
-            memory_config=self.memory_config,
-        )
-        shape = (batch_size, _out_height, _out_width, x.shape[-1])
-        if self.reshape_output:
-            x = ttnn.reshape(x, shape)
-        if self.return_dims:
-            return x, shape
-        else:
-            return x
+            ttnn.deallocate(slice_input)
+
+        for i in range(len(partial_maxpool_out)):
+            partial_maxpool_out[i] = ttnn.reshape(partial_maxpool_out[i], (B, H, C))
+        new_features = ttnn.concat((partial_maxpool_out), dim=1, memory_config=ttnn.L1_MEMORY_CONFIG)
+        new_features = ttnn.permute(
+            new_features, (0, 2, 1), memory_config=ttnn.L1_MEMORY_CONFIG
+        )  # (B, mlp[-1], npoint)
+        for i in range(len(partial_maxpool_out)):
+            ttnn.deallocate(partial_maxpool_out[i])
+
+        return new_features
 
 
 def shift_scale_points_ttnn(pred_xyz, src_range, device=None):

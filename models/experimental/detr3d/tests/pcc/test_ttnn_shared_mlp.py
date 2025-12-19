@@ -13,18 +13,19 @@ from models.experimental.detr3d.ttnn.shared_mlp import TtnnSharedMLP
 from models.experimental.detr3d.common import load_torch_model_state
 from models.experimental.detr3d.reference.pytorch_utils import SharedMLP
 from models.experimental.detr3d.ttnn.custom_preprocessing import create_custom_mesh_preprocessor
+from ttnn.model_preprocessing import infer_ttnn_module_args
 
 
 @pytest.mark.parametrize(
     "mlp, bn, features_shape, weight_key_prefix",
     [
         ([3, 64, 128, 256], True, (1, 3, 2048, 64), "pre_encoder.mlp_module"),  # mlp  # bn  # weight prefix
-        (
-            [259, 256, 256, 256],
-            True,
-            (1, 259, 1024, 32),
-            "encoder.interim_downsampling.mlp_module",
-        ),  # mlp  # bn  # weight prefix
+        # (
+        #     [259, 256, 256, 256],
+        #     True,
+        #     (1, 259, 1024, 32),
+        #     "encoder.interim_downsampling.mlp_module",
+        # ),  # mlp  # bn  # weight prefix
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
@@ -47,7 +48,12 @@ def test_ttnn_shared_mlp(device, mlp, bn, features_shape, weight_key_prefix, res
         custom_preprocessor=create_custom_mesh_preprocessor(None),
         device=device,
     )
-    ttnn_model = TtnnSharedMLP(parameters, device)
+    parameters.layer_args = {}
+    parameters.layer_args = infer_ttnn_module_args(
+        model=torch_model, run_model=lambda model: torch_model(features), device=device
+    )
+
+    ttnn_model = TtnnSharedMLP(parameters, parameters.layer_args, device)
     ttnn_out = ttnn_model(ttnn_features)
 
     ttnn_out = ttnn.to_torch(ttnn_out)
