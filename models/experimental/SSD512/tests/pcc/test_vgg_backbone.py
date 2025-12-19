@@ -16,15 +16,10 @@ from models.common.utility_functions import comp_pcc
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 from models.tt_cnn.tt.builder import (
-    Conv2dConfiguration,
-    MaxPool2dConfiguration,
-)
-from models.tt_cnn.tt.builder import (
-    Conv2dConfiguration,
-    MaxPool2dConfiguration,
     AutoShardedStrategyConfiguration,
     L1FullSliceStrategyConfiguration,
 )
+from models.experimental.SSD512.tt.utils import create_config_layers
 
 SSD512_L1_SMALL_SIZE = 98304
 # SSD512_L1_SMALL_SIZE = 2457
@@ -73,60 +68,11 @@ def test_vgg_backbone(device, pcc, size, reset_seeds):
     ttnn_input_tensor = ttnn.from_torch(
         torch_input.permute(0, 2, 3, 1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, device=device
     )
-    # ttnn_input_tensor=ttnn_input_tensor.tomemorylayout
-    # ttnn_input_tensor = ttnn_input_tensor.to(device, ttnn.DRAM_MEMORY_CONFIG)
-    ############################################333
-    # pad_channels=True
-    # ttnn_input_tensor = torch.permute(torch_input, (0, 2, 3, 1))
-    # if pad_channels:
-    #     ttnn_input_tensor = torch.nn.functional.pad(
-    #         ttnn_input_tensor, (0, pad_channels - ttnn_input_tensor.shape[-1]), value=0
-    #     )
-    # ttnn_input_tensor = ttnn.from_torch(
-    #     ttnn_input_tensor, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=device
-    # )
-    # # ttnn_input_tensor = ttnn.reshape(
-    # #     ttnn_input_tensor,
-    # #     (
-    # #         1,
-    # #         1,
-    # #         ttnn_input_tensor.shape[0] * ttnn_input_tensor.shape[1] * ttnn_input_tensor.shape[2],
-    # #         ttnn_input_tensor.shape[3],
-    # #     ),
-    # # )
-    ###################################################333
+
     cfg = base[str(size)]
     torch_layers = vgg(cfg, i=3, batch_norm=False)
     torch_model = nn.Sequential(*torch_layers)
     torch_model.eval()
-    # Export the torch_model to ONNX
-    # import os
-    # from ttnn.torch_tracer import trace, visualize
-    # visualize(torch_model, file_name="model_graph.svg")
-    # onnx_filename = "vgg_backbone.onnx"
-    # torch.onnx.export(
-    #     torch_model,
-    #     torch_input,
-    #     onnx_filename)
-    #     export_params=True,
-    #     opset_version=12,
-    #     do_constant_folding=True,
-    #     # input_names=['input'],
-    #     # output_names=['output'],
-    #     # dynamic_axes={
-    #     #     'input': {0: 'batch_size'},
-    #     #     'output': {0: 'batch_size'}
-    #     # },
-    # )
-    # print(f"Exported VGG backbone torch model to {onnx_filename}")
-    # model_config = {
-    #     "math_fidelity": ttnn.MathFidelity.LoFi,
-    #     "weights_dtype": ttnn.bfloat8_b,
-    #     "activation_dtype": ttnn.bfloat8_b,
-    #     "output_dtype": ttnn.bfloat8_b,
-    #     "deallocate_activation":True,
-    #     "sharding_strategy":WidthSliceStrategyConfiguration
-    # }
 
     model_config = {
         "weights_dtype": ttnn.bfloat8_b,
@@ -135,21 +81,6 @@ def test_vgg_backbone(device, pcc, size, reset_seeds):
         "math_fidelity": ttnn.MathFidelity.LoFi,
         "sharding_strategy": AutoShardedStrategyConfiguration(),
         "slice_strategy": L1FullSliceStrategyConfiguration(),
-        # "slice_strategy": WidthSliceStrategyConfiguration(num_slices=4),
-        # # "math_fidelity": ttnn.MathFidelity.LoFi,
-        # # "fp32_dest_acc_en": True,
-        # # "packer_l1_acc": False,
-        # # "deallocate_activation": True,
-        # # "enable_act_double_buffer": True,
-        # # "enable_weights_double_buffer": False,
-        # # "reallocate_halo_output": True,
-        # # "activation": ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-        # # "config_tensors_in_dram": True,
-        # # 'act_block_h' : 256,
-        # "enable_act_double_buffer": True,
-        # "enable_weights_double_buffer": True,
-        # "deallocate_activation": True,
-        # "reallocate_halo_output": True,
     }
 
     # Optimized config for MaxPool2d layers (only includes applicable parameters)
@@ -159,47 +90,48 @@ def test_vgg_backbone(device, pcc, size, reset_seeds):
         "slice_strategy": L1FullSliceStrategyConfiguration(),
     }
 
-    #############################################33
-    # torch_model = nn.ModuleList(torch_layers)
-    conv_config_layers = []
-    with torch.no_grad():
-        x = torch_input
-        for i, layer in enumerate(torch_model):
-            # if i<2:
-            #     continue
-            print("layer_info", layer.__class__.__name__, x.shape)
-            # Create Conv2dConfiguration from the current layer, given torch input height, width, batch_size
-            if isinstance(layer, nn.Conv2d):
-                conv_config_layers.append(
-                    Conv2dConfiguration.from_torch(
-                        layer,
-                        input_height=x.shape[-2],
-                        input_width=x.shape[-1],
-                        batch_size=x.shape[0],
-                        **model_config,
-                    )
-                )
-            elif isinstance(layer, nn.MaxPool2d):
-                conv_config_layers.append(
-                    MaxPool2dConfiguration.from_torch(
-                        layer,
-                        input_height=x.shape[-2],
-                        input_width=x.shape[-1],
-                        channels=x.shape[-3],
-                        batch_size=x.shape[0],
-                        **pool_config,
-                    )
-                )
-
-            # x = torch.nn.functional.relu(layer(x), inplace=True)
-            x = layer(x)
-            # if i>=21:
-            #     break
-        torch_output = x
-    ########################################################
-
+    # #############################################33
+    # # torch_model = nn.ModuleList(torch_layers)
+    # conv_config_layers = []
     # with torch.no_grad():
-    #     torch_output = torch_model(torch_input)
+    #     x = torch_input
+    #     for i, layer in enumerate(torch_model):
+    #         # if i<2:
+    #         #     continue
+    #         print("layer_info", layer.__class__.__name__, x.shape)
+    #         # Create Conv2dConfiguration from the current layer, given torch input height, width, batch_size
+    #         if isinstance(layer, nn.Conv2d):
+    #             conv_config_layers.append(
+    #                 Conv2dConfiguration.from_torch(
+    #                     layer,
+    #                     input_height=x.shape[-2],
+    #                     input_width=x.shape[-1],
+    #                     batch_size=x.shape[0],
+    #                     **model_config,
+    #                 )
+    #             )
+    #         elif isinstance(layer, nn.MaxPool2d):
+    #             conv_config_layers.append(
+    #                 MaxPool2dConfiguration.from_torch(
+    #                     layer,
+    #                     input_height=x.shape[-2],
+    #                     input_width=x.shape[-1],
+    #                     channels=x.shape[-3],
+    #                     batch_size=x.shape[0],
+    #                     **pool_config,
+    #                 )
+    #             )
+
+    #         # x = torch.nn.functional.relu(layer(x), inplace=True)
+    #         x = layer(x)
+    #         # if i>=21:
+    #         #     break
+    #     torch_output = x
+    # ########################################################
+
+    conv_config_layers = create_config_layers(torch_model, torch_input=torch_input)
+    with torch.no_grad():
+        torch_output = torch_model(torch_input)
 
     tt_vgg_backbone = TtVGGBackbone(
         conv_config_layer=conv_config_layers,
@@ -209,14 +141,6 @@ def test_vgg_backbone(device, pcc, size, reset_seeds):
 
     tt_output_ttnn = tt_vgg_backbone(device, ttnn_input_tensor)
     tt_output = ttnn.to_torch(tt_output_ttnn)
-
-    # if len(tt_output.shape) == 4:
-    #     tt_output = tt_output.permute(0, 3, 1, 2)
-    # tt_output = tt_output.float()
-
-    # _, pcc_message = comp_pcc(torch_output, tt_output, pcc)
-    # logger.info(f"VGG Backbone PCC: {pcc_message}")
-    # assert_with_pcc(torch_output, tt_output, pcc)
 
     expected_shape = torch_output.shape
     if tt_output.shape != (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1]):
@@ -236,13 +160,3 @@ def test_vgg_backbone(device, pcc, size, reset_seeds):
     _, pcc_message = comp_pcc(torch_output, tt_output, pcc)
     logger.info(f"Vgg Backbone PCC: {pcc_message}")
     assert_with_pcc(torch_output, tt_output, pcc)
-
-
-# def create_conv_block_config(in_channels, out_channels, input_size, batch_size, device):
-#     """Create a typical CNN block: Conv -> Conv -> MaxPool"""
-
-#     input_height, input_width = input_size
-#     sharding_strategy = HeightShardedStrategyConfiguration(
-#         act_block_h_override=64,
-#         reshard_if_not_optimal=False
-#     )
