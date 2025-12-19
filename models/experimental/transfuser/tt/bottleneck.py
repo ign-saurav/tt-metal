@@ -216,7 +216,7 @@ class TTRegNetBottleneck:
 
     def __call__(self, x, device):
         input_shape = x.shape
-        downsample_input = ttnn.reallocate(x)
+        downsample_input = ttnn.clone(x)
 
         # conv1- 1x1 convolution (using new TtConv2d interface)
         out = self.conv1(x)

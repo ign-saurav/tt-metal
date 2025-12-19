@@ -449,7 +449,7 @@ class TtTransfuserBackbone:
             lidar_features = block(lidar_features, device)
         ttnn.ReadDeviceProfiler(device)
 
-        return image_features, lidar_features  # fails
+        return image_features, lidar_features  # pass
 
         # Layer3 avgpool - image
         image_embd_layer3 = _avgpool_to_L1(
