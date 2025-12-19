@@ -5,7 +5,6 @@ import ttnn
 from models.experimental.SSD512.tt.utils import Conv2dOperation
 
 
-# Extras backbone network that generates additional feature maps for multi-scale detection
 class TtExtrasBackbone:
     def __init__(self, conv_config_layer, device, batch_size: int):
         self.batch_size = batch_size
@@ -24,7 +23,6 @@ class TtExtrasBackbone:
 
         self.block = layers
 
-    # Forward pass through extras backbone
     def __call__(self, device, input, return_residual_sources=False):
         for i, layer in enumerate(self.block):
             if i == 0:
@@ -32,7 +30,6 @@ class TtExtrasBackbone:
             else:
                 result = layer(device, result)
 
-            # Extract features at odd indices (1, 3, 5, ...) for multi-scale detection
             if i % 2 == 1:
                 self.residual_sources.append(result)
 
