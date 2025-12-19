@@ -10,7 +10,6 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-import torch.nn.functional as F
 import ttnn
 from loguru import logger
 from PIL import Image, ImageDraw, ImageFont
@@ -22,7 +21,7 @@ from models.experimental.SSD512.common import (
     generate_prior_boxes,
 )
 from models.experimental.SSD512.reference.data.voc0712 import VOC_CLASSES
-from models.experimental.SSD512.tt.tt_ssd import build_ssd512
+from models.experimental.SSD512.tt.tt_ssd import TtSSD
 from models.experimental.SSD512.tt.layers.detect import TtDetect
 
 
@@ -43,7 +42,7 @@ def load_image(image_path, size=512):
     return img_tensor, original_img
 
 
-def filter_top_detections(detections, max_detections=2, min_score=0.1):
+def filter_top_detections(detections, max_detections=5, min_score=0.01):
     if len(detections) == 0:
         return detections
 
@@ -55,25 +54,18 @@ def filter_top_detections(detections, max_detections=2, min_score=0.1):
     if len(boxes) == 0:
         return detections
 
-    score_mask = scores >= min_score
-    if not score_mask.any():
-        score_mask = torch.ones_like(scores, dtype=torch.bool)
+    sorted_indices = torch.argsort(scores, descending=True)
 
-    filtered_boxes = boxes[score_mask]
-    filtered_scores = scores[score_mask]
-    filtered_labels = labels[score_mask]
-
-    if len(filtered_boxes) == 0:
+    if len(sorted_indices) == 0:
         return detections
 
-    sorted_indices = torch.argsort(filtered_scores, descending=True)
-    keep_indices = sorted_indices[:max_detections]
+    top_indices = sorted_indices[:max_detections]
 
     return [
         {
-            "boxes": filtered_boxes[keep_indices],
-            "scores": filtered_scores[keep_indices],
-            "labels": filtered_labels[keep_indices],
+            "boxes": boxes[top_indices],
+            "scores": scores[top_indices],
+            "labels": labels[top_indices],
         }
     ]
 
@@ -127,38 +119,75 @@ def draw_detections(image, detections, output_path, model_name):
             draw.rectangle(bbox, fill=color)
             draw.text((x1, y1 - 20), label_text, fill=(255, 255, 255), font=font)
 
-    title = f"{model_name} Detections"
-    bbox = draw.textbbox((10, 10), title, font=font)
-    draw.rectangle(bbox, fill=(0, 0, 0, 180))
-    draw.text((10, 10), title, fill=(255, 255, 255), font=font)
-
     image.save(output_path)
 
 
 def run_ttnn_detection(model, image_tensor, priors, device, conf_thresh=0.01, nms_thresh=0.45, top_k=200):
     ttnn.synchronize_device(device)
 
-    loc, conf = model.forward(image_tensor, dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+    image_tensor_permuted = image_tensor.permute(0, 2, 3, 1)
+    ttnn_input = ttnn.from_torch(
+        image_tensor_permuted, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
+    )
+    ttnn_input = ttnn.to_layout(ttnn_input, ttnn.TILE_LAYOUT)
 
-    loc_torch = ttnn.to_torch(loc).float()
-    conf_torch = ttnn.to_torch(conf).float()
+    tt_loc_preds, tt_conf_preds = model(device, ttnn_input)
+
+    loc_tensors = []
+    conf_tensors = []
+    memory_config = ttnn.DRAM_MEMORY_CONFIG
+
+    for loc_pred in tt_loc_preds:
+        if loc_pred.is_sharded():
+            loc_pred = ttnn.sharded_to_interleaved(loc_pred, memory_config)
+        loc_pred = ttnn.to_memory_config(loc_pred, memory_config)
+        if loc_pred.layout != ttnn.ROW_MAJOR_LAYOUT:
+            loc_pred = ttnn.to_layout(loc_pred, ttnn.ROW_MAJOR_LAYOUT, memory_config=memory_config)
+        batch_size = loc_pred.shape[0]
+        total_elements = loc_pred.shape[1] * loc_pred.shape[2] * loc_pred.shape[3]
+        loc_reshaped = ttnn.experimental.view(loc_pred, (batch_size, total_elements))
+        loc_reshaped = ttnn.to_memory_config(loc_reshaped, memory_config)
+        loc_tensors.append(loc_reshaped)
+
+    for conf_pred in tt_conf_preds:
+        if conf_pred.is_sharded():
+            conf_pred = ttnn.sharded_to_interleaved(conf_pred, memory_config)
+        conf_pred = ttnn.to_memory_config(conf_pred, memory_config)
+        if conf_pred.layout != ttnn.ROW_MAJOR_LAYOUT:
+            conf_pred = ttnn.to_layout(conf_pred, ttnn.ROW_MAJOR_LAYOUT, memory_config=memory_config)
+        batch_size = conf_pred.shape[0]
+        total_elements = conf_pred.shape[1] * conf_pred.shape[2] * conf_pred.shape[3]
+        conf_reshaped = ttnn.experimental.view(conf_pred, (batch_size, total_elements))
+        conf_reshaped = ttnn.to_memory_config(conf_reshaped, memory_config)
+        conf_tensors.append(conf_reshaped)
+
+    if len(loc_tensors) > 1:
+        loc = ttnn.concat(loc_tensors, dim=1, memory_config=memory_config)
+    else:
+        loc = loc_tensors[0]
+
+    if len(conf_tensors) > 1:
+        conf = ttnn.concat(conf_tensors, dim=1, memory_config=memory_config)
+    else:
+        conf = conf_tensors[0]
 
     batch_size = 1
-    loc_torch = loc_torch.reshape(batch_size, -1)
-    conf_torch = conf_torch.reshape(batch_size, -1)
+    loc_total_elements = loc.shape[1]
+    num_priors = loc_total_elements // 4
 
-    num_priors = loc_torch.shape[1] // 4
-    loc_torch = loc_torch.view(batch_size, num_priors, 4)
-    conf_torch = conf_torch.view(batch_size, num_priors, model.num_classes)
+    loc = ttnn.experimental.view(loc, (batch_size, num_priors, 4))
+    conf = ttnn.experimental.view(conf, (batch_size, num_priors, SSD512_NUM_CLASSES))
 
-    conf_torch = F.softmax(conf_torch, dim=-1)
+    conf = ttnn.to_layout(conf, ttnn.TILE_LAYOUT, memory_config=memory_config)
+    conf = ttnn.softmax(conf, dim=-1, memory_config=memory_config)
+    conf = ttnn.to_layout(conf, ttnn.ROW_MAJOR_LAYOUT, memory_config=memory_config)
 
     priors_ttnn = ttnn.from_torch(priors, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
-    loc_ttnn = ttnn.from_torch(loc_torch, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
-    conf_ttnn = ttnn.from_torch(conf_torch, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
+    loc_ttnn = ttnn.to_memory_config(loc, memory_config)
+    conf_ttnn = ttnn.to_memory_config(conf, memory_config)
 
     detect = TtDetect(
-        num_classes=model.num_classes, top_k=top_k, conf_thresh=conf_thresh, nms_thresh=nms_thresh, device=device
+        num_classes=SSD512_NUM_CLASSES, top_k=top_k, conf_thresh=conf_thresh, nms_thresh=nms_thresh, device=device
     )
     detections = detect(loc_ttnn, conf_ttnn, priors_ttnn)
 
@@ -175,10 +204,10 @@ def main():
     parser = argparse.ArgumentParser(description="SSD512 Demo")
     parser.add_argument("--input_dir", type=str, required=True)
     parser.add_argument("--output_dir", type=str, default="./models/experimental/SSD512/resources/sample_output")
-    parser.add_argument("--conf_thresh", type=float, default=0.1)
+    parser.add_argument("--conf_thresh", type=float, default=0.01)
     parser.add_argument("--nms_thresh", type=float, default=0.45)
-    parser.add_argument("--top_k", type=int, default=5)
-    parser.add_argument("--max_detections", type=int, default=2)
+    parser.add_argument("--top_k", type=int, default=200)
+    parser.add_argument("--max_detections", type=int, default=5)
     parser.add_argument("--device_id", type=int, default=0)
     parser.add_argument("--restart_device", action="store_true")
     parser.add_argument("--l1_small_size", type=int, default=SSD512_L1_SMALL_SIZE)
@@ -204,8 +233,9 @@ def main():
         else:
             device = ttnn.open_device(device_id=args.device_id, l1_small_size=args.l1_small_size)
 
-        ttnn_model = build_ssd512(num_classes=SSD512_NUM_CLASSES, device=device)
-        ttnn_model.load_weights_from_torch(torch_model)
+        batch_size = 1
+        torch_input = torch.randn(batch_size, 3, 512, 512)
+        ttnn_model = TtSSD(torch_model, torch_input, device, batch_size)
 
         return device, ttnn_model
 
@@ -250,7 +280,9 @@ def main():
 
             ttnn.synchronize_device(device)
 
-            ttnn_detections = filter_top_detections(ttnn_detections, max_detections=args.max_detections, min_score=0.1)
+            ttnn_detections = filter_top_detections(
+                ttnn_detections, max_detections=args.max_detections, min_score=args.conf_thresh
+            )
 
             base_name = img_path.stem
             ttnn_output_path = os.path.join(args.output_dir, f"{base_name}_ttnn.jpg")

@@ -9,13 +9,15 @@ import ttnn
 from loguru import logger
 
 from models.experimental.SSD512.common import SSD512_L1_SMALL_SIZE, SSD512_NUM_CLASSES, load_torch_model
-from models.experimental.SSD512.tt.tt_ssd import build_ssd512
+from models.experimental.SSD512.tt.tt_ssd import TtSSD
 from models.perf.perf_utils import prep_perf_report
 from models.tt_cnn.tt.pipeline import PipelineConfig, create_pipeline_from_config
 from models.common.utility_functions import run_for_wormhole_b0
 
 
 def create_ssd512_pipeline_model(ttnn_model, dtype=ttnn.bfloat16):
+    device_ref = ttnn_model.device
+
     def run(l1_input_tensor):
         assert l1_input_tensor.storage_type() == ttnn.StorageType.DEVICE
         assert l1_input_tensor.memory_config().buffer_type == ttnn.BufferType.L1
@@ -24,7 +26,45 @@ def create_ssd512_pipeline_model(ttnn_model, dtype=ttnn.bfloat16):
         if input_for_model.layout != ttnn.TILE_LAYOUT:
             input_for_model = ttnn.to_layout(input_for_model, ttnn.TILE_LAYOUT)
 
-        loc, conf = ttnn_model.forward(input_for_model, dtype=dtype, memory_config=ttnn.DRAM_MEMORY_CONFIG, debug=False)
+        tt_loc_preds, tt_conf_preds = ttnn_model(device_ref, input_for_model)
+
+        loc_tensors = []
+        conf_tensors = []
+        memory_config = ttnn.DRAM_MEMORY_CONFIG
+
+        for loc_pred in tt_loc_preds:
+            if loc_pred.is_sharded():
+                loc_pred = ttnn.sharded_to_interleaved(loc_pred, memory_config)
+            loc_pred = ttnn.to_memory_config(loc_pred, memory_config)
+            if loc_pred.layout != ttnn.ROW_MAJOR_LAYOUT:
+                loc_pred = ttnn.to_layout(loc_pred, ttnn.ROW_MAJOR_LAYOUT, memory_config=memory_config)
+            batch_size = loc_pred.shape[0]
+            total_elements = loc_pred.shape[1] * loc_pred.shape[2] * loc_pred.shape[3]
+            loc_reshaped = ttnn.experimental.view(loc_pred, (batch_size, total_elements))
+            loc_reshaped = ttnn.to_memory_config(loc_reshaped, memory_config)
+            loc_tensors.append(loc_reshaped)
+
+        for conf_pred in tt_conf_preds:
+            if conf_pred.is_sharded():
+                conf_pred = ttnn.sharded_to_interleaved(conf_pred, memory_config)
+            conf_pred = ttnn.to_memory_config(conf_pred, memory_config)
+            if conf_pred.layout != ttnn.ROW_MAJOR_LAYOUT:
+                conf_pred = ttnn.to_layout(conf_pred, ttnn.ROW_MAJOR_LAYOUT, memory_config=memory_config)
+            batch_size = conf_pred.shape[0]
+            total_elements = conf_pred.shape[1] * conf_pred.shape[2] * conf_pred.shape[3]
+            conf_reshaped = ttnn.experimental.view(conf_pred, (batch_size, total_elements))
+            conf_reshaped = ttnn.to_memory_config(conf_reshaped, memory_config)
+            conf_tensors.append(conf_reshaped)
+
+        if len(loc_tensors) > 1:
+            loc = ttnn.concat(loc_tensors, dim=1, memory_config=memory_config)
+        else:
+            loc = loc_tensors[0]
+
+        if len(conf_tensors) > 1:
+            conf = ttnn.concat(conf_tensors, dim=1, memory_config=memory_config)
+        else:
+            conf = conf_tensors[0]
 
         if loc.layout != ttnn.ROW_MAJOR_LAYOUT:
             loc = ttnn.to_layout(loc, ttnn.ROW_MAJOR_LAYOUT)
@@ -61,20 +101,19 @@ def test_ssd512_e2e_performant(
     dtype = ttnn.bfloat16
 
     torch_model = load_torch_model(phase="test", size=size, num_classes=SSD512_NUM_CLASSES)
-    ttnn_model = build_ssd512(num_classes=SSD512_NUM_CLASSES, device=device)
-    ttnn_model.load_weights_from_torch(torch_model)
-
-    ttnn.synchronize_device(device)
 
     input_shape = (batch_size, 3, size, size)
     sample_input = torch.randn(input_shape, dtype=torch.float32)
+    torch_input = sample_input
+
+    ttnn_model = TtSSD(torch_model, torch_input, device, batch_size)
+
+    ttnn.synchronize_device(device)
 
     pipeline_model = create_ssd512_pipeline_model(ttnn_model, dtype=dtype)
 
     sample_input_permuted = sample_input.permute(0, 2, 3, 1)
     sample_input_shape = sample_input_permuted.shape
-    ttnn_input_tensor = ttnn.from_torch(sample_input_permuted, device=None, dtype=dtype, layout=ttnn.ROW_MAJOR_LAYOUT)
-
     batch_size, height, width, channels = sample_input_shape
     total_height = batch_size * height * width
 
@@ -91,6 +130,16 @@ def test_ssd512_e2e_performant(
     shard_width_bytes = channels * dtype_size
     padded_shard_width = ((shard_width_bytes + l1_alignment - 1) // l1_alignment) * l1_alignment
     padded_shard_width_channels = padded_shard_width // dtype_size
+
+    if padded_shard_width_channels > channels:
+        padding_size = padded_shard_width_channels - channels
+        sample_input_padded = torch.nn.functional.pad(
+            sample_input_permuted, (0, padding_size), mode="constant", value=0
+        )
+    else:
+        sample_input_padded = sample_input_permuted
+
+    ttnn_input_tensor = ttnn.from_torch(sample_input_padded, device=None, dtype=dtype, layout=ttnn.ROW_MAJOR_LAYOUT)
 
     l1_shard_height = max_shard_height
     l1_core_range = ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(core_grid.x - 1, core_grid.y - 1))

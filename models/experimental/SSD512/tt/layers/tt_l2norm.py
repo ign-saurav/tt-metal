@@ -8,7 +8,6 @@ from models.common.utility_functions import torch_to_tt_tensor_rm
 
 class TtL2Norm:
     def __init__(self, n_channels, scale=20, eps=1e-10, device=None):
-        """Create an L2Norm module with learnable per-channel scale."""
         self.n_channels = n_channels
         self.eps = eps
         self.device = device
@@ -16,7 +15,6 @@ class TtL2Norm:
         self.weight = ttnn.full([1, n_channels, 1, 1], scale, device=device)
 
     def __call__(self, x, memory_config=None):
-        """Apply L2 normalization and learned scale."""
         x_shape = x.shape
         if len(x_shape) == 4:
             dim1_val = x_shape[1]
@@ -47,7 +45,6 @@ class TtL2Norm:
         squared = ttnn.mul(x_nchw_ttnn, x_nchw_ttnn, memory_config=layer_memory_config)
         squared = ttnn.to_layout(squared, layout=ttnn.TILE_LAYOUT)
         sum_result = ttnn.sum(squared, dim=1, keepdim=True, memory_config=layer_memory_config)
-        # Add eps using ttnn operations
         eps_tensor = ttnn.full_like(sum_result, self.eps, memory_config=layer_memory_config)
         norm = ttnn.sqrt(
             ttnn.add(sum_result, eps_tensor, memory_config=layer_memory_config), memory_config=layer_memory_config
@@ -61,7 +58,6 @@ class TtL2Norm:
 
 
 def l2norm(input_tensor, num_channels=512, scale=20.0, device=None):
-    """Function wrapper for TtL2Norm for convenience."""
     l2norm_module = TtL2Norm(n_channels=num_channels, scale=scale, device=device)
 
     if isinstance(input_tensor, torch.Tensor):

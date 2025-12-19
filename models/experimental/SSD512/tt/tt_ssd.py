@@ -34,7 +34,6 @@ class TtSSD:
             device=device,
         )
 
-        # TTNN L2Norm
         self.tt_l2norm = TtL2Norm(n_channels=512, scale=20.0, device=device)
 
         extra_config_layers, extra_torch_output = create_config_layers(
@@ -52,13 +51,11 @@ class TtSSD:
         self.loc_kernel_layers = []
         self.conf_kernel_layers = []
         for source_idx, source in enumerate(sources_shape):
-            # if isinstance(torch_loc_model[source_idx], nn.Conv2d):
             loc_config_layers = Conv2dConfiguration.from_torch(
                 torch_loc_model[source_idx],
                 input_height=source[-2],
                 input_width=source[-1],
                 batch_size=source[0],
-                # **model_config,
             )
 
             conf_config_layers = Conv2dConfiguration.from_torch(
@@ -66,7 +63,6 @@ class TtSSD:
                 input_height=source[-2],
                 input_width=source[-1],
                 batch_size=source[0],
-                # **model_config,
             )
             self.loc_kernel_layers.append(
                 TtMultiBoxHEAD(
@@ -98,7 +94,6 @@ class TtSSD:
         tt_sources.extend(extra_sources)
 
         for source, loc_layer, conf_layer in zip(tt_sources, self.loc_kernel_layers, self.conf_kernel_layers):
-            print(loc_layer)
             loc_pred = loc_layer(device, source)
             conf_pred = conf_layer(device, source)
             tt_loc_preds.append(loc_pred)
