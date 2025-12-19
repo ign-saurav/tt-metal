@@ -214,9 +214,8 @@ class TTRegNetBottleneck:
             enable_act_double_buffer=False,
         )
 
-    def __call__(self, x, device, input_shape=None):
-        if input_shape is None:
-            input_shape = x.shape
+    def __call__(self, x, device):
+        input_shape = x.shape
         downsample_input = ttnn.reallocate(x)
 
         # conv1- 1x1 convolution (using new TtConv2d interface)

@@ -331,28 +331,32 @@ class TtTransfuserBackbone:
         image_x = self.normalize_imagenet_ttnn(image_x)
 
         # image_encoder_conv1
-        image_out, image_shape = self.conv1(device, image_x, image_x.shape)
+        image_out = self.conv1(image_x)
+        # image_out, image_shape = self.conv1(device, image_x, image_x.shape)
 
         # lidar_encoder_conv1
-        lidar_out, lidar_shape = self.lidar_conv1(device, lidar_x, lidar_x.shape)
+        lidar_out = self.lidar_conv1(lidar_x)
+        # lidar_out, lidar_shape = self.lidar_conv1(device, lidar_x, lidar_x.shape)
 
         # image_encoder_layer1
         for block in self.image_layer1:
-            image_out, image_shape = block(image_out, device, image_shape)
+            image_out = block(image_out, device)
+            # image_out, image_shape = block(image_out, device, image_shape)
         ttnn.ReadDeviceProfiler(device)
 
         # lidar_encoder_layer1
         for block in self.lidar_layer1:
-            lidar_out, lidar_shape = block(lidar_out, device, lidar_shape)
+            lidar_out = block(lidar_out, device)
         ttnn.ReadDeviceProfiler(device)
 
         # Layer1 avgpool - image
+        # image_embd_layer1 = _avgpool_to_L1(image_out, image_out.shape, [self.config.img_vert_anchors, self.config.img_horz_anchors])
         image_embd_layer1 = _avgpool_to_L1(
-            image_out, image_shape, [self.config.img_vert_anchors, self.config.img_horz_anchors]
+            image_out, (1, 40, 176, 72), [self.config.img_vert_anchors, self.config.img_horz_anchors]
         )
         # Layer1 avgpool - lidar
         lidar_embd_layer1 = _avgpool_to_L1(
-            lidar_out, lidar_shape, [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
+            lidar_out, (1, 64, 64, 72), [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
         )
 
         # Layer1 transformer
@@ -373,6 +377,8 @@ class TtTransfuserBackbone:
         )
 
         # Layer1 Add
+        image_out = ttnn.sharded_to_interleaved(image_out, ttnn.DRAM_MEMORY_CONFIG)
+        lidar_out = ttnn.sharded_to_interleaved(lidar_out, ttnn.DRAM_MEMORY_CONFIG)
         image_out = ttnn.reshape(image_out, image_features_layer1.shape)
         lidar_out = ttnn.reshape(lidar_out, lidar_features_layer1.shape)
         image_features = ttnn.add(image_out, image_features_layer1)
@@ -382,21 +388,23 @@ class TtTransfuserBackbone:
 
         # image_encoder_layer2
         for block in self.image_layer2:
-            image_features, image_shape = block(image_features, device, image_shape)
+            image_features = block(image_features, device)
+            # image_features, image_shape = block(image_features, device, image_shape)
         ttnn.ReadDeviceProfiler(device)
 
         # lidar_encoder_layer2
         for block in self.lidar_layer2:
-            lidar_features, lidar_shape = block(lidar_features, device, lidar_shape)
+            lidar_features = block(lidar_features, device)
+            # lidar_features, lidar_shape = block(lidar_features, device, lidar_shape)
         ttnn.ReadDeviceProfiler(device)
 
         # Layer2 avgpool - image
         image_embd_layer2 = _avgpool_to_L1(
-            image_features, image_shape, [self.config.img_vert_anchors, self.config.img_horz_anchors]
+            image_features, (1, 20, 88, 216), [self.config.img_vert_anchors, self.config.img_horz_anchors]
         )
         # Layer2 avgpool - lidar
         lidar_embd_layer2 = _avgpool_to_L1(
-            lidar_features, lidar_shape, [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
+            lidar_features, (1, 32, 32, 216), [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
         )
 
         # layer2 transformer
@@ -428,21 +436,21 @@ class TtTransfuserBackbone:
 
         # image_encoder_layer3
         for block in self.image_layer3:
-            image_features, image_shape = block(image_features, device, image_shape)
+            image_features = block(image_features, device)
         ttnn.ReadDeviceProfiler(device)
 
         # lidar_encoder_layer3
         for block in self.lidar_layer3:
-            lidar_features, lidar_shape = block(lidar_features, device, lidar_shape)
+            lidar_features = block(lidar_features, device)
         ttnn.ReadDeviceProfiler(device)
 
         # Layer3 avgpool - image
         image_embd_layer3 = _avgpool_to_L1(
-            image_features, image_shape, [self.config.img_vert_anchors, self.config.img_horz_anchors]
+            image_features, (1, 10, 44, 576), [self.config.img_vert_anchors, self.config.img_horz_anchors]
         )
         # Layer3 avgpool - lidar
         lidar_embd_layer3 = _avgpool_to_L1(
-            lidar_features, lidar_shape, [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
+            lidar_features, (1, 16, 16, 576), [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
         )
 
         # layer3 transformer
@@ -472,21 +480,21 @@ class TtTransfuserBackbone:
 
         # image_encoder_layer4
         for block in self.image_layer4:
-            image_features, image_shape = block(image_features, device, image_shape)
+            image_features = block(image_features, device)
         ttnn.ReadDeviceProfiler(device)
 
         # lidar_encoder_layer4
         for block in self.lidar_layer4:
-            lidar_features, lidar_shape = block(lidar_features, device, lidar_shape)
+            lidar_features = block(lidar_features, device)
         ttnn.ReadDeviceProfiler(device)
 
         # Layer4 avgpool - image
         image_embd_layer4 = _avgpool_to_L1(
-            image_features, image_shape, [self.config.img_vert_anchors, self.config.img_horz_anchors]
+            image_features, (1, 5, 22, 1512), [self.config.img_vert_anchors, self.config.img_horz_anchors]
         )
         # Layer4 avgpool - lidar
         lidar_embd_layer4 = _avgpool_to_L1_lidar_layer4(
-            lidar_features, lidar_shape, [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
+            lidar_features, (1, 8, 8, 1512), [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
         )
 
         # layer4 transformer
@@ -513,11 +521,14 @@ class TtTransfuserBackbone:
         lidar_features = ttnn.add(lidar_features, lidar_features_layer4)
 
         # Downsamples channels to 512
-        image_features, shape_ = self.change_channel_conv_image(device, image_features, image_features.shape)
-        lidar_features, shape_l = self.change_channel_conv_lidar(device, lidar_features, lidar_features.shape)
+        image_features, (iH, iW) = self.change_channel_conv_image(image_features, return_output_dim=True)
+        lidar_features, (lH, lW) = self.change_channel_conv_lidar(lidar_features, return_output_dim=True)
         x4 = lidar_features  # Save for FPN
         image_features_grid = image_features  # For auxiliary information
+        shape_ = (1, iH, iW, image_features.shape[-1])
+        shape_l = (1, lH, lW, lidar_features.shape[-1])
         image_features_grid = ttnn.reshape(image_features_grid, shape_)
+        # TODO: fixx
         x4 = ttnn.reshape(x4, shape_l)
 
         # Global average pooling
