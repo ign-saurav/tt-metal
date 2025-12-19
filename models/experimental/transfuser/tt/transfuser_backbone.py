@@ -168,7 +168,7 @@ class TtTransfuserBackbone:
                 padding=conv1x1_params["padding"],
                 groups=conv1x1_params["groups"],
             )
-            lidar_conv1x1_params = model_args["change_channel_conv_image"]
+            lidar_conv1x1_params = model_args["change_channel_conv_lidar"]
             lidar_conv1x1_config = self._create_conv_config(
                 parameters=parameters.change_channel_conv_lidar,
                 batch_size=lidar_conv1x1_params["batch_size"],
@@ -528,7 +528,6 @@ class TtTransfuserBackbone:
         shape_ = (1, iH, iW, image_features.shape[-1])
         shape_l = (1, lH, lW, lidar_features.shape[-1])
         image_features_grid = ttnn.reshape(image_features_grid, shape_)
-        # TODO: fixx
         x4 = ttnn.reshape(x4, shape_l)
 
         # Global average pooling
