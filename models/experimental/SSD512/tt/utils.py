@@ -142,37 +142,37 @@ class Maxpool2DOperation:
         return input_tensor
 
 
-# class Conv2dNormActivation:
-#     def __init__(
-#         self,
-#         layer,
-#         input_height,
-#         input_width,
-#         batch_size,
-#         device=None,
-#         activation_layer=None,
-#     ):
-#         # if activation_layer == ttnn.relu:
-#         #     # self.activation_layer = None
-#         #     activation = ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)
-#         # else:
-#         #     self.activation_layer = activation_layer
-#         #     activation = None
+class Conv2dNormActivation_2:
+    def __init__(
+        self,
+        layer,
+        input_height,
+        input_width,
+        batch_size,
+        device=None,
+        activation_layer=None,
+    ):
+        # if activation_layer == ttnn.relu:
+        #     # self.activation_layer = None
+        #     activation = ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)
+        # else:
+        #     self.activation_layer = activation_layer
+        #     activation = None
 
-#         self.conv_config = Conv2dConfiguration.from_torch(
-#             layer, input_height=input_height, input_width=input_width, batch_size=batch_size
-#         )
-#         # self.conv_config = conv_config
-#         self.activation_layer = activation_layer
+        self.conv_config = Conv2dConfiguration.from_torch(
+            layer, input_height=input_height, input_width=input_width, batch_size=batch_size
+        )
+        # self.conv_config = conv_config
+        self.activation_layer = activation_layer
 
-#         self.conv = TtConv2d(self.conv_config, device)
+        self.conv = TtConv2d(self.conv_config, device)
 
-#     def __call__(self, device, input_tensor, return_output_dim=True):
-#         [input_tensor, [_out_height, _out_width]] = self.conv(input_tensor, return_output_dim=True)
-#         # input_tensor = post_conv_reshape(input_tensor, out_height=_out_height, out_width=_out_width)
-#         if self.activation_layer is not None:
-#             input_tensor = self.activation_layer(input_tensor)
-#         return input_tensor
+    def __call__(self, device, input_tensor, return_output_dim=True):
+        [input_tensor, [_out_height, _out_width]] = self.conv(input_tensor, return_output_dim=True)
+        # input_tensor = post_conv_reshape(input_tensor, out_height=_out_height, out_width=_out_width)
+        if self.activation_layer is not None:
+            input_tensor = self.activation_layer(input_tensor)
+        return input_tensor
 
 
 # class Maxpool2DOperation:

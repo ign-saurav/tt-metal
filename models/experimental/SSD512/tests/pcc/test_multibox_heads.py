@@ -13,6 +13,9 @@ from models.experimental.SSD512.reference.ssd import multibox, base, mbox, vgg
 from models.common.utility_functions import comp_pcc
 from models.experimental.SSD512.tt.utils import Conv2dNormActivation
 from tests.ttnn.utils_for_testing import assert_with_pcc
+from models.tt_cnn.tt.builder import (
+    Conv2dConfiguration,
+)
 
 SSD512_NUM_CLASSES = 21
 
@@ -93,38 +96,77 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
         else:
             sources.append(torch.randn(batch_size, 256, 1, 1))
     #####################################################################3
-    # from models.tt_cnn.tt.builder import ( Conv2dConfiguration, )
-    # sources=sources[:2]
     loc_config_layers = []
     conf_config_layers = []
+    loc_kernel_layers = []
+    conf_kernel_layers = []
     for source_idx, source in enumerate(sources):
-        # loc_config_layers.append(create_config_layers(torch_loc_model[source_idx], source))
         if isinstance(torch_loc_model[source_idx], nn.Conv2d):
-            loc_config_layers.append(
+            loc_config_layers = Conv2dConfiguration.from_torch(
+                torch_loc_model[source_idx],
+                input_height=source.shape[-2],
+                input_width=source.shape[-1],
+                batch_size=source.shape[0],
+                # **model_config,
+            )
+
+            conf_config_layers = Conv2dConfiguration.from_torch(
+                torch_conf_model[source_idx],
+                input_height=source.shape[-2],
+                input_width=source.shape[-1],
+                batch_size=source.shape[0],
+                # **model_config,
+            )
+
+            loc_kernel_layers.append(
                 Conv2dNormActivation(
-                    torch_loc_model[source_idx],
-                    input_height=source.shape[-2],
-                    input_width=source.shape[-1],
-                    batch_size=source.shape[0],
                     device=device,
-                    # activation_layer=ttnn.relu
-                    # **model_config,
+                    conv_config=loc_config_layers,
+                    # activation_layer=ttnn.relu,
                 )
             )
-        if isinstance(torch_conf_model[source_idx], nn.Conv2d):
-            conf_config_layers.append(
+            conf_kernel_layers.append(
                 Conv2dNormActivation(
-                    torch_conf_model[source_idx],
-                    input_height=source.shape[-2],
-                    input_width=source.shape[-1],
-                    batch_size=source.shape[0],
                     device=device,
-                    # activation_layer=ttnn.relu
-                    # **model_config,
+                    conv_config=conf_config_layers,
+                    # activation_layer=ttnn.relu,
                 )
             )
-        # conf_config_layers.append(create_config_layers(torch_loc_model[source_idx], source))
-        # conf_config_layer=create_config_layers(torch_loc_model, torch_input)
+
+    ############################################################################
+    # # from models.tt_cnn.tt.builder import ( Conv2dConfiguration, )
+    # # sources=sources[:2]
+    # loc_kernel_layers = []
+    # conf_kernel_layers = []
+    # for source_idx, source in enumerate(sources):
+    #     # loc_kernel_layers.append(create_config_layers(torch_loc_model[source_idx], source))
+    #     if isinstance(torch_loc_model[source_idx], nn.Conv2d):
+    #         loc_kernel_layers.append(
+    #             Conv2dNormActivation_2(
+    #                 torch_loc_model[source_idx],
+    #                 input_height=source.shape[-2],
+    #                 input_width=source.shape[-1],
+    #                 batch_size=source.shape[0],
+    #                 device=device,
+    #                 # activation_layer=ttnn.relu
+    #                 # **model_config,
+    #             )
+    #         )
+
+    #     if isinstance(torch_conf_model[source_idx], nn.Conv2d):
+    #         conf_kernel_layers.append(
+    #             Conv2dNormActivation_2(
+    #                 torch_conf_model[source_idx],
+    #                 input_height=source.shape[-2],
+    #                 input_width=source.shape[-1],
+    #                 batch_size=source.shape[0],
+    #                 device=device,
+    #                 # activation_layer=ttnn.relu
+    #                 # **model_config,
+    #             )
+    #         )
+    # #     # conf_kernel_layers.append(create_config_layers(torch_loc_model[source_idx], source))
+    # #     # conf_config_layer=create_config_layers(torch_loc_model, torch_input)
     #########################################################################
     torch_loc_preds = []
     torch_conf_preds = []
@@ -146,11 +188,11 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
         ttnn_input_tensor = ttnn.from_torch(
             source.permute(0, 2, 3, 1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, device=device
         )
-        loc_pred = loc_config_layers[source_idx](device, ttnn_input_tensor)
+        loc_pred = loc_kernel_layers[source_idx](device, ttnn_input_tensor)
         # loc_pred = loc_pred.permute(0, 2, 3, 1).contiguous()
         tt_loc_preds.append(loc_pred)
 
-        conf_pred = conf_config_layers[source_idx](device, ttnn_input_tensor)
+        conf_pred = conf_kernel_layers[source_idx](device, ttnn_input_tensor)
         # conf_pred = conf_pred.permute(0, 2, 3, 1).contiguous()
         tt_conf_preds.append(conf_pred)
 
