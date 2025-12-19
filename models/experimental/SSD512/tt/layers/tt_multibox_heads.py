@@ -1,29 +1,21 @@
-import ttnn
 from models.experimental.SSD512.tt.utils import Conv2dNormActivation
 
 
 class TtMultiBoxHEAD:
-    def __init__(self, conv_config_layer, device, batch_size: int):
-        self.batch_size = batch_size
+    def __init__(self, conv_config_layer, device, activation_layer=None):
+        # self.batch_size = batch_size
         self.device = device
 
-        layers = []
-        for i, conv_config in enumerate(conv_config_layer):
-            layers.append(
-                Conv2dNormActivation(
-                    device=device,
-                    conv_config=conv_config,
-                    activation_layer=ttnn.relu,
-                )
-            )
+        # layers = []
+        self.layer = Conv2dNormActivation(
+            device=device,
+            conv_config=conv_config_layer,
+            activation_layer=activation_layer,
+        )
 
-        self.block = layers
+    #    return layers
 
     def __call__(self, device, input):
-        for i, layer in enumerate(self.block):
-            if i == 0:
-                result = layer(device, input)
-            else:
-                result = layer(device, result)
+        result = self.layer(device, input)
 
         return result

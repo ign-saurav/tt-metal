@@ -11,11 +11,11 @@ from loguru import logger
 # from models.experimental.SSD512.common import SSD512_NUM_CLASSES
 from models.experimental.SSD512.reference.ssd import multibox, base, mbox, vgg
 from models.common.utility_functions import comp_pcc
-from models.experimental.SSD512.tt.utils import Conv2dNormActivation
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
 )
+from models.experimental.SSD512.tt.layers.tt_multibox_heads import TtMultiBoxHEAD
 
 SSD512_NUM_CLASSES = 21
 
@@ -117,21 +117,34 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
                 batch_size=source.shape[0],
                 # **model_config,
             )
-
             loc_kernel_layers.append(
-                Conv2dNormActivation(
+                TtMultiBoxHEAD(
                     device=device,
-                    conv_config=loc_config_layers,
+                    conv_config_layer=loc_config_layers,
                     # activation_layer=ttnn.relu,
                 )
             )
             conf_kernel_layers.append(
-                Conv2dNormActivation(
+                TtMultiBoxHEAD(
                     device=device,
-                    conv_config=conf_config_layers,
+                    conv_config_layer=conf_config_layers,
                     # activation_layer=ttnn.relu,
                 )
             )
+            # loc_kernel_layers.append(
+            #     Conv2dNormActivation(
+            #         device=device,
+            #         conv_config=loc_config_layers,
+            #         # activation_layer=ttnn.relu,
+            #     )
+            # )
+            # conf_kernel_layers.append(
+            #     Conv2dNormActivation(
+            #         device=device,
+            #         conv_config=conf_config_layers,
+            #         # activation_layer=ttnn.relu,
+            #     )
+            # )
 
     ############################################################################
     # # from models.tt_cnn.tt.builder import ( Conv2dConfiguration, )
