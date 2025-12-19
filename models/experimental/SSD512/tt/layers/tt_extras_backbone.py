@@ -2,18 +2,20 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-from models.experimental.SSD512.tt.utils import Conv2dNormActivation
+from models.experimental.SSD512.tt.utils import Conv2dOperation
 
 
+# Extras backbone network that generates additional feature maps for multi-scale detection
 class TtExtrasBackbone:
     def __init__(self, conv_config_layer, device, batch_size: int):
         self.batch_size = batch_size
         self.device = device
+        self.residual_sources = []
 
         layers = []
         for conv_config in conv_config_layer:
             layers.append(
-                Conv2dNormActivation(
+                Conv2dOperation(
                     device=device,
                     conv_config=conv_config,
                     activation_layer=ttnn.relu,
@@ -22,18 +24,18 @@ class TtExtrasBackbone:
 
         self.block = layers
 
-    def __call__(self, device, input, return_source=False):
-        tt_sources = []
-
+    # Forward pass through extras backbone
+    def __call__(self, device, input, return_residual_sources=False):
         for i, layer in enumerate(self.block):
             if i == 0:
                 result = layer(device, input)
             else:
                 result = layer(device, result)
 
+            # Extract features at odd indices (1, 3, 5, ...) for multi-scale detection
             if i % 2 == 1:
-                tt_sources.append(result)
+                self.residual_sources.append(result)
 
-        if return_source:
-            return result, tt_sources
+        if return_residual_sources:
+            return result, self.residual_sources
         return result

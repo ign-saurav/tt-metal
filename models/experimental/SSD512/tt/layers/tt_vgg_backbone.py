@@ -10,7 +10,7 @@ from models.tt_cnn.tt.builder import (
     BlockShardedStrategyConfiguration,
     HeightShardedStrategyConfiguration,
 )
-from models.experimental.SSD512.tt.utils import Conv2dNormActivation, Maxpool2DOperation, override_conv_config
+from models.experimental.SSD512.tt.utils import Conv2dOperation, Maxpool2DOperation, override_conv_config
 
 
 @dataclass
@@ -61,21 +61,24 @@ vgg_backbone_optimizations = VGGBackboneOptimizationConfig(
 )
 
 
+# VGG backbone network with per-layer optimization configurations for SSD512
 class TtVGGBackbone:
-    def __init__(self, conv_config_layer, device, batch_size: int):
+    def __init__(self, config_layers, device, batch_size: int):
         self.batch_size = batch_size
         self.device = device
 
         layers = []
+        self.residual_sources = []
 
-        for i, conv_config in enumerate(conv_config_layer):
+        # Build layers with per-conv optimization overrides
+        for i, conv_config in enumerate(config_layers):
             if isinstance(conv_config, Conv2dConfiguration):
                 optimization_key = f"conv{i+1}"
                 override_dict = getattr(vgg_backbone_optimizations, optimization_key, {})
                 updated_config = override_conv_config(conv_config, override_dict)
 
                 layers.append(
-                    Conv2dNormActivation(
+                    Conv2dOperation(
                         device=device,
                         conv_config=updated_config,
                         activation_layer=ttnn.relu,
@@ -93,18 +96,18 @@ class TtVGGBackbone:
 
         self.block = layers
 
-    def __call__(self, device, input, return_source=False):
-        tt_sources = []
-
+    # Forward pass through VGG backbone
+    def __call__(self, device, input, return_residual_sources=False):
         for i, layer in enumerate(self.block):
             if i == 0:
                 result = layer(device, input)
             else:
                 result = layer(device, result)
 
+            # Extract feature map at layer 12 for SSD512 multi-scale detection
             if i == 12:
-                tt_sources.append(result)
+                self.residual_sources.append(result)
 
-        if return_source:
-            return result, tt_sources
+        if return_residual_sources:
+            return result, self.residual_sources
         return result

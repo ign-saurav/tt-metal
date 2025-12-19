@@ -6,6 +6,7 @@ import torch
 from models.common.utility_functions import torch_to_tt_tensor_rm
 
 
+# L2 normalization layer
 class TtL2Norm:
     def __init__(self, n_channels, scale=20, eps=1e-10, device=None):
         self.n_channels = n_channels
@@ -28,9 +29,6 @@ class TtL2Norm:
         else:
             x_nchw_ttnn = x
 
-        batch_size, channels, height, width = x_nchw_ttnn.shape
-        tensor_size_estimate = batch_size * height * width * channels
-
         if memory_config is None:
             layer_memory_config = ttnn.L1_MEMORY_CONFIG
         else:
@@ -52,11 +50,13 @@ class TtL2Norm:
         norm = ttnn.to_layout(norm, layout=ttnn.TILE_LAYOUT)
         x_norm = ttnn.div(x_nchw_ttnn, norm, memory_config=layer_memory_config)
 
+        # Apply learnable per-channel scaling
         out = ttnn.mul(x_norm, self.weight, memory_config=layer_memory_config)
 
         return out
 
 
+# Convenience function wrapper for TtL2Norm that handles both torch and ttnn tensors
 def l2norm(input_tensor, num_channels=512, scale=20.0, device=None):
     l2norm_module = TtL2Norm(n_channels=num_channels, scale=scale, device=device)
 

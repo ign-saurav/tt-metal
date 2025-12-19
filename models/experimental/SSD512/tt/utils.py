@@ -16,14 +16,7 @@ import torch.nn as nn
 from dataclasses import replace
 
 
-def post_conv_reshape(x, out_height=1, out_width=1):
-    x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
-    x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT)
-    x = ttnn.reshape(x, (x.shape[0], out_height, out_width, x.shape[3]))
-    return ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
-
-
-DEFAUlT_CONFIG = {
+CONV_CONFIG_DEFAULT = {
     "weights_dtype": ttnn.bfloat8_b,
     "output_dtype": ttnn.bfloat8_b,
     "activation_dtype": ttnn.bfloat8_b,
@@ -32,44 +25,52 @@ DEFAUlT_CONFIG = {
     "slice_strategy": L1FullSliceStrategyConfiguration(),
 }
 
-pool_config = {
+POOL_CONFIG_DEFAULT = {
     "dtype": ttnn.bfloat16,
     "slice_strategy": L1FullSliceStrategyConfiguration(),
 }
 
 
-def create_config_layers(torch_model, torch_input, model_config=DEFAUlT_CONFIG, return_out=False):
-    conv_config_layers = []
-    x = torch_input
+# Converts PyTorch model layers to TTNN configuration objects for execution on device
+def create_config_layers(
+    torch_model,
+    torch_input,
+    conv_config=CONV_CONFIG_DEFAULT,
+    pool_config=POOL_CONFIG_DEFAULT,
+    return_output_tensor=False,
+):
+    layer_configs = []
+    # Process each layer and create corresponding TTNN configuration
     for layer in torch_model:
         if isinstance(layer, nn.Conv2d):
-            conv_config_layers.append(
+            layer_configs.append(
                 Conv2dConfiguration.from_torch(
                     layer,
-                    input_height=x.shape[-2],
-                    input_width=x.shape[-1],
-                    batch_size=x.shape[0],
-                    **model_config,
+                    input_height=torch_input.shape[-2],
+                    input_width=torch_input.shape[-1],
+                    batch_size=torch_input.shape[0],
+                    **conv_config,
                 )
             )
         elif isinstance(layer, nn.MaxPool2d):
-            conv_config_layers.append(
+            layer_configs.append(
                 MaxPool2dConfiguration.from_torch(
                     layer,
-                    input_height=x.shape[-2],
-                    input_width=x.shape[-1],
-                    channels=x.shape[-3],
-                    batch_size=x.shape[0],
+                    input_height=torch_input.shape[-2],
+                    input_width=torch_input.shape[-1],
+                    channels=torch_input.shape[-3],
+                    batch_size=torch_input.shape[0],
                     **pool_config,
                 )
             )
-        x = layer(x)
-    if return_out:
-        return conv_config_layers, x
-    return conv_config_layers
+        torch_input = layer(torch_input)
+    if return_output_tensor:
+        return layer_configs, torch_input
+    return layer_configs
 
 
-class Conv2dNormActivation:
+# Wrapper for Conv2d layer with optional normalization and activation
+class Conv2dOperation:
     def __init__(
         self,
         device=None,
@@ -88,6 +89,7 @@ class Conv2dNormActivation:
         return input_tensor
 
 
+# Wrapper for MaxPool2d layer execution on TTNN device
 class Maxpool2DOperation:
     def __init__(
         self,
@@ -104,7 +106,16 @@ class Maxpool2DOperation:
         return input_tensor
 
 
+# Overrides Conv2dConfiguration parameters using dataclass replace (frozen dataclass)
 def override_conv_config(config, override_dict):
     if not isinstance(config, Conv2dConfiguration):
         return config
     return replace(config, **override_dict)
+
+
+# Reshapes tensor from sharded to interleaved layout and applies spatial reshape
+def post_conv_reshape(x, out_height=1, out_width=1):
+    x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
+    x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT)
+    x = ttnn.reshape(x, (x.shape[0], out_height, out_width, x.shape[3]))
+    return ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)

@@ -15,6 +15,7 @@ from models.tt_cnn.tt.pipeline import PipelineConfig, create_pipeline_from_confi
 from models.common.utility_functions import run_for_wormhole_b0
 
 
+# Creates pipeline-compatible wrapper for SSD512 model
 def create_ssd512_pipeline_model(ttnn_model, dtype=ttnn.bfloat16):
     device_ref = ttnn_model.device
 
@@ -22,6 +23,7 @@ def create_ssd512_pipeline_model(ttnn_model, dtype=ttnn.bfloat16):
         assert l1_input_tensor.storage_type() == ttnn.StorageType.DEVICE
         assert l1_input_tensor.memory_config().buffer_type == ttnn.BufferType.L1
 
+        # Convert from L1 to DRAM memory config for model execution
         input_for_model = ttnn.to_memory_config(l1_input_tensor, ttnn.DRAM_MEMORY_CONFIG)
         if input_for_model.layout != ttnn.TILE_LAYOUT:
             input_for_model = ttnn.to_layout(input_for_model, ttnn.TILE_LAYOUT)

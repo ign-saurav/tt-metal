@@ -3,6 +3,7 @@
 import ttnn
 
 
+# Generates prior boxes (anchor boxes) for SSD512 at multiple feature map scales
 class TtPriorBox:
     def __init__(self, cfg, device=None):
         self.image_size = cfg["min_dim"]
@@ -20,12 +21,15 @@ class TtPriorBox:
             if v <= 0:
                 raise ValueError("Variances must be greater than 0")
 
+    # Generates prior boxes
     def __call__(self):
         all_boxes = []
 
+        # Generate priors for each feature map scale
         for k, f in enumerate(self.feature_maps):
             f_k = self.image_size / self.steps[k]
 
+            # Create coordinate grids for this feature map
             y_coords = ttnn.arange(0, f, device=self.device, dtype=ttnn.float32)
             x_coords = ttnn.arange(0, f, device=self.device, dtype=ttnn.float32)
 
@@ -35,9 +39,11 @@ class TtPriorBox:
             yy_flat = ttnn.reshape(yy, (-1,))
             xx_flat = ttnn.reshape(xx, (-1,))
 
+            # Compute center coordinates normalized to [0, 1]
             cy = (yy_flat + 0.5) / f_k
             cx = (xx_flat + 0.5) / f_k
 
+            # Compute scale factors for this feature map
             s_k = self.min_sizes[k] / self.image_size
             s_k_prime = ttnn.sqrt(
                 ttnn.full((1,), s_k * (self.max_sizes[k] / self.image_size), device=self.device, dtype=ttnn.float32)

@@ -9,14 +9,13 @@ import ttnn
 from loguru import logger
 
 from models.experimental.SSD512.reference.ssd import add_extras, extras
-
-# from models.experimental.SSD512.reference.ssd import add_extras
 from models.common.utility_functions import comp_pcc
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from models.experimental.SSD512.tt.utils import create_config_layers
 from models.experimental.SSD512.tt.layers.tt_extras_backbone import TtExtrasBackbone
 
 
+# Tests extras backbone
 @pytest.mark.parametrize("pcc", ((0.99),))
 @pytest.mark.parametrize("size", (512,))
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
@@ -28,21 +27,19 @@ def test_extras_backbone(device, pcc, size, reset_seeds):
 
     batch_size = 1
     input_channels = 1024
-    input_height = 64 if size == 512 else 38
-    input_width = input_height
+    input_height = input_width = 64
 
     torch_input = torch.randn(batch_size, input_channels, input_height, input_width)
     ttnn_input_tensor = ttnn.from_torch(
         torch_input.permute(0, 2, 3, 1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, device=device
     )
-    conv_config_layers = []
     with torch.no_grad():
         x = torch_input
         for i, layer in enumerate(torch_model):
-            print(layer.__class__.__name__, x.shape)
             x = torch.nn.functional.relu(layer(x), inplace=True)
         torch_output = x
 
+    conv_config_layers = []
     conv_config_layers = create_config_layers(torch_model, torch_input=torch_input)
     tt_extras = TtExtrasBackbone(
         conv_config_layer=conv_config_layers,
