@@ -2,30 +2,39 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-from models.experimental.petr.tt.common import Conv
 from models.tt_cnn.tt.builder import TtUpsample, UpsampleConfiguration
+from models.tt_cnn.tt.builder import TtConv2d, Conv2dConfiguration
 
 
 class ttnn_ConvModule:
     def __init__(
         self,
-        in_channels: int,
-        out_channels: int,
-        kernel_size,
-        stride=1,
-        padding=0,
-        dilation=1,
-        groups: int = 1,
+        conv_args=None,
+        model_config=None,
         parameters=None,
+        device=None,
     ):
-        self.conv = Conv([stride, stride, padding, padding], parameters["conv"])
+        self.conv_config = Conv2dConfiguration.from_model_args(
+            conv2d_args=conv_args,
+            weights=parameters["weight"],
+            bias=parameters["bias"],
+            # **layer_optimisations.conv3,
+            math_fidelity=model_config["MATH_FIDELITY"],
+            weights_dtype=model_config["WEIGHTS_DTYPE"],
+            activation_dtype=model_config["ACTIVATIONS_DTYPE"],
+        )
+        self.conv = TtConv2d(self.conv_config, device)
 
     def __call__(
         self,
         device,
         x,
     ):
-        x = self.conv(device, x)
+        x, [output_height, output_width] = self.conv(x, return_output_dim=True)
+
+        x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+
+        x = ttnn.reshape(x, (self.conv_config.batch_size, output_height, output_width, self.conv_config.out_channels))
         return x
 
 
@@ -35,13 +44,17 @@ class ttnn_CPFPN:
         in_channels,
         out_channels,
         num_outs,
+        batch_size,
         start_level=0,
         end_level=-1,
         add_extra_convs=False,
         relu_before_extra_convs=False,
         no_norm_on_lateral=False,
         upsample_cfg=dict(mode="nearest"),
+        model_config=None,
+        model_args=None,
         parameters=None,
+        device=None,
     ):
         assert isinstance(in_channels, list)
         self.in_channels = in_channels
@@ -52,6 +65,7 @@ class ttnn_CPFPN:
         self.no_norm_on_lateral = no_norm_on_lateral
         self.fp16_enabled = False
         self.upsample_cfg = upsample_cfg.copy()
+        self.device = device
 
         if end_level == -1:
             self.backbone_end_level = self.num_ins
@@ -74,11 +88,19 @@ class ttnn_CPFPN:
         self.fpn_convs = []
 
         for i in range(self.start_level, self.backbone_end_level):
-            l_conv = ttnn_ConvModule(in_channels[i], out_channels, 1, parameters=parameters["lateral_convs"][i])
+            l_conv = ttnn_ConvModule(
+                conv_args=model_args["lateral_convs"][i]["conv"],
+                model_config=model_config,
+                device=device,
+                parameters=parameters["lateral_convs"][i]["conv"],
+            )
             self.lateral_convs.append(l_conv)
             if i == 0:
                 fpn_conv = ttnn_ConvModule(
-                    out_channels, out_channels, 3, padding=1, parameters=parameters["fpn_convs"][i]
+                    conv_args=model_args["fpn_convs"][i]["conv"],
+                    model_config=model_config,
+                    device=device,
+                    parameters=parameters["fpn_convs"][i]["conv"],
                 )
                 self.fpn_convs.append(fpn_conv)
 
@@ -90,19 +112,18 @@ class ttnn_CPFPN:
                 else:
                     in_channels = out_channels
                 extra_fpn_conv = ttnn_ConvModule(
-                    in_channels,
-                    out_channels,
-                    3,
-                    stride=2,
-                    padding=1,
+                    conv_args=model_args["fpn_convs"][i]["conv"],
+                    model_config=model_config,
+                    device=device,
+                    parameters=parameters["fpn_convs"][i]["conv"],
                 )
                 self.fpn_convs.append(extra_fpn_conv)
 
-    def __call__(self, device, inputs):
+    def __call__(self, inputs):
         assert len(inputs) == len(self.in_channels)
 
         laterals = [
-            lateral_conv(device, inputs[i + self.start_level]) for i, lateral_conv in enumerate(self.lateral_convs)
+            lateral_conv(self.device, inputs[i + self.start_level]) for i, lateral_conv in enumerate(self.lateral_convs)
         ]
 
         used_backbone_levels = len(laterals)
@@ -118,7 +139,7 @@ class ttnn_CPFPN:
                     channels=channels,
                     batch_size=batch_size,
                 )
-                upsample = TtUpsample(upsample_config, device)
+                upsample = TtUpsample(upsample_config, self.device)
 
             else:
                 upsample_config = UpsampleConfiguration(
@@ -129,12 +150,14 @@ class ttnn_CPFPN:
                     scale_factor=(2, 2),
                 )
 
-                upsample = TtUpsample(upsample_config, device)
+                upsample = TtUpsample(upsample_config, self.device)
 
             upsampled = upsample(input_tensor)
             upsampled = ttnn.to_layout(upsampled, layout=ttnn.TILE_LAYOUT)
             laterals[i - 1] += upsampled
 
-        outs = [self.fpn_convs[i](device, laterals[i]) if i == 0 else laterals[i] for i in range(used_backbone_levels)]
+        outs = [
+            self.fpn_convs[i](self.device, laterals[i]) if i == 0 else laterals[i] for i in range(used_backbone_levels)
+        ]
 
         return tuple(outs)
