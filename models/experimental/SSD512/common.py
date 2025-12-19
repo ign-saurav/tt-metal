@@ -7,7 +7,8 @@ import ttnn
 
 from models.experimental.SSD512.reference.ssd import build_ssd
 from models.experimental.SSD512.reference.layers.functions.prior_box import PriorBox
-from models.experimental.SSD512.reference.data.config import voc
+
+# from models.experimental.SSD512.reference.data.config import voc
 
 
 SSD512_L1_SMALL_SIZE = 98304

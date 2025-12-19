@@ -55,7 +55,7 @@ pool_config = {
 }
 
 
-def create_config_layers(torch_model, torch_input, model_config=conv_config_optmised):
+def create_config_layers(torch_model, torch_input, model_config=conv_config_optmised, return_out=False):
     conv_config_layers = []
     # with torch.no_grad():
     x = torch_input
@@ -87,6 +87,8 @@ def create_config_layers(torch_model, torch_input, model_config=conv_config_optm
         # x = torch.nn.functional.relu(layer(x), inplace=True)
         x = layer(x)
     # torch_output = x
+    if return_out:
+        return conv_config_layers, x
     return conv_config_layers
 
 

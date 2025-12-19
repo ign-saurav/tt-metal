@@ -258,12 +258,29 @@ class TtVGGBackbone:
             #     break
         self.block = layers
 
-    def __call__(self, device, input):
+    # def __call__(self, device, input):
+    #     for i, layer in enumerate(self.block):
+    #         if i == 0:
+    #             result = layer(device, input)
+    #         else:
+    #             result = layer(device, result)
+    #         print("layer_done", i + 1)
+
+    #     return result
+
+    def __call__(self, device, input, return_source=False):
+        tt_sources = []
         for i, layer in enumerate(self.block):
             if i == 0:
                 result = layer(device, input)
             else:
                 result = layer(device, result)
-            print("layer_done", i + 1)
+            print("data_print", i, result.shape)
+            if i == 12:
+                tt_sources.append(result)
 
+        # tt_sources.append(result)
+
+        if return_source:
+            return result, tt_sources
         return result

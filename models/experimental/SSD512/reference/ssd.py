@@ -4,11 +4,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
 from models.experimental.SSD512.reference.layers import *
 
 # from models.experimental.SSD512.reference.data import voc
-from models.experimental.SSD512.reference.data.voc0712 import voc
+# from models.experimental.SSD512.reference.data.voc0712 import voc
 from loguru import logger
 import os
 
@@ -35,10 +34,10 @@ class SSD(nn.Module):
         super(SSD, self).__init__()
         self.phase = phase
         self.num_classes = num_classes
-        self.cfg = voc["SSD{}".format(size)]
-        self.priorbox = PriorBox(self.cfg)
-        with torch.no_grad():
-            self.priors = Variable(self.priorbox.forward())
+        # self.cfg = voc["SSD{}".format(size)]
+        # self.priorbox = PriorBox(self.cfg)
+        # with torch.no_grad():
+        #     self.priors = Variable(self.priorbox.forward())
         self.size = size
 
         # SSD network
