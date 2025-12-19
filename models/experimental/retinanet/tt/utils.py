@@ -19,7 +19,6 @@ conv_config = {
 }
 
 
-# @dataclass
 class MaxPoolConfiguration(MaxPool2dConfiguration):
     @classmethod
     def from_model_args(cls, maxpool2d_args, **kwargs):

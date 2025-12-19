@@ -8,10 +8,7 @@ from models.experimental.retinanet.tt.utils import TTUpsample
 from collections import OrderedDict
 
 from models.tt_cnn.tt.builder import TtConv2d
-from models.experimental.retinanet.tt.utils import _create_conv_config_from_params
-from models.tt_cnn.tt.builder import (
-    AutoShardedStrategyConfiguration,
-)
+from models.tt_cnn.tt.builder import Conv2dConfiguration
 
 
 @dataclass
@@ -100,194 +97,95 @@ class resnet50Fpn:
         device,
         parameters,
         model_config,
+        model_args,
         layer_optimisations=fpn_optimisations,
     ) -> None:
-        # self.conv1 = TTConv2D(
-        #     kernel_size=1,
-        #     stride=1,
-        #     padding=0,
-        #     parameters=parameters["inner_blocks"].get("0", {}).get("0", None),
-        #     kernel_fidelity=model_config,
-        #     activation=None,
-        #     **layer_optimisations.conv1,
-        # )
-
-        self.conv_config_1 = _create_conv_config_from_params(
-            input_height=input_height,
-            input_width=input_width,
-            in_channels=parameters["inner_blocks"].get("0", {}).get("0", None)["weight"].shape[1],
-            out_channels=parameters["inner_blocks"].get("0", {}).get("0", None)["weight"].shape[0],
-            kernel_size=1,
-            batch_size=1,
-            parameters=parameters["inner_blocks"].get("0", {}).get("0", None),
-            activation=None,
-            sharding_strategy=AutoShardedStrategyConfiguration(),
+        print(model_args)
+        self.conv_config_1 = Conv2dConfiguration.from_model_args(
+            model_args["conv1"],
+            weights=parameters["inner_blocks"].get("0", {}).get("0", None)["weight"],
+            bias=parameters["inner_blocks"].get("0", {}).get("0", None)["bias"],
+            # **layer_optimisations.conv1,
+            math_fidelity=model_config["MATH_FIDELITY"],
+            weights_dtype=model_config["WEIGHTS_DTYPE"],
+            activation_dtype=model_config["ACTIVATIONS_DTYPE"],
         )
         self.conv1 = TtConv2d(self.conv_config_1, device)
 
-        # self.conv2 = TTConv2D(
-        #     kernel_size=1,
-        #     stride=1,
-        #     padding=0,
-        #     parameters=parameters["inner_blocks"].get("1", {}).get("0", None),
-        #     kernel_fidelity=model_config,
-        #     activation=None,
-        #     **layer_optimisations.conv2,
-        # )
-
-        self.conv_config_2 = _create_conv_config_from_params(
-            input_height=input_height,
-            input_width=input_width,
-            in_channels=parameters["inner_blocks"].get("1", {}).get("0", None)["weight"].shape[1],
-            out_channels=parameters["inner_blocks"].get("1", {}).get("0", None)["weight"].shape[0],
-            kernel_size=1,
-            batch_size=1,
-            parameters=parameters["inner_blocks"].get("1", {}).get("0", None),
-            activation=None,
-            sharding_strategy=AutoShardedStrategyConfiguration(),
+        self.conv_config_2 = Conv2dConfiguration.from_model_args(
+            model_args["conv1"],
+            weights=parameters["inner_blocks"].get("1", {}).get("0", None)["weight"],
+            bias=parameters["inner_blocks"].get("1", {}).get("0", None)["bias"],
+            # **layer_optimisations.conv2,
+            math_fidelity=model_config["MATH_FIDELITY"],
+            weights_dtype=model_config["WEIGHTS_DTYPE"],
+            activation_dtype=model_config["ACTIVATIONS_DTYPE"],
         )
         self.conv2 = TtConv2d(self.conv_config_2, device)
 
-        # self.conv3 = TTConv2D(
-        #     kernel_size=1,
-        #     stride=1,
-        #     padding=0,
-        #     parameters=parameters["inner_blocks"].get("2", {}).get("0", None),
-        #     kernel_fidelity=model_config,
-        #     activation=None,
-        #     **layer_optimisations.conv3,
-        # )
-
-        self.conv_config_3 = _create_conv_config_from_params(
-            input_height=input_height,
-            input_width=input_width,
-            in_channels=parameters["inner_blocks"].get("2", {}).get("0", None)["weight"].shape[1],
-            out_channels=parameters["inner_blocks"].get("2", {}).get("0", None)["weight"].shape[0],
-            kernel_size=1,
-            batch_size=1,
-            parameters=parameters["inner_blocks"].get("2", {}).get("0", None),
-            activation=None,
-            sharding_strategy=AutoShardedStrategyConfiguration(),
+        self.conv_config_3 = Conv2dConfiguration.from_model_args(
+            model_args["conv1"],
+            weights=parameters["inner_blocks"].get("2", {}).get("0", None)["weight"],
+            bias=parameters["inner_blocks"].get("2", {}).get("0", None)["bias"],
+            # **layer_optimisations.conv3,
+            math_fidelity=model_config["MATH_FIDELITY"],
+            weights_dtype=model_config["WEIGHTS_DTYPE"],
+            activation_dtype=model_config["ACTIVATIONS_DTYPE"],
         )
         self.conv3 = TtConv2d(self.conv_config_3, device)
 
-        # self.conv4 = TTConv2D(
-        #     kernel_size=3,
-        #     stride=1,
-        #     padding=1,
-        #     parameters=parameters["layer_blocks"].get("0", {}).get("0", None),
-        #     kernel_fidelity=model_config,
-        #     activation=None,
-        #     **layer_optimisations.conv4,
-        # )
-
-        self.conv_config_4 = _create_conv_config_from_params(
-            input_height=input_height,
-            input_width=input_width,
-            in_channels=parameters["layer_blocks"].get("0", {}).get("0", None)["weight"].shape[1],
-            out_channels=parameters["layer_blocks"].get("0", {}).get("0", None)["weight"].shape[0],
-            kernel_size=3,
-            batch_size=1,
-            padding=(1, 1),
-            parameters=parameters["layer_blocks"].get("0", {}).get("0", None),
-            activation=None,
-            sharding_strategy=AutoShardedStrategyConfiguration(),
+        self.conv_config_4 = Conv2dConfiguration.from_model_args(
+            model_args["conv1"],
+            weights=parameters["layer_blocks"].get("0", {}).get("0", None)["weight"],
+            bias=parameters["layer_blocks"].get("0", {}).get("0", None)["bias"],
+            # **layer_optimisations.conv4,
+            math_fidelity=model_config["MATH_FIDELITY"],
+            weights_dtype=model_config["WEIGHTS_DTYPE"],
+            activation_dtype=model_config["ACTIVATIONS_DTYPE"],
         )
         self.conv4 = TtConv2d(self.conv_config_4, device)
 
-        # self.conv5 = TTConv2D(
-        #     kernel_size=3,
-        #     stride=1,
-        #     padding=1,
-        #     parameters=parameters["layer_blocks"].get("1", {}).get("0", None),
-        #     kernel_fidelity=model_config,
-        #     activation=None,
-        #     **layer_optimisations.conv5,
-        # )
-
-        self.conv_config_5 = _create_conv_config_from_params(
-            input_height=input_height,
-            input_width=input_width,
-            in_channels=parameters["layer_blocks"].get("1", {}).get("0", None)["weight"].shape[1],
-            out_channels=parameters["layer_blocks"].get("1", {}).get("0", None)["weight"].shape[0],
-            kernel_size=3,
-            batch_size=1,
-            padding=(1, 1),
-            parameters=parameters["layer_blocks"].get("1", {}).get("0", None),
-            activation=None,
-            sharding_strategy=AutoShardedStrategyConfiguration(),
+        self.conv_config_5 = Conv2dConfiguration.from_model_args(
+            model_args["conv1"],
+            weights=parameters["layer_blocks"].get("1", {}).get("0", None)["weight"],
+            bias=parameters["layer_blocks"].get("1", {}).get("0", None)["bias"],
+            # **layer_optimisations.conv5,
+            math_fidelity=model_config["MATH_FIDELITY"],
+            weights_dtype=model_config["WEIGHTS_DTYPE"],
+            activation_dtype=model_config["ACTIVATIONS_DTYPE"],
         )
         self.conv5 = TtConv2d(self.conv_config_5, device)
 
-        # self.conv6 = TTConv2D(
-        #     kernel_size=3,
-        #     stride=1,
-        #     padding=1,
-        #     parameters=parameters["layer_blocks"].get("2", {}).get("0", None),
-        #     kernel_fidelity=model_config,
-        #     activation=None,
-        #     **layer_optimisations.conv6,
-        # )
-
-        self.conv_config_6 = _create_conv_config_from_params(
-            input_height=input_height,
-            input_width=input_width,
-            in_channels=parameters["layer_blocks"].get("2", {}).get("0", None)["weight"].shape[1],
-            out_channels=parameters["layer_blocks"].get("2", {}).get("0", None)["weight"].shape[0],
-            kernel_size=3,
-            batch_size=1,
-            padding=(1, 1),
-            parameters=parameters["layer_blocks"].get("2", {}).get("0", None),
-            activation=None,
-            sharding_strategy=AutoShardedStrategyConfiguration(),
+        self.conv_config_6 = Conv2dConfiguration.from_model_args(
+            model_args["conv1"],
+            weights=parameters["layer_blocks"].get("2", {}).get("0", None)["weight"],
+            bias=parameters["layer_blocks"].get("2", {}).get("0", None)["bias"],
+            # **layer_optimisations.conv6,
+            math_fidelity=model_config["MATH_FIDELITY"],
+            weights_dtype=model_config["WEIGHTS_DTYPE"],
+            activation_dtype=model_config["ACTIVATIONS_DTYPE"],
         )
         self.conv6 = TtConv2d(self.conv_config_6, device)
 
-        # self.conv7 = TTConv2D(
-        #     kernel_size=3,
-        #     stride=2,
-        #     padding=1,
-        #     parameters=getattr(parameters.extra_blocks, "p6", None),
-        #     kernel_fidelity=model_config,
-        #     activation=None,
-        #     **layer_optimisations.conv7,
-        # )
-
-        self.conv_config_7 = _create_conv_config_from_params(
-            input_height=input_height,
-            input_width=input_width,
-            in_channels=getattr(parameters.extra_blocks, "p6", None)["weight"].shape[1],
-            out_channels=getattr(parameters.extra_blocks, "p6", None)["weight"].shape[0],
-            kernel_size=3,
-            batch_size=1,
-            padding=(1, 1),
-            parameters=getattr(parameters.extra_blocks, "p6", None),
-            activation=None,
-            sharding_strategy=AutoShardedStrategyConfiguration(),
+        self.conv_config_7 = Conv2dConfiguration.from_model_args(
+            model_args["conv1"],
+            weights=getattr(parameters.extra_blocks, "p6", None)["weight"],
+            bias=getattr(parameters.extra_blocks, "p6", None)["bias"],
+            # **layer_optimisations.conv7,
+            math_fidelity=model_config["MATH_FIDELITY"],
+            weights_dtype=model_config["WEIGHTS_DTYPE"],
+            activation_dtype=model_config["ACTIVATIONS_DTYPE"],
         )
         self.conv7 = TtConv2d(self.conv_config_7, device)
 
-        # self.conv8 = TTConv2D(
-        #     kernel_size=3,
-        #     stride=2,
-        #     padding=1,
-        #     parameters=getattr(parameters.extra_blocks, "p7", None),
-        #     kernel_fidelity=model_config,
-        #     activation=None,
-        #     **layer_optimisations.conv8,
-        # )
-
-        self.conv_config_8 = _create_conv_config_from_params(
-            input_height=input_height,
-            input_width=input_width,
-            in_channels=getattr(parameters.extra_blocks, "p7", None)["weight"].shape[1],
-            out_channels=getattr(parameters.extra_blocks, "p7", None)["weight"].shape[0],
-            kernel_size=3,
-            batch_size=1,
-            padding=(1, 1),
-            parameters=getattr(parameters.extra_blocks, "p7", None),
-            activation=None,
-            sharding_strategy=AutoShardedStrategyConfiguration(),
+        self.conv_config_8 = Conv2dConfiguration.from_model_args(
+            model_args["conv1"],
+            weights=getattr(parameters.extra_blocks, "p7", None)["weight"],
+            bias=getattr(parameters.extra_blocks, "p7", None)["bias"],
+            # **layer_optimisations.conv8,
+            math_fidelity=model_config["MATH_FIDELITY"],
+            weights_dtype=model_config["WEIGHTS_DTYPE"],
+            activation_dtype=model_config["ACTIVATIONS_DTYPE"],
         )
         self.conv8 = TtConv2d(self.conv_config_8, device)
 
