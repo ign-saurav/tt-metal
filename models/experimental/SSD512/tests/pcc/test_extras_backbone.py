@@ -8,7 +8,8 @@ import pytest
 import ttnn
 from loguru import logger
 
-# from models.experimental.SSD512.reference.ssd import add_extras, extras
+from models.experimental.SSD512.reference.ssd import add_extras, extras
+
 # from models.experimental.SSD512.reference.ssd import add_extras
 from models.common.utility_functions import comp_pcc
 from tests.ttnn.utils_for_testing import assert_with_pcc
@@ -16,32 +17,10 @@ from models.experimental.SSD512.tt.utils import create_config_layers
 from models.experimental.SSD512.tt.layers.tt_extras_backbone import TtExtrasBackbone
 
 
-def add_extras(cfg, i, batch_norm=False):
-    # Extra layers added to VGG for feature scaling
-    layers = []
-    in_channels = i
-    flag = False
-    for k, v in enumerate(cfg):
-        if in_channels != "S":
-            if v == "S":
-                layers += [nn.Conv2d(in_channels, cfg[k + 1], kernel_size=(1, 3)[flag], stride=2, padding=1)]
-            else:
-                layers += [nn.Conv2d(in_channels, v, kernel_size=(1, 3)[flag])]
-            flag = not flag
-        in_channels = v
-    if len(cfg) == 13:
-        layers += [nn.Conv2d(in_channels, 256, kernel_size=4, padding=1)]  # Fix padding to match Caffe version (pad=1).
-    return layers
-
-
 @pytest.mark.parametrize("pcc", ((0.99),))
 @pytest.mark.parametrize("size", (512,))
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
 def test_extras_backbone(device, pcc, size, reset_seeds):
-    extras = {
-        "300": [256, "S", 512, 128, "S", 256, 128, 256, 128, 256],
-        "512": [256, "S", 512, 128, "S", 256, 128, "S", 256, 128, "S", 256, 128],
-    }
     cfg = extras[str(size)]
     torch_layers = add_extras(cfg, i=1024, batch_norm=False)
     torch_model = nn.ModuleList(torch_layers)
@@ -70,26 +49,6 @@ def test_extras_backbone(device, pcc, size, reset_seeds):
         batch_size=batch_size,
         device=device,
     )
-
-    ############################333
-    # tt_extras2 = CreateConfigLayers(
-    #     torch_model,
-    #     torch_input=torch_input,
-    #     # batch_size=batch_size,
-    #     device=device,
-    #     activation_layer=ttnn.relu,
-    # )
-    ###################################
-
-    ############################333
-    # tt_extras2 = TtExtrasBackbone(
-    #     torch_model,
-    #     torch_input=torch_input,
-    #     batch_size=batch_size,
-    #     device=device,
-    #     activation_layer=ttnn.relu,
-    # )
-    ###################################
 
     tt_output_ttnn = tt_extras(device, ttnn_input_tensor)
     tt_output = ttnn.to_torch(tt_output_ttnn)
