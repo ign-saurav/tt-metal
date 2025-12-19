@@ -14,6 +14,7 @@ from models.experimental.SSD512.common import (
 )
 from models.experimental.SSD512.tt.tt_ssd import TtSSD
 from models.common.utility_functions import comp_pcc
+from tests.ttnn.utils_for_testing import assert_with_pcc
 
 
 @pytest.mark.parametrize("pcc", ((0.97),))
@@ -102,5 +103,5 @@ def test_ssd512(device, pcc, size, reset_seeds):
         _, pcc_message_conf = comp_pcc(torch_conf, tt_conf, pcc)
         logger.info(f"Confidence head {source_idx} PCC: {pcc_message_conf}")
 
-        # assert_with_pcc(torch_loc, tt_loc, pcc)
-        # assert_with_pcc(torch_conf, tt_conf, pcc)
+        assert_with_pcc(torch_loc, tt_loc, pcc)
+        assert_with_pcc(torch_conf, tt_conf, pcc)
