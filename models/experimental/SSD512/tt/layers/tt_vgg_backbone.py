@@ -45,16 +45,10 @@ class VGGBackboneOptimizationConfig:
     conv3: dict
     conv4: dict
     conv5: dict
-    conv6: dict
-    conv7: dict
     conv8: dict
     conv9: dict
-    conv10: dict
-    conv11: dict
+
     conv12: dict
-    conv13: dict
-    conv14: dict
-    conv15: dict
 
 
 # ============================================================================
@@ -101,20 +95,6 @@ vgg_backbone_optimizations = VGGBackboneOptimizationConfig(
         "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
         "deallocate_activation": True,
     },
-    # conv6: Sixth convolution layer (256->256 channels)
-    # Uses auto sharding for flexibility
-    conv6={
-        "sharding_strategy": AutoShardedStrategyConfiguration(),
-        "deallocate_activation": True,
-    },
-    # conv7: Seventh convolution layer (256->256 channels)
-    # Uses auto sharding for flexibility
-    conv7={
-        "sharding_strategy": AutoShardedStrategyConfiguration(),
-        "deallocate_activation": True,
-    },
-    # conv8: Eighth convolution layer (256->512 channels)
-    # Uses block sharding for consistent memory layout
     conv8={
         "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
         "deallocate_activation": True,
@@ -125,40 +105,10 @@ vgg_backbone_optimizations = VGGBackboneOptimizationConfig(
         "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
         "deallocate_activation": True,
     },
-    # conv10: Tenth convolution layer (512->512 channels)
-    # Uses auto sharding for flexibility
-    conv10={
-        "sharding_strategy": AutoShardedStrategyConfiguration(),
-        "deallocate_activation": True,
-    },
-    # conv11: Dilated convolution layer (512->1024 channels)
-    # Uses auto sharding to handle dilated convolution efficiently
-    conv11={
-        "sharding_strategy": AutoShardedStrategyConfiguration(),
-        "deallocate_activation": True,
-    },
     # conv12: Final 1x1 convolution layer (1024->1024 channels)
     # Uses block sharding with re-sharding optimization for 1x1 convolutions
     conv12={
         "sharding_strategy": BlockShardedStrategyConfiguration(reshard_if_not_optimal=True, act_block_h_override=32),
-        "deallocate_activation": True,
-    },
-    # conv13: Extended backbone layer (1024->256 channels)
-    # Uses auto sharding for additional backbone layers
-    conv13={
-        "sharding_strategy": AutoShardedStrategyConfiguration(),
-        "deallocate_activation": True,
-    },
-    # conv14: Extended backbone layer (256->512 channels)
-    # Uses auto sharding for additional backbone layers
-    conv14={
-        "sharding_strategy": AutoShardedStrategyConfiguration(),
-        "deallocate_activation": True,
-    },
-    # conv15: Extended backbone layer (512->512 channels)
-    # Uses auto sharding for additional backbone layers
-    conv15={
-        "sharding_strategy": AutoShardedStrategyConfiguration(),
         "deallocate_activation": True,
     },
 )
