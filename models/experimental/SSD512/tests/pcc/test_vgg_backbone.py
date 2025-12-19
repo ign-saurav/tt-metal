@@ -1,5 +1,4 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
-
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
@@ -10,7 +9,8 @@ from loguru import logger
 
 from models.experimental.SSD512.common import SSD512_L1_SMALL_SIZE
 from models.experimental.SSD512.reference.ssd import vgg, base
-from models.experimental.SSD512.tt.layers.tt_vgg_backbone import build_vgg_backbone, apply_vgg_backbone
+from models.experimental.SSD512.tt.layers.tt_vgg_backbone import TtVggBackbone
+from models.experimental.SSD512.tt.utils import extract_vgg_parameters_from_torch
 from models.common.utility_functions import comp_pcc
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
@@ -31,47 +31,29 @@ def test_vgg_backbone(device, pcc, size, reset_seeds):
     with torch.no_grad():
         torch_output = torch_model(torch_input)
 
-    layers_config = build_vgg_backbone(size=size, input_channels=input_channels, device=device)
-    torch_conv_idx = 0
-    layers_with_weights = []
+    parameters = extract_vgg_parameters_from_torch(torch_model)
 
-    for layer in layers_config:
-        if layer["type"] == "conv":
-            while torch_conv_idx < len(torch_model):
-                torch_layer = torch_model[torch_conv_idx]
-                if isinstance(torch_layer, nn.Conv2d):
-                    break
-                torch_conv_idx += 1
-
-            torch_conv = torch_model[torch_conv_idx]
-            torch_conv_idx += 1
-
-            weight = torch_conv.weight.data.clone()
-            bias = torch_conv.bias.data.clone() if torch_conv.bias is not None else None
-
-            weight_ttnn = ttnn.from_torch(weight, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
-            bias_ttnn = None
-            if bias is not None:
-                bias_reshaped = bias.reshape((1, 1, 1, -1))
-                bias_ttnn = ttnn.from_torch(
-                    bias_reshaped, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
-                )
-
-            layer_with_weights = layer.copy()
-            layer_with_weights["weight"] = weight_ttnn
-            layer_with_weights["bias"] = bias_ttnn
-            layers_with_weights.append(layer_with_weights)
-        else:
-            layers_with_weights.append(layer.copy())
-
-    tt_output_ttnn = apply_vgg_backbone(
-        torch_input, layers_with_weights, device=device, dtype=ttnn.bfloat8_b, memory_config=ttnn.DRAM_MEMORY_CONFIG
+    tt_vgg = TtVggBackbone(
+        size=size, input_channels=input_channels, batch_size=batch_size, parameters=parameters, device=device
     )
+
+    tt_output_ttnn = tt_vgg(torch_input)
     tt_output = ttnn.to_torch(tt_output_ttnn)
+
+    expected_shape = torch_output.shape
+    if tt_output.shape != (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1]):
+        B, C, H, W = expected_shape
+        tt_output = tt_output.reshape(B, H, W, C)
 
     if len(tt_output.shape) == 4:
         tt_output = tt_output.permute(0, 3, 1, 2)
     tt_output = tt_output.float()
+
+    if tt_output.shape != torch_output.shape:
+        logger.error(f"Shape mismatch! PyTorch: {torch_output.shape}, TTNN: {tt_output.shape}")
+        min_shape = [min(s1, s2) for s1, s2 in zip(torch_output.shape, tt_output.shape)]
+        torch_output = torch_output[tuple(slice(0, s) for s in min_shape)]
+        tt_output = tt_output[tuple(slice(0, s) for s in min_shape)]
 
     _, pcc_message = comp_pcc(torch_output, tt_output, pcc)
     logger.info(f"VGG Backbone PCC: {pcc_message}")

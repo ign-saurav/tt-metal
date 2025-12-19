@@ -1,5 +1,4 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
-
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
@@ -10,7 +9,8 @@ from loguru import logger
 
 from models.experimental.SSD512.common import SSD512_NUM_CLASSES
 from models.experimental.SSD512.reference.ssd import multibox, base, extras, mbox, vgg, add_extras
-from models.experimental.SSD512.tt.layers.tt_multibox_heads import build_multibox_heads, apply_multibox_heads
+from models.experimental.SSD512.tt.layers.tt_multibox_heads import TtMultiboxHeads
+from models.experimental.SSD512.tt.utils import extract_multibox_parameters_from_torch
 from models.common.utility_functions import comp_pcc
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
@@ -47,64 +47,9 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
     torch_loc_model.eval()
     torch_conf_model.eval()
 
-    loc_layers_config, conf_layers_config = build_multibox_heads(
-        size=size,
-        num_classes=num_classes,
-        vgg_channels=vgg_channels,
-        extra_channels=extra_channels,
-        extra_source_indices=extra_source_indices,
-        device=device,
-    )
+    loc_parameters = extract_multibox_parameters_from_torch(torch_loc_model)
+    conf_parameters = extract_multibox_parameters_from_torch(torch_conf_model)
 
-    torch_conv_idx = 0
-    loc_layers_with_weights = []
-
-    for layer in loc_layers_config:
-        if layer["type"] == "conv":
-            torch_conv = torch_loc_model[torch_conv_idx]
-            torch_conv_idx += 1
-
-            weight = torch_conv.weight.data.clone()
-            bias = torch_conv.bias.data.clone() if torch_conv.bias is not None else None
-
-            weight_ttnn = ttnn.from_torch(weight, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
-            bias_ttnn = None
-            if bias is not None:
-                bias_reshaped = bias.reshape((1, 1, 1, -1))
-                bias_ttnn = ttnn.from_torch(
-                    bias_reshaped, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
-                )
-
-            layer_with_weights = layer.copy()
-            layer_with_weights["weight"] = weight_ttnn
-            layer_with_weights["bias"] = bias_ttnn
-            loc_layers_with_weights.append(layer_with_weights)
-
-    torch_conv_idx = 0
-    conf_layers_with_weights = []
-
-    for layer in conf_layers_config:
-        if layer["type"] == "conv":
-            torch_conv = torch_conf_model[torch_conv_idx]
-            torch_conv_idx += 1
-
-            weight = torch_conv.weight.data.clone()
-            bias = torch_conv.bias.data.clone() if torch_conv.bias is not None else None
-
-            weight_ttnn = ttnn.from_torch(weight, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
-            bias_ttnn = None
-            if bias is not None:
-                bias_reshaped = bias.reshape((1, 1, 1, -1))
-                bias_ttnn = ttnn.from_torch(
-                    bias_reshaped, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
-                )
-
-            layer_with_weights = layer.copy()
-            layer_with_weights["weight"] = weight_ttnn
-            layer_with_weights["bias"] = bias_ttnn
-            conf_layers_with_weights.append(layer_with_weights)
-
-    num_heads = len(loc_layers_with_weights)
     batch_size = 1
     sources = []
 
@@ -117,6 +62,7 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
         sources.append(torch.randn(batch_size, 1024, 19, 19))
         extra_dims = [(512, 10, 10), (256, 5, 5), (256, 3, 3), (256, 1, 1)]
 
+    num_heads = len(vgg_channels) + len(extra_channels)
     num_extra_sources = num_heads - 2
     for i in range(num_extra_sources):
         if i < len(extra_dims):
@@ -138,9 +84,18 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
             conf_pred = conf_pred.permute(0, 2, 3, 1).contiguous()
             torch_conf_preds.append(conf_pred)
 
-    tt_loc_preds, tt_conf_preds = apply_multibox_heads(
-        sources, loc_layers_with_weights, conf_layers_with_weights, device=device, dtype=ttnn.bfloat8_b
+    tt_multibox = TtMultiboxHeads(
+        size=size,
+        num_classes=num_classes,
+        batch_size=batch_size,
+        loc_parameters=loc_parameters,
+        conf_parameters=conf_parameters,
+        vgg_channels=vgg_channels,
+        extra_channels=extra_channels,
+        device=device,
     )
+
+    tt_loc_preds, tt_conf_preds = tt_multibox(sources)
 
     for source_idx in range(len(sources)):
         tt_loc = ttnn.to_torch(tt_loc_preds[source_idx]).float()
@@ -150,11 +105,13 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
         torch_conf = torch_conf_preds[source_idx]
 
         if tt_loc.shape != torch_loc.shape:
+            logger.error(f"Loc shape mismatch! PyTorch: {torch_loc.shape}, TTNN: {tt_loc.shape}")
             min_shape = [min(s1, s2) for s1, s2 in zip(torch_loc.shape, tt_loc.shape)]
             torch_loc = torch_loc[tuple(slice(0, s) for s in min_shape)]
             tt_loc = tt_loc[tuple(slice(0, s) for s in min_shape)]
 
         if tt_conf.shape != torch_conf.shape:
+            logger.error(f"Conf shape mismatch! PyTorch: {torch_conf.shape}, TTNN: {tt_conf.shape}")
             min_shape = [min(s1, s2) for s1, s2 in zip(torch_conf.shape, tt_conf.shape)]
             torch_conf = torch_conf[tuple(slice(0, s) for s in min_shape)]
             tt_conf = tt_conf[tuple(slice(0, s) for s in min_shape)]

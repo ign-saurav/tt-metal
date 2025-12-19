@@ -2,730 +2,245 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-import torch
-from models.tt_cnn.tt.builder import (
-    Conv2dConfiguration,
-    TtConv2d,
-    BlockShardedStrategyConfiguration,
-    AutoShardedStrategyConfiguration,
-    L1FullSliceStrategyConfiguration,
-    WidthSliceStrategyConfiguration,
-)
+from dataclasses import dataclass
+from models.tt_cnn.tt.builder import TtConv2d
+from models.experimental.SSD512.tt.utils import _create_conv_config_from_params
+
+
+@dataclass
+class HeadConfig:
+    in_channels: int
+    out_channels: int
+    kernel_size: int = 3
+    stride: int = 1
+    padding: int = 1
+
+
+class ConvHead:
+    def __init__(
+        self,
+        input_height: int,
+        input_width: int,
+        config: HeadConfig,
+        batch_size: int,
+        parameters: dict,
+        device,
+    ):
+        from models.tt_cnn.tt.builder import AutoShardedStrategyConfiguration, L1FullSliceStrategyConfiguration
+
+        self.config = config
+        self.batch_size = batch_size
+
+        # Multibox heads work with smaller feature maps, so we can use L1 for smaller layers
+        tensor_size_estimate = batch_size * input_height * input_width * config.in_channels
+        use_l1 = input_height <= 64 and input_width <= 64 and tensor_size_estimate <= 2 * 1024 * 1024
+
+        self.memory_config = ttnn.L1_MEMORY_CONFIG if use_l1 else ttnn.DRAM_MEMORY_CONFIG
+
+        sharding_strategy = AutoShardedStrategyConfiguration()
+        slice_strategy = L1FullSliceStrategyConfiguration() if use_l1 else None
+        enable_act_double_buffer = use_l1
+        enable_weights_double_buffer = use_l1
+
+        conv_cfg = _create_conv_config_from_params(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=config.in_channels,
+            out_channels=config.out_channels,
+            batch_size=batch_size,
+            parameters=parameters,
+            device=device,
+            kernel_size=(config.kernel_size, config.kernel_size),
+            stride=(config.stride, config.stride),
+            padding=(config.padding, config.padding),
+            sharding_strategy=sharding_strategy,
+            slice_strategy=slice_strategy,
+            enable_act_double_buffer=enable_act_double_buffer,
+            enable_weights_double_buffer=enable_weights_double_buffer,
+            # config_tensors_in_dram=(not use_l1),
+        )
+        self.conv = TtConv2d(conv_cfg, device)
+
+        self.out_height = (input_height + 2 * config.padding - config.kernel_size) // config.stride + 1
+        self.out_width = (input_width + 2 * config.padding - config.kernel_size) // config.stride + 1
+
+    def __call__(self, x):
+        if hasattr(x, "memory_config") and x.memory_config().buffer_type != self.memory_config.buffer_type:
+            x = ttnn.to_memory_config(x, self.memory_config)
+
+        x = self.conv(x)
+        if x.is_sharded():
+            x = ttnn.sharded_to_interleaved(x, self.memory_config)
+
+        # Explicitly reshape to ensure correct output format [batch, height, width, channels]
+        x = x.reshape([self.batch_size, self.out_height, self.out_width, self.config.out_channels])
+
+        return x
+
+
+class TtMultiboxHeads:
+    def __init__(
+        self,
+        size: int,
+        num_classes: int,
+        batch_size: int,
+        loc_parameters: list,
+        conf_parameters: list,
+        vgg_channels: list,
+        extra_channels: list,
+        device,
+    ):
+        self.size = size
+        self.num_classes = num_classes
+        self.batch_size = batch_size
+        self.device = device
+        self.vgg_channels = vgg_channels
+        self.extra_channels = extra_channels
+        self.loc_parameters = loc_parameters
+        self.conf_parameters = conf_parameters
+
+        self.mbox_cfg = {
+            "300": [4, 6, 6, 6, 4, 4],
+            "512": [4, 6, 6, 6, 4, 4, 4],
+        }[str(size)]
+
+        # Pre-define expected source dimensions for SSD512
+        # Format: (height, width, channels)
+        self.expected_source_dims = [
+            (64, 64, 512),  # Conv4_3 normalized
+            (32, 32, 1024),  # Conv7
+            (16, 16, 512),  # Extra 1
+            (8, 8, 256),  # Extra 2
+            (4, 4, 256),  # Extra 3
+            (2, 2, 256),  # Extra 4
+            (1, 1, 256),  # Extra 5
+        ]
+
+        # Build heads immediately with expected dimensions
+        self.loc_heads = []
+        self.conf_heads = []
+
+        all_channels = vgg_channels + extra_channels
+        for idx in range(len(all_channels)):
+            if idx < len(self.expected_source_dims):
+                input_h, input_w, in_channels = self.expected_source_dims[idx]
+            else:
+                # Fallback for unexpected sources
+                input_h, input_w, in_channels = 1, 1, all_channels[idx]
+
+            num_boxes = self.mbox_cfg[idx] if idx < len(self.mbox_cfg) else self.mbox_cfg[-1]
+
+            loc_out_channels = num_boxes * 4
+            conf_out_channels = num_boxes * self.num_classes
+
+            loc_config = HeadConfig(in_channels, loc_out_channels, 3, 1, 1)
+            loc_head = ConvHead(input_h, input_w, loc_config, self.batch_size, self.loc_parameters[idx], self.device)
+            self.loc_heads.append(loc_head)
+
+            conf_config = HeadConfig(in_channels, conf_out_channels, 3, 1, 1)
+            conf_head = ConvHead(input_h, input_w, conf_config, self.batch_size, self.conf_parameters[idx], self.device)
+            self.conf_heads.append(conf_head)
+
+    def __call__(self, sources):
+        import torch
+
+        # Heads are already built in __init__, no need to rebuild
+        loc_preds = []
+        conf_preds = []
+
+        for idx, source in enumerate(sources):
+            if isinstance(source, torch.Tensor):
+                _, _, input_h, input_w = source.shape
+                tensor_size = source.numel() * 2
+
+                # Use L1 for smaller feature maps, DRAM for larger ones
+                memory_config = (
+                    ttnn.L1_MEMORY_CONFIG
+                    if (input_h <= 64 and input_w <= 64 and tensor_size <= 2 * 1024 * 1024)
+                    else ttnn.DRAM_MEMORY_CONFIG
+                )
+
+                source = source.permute(0, 2, 3, 1)
+                source = ttnn.from_torch(
+                    source,
+                    device=self.device,
+                    dtype=ttnn.bfloat16,
+                    layout=ttnn.TILE_LAYOUT,
+                    memory_config=memory_config,
+                )
+
+            # Use pre-built heads
+            if idx < len(self.loc_heads):
+                loc_pred = self.loc_heads[idx](source)
+                conf_pred = self.conf_heads[idx](source)
+            else:
+                raise IndexError(f"Source index {idx} exceeds number of built heads ({len(self.loc_heads)})")
+
+            loc_preds.append(loc_pred)
+            conf_preds.append(conf_pred)
+
+        return loc_preds, conf_preds
 
 
 def multibox_heads(
-    vgg_source_indices, extra_source_indices, mbox_cfg, num_classes, vgg_channels=None, extra_channels=None
-):
-    """
-    Build multibox location and confidence heads using TTNN operations.
-    """
-    loc_layers_config = []
-    conf_layers_config = []
+    size: int = 512,
+    num_classes: int = 21,
+    batch_size: int = 1,
+    loc_parameters: list = None,
+    conf_parameters: list = None,
+    vgg_channels: list = None,
+    extra_channels: list = None,
+    device=None,
+) -> TtMultiboxHeads:
+    import torch
 
-    total_sources = len(vgg_source_indices) + len(extra_source_indices)
+    if vgg_channels is None:
+        vgg_channels = [512, 1024]
 
-    layer_idx = 0
+    if extra_channels is None:
+        extra_channels = [512, 256, 256, 256, 256, 256] if size == 512 else [512, 256, 256, 256]
 
-    # process VGG source layers
-    for vgg_idx in vgg_source_indices:
-        if vgg_channels is not None:
-            vgg_channel_idx = vgg_source_indices.index(vgg_idx)
-            in_channels = vgg_channels[vgg_channel_idx]
-        else:
-            in_channels = 512 if len(loc_layers_config) == 0 else 1024
+    mbox_cfg = {
+        "300": [4, 6, 6, 6, 4, 4],
+        "512": [4, 6, 6, 6, 4, 4, 4],
+    }[str(size)]
 
-        # bounds check for mbox_cfg
-        if layer_idx >= len(mbox_cfg):
-            num_boxes = mbox_cfg[-1]
-        else:
-            num_boxes = mbox_cfg[layer_idx]
+    total_heads = len(vgg_channels) + len(extra_channels)
 
-        # Location head: predicts 4 coordinates per box
-        loc_out_channels = num_boxes * 4
-        loc_layers_config.append(
-            {
-                "type": "conv",
-                "config": {
-                    "kernel_size": (3, 3),
-                    "stride": (1, 1),
-                    "padding": (1, 1),
-                    "dilation": (1, 1),
-                    "groups": 1,
-                },
-                "in_channels": in_channels,
-                "out_channels": loc_out_channels,
-                "source": "vgg",
-                "source_idx": vgg_idx,
-            }
-        )
+    if loc_parameters is None:
+        loc_parameters = []
+        conf_parameters = []
 
-        # Confidence head: predicts num_classes per box
-        conf_out_channels = num_boxes * num_classes
-        conf_layers_config.append(
-            {
-                "type": "conv",
-                "config": {
-                    "kernel_size": (3, 3),
-                    "stride": (1, 1),
-                    "padding": (1, 1),
-                    "dilation": (1, 1),
-                    "groups": 1,
-                },
-                "in_channels": in_channels,
-                "out_channels": conf_out_channels,
-                "source": "vgg",
-                "source_idx": vgg_idx,
-            }
-        )
+        all_channels = vgg_channels + extra_channels
 
-        layer_idx += 1
+        for idx, in_channels in enumerate(all_channels):
+            num_boxes = mbox_cfg[idx] if idx < len(mbox_cfg) else mbox_cfg[-1]
 
-    for extra_idx_pos, extra_idx in enumerate(extra_source_indices):
-        if extra_channels is not None:
-            if extra_idx_pos < len(extra_channels):
-                in_channels = extra_channels[extra_idx_pos]
-            else:
-                if extra_idx_pos == 0:
-                    in_channels = 512
-                else:
-                    in_channels = 256
-        else:
-            if extra_idx_pos == 0:
-                in_channels = 512
-            else:
-                in_channels = 256
+            loc_out_channels = num_boxes * 4
+            dummy_loc_weight = torch.zeros(loc_out_channels, in_channels, 3, 3)
+            dummy_loc_bias = torch.zeros(loc_out_channels)
+            loc_parameters.append({"weight": dummy_loc_weight, "bias": dummy_loc_bias})
 
-        # Bounds check for mbox_cfg
-        if layer_idx >= len(mbox_cfg):
-            num_boxes = mbox_cfg[-1]
-        else:
-            num_boxes = mbox_cfg[layer_idx]
+            conf_out_channels = num_boxes * num_classes
+            dummy_conf_weight = torch.zeros(conf_out_channels, in_channels, 3, 3)
+            dummy_conf_bias = torch.zeros(conf_out_channels)
+            conf_parameters.append({"weight": dummy_conf_weight, "bias": dummy_conf_bias})
 
-        # Location head
-        loc_out_channels = num_boxes * 4
-        loc_layers_config.append(
-            {
-                "type": "conv",
-                "config": {
-                    "kernel_size": (3, 3),
-                    "stride": (1, 1),
-                    "padding": (1, 1),
-                    "dilation": (1, 1),
-                    "groups": 1,
-                },
-                "in_channels": in_channels,
-                "out_channels": loc_out_channels,
-                "source": "extra",
-                "source_idx": extra_idx,
-            }
-        )
-
-        # Confidence head
-        conf_out_channels = num_boxes * num_classes
-        conf_layers_config.append(
-            {
-                "type": "conv",
-                "config": {
-                    "kernel_size": (3, 3),
-                    "stride": (1, 1),
-                    "padding": (1, 1),
-                    "dilation": (1, 1),
-                    "groups": 1,
-                },
-                "in_channels": in_channels,
-                "out_channels": conf_out_channels,
-                "source": "extra",
-                "source_idx": extra_idx,
-            }
-        )
-
-        layer_idx += 1
-
-    return loc_layers_config, conf_layers_config
-
-
-def apply_multibox_heads(
-    sources, loc_layers_with_weights, conf_layers_with_weights, device=None, dtype=ttnn.bfloat8_b, memory_config=None
-):
-    """
-    Apply multibox heads to source feature maps using TTNN operations.
-    """
-    if memory_config is None:
-        memory_config = ttnn.L1_MEMORY_CONFIG
-
-    loc_preds = []
-    conf_preds = []
-
-    for source_idx, source in enumerate(sources):
-        loc_layer = loc_layers_with_weights[source_idx]
-        conf_layer = conf_layers_with_weights[source_idx]
-
-        loc_pred = apply_multibox_head(
-            source,
-            loc_layer,
-            device=device,
-            dtype=dtype,
-            memory_config=memory_config,
-        )
-        loc_preds.append(loc_pred)
-
-        conf_pred = apply_multibox_head(
-            source,
-            conf_layer,
-            device=device,
-            dtype=dtype,
-            memory_config=memory_config,
-        )
-        conf_preds.append(conf_pred)
-
-    return loc_preds, conf_preds
-
-
-_multibox_weight_device_cache = {}
-
-
-def clear_multibox_weight_cache():
-    """Clear weight cache for fresh PCC tests."""
-    global _multibox_weight_device_cache
-    _multibox_weight_device_cache.clear()
-
-
-def apply_multibox_head(input_tensor, layer_with_weights, device=None, dtype=ttnn.bfloat16, memory_config=None):
-    """Apply a single multibox head (location or confidence) to input tensor."""
-    # Get weight channels first to help determine format
-    weight = layer_with_weights["weight"]
-    if isinstance(weight, ttnn.Tensor):
-        weight_shape = weight.shape
-        if len(weight_shape) >= 2:
-            actual_weight_in_channels = weight_shape[1] if len(weight_shape) == 4 else None
-        else:
-            actual_weight_in_channels = None
-    elif isinstance(weight, torch.Tensor):
-        actual_weight_in_channels = weight.shape[1]
-    else:
-        actual_weight_in_channels = None
-
-    if isinstance(input_tensor, torch.Tensor):
-        batch_size = 1
-        input_height = input_tensor.shape[2]
-        input_width = input_tensor.shape[3]
-        in_channels = input_tensor.shape[1]
-    else:
-        shape = input_tensor.shape
-        batch_size = 1
-
-        # If we have weight channel information, always try both formats explicitly
-        # This is more reliable than trying to guess the format
-        if actual_weight_in_channels is not None:
-            # Try both formats from the original tensor
-            x_original = input_tensor
-
-            # Format 1: Assume it's already NHWC (channels at index 3)
-            x_try1 = x_original
-            if x_try1.layout != ttnn.ROW_MAJOR_LAYOUT:
-                x_try1 = ttnn.to_layout(x_try1, ttnn.ROW_MAJOR_LAYOUT)
-            # No permute - assume already NHWC
-            if x_try1.layout != ttnn.TILE_LAYOUT:
-                x_try1 = ttnn.to_layout(x_try1, ttnn.TILE_LAYOUT)
-            channels_try1 = x_try1.shape[3] if len(x_try1.shape) >= 4 else None
-
-            # Format 2: Assume it's NCHW (channels at index 1, permute to NHWC)
-            x_try2 = x_original
-            if x_try2.layout != ttnn.ROW_MAJOR_LAYOUT:
-                x_try2 = ttnn.to_layout(x_try2, ttnn.ROW_MAJOR_LAYOUT)
-            x_try2 = ttnn.permute(x_try2, (0, 2, 3, 1))  # NCHW -> NHWC
-            if x_try2.layout != ttnn.TILE_LAYOUT:
-                x_try2 = ttnn.to_layout(x_try2, ttnn.TILE_LAYOUT)
-            channels_try2 = x_try2.shape[3] if len(x_try2.shape) >= 4 else None
-
-            # Use whichever format matches the weight channels
-            if channels_try1 == actual_weight_in_channels:
-                x = x_try1
-                in_channels = channels_try1
-                input_height = x.shape[1]
-                input_width = x.shape[2]
-            elif channels_try2 == actual_weight_in_channels:
-                x = x_try2
-                in_channels = channels_try2
-                input_height = x.shape[1]
-                input_width = x.shape[2]
-            else:
-                # Neither format matches - use the one that's closer or default to try1
-                if channels_try1 is not None and channels_try2 is not None:
-                    if abs(channels_try1 - actual_weight_in_channels) <= abs(channels_try2 - actual_weight_in_channels):
-                        x = x_try1
-                        in_channels = channels_try1
-                        input_height = x.shape[1]
-                        input_width = x.shape[2]
-                    else:
-                        x = x_try2
-                        in_channels = channels_try2
-                        input_height = x.shape[1]
-                        input_width = x.shape[2]
-                elif channels_try1 is not None:
-                    x = x_try1
-                    in_channels = channels_try1
-                    input_height = x.shape[1]
-                    input_width = x.shape[2]
-                elif channels_try2 is not None:
-                    x = x_try2
-                    in_channels = channels_try2
-                    input_height = x.shape[1]
-                    input_width = x.shape[2]
-                else:
-                    # Fallback to default format detection
-                    input_height = shape[1]
-                    input_width = shape[2]
-                    in_channels = shape[3]
-                    x = input_tensor
-                    if x.layout != ttnn.TILE_LAYOUT:
-                        if x.layout != ttnn.ROW_MAJOR_LAYOUT:
-                            x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-                        x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-        else:
-            # No weight info - use format detection based on expected channels
-            config = layer_with_weights.get("config", {})
-            expected_in_channels = layer_with_weights.get("in_channels", config.get("in_channels", None))
-
-            input_height_nhwc = shape[1]
-            input_width_nhwc = shape[2]
-            in_channels_nhwc = shape[3]
-
-            in_channels_nchw = shape[1]
-            input_height_nchw = shape[2]
-            input_width_nchw = shape[3]
-
-            # Determine format based on expected channels
-            needs_permute = False
-            if expected_in_channels is not None:
-                if in_channels_nchw == expected_in_channels:
-                    needs_permute = True
-                    input_height = input_height_nchw
-                    input_width = input_width_nchw
-                    in_channels = in_channels_nchw
-                elif in_channels_nhwc == expected_in_channels:
-                    input_height = input_height_nhwc
-                    input_width = input_width_nhwc
-                    in_channels = in_channels_nhwc
-                else:
-                    # Default to NHWC
-                    input_height = input_height_nhwc
-                    input_width = input_width_nhwc
-                    in_channels = in_channels_nhwc
-            else:
-                # Default to NHWC
-                input_height = input_height_nhwc
-                input_width = input_width_nhwc
-                in_channels = in_channels_nhwc
-
-            x = input_tensor
-            if needs_permute:
-                if x.layout != ttnn.ROW_MAJOR_LAYOUT:
-                    x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-                x = ttnn.permute(x, (0, 2, 3, 1))
-
-            if x.layout != ttnn.TILE_LAYOUT:
-                x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-
-    # Use L1 for smaller feature maps (<=128x128), DRAM for larger ones
-    tensor_size_estimate = batch_size * input_height * input_width * in_channels
-    use_l1_for_this_layer = input_height <= 128 and input_width <= 128 and tensor_size_estimate <= 2 * 1024 * 1024
-
-    if memory_config is None:
-        memory_config = ttnn.L1_MEMORY_CONFIG
-
-    if isinstance(input_tensor, torch.Tensor):
-        x_torch = input_tensor.permute(0, 2, 3, 1)
-        x = ttnn.from_torch(
-            x_torch,
-            device=device,
-            dtype=dtype,
-            layout=ttnn.TILE_LAYOUT,
-            memory_config=memory_config,
-        )
-        in_channels = input_tensor.shape[1]
-        input_height = input_tensor.shape[2]
-        input_width = input_tensor.shape[3]
-
-    bias = layer_with_weights.get("bias", None)
-    config = layer_with_weights["config"]
-    out_channels = layer_with_weights["out_channels"]
-
-    expected_in_channels = layer_with_weights.get("in_channels", config.get("in_channels", None))
-
-    kernel_size = config["kernel_size"]
-    stride = config["stride"]
-    padding = config["padding"]
-    dilation = config["dilation"]
-    groups = config["groups"]
-
-    if actual_weight_in_channels is not None and actual_weight_in_channels != in_channels:
-        # Provide detailed error message with tensor shape information
-        if isinstance(input_tensor, torch.Tensor):
-            tensor_shape_str = str(input_tensor.shape)
-        else:
-            tensor_shape_str = str(input_tensor.shape)
-            if hasattr(input_tensor, "layout"):
-                tensor_shape_str += f" (layout: {input_tensor.layout})"
-
-        raise ValueError(
-            f"Input tensor channels ({in_channels}) don't match weight's expected input channels ({actual_weight_in_channels})!\n"
-            f"  Tensor shape: {tensor_shape_str}\n"
-            f"  Expected channels: {expected_in_channels}\n"
-            f"  Weight channels: {actual_weight_in_channels}\n"
-            f"  Detected channels: {in_channels}\n"
-            f"  Input height: {input_height}, width: {input_width}"
-        )
-
-    is_1x1_conv = kernel_size == (1, 1) or (kernel_size[0] == 1 and kernel_size[1] == 1)
-    is_very_small = input_height <= 2 or input_width <= 2
-
-    is_l1_memory = memory_config is not None and memory_config.buffer_type == ttnn.BufferType.L1
-    force_l1_slice = is_very_small or is_1x1_conv
-
-    # Use DRAM slicing only if using DRAM memory config and tensor is large
-    use_dram_slicing = (
-        not force_l1_slice
-        and not is_l1_memory
-        and ((tensor_size_estimate > 1024 * 1024 or input_height > 64 or input_width > 64))
+    return TtMultiboxHeads(
+        size, num_classes, batch_size, loc_parameters, conf_parameters, vgg_channels, extra_channels, device
     )
-
-    cache_key = None
-    used_cache_fallback = False
-    if isinstance(weight, ttnn.Tensor):
-        weight_id = id(weight)
-        input_mem_config = memory_config if memory_config is not None else ttnn.DRAM_MEMORY_CONFIG
-        input_layout = ttnn.TILE_LAYOUT
-        cache_key = (
-            weight_id,
-            in_channels,
-            out_channels,
-            kernel_size,
-            stride,
-            padding,
-            groups,
-            id(input_mem_config) if input_mem_config else None,
-            input_layout,
-            input_height,
-            input_width,
-            batch_size,
-            dtype,
-        )
-
-        if cache_key in _multibox_weight_device_cache:
-            weight_ttnn, bias_ttnn = _multibox_weight_device_cache[cache_key]
-            used_cache_fallback = True
-        else:
-            try:
-                weight_torch = ttnn.to_torch(weight)
-
-                bias_torch = None
-                if bias is not None:
-                    if isinstance(bias, ttnn.Tensor):
-                        bias_torch = ttnn.to_torch(bias).reshape(-1)
-                    elif isinstance(bias, torch.Tensor):
-                        bias_torch = bias.reshape(-1)
-                    else:
-                        raise ValueError("Bias must be either a TTNN tensor or torch tensor")
-
-                weight_ttnn, bias_ttnn = Conv2dConfiguration.convert_torch_weight_and_bias_to_ttnn(
-                    weight_torch, bias_torch
-                )
-                if device is not None:
-                    weight_ttnn = ttnn.to_device(weight_ttnn, device)
-                    if bias_ttnn is not None:
-                        bias_ttnn = ttnn.to_device(bias_ttnn, device)
-
-                try:
-                    weight_host = ttnn.from_torch(
-                        weight_torch, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=None
-                    )
-                    if bias_torch is not None:
-                        bias_host = ttnn.from_torch(
-                            bias_torch.reshape((1, 1, 1, -1)),
-                            dtype=ttnn.float32,
-                            layout=ttnn.ROW_MAJOR_LAYOUT,
-                            device=None,
-                        )
-                    else:
-                        bias_host = None
-
-                    conv_config_for_weights = ttnn.Conv2dConfig(weights_dtype=dtype)
-                    weight_prep = ttnn.prepare_conv_weights(
-                        weight_tensor=weight_host,
-                        weights_format="OIHW",
-                        input_memory_config=input_mem_config,
-                        input_layout=input_layout,
-                        in_channels=in_channels,
-                        out_channels=out_channels,
-                        batch_size=batch_size,
-                        input_height=input_height,
-                        input_width=input_width,
-                        kernel_size=kernel_size,
-                        stride=stride,
-                        padding=padding,
-                        dilation=dilation,
-                        has_bias=bias is not None,
-                        groups=groups,
-                        device=device,
-                        input_dtype=dtype,
-                        output_dtype=dtype,
-                        conv_config=conv_config_for_weights,
-                        compute_config=None,
-                    )
-
-                    if bias_host is not None:
-                        conv_config_for_bias = ttnn.Conv2dConfig(weights_dtype=dtype)
-                        bias_prep = ttnn.prepare_conv_bias(
-                            bias_tensor=bias_host,
-                            input_memory_config=input_mem_config,
-                            input_layout=input_layout,
-                            in_channels=in_channels,
-                            out_channels=out_channels,
-                            batch_size=batch_size,
-                            input_height=input_height,
-                            input_width=input_width,
-                            kernel_size=kernel_size,
-                            stride=stride,
-                            padding=padding,
-                            dilation=dilation,
-                            groups=groups,
-                            device=device,
-                            input_dtype=dtype,
-                            output_dtype=dtype,
-                            conv_config=conv_config_for_bias,
-                            compute_config=None,
-                        )
-                    else:
-                        bias_prep = None
-
-                    _multibox_weight_device_cache[cache_key] = (weight_prep, bias_prep)
-                except (RuntimeError, ValueError):
-                    pass
-            except RuntimeError as e:
-                error_msg = str(e) if e else ""
-                if (
-                    "trace" in error_msg.lower()
-                    or "Reads are not supported" in error_msg
-                    or "Writes are not supported" in error_msg
-                ):
-                    if cache_key in _multibox_weight_device_cache:
-                        weight_ttnn, bias_ttnn = _multibox_weight_device_cache[cache_key]
-                        used_cache_fallback = True
-                    else:
-                        raise RuntimeError(
-                            f"Weight cache not populated during warmup. Original error: {error_msg}"
-                        ) from e
-                else:
-                    raise
-
-    else:
-        if isinstance(weight, torch.Tensor):
-            weight_torch = weight
-        else:
-            raise ValueError("Weight must be either a TTNN tensor or torch tensor")
-
-        bias_torch = None
-        if bias is not None:
-            if isinstance(bias, torch.Tensor):
-                bias_torch = bias
-            else:
-                raise ValueError("Bias must be either a TTNN tensor or torch tensor")
-
-        weight_ttnn, bias_ttnn = Conv2dConfiguration.convert_torch_weight_and_bias_to_ttnn(weight_torch, bias_torch)
-
-    if use_dram_slicing and x.layout != ttnn.ROW_MAJOR_LAYOUT:
-        x = ttnn.to_memory_config(x, ttnn.L1_MEMORY_CONFIG)
-        x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-    if device is not None:
-        x = ttnn.to_device(x, device, memory_config=memory_config)
-
-    estimated_memory_bytes = input_height * input_width * in_channels * 2
-
-    if use_dram_slicing:
-        slice_count = max(1, (batch_size * input_height * input_width) // (1024))
-        slice_count = min(slice_count, 64)
-        slice_strategy = WidthSliceStrategyConfiguration(num_slices=slice_count)
-        sharding_strategy = AutoShardedStrategyConfiguration()
-        enable_act_double_buffer = False
-        deallocate_activation = False
-    elif use_l1_for_this_layer and not use_dram_slicing and estimated_memory_bytes < 1024 * 1024:
-        if in_channels > 256 or out_channels > 512:
-            sharding_strategy = AutoShardedStrategyConfiguration()
-            slice_strategy = None
-            enable_act_double_buffer = False
-            deallocate_activation = False
-        elif input_height <= 32:
-            act_block_h = 32
-            enable_act_double_buffer = True
-            sharding_strategy = BlockShardedStrategyConfiguration(
-                act_block_h_override=act_block_h,
-                act_block_w_div=1,
-                reshard_if_not_optimal=True,
-            )
-            slice_strategy = L1FullSliceStrategyConfiguration()
-            deallocate_activation = False
-        else:
-            if in_channels <= 128 and out_channels <= 256:
-                act_block_h = 32
-                enable_act_double_buffer = False
-                sharding_strategy = BlockShardedStrategyConfiguration(
-                    act_block_h_override=act_block_h,
-                    act_block_w_div=1,
-                    reshard_if_not_optimal=True,
-                )
-                slice_strategy = L1FullSliceStrategyConfiguration()
-                deallocate_activation = False
-            else:
-                sharding_strategy = AutoShardedStrategyConfiguration()
-                slice_strategy = None
-                enable_act_double_buffer = False
-                deallocate_activation = False
-    else:
-        sharding_strategy = AutoShardedStrategyConfiguration()
-        slice_strategy = None
-        enable_act_double_buffer = False
-        deallocate_activation = False
-
-    if used_cache_fallback:
-        cached_weight, cached_bias = _multibox_weight_device_cache[cache_key]
-        dummy_weight_shape = (out_channels, in_channels // groups, kernel_size[0], kernel_size[1])
-        dummy_weight = ttnn.zeros(dummy_weight_shape, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=None)
-        dummy_bias = None
-        if cached_bias is not None:
-            dummy_bias = ttnn.zeros(
-                (1, 1, 1, out_channels), dtype=ttnn.float32, layout=ttnn.ROW_MAJOR_LAYOUT, device=None
-            )
-
-        conv_config = Conv2dConfiguration(
-            input_height=input_height,
-            input_width=input_width,
-            in_channels=in_channels,
-            out_channels=out_channels,
-            batch_size=batch_size,
-            kernel_size=kernel_size,
-            weight=dummy_weight,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            groups=groups,
-            bias=dummy_bias,
-            activation_dtype=dtype,
-            weights_dtype=dtype,
-            output_dtype=dtype,
-            sharding_strategy=sharding_strategy,
-            slice_strategy=slice_strategy,
-            math_fidelity=ttnn.MathFidelity.HiFi4,
-            fp32_dest_acc_en=True,
-            packer_l1_acc=False,
-            enable_act_double_buffer=enable_act_double_buffer,
-            enable_weights_double_buffer=False,
-            deallocate_activation=deallocate_activation,
-            reallocate_halo_output=True,
-            config_tensors_in_dram=not use_l1_for_this_layer,
-        )
-        object.__setattr__(conv_config, "weight", cached_weight)
-        if cached_bias is not None:
-            object.__setattr__(conv_config, "bias", cached_bias)
-    else:
-        conv_config = Conv2dConfiguration(
-            input_height=input_height,
-            input_width=input_width,
-            in_channels=in_channels,
-            out_channels=out_channels,
-            batch_size=batch_size,
-            kernel_size=kernel_size,
-            weight=weight_ttnn,
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            groups=groups,
-            bias=bias_ttnn,
-            activation_dtype=dtype,
-            weights_dtype=dtype,
-            output_dtype=dtype,
-            sharding_strategy=sharding_strategy,
-            slice_strategy=slice_strategy,
-            math_fidelity=ttnn.MathFidelity.HiFi4,
-            fp32_dest_acc_en=True,
-            packer_l1_acc=False,
-            enable_act_double_buffer=enable_act_double_buffer,
-            enable_weights_double_buffer=False,
-            deallocate_activation=deallocate_activation,
-            reallocate_halo_output=True,
-            config_tensors_in_dram=not use_l1_for_this_layer,
-        )
-
-    conv_layer = TtConv2d(conv_config, device)
-    output_tensor = conv_layer(x)
-
-    if output_tensor.is_sharded():
-        output_tensor = ttnn.sharded_to_interleaved(output_tensor, memory_config)
-
-    padding_h, padding_w = padding
-    dilation_h, dilation_w = dilation
-    stride_h, stride_w = stride
-    kernel_h, kernel_w = kernel_size
-
-    output_height = (input_height + 2 * padding_h - dilation_h * (kernel_h - 1) - 1) // stride_h + 1
-    output_width = (input_width + 2 * padding_w - dilation_w * (kernel_w - 1) - 1) // stride_w + 1
-
-    x = output_tensor.reshape([batch_size, output_height, output_width, out_channels])
-
-    return x
-
-
-# configuration dictionaries matching torch_reference_ssd.py
-mbox = {
-    "512": [4, 6, 6, 6, 4, 4, 4],
-}
 
 
 def build_multibox_heads(
-    size=512,
-    num_classes=21,
-    vgg_channels=None,
-    extra_channels=None,
-    vgg_source_indices=None,
-    extra_source_indices=None,
+    size: int = 512,
+    num_classes: int = 21,
+    batch_size: int = 1,
+    loc_parameters: list = None,
+    conf_parameters: list = None,
+    vgg_channels: list = None,
+    extra_channels: list = None,
     device=None,
-):
-    """
-    Build multibox heads for specified input size.
-    """
-    if size not in [300, 512]:
-        raise ValueError(f"Size must be 512, got {size}")
-
-    cfg = mbox[str(size)]
-
-    if vgg_source_indices is None:
-        vgg_source_indices = [21, -2]
-
-    # Extras source indices: every other layer starting from index 1
-    # For SSD512: indices 1, 3, 5, 7, 9, 11 (6 layers)
-    if extra_source_indices is None:
-        if size == 300:
-            extra_source_indices = [1, 3, 5, 7]
-        else:  # size == 512
-            extra_source_indices = [1, 3, 5, 7, 9, 11]
-
-    # Default channel counts if not provided
-    if vgg_channels is None:
-        vgg_channels = [512, 1024]  # Conv4_3, Conv7
-
-    if extra_channels is None:
-        if size == 300:
-            extra_channels = [512, 256, 256, 256]
-        else:  # size == 512
-            extra_channels = [512, 256, 256, 256, 256, 256]
-
-    loc_layers_config, conf_layers_config = multibox_heads(
-        vgg_source_indices=vgg_source_indices,
-        extra_source_indices=extra_source_indices,
-        mbox_cfg=cfg,
-        num_classes=num_classes,
-        vgg_channels=vgg_channels,
-        extra_channels=extra_channels,
+) -> TtMultiboxHeads:
+    return multibox_heads(
+        size, num_classes, batch_size, loc_parameters, conf_parameters, vgg_channels, extra_channels, device
     )
-
-    return loc_layers_config, conf_layers_config

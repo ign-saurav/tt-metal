@@ -26,9 +26,22 @@ class ConvBlock:
         parameters: dict,
         device,
     ):
+        from models.tt_cnn.tt.builder import AutoShardedStrategyConfiguration, WidthSliceStrategyConfiguration
+
         self.config = config
         self.out_height = (input_height + 2 * config.padding - config.kernel_size) // config.stride + 1
         self.out_width = (input_width + 2 * config.padding - config.kernel_size) // config.stride + 1
+
+        tensor_size_estimate = batch_size * input_height * input_width * config.in_channels
+        use_l1 = input_height <= 64 and input_width <= 64 and tensor_size_estimate <= 2 * 1024 * 1024
+        self.memory_config = ttnn.L1_MEMORY_CONFIG if use_l1 else ttnn.DRAM_MEMORY_CONFIG
+
+        # For large DRAM operations, use WidthSliceStrategy
+        if not use_l1 and input_height >= 128:
+            num_slices = max(2, min(8, (batch_size * input_height * input_width) // (64 * 64)))
+            slice_strategy = WidthSliceStrategyConfiguration(num_slices=num_slices)
+        else:
+            slice_strategy = None
 
         conv_cfg = _create_conv_config_from_params(
             input_height=input_height,
@@ -41,13 +54,21 @@ class ConvBlock:
             kernel_size=(config.kernel_size, config.kernel_size),
             stride=(config.stride, config.stride),
             padding=(config.padding, config.padding),
+            sharding_strategy=AutoShardedStrategyConfiguration(),
+            slice_strategy=slice_strategy,
+            enable_act_double_buffer=False,
+            enable_weights_double_buffer=False,
+            # config_tensors_in_dram=True,
         )
         self.conv = TtConv2d(conv_cfg, device)
 
     def __call__(self, x):
+        if hasattr(x, "memory_config") and x.memory_config().buffer_type != self.memory_config.buffer_type:
+            x = ttnn.to_memory_config(x, self.memory_config)
+
         x = self.conv(x)
         if x.is_sharded():
-            x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
+            x = ttnn.sharded_to_interleaved(x, self.memory_config)
         x = ttnn.relu(x)
         return x, self.out_height, self.out_width
 
@@ -85,10 +106,10 @@ class TtExtrasBackbone:
 
         self.cfg = extras_cfg[str(size)]
         self.parameters = parameters
-        self.blocks = None
-        self.dimensions = None
         self.input_height = None
         self.input_width = None
+        self.blocks = None
+        self.dimensions = None
 
     def _build_blocks(self, cfg, input_channels, input_height, input_width, parameters):
         blocks = []
@@ -180,7 +201,7 @@ class TtExtrasBackbone:
                 device=self.device,
                 dtype=ttnn.bfloat16,
                 layout=ttnn.TILE_LAYOUT,
-                memory_config=ttnn.L1_MEMORY_CONFIG,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
         else:
             if self.blocks is None:

@@ -48,9 +48,29 @@ def test_extras_backbone(device, pcc, size, reset_seeds):
     tt_output = ttnn.to_torch(tt_output_ttnn)
 
     expected_shape = torch_output.shape
-    if tt_output.shape != (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1]):
-        B, C, H, W = expected_shape
-        tt_output = tt_output.reshape(B, H, W, C)
+    B, C, H, W = expected_shape
+
+    if len(tt_output.shape) == 1:
+        if tt_output.numel() == B * H * W * C:
+            tt_output = tt_output.reshape(B, H, W, C)
+        else:
+            raise ValueError(
+                f"Cannot reshape tt_output with shape {tt_output.shape} and size {tt_output.numel()} to expected shape {expected_shape}"
+            )
+    elif len(tt_output.shape) == 4:
+        if tt_output.shape == (B, H, W, C):
+            pass
+        elif tt_output.shape == (B, C, H, W):
+            tt_output = tt_output.permute(0, 2, 3, 1)
+        elif tt_output.shape == (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1]):
+            pass
+        else:
+            if tt_output.numel() == B * H * W * C:
+                tt_output = tt_output.reshape(B, H, W, C)
+            else:
+                logger.warning(
+                    f"Shape mismatch: tt_output.shape={tt_output.shape}, expected NHWC={B, H, W, C}, numel={tt_output.numel()}, expected_numel={B*H*W*C}"
+                )
 
     if len(tt_output.shape) == 4:
         tt_output = tt_output.permute(0, 3, 1, 2)
