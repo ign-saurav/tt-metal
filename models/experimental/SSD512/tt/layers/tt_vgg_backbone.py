@@ -16,7 +16,6 @@ from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
     MaxPool2dConfiguration,
     AutoShardedStrategyConfiguration,
-    L1FullSliceStrategyConfiguration,
     BlockShardedStrategyConfiguration,
     HeightShardedStrategyConfiguration,
 )
@@ -24,7 +23,7 @@ from models.experimental.SSD512.tt.utils import Conv2dNormActivation, Maxpool2DO
 
 
 @dataclass
-class TtVGGBackbone:
+class VGGBackboneOptimizationConfig:
     """
     Dataclass to store per-convolution-layer optimization configurations.
 
@@ -34,7 +33,11 @@ class TtVGGBackbone:
     and buffer management for each layer.
 
     Attributes:
-        conv1-conv19: Dictionary of optimization parameters for each convolution layer
+        conv1-conv15: Dictionary of optimization parameters for each convolution layer.
+                     Each dictionary can contain:
+                     - sharding_strategy: Sharding strategy configuration
+                     - deallocate_activation: Whether to free activation memory after use
+                     - Other Conv2dConfiguration override parameters
     """
 
     conv1: dict
@@ -52,172 +55,116 @@ class TtVGGBackbone:
     conv13: dict
     conv14: dict
     conv15: dict
-    conv16: dict
-    conv17: dict
-    conv18: dict
-    conv19: dict
 
 
-# Per-layer optimization configurations for VGG backbone
+# ============================================================================
+# Per-Layer Optimization Configurations
+# ============================================================================
+
+# Per-layer optimization configurations for VGG backbone.
 # These settings control memory layout, sharding strategy, and buffer management
-# to optimize performance and memory usage for each specific layer
-vgg_backbone_optimisations = TtVGGBackbone(
-    # conv1: First convolution layer (typically 3->64 channels)
+# to optimize performance and memory usage for each specific layer.
+#
+# Configuration patterns:
+# - Early layers (conv1-conv2): Height sharding for large spatial dimensions
+# - Middle layers (conv3-conv10): Block sharding or auto sharding
+# - Late layers (conv11-conv12): Auto sharding for dilated/1x1 convolutions
+# - Extended layers (conv13-conv15): Auto sharding for additional backbone layers
+vgg_backbone_optimizations = VGGBackboneOptimizationConfig(
+    # conv1: First convolution layer (3->64 channels, large spatial dimensions)
+    # Uses height sharding with large block height for efficient memory usage
     conv1={
         "sharding_strategy": HeightShardedStrategyConfiguration(act_block_h_override=15 * 32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,  # Enable double buffering for activations
-        "enable_weights_double_buffer": True,  # Enable double buffering for weights
-        "deallocate_activation": True,  # Free activation memory after use
-        "reallocate_halo_output": True,  # Reallocate halo regions for sharded operations
+        "deallocate_activation": True,
     },
-    # conv2: Second convolution layer
+    # conv2: Second convolution layer (64->64 channels)
+    # Uses height sharding with re-sharding optimization enabled
     conv2={
         "sharding_strategy": HeightShardedStrategyConfiguration(reshard_if_not_optimal=True, act_block_h_override=32),
-        "enable_act_double_buffer": False,
-        "enable_weights_double_buffer": False,
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
-    # conv3-conv10: Middle convolution layers (typically 64->128->256->512 channels)
+    # conv3: Third convolution layer (64->128 channels)
+    # Uses block sharding with large block height for initial feature extraction
     conv3={
         "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=15 * 32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
+    # conv4: Fourth convolution layer (128->128 channels)
+    # Uses auto sharding to let TTNN choose optimal strategy
     conv4={
-        "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
+        "sharding_strategy": AutoShardedStrategyConfiguration(),
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
+    # conv5: Fifth convolution layer (128->256 channels)
+    # Uses block sharding for consistent memory layout
     conv5={
         "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
+    # conv6: Sixth convolution layer (256->256 channels)
+    # Uses auto sharding for flexibility
     conv6={
-        "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
+        "sharding_strategy": AutoShardedStrategyConfiguration(),
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
+    # conv7: Seventh convolution layer (256->256 channels)
+    # Uses auto sharding for flexibility
     conv7={
-        "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
+        "sharding_strategy": AutoShardedStrategyConfiguration(),
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
+    # conv8: Eighth convolution layer (256->512 channels)
+    # Uses block sharding for consistent memory layout
     conv8={
         "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
+    # conv9: Ninth convolution layer (512->512 channels)
+    # Uses block sharding for consistent memory layout
     conv9={
         "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
+    # conv10: Tenth convolution layer (512->512 channels)
+    # Uses auto sharding for flexibility
     conv10={
-        "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
+        "sharding_strategy": AutoShardedStrategyConfiguration(),
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
-    # conv11: Typically the dilated convolution (512->1024 channels)
+    # conv11: Dilated convolution layer (512->1024 channels)
+    # Uses auto sharding to handle dilated convolution efficiently
     conv11={
-        "sharding_strategy": AutoShardedStrategyConfiguration(),  # Let TTNN choose optimal sharding
-        "enable_act_double_buffer": False,
-        "enable_weights_double_buffer": False,
+        "sharding_strategy": AutoShardedStrategyConfiguration(),
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
-    # conv12: Final 1x1 convolution (1024->1024 channels)
+    # conv12: Final 1x1 convolution layer (1024->1024 channels)
+    # Uses block sharding with re-sharding optimization for 1x1 convolutions
     conv12={
         "sharding_strategy": BlockShardedStrategyConfiguration(reshard_if_not_optimal=True, act_block_h_override=32),
-        "enable_act_double_buffer": False,
-        "enable_weights_double_buffer": False,
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
-    # conv13-conv19: Additional layers for extended VGG backbone
+    # conv13: Extended backbone layer (1024->256 channels)
+    # Uses auto sharding for additional backbone layers
     conv13={
-        "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
+        "sharding_strategy": AutoShardedStrategyConfiguration(),
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
+    # conv14: Extended backbone layer (256->512 channels)
+    # Uses auto sharding for additional backbone layers
     conv14={
-        "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
+        "sharding_strategy": AutoShardedStrategyConfiguration(),
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
+    # conv15: Extended backbone layer (512->512 channels)
+    # Uses auto sharding for additional backbone layers
     conv15={
-        "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
+        "sharding_strategy": AutoShardedStrategyConfiguration(),
         "deallocate_activation": True,
-        "reallocate_halo_output": True,
-    },
-    conv16={
-        "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
-        "deallocate_activation": True,
-        "reallocate_halo_output": True,
-    },
-    conv17={
-        "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
-        "deallocate_activation": True,
-        "reallocate_halo_output": True,
-    },
-    conv18={
-        "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
-        "deallocate_activation": True,
-        "reallocate_halo_output": True,
-    },
-    conv19={
-        "sharding_strategy": BlockShardedStrategyConfiguration(act_block_h_override=32),
-        "slice_strategy": L1FullSliceStrategyConfiguration(),
-        "enable_act_double_buffer": True,
-        "enable_weights_double_buffer": True,
-        "deallocate_activation": True,
-        "reallocate_halo_output": True,
     },
 )
+
+# Backward compatibility alias
+vgg_backbone_optimisations = vgg_backbone_optimizations
 
 
 def override_conv_config(config, override_dict):
@@ -282,10 +229,10 @@ class TtVGGBackbone:
         # Process each layer configuration and build the network
         for i, conv_config in enumerate(conv_config_layer):
             if isinstance(conv_config, Conv2dConfiguration):
-                # Apply per-layer optimizations from vgg_backbone_optimisations
+                # Apply per-layer optimizations from vgg_backbone_optimizations
                 # Layer indices are 1-based (conv1, conv2, etc.)
-                optimisation_key = f"conv{i+1}"
-                override_dict = getattr(vgg_backbone_optimisations, optimisation_key, {})
+                optimization_key = f"conv{i+1}"
+                override_dict = getattr(vgg_backbone_optimizations, optimization_key, {})
 
                 # Create new config with optimizations applied
                 updated_config = override_conv_config(conv_config, override_dict)
