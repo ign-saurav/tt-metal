@@ -11,24 +11,21 @@ from models.experimental.SSD512.tt.layers.tt_multibox_heads import TtMultiBoxHEA
 from models.experimental.SSD512.tt.layers.tt_l2norm import TtL2Norm
 import ttnn
 
-sources_shape = [
-    (1, 512, 64, 64),
-    (1, 1024, 32, 32),
-    (1, 512, 16, 16),
-    (1, 256, 8, 8),
-    (1, 256, 4, 4),
-    (1, 256, 2, 2),
-    (1, 256, 1, 1),
-]
-
 
 class TtSSD:
     # Initializes SSD512 model with VGG backbone, extras network, and multi-box detection heads
     def __init__(self, torch_model, torch_input, device, batch_size: int):
         self.batch_size = batch_size
         self.device = device
-        self.tt_loc_preds = []
-        self.tt_conf_preds = []
+        sources_shape = [
+            (1, 512, 64, 64),
+            (1, 1024, 32, 32),
+            (1, 512, 16, 16),
+            (1, 256, 8, 8),
+            (1, 256, 4, 4),
+            (1, 256, 2, 2),
+            (1, 256, 1, 1),
+        ]
 
         vgg_backbone_config_layers, vgg_torch_output = create_config_layers(
             torch_model=torch_model.base, torch_input=torch_input, return_output_tensor=True
@@ -84,6 +81,7 @@ class TtSSD:
     # Forward pass: extracts multi-scale features and generates location/confidence predictions
     def __call__(self, device, input):
         tt_vgg_out, vgg_sources = self.tt_vgg_backbone(device, input, return_residual_sources=True)
+        tt_loc_preds, tt_conf_preds = [], []
 
         # Reshape and normalize first VGG source for L2Norm
         input_tensor = post_conv_reshape(vgg_sources[0], out_height=64, out_width=64)
@@ -99,7 +97,7 @@ class TtSSD:
         for source, loc_layer, conf_layer in zip(tt_sources, self.loc_kernel_layers, self.conf_kernel_layers):
             loc_pred = loc_layer(device, source)
             conf_pred = conf_layer(device, source)
-            self.tt_loc_preds.append(loc_pred)
-            self.tt_conf_preds.append(conf_pred)
+            tt_loc_preds.append(loc_pred)
+            tt_conf_preds.append(conf_pred)
 
-        return self.tt_loc_preds, self.tt_conf_preds
+        return tt_loc_preds, tt_conf_preds

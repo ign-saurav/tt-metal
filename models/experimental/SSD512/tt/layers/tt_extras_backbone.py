@@ -9,7 +9,6 @@ class TtExtrasBackbone:
     def __init__(self, conv_config_layer, device, batch_size: int):
         self.batch_size = batch_size
         self.device = device
-        self.residual_sources = []
 
         layers = []
         for conv_config in conv_config_layer:
@@ -24,6 +23,7 @@ class TtExtrasBackbone:
         self.block = layers
 
     def __call__(self, device, input, return_residual_sources=False):
+        residual_sources = []
         for i, layer in enumerate(self.block):
             if i == 0:
                 result = layer(device, input)
@@ -31,8 +31,8 @@ class TtExtrasBackbone:
                 result = layer(device, result)
 
             if i % 2 == 1:
-                self.residual_sources.append(result)
+                residual_sources.append(result)
 
         if return_residual_sources:
-            return result, self.residual_sources
+            return result, residual_sources
         return result
