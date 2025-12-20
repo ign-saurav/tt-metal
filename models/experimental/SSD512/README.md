@@ -29,84 +29,80 @@ models/
         │   └── sample_output/
         ├── reference/
         │   ├── ssd.py                    # TorchSSD (reference)
-        │   ├── data/
-        │   │   ├── voc0712.py
-        │   │   ├── config.py
-        │   │   └── scripts/
-        │   └── layers/
-        │       ├── box_utils.py
-        │       ├── functions/
-        │       │   ├── detection.py
-        │       │   └── prior_box.py
-        │       └── modules/
-        │           ├── l2norm.py
-        │           └── multibox_loss.py
+        │   ├── voc0712.py
+        │   ├── config.py
+        │   ├── box_utils.py
+        │   ├── detection.py
+        │   ├── prior_box.py
+        │   ├── l2norm.py
+        │   └── multibox_loss.py
         ├── tt/
-        │   ├── tt_ssd.py                 # SSD512Network (TTNN)
-        │   └── layers/
-        │       ├── detect.py
-        │       ├── tt_vgg_backbone.py
-        │       ├── tt_extras_backbone.py
-        │       ├── tt_l2norm.py
-        │       ├── tt_multibox_heads.py
-        │       └── functions/
-        │           └── prior_box.py
+        │   ├── tt_ssd.py                 # TtSSD (TTNN)
+        │   ├── tt_vgg_backbone.py
+        │   ├── tt_extras_backbone.py
+        │   ├── tt_l2norm.py
+        │   ├── tt_multibox_heads.py
+        │   ├── tt_detect.py
+        │   └── utils.py
         ├── demo/
-        │   └── demo.py                   # CLI demo
+        │   ├── demo.py                   # CLI demo
+        │   └── processing.py             # Pre/post-processing and visualization
         ├── tests/
         │   ├── pcc/
-        │   │   ├── test_ssd.py           # end-to-end pytest
+        │   │   ├── test_ssd512.py        # end-to-end pytest
         │   │   ├── test_vgg_backbone.py
         │   │   ├── test_extras_backbone.py
-        │   │   ├── test_l2norm.py
         │   │   └── test_multibox_heads.py
-        │   ├── perf/
-        │       └── test_device_perf_ssd.py
+        │   └── perf/
+        │       ├── test_ssd512_e2e_perf.py
+        │       └── performant_infra.py   # SSD512PerformantTestInfra class
+        ├── common.py                     # Common utilities and constants
         └── README.md
 ```
 
 ## Details
 
-- The entry point to the TTNN SSD512 model is `SSD512Network` in `models/experimental/SSD512/tt/tt_ssd.py`. The model uses random weights from the PyTorch reference implementation.
+- The entry point to the TTNN SSD512 model is `TtSSD` in `models/experimental/SSD512/tt/tt_ssd.py`. The model uses random weights from the PyTorch reference implementation.
+- Common utilities and constants are defined in `common.py`.
+- Performance test infrastructure is encapsulated in `SSD512PerformantTestInfra` class in `tests/perf/performant_infra.py`.
 
 ## How to Run
 
 ### Run the Full Model Test
 ```bash
 # From tt-metal root directory
-pytest models/experimental/SSD512/tests/pcc/test_ssd.py
+pytest models/experimental/SSD512/tests/pcc/test_ssd512.py
 ```
 
 ### Performance
 ### Single Device (BS=1):
-- end-2-end perf is `49.9` FPS
+- Expected throughput: `66.5` FPS
 
 ### Run Device Performance Test
 ```bash
 # Test full model performance
-pytest models/experimental/SSD512/tests/perf/test_device_perf_ssd.py
+pytest models/experimental/SSD512/tests/perf/test_ssd512_e2e_perf.py
 ```
 
 ### Run the Demo
 ```bash
-# Process images from a directory
-python models/experimental/SSD512/demo/demo.py --input_dir <input_dir> --output_dir <output_dir>
+# Process a single image
+python models/experimental/SSD512/demo/demo.py --input_image <path_to_image>
 
-# With custom detection parameters
-python models/experimental/SSD512/demo/demo.py --input_dir <input_dir> --output_dir <output_dir> --conf_thresh 0.3 --max_detections 5
+# With custom output path and detection parameters
+python models/experimental/SSD512/demo/demo.py --input_image <path_to_image> --output_path <output_path> --conf_thresh 0.3 --max_detections 5
 ```
 
-For help with demo options:
+Example:
 ```bash
-python models/experimental/SSD512/demo/demo.py --help
+python models/experimental/SSD512/demo/demo.py --input_image models/experimental/SSD512/resources/sample_input/000007.jpg
 ```
-Note: Currently, the input image directory path for the demo: models/experimental/SSD512/resources/sample_input/
 
 ### Demo Output Files
 
 The demo generates output files for each processed image:
-- `{image_name}_ttnn.jpg`: TTNN detection results with bounding boxes and labels
-Note: Default directory path for output image: models/experimental/SSD512/resources/sample_output/
+- `{image_name}_ttnn.jpg`: TTNN detection results with bounding boxes and labels (default output name if `--output_path` is not specified)
+- Output is saved to the same directory as the input image by default, or to the path specified by `--output_path`
 
 ## Configuration Notes
 - Resolution: (H, W) = (512, 512) is supported end-to-end.

@@ -8,10 +8,7 @@ import pytest
 import ttnn
 from loguru import logger
 
-# from models.experimental.SSD512.common import SSD512_L1_SMALL_SIZE
-# from models.experimental.SSD512.reference.ssd import vgg
-# from models.experimental.SSD512.tt.layers.tt_vgg_backbone import build_vgg_backbone, apply_vgg_backbone
-from models.experimental.SSD512.tt.layers.tt_vgg_backbone import TtVGGBackbone
+from models.experimental.SSD512.tt.tt_vgg_backbone import TtVGGBackbone
 from models.common.utility_functions import comp_pcc
 from tests.ttnn.utils_for_testing import assert_with_pcc
 

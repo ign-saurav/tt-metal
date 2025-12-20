@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from models.experimental.SSD512.tt.utils import create_config_layers, post_conv_reshape
-from models.experimental.SSD512.tt.layers.tt_extras_backbone import TtExtrasBackbone
-from models.experimental.SSD512.tt.layers.tt_vgg_backbone import TtVGGBackbone
+from models.experimental.SSD512.tt.tt_extras_backbone import TtExtrasBackbone
+from models.experimental.SSD512.tt.tt_vgg_backbone import TtVGGBackbone
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
 )
-from models.experimental.SSD512.tt.layers.tt_multibox_heads import TtMultiBoxHEAD
-from models.experimental.SSD512.tt.layers.tt_l2norm import TtL2Norm
+from models.experimental.SSD512.tt.tt_multibox_heads import TtMultiBoxHEAD
+from models.experimental.SSD512.tt.tt_l2norm import TtL2Norm
 import ttnn
 
 

@@ -12,7 +12,7 @@ from models.experimental.SSD512.reference.ssd import add_extras, extras
 from models.common.utility_functions import comp_pcc
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from models.experimental.SSD512.tt.utils import create_config_layers
-from models.experimental.SSD512.tt.layers.tt_extras_backbone import TtExtrasBackbone
+from models.experimental.SSD512.tt.tt_extras_backbone import TtExtrasBackbone
 
 
 # Tests extras backbone
@@ -39,7 +39,6 @@ def test_extras_backbone(device, pcc, size, reset_seeds):
             x = torch.nn.functional.relu(layer(x), inplace=True)
         torch_output = x
 
-    conv_config_layers = []
     conv_config_layers = create_config_layers(torch_model, torch_input=torch_input)
     tt_extras = TtExtrasBackbone(
         conv_config_layer=conv_config_layers,

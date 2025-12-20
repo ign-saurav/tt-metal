@@ -14,7 +14,7 @@ from tests.ttnn.utils_for_testing import assert_with_pcc
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
 )
-from models.experimental.SSD512.tt.layers.tt_multibox_heads import TtMultiBoxHEAD
+from models.experimental.SSD512.tt.tt_multibox_heads import TtMultiBoxHEAD
 from models.experimental.SSD512.reference.ssd import add_extras, extras
 from models.experimental.SSD512.common import SSD512_NUM_CLASSES
 
