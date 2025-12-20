@@ -14,16 +14,10 @@ from models.tt_cnn.tt.builder import (
 from models.tt_cnn.tt.builder import TtConv2d, TtMaxPool2d
 import torch.nn as nn
 
-# conv_config = {
-#     "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
-#     "WEIGHTS_DTYPE": ttnn.bfloat16,
-#     "ACTIVATIONS_DTYPE": ttnn.bfloat16,
-# }
-# conv_config_optmised = {
-#     "math_fidelity": ttnn.MathFidelity.LoFi,
-#     "weights_dtype": ttnn.bfloat8_b,
-#     "activation_dtype": ttnn.bfloat8_b,
-# }
+SSD512_L1_SMALL_SIZE = 98304
+SSD512_NUM_CLASSES = 21
+
+
 conv_config_optmised = {
     "weights_dtype": ttnn.bfloat8_b,
     "output_dtype": ttnn.bfloat8_b,
@@ -31,37 +25,17 @@ conv_config_optmised = {
     "math_fidelity": ttnn.MathFidelity.LoFi,
     "sharding_strategy": AutoShardedStrategyConfiguration(),
     "slice_strategy": L1FullSliceStrategyConfiguration(),
-    # "slice_strategy": WidthSliceStrategyConfiguration(num_slices=4),
-    # # "math_fidelity": ttnn.MathFidelity.LoFi,
-    # # "fp32_dest_acc_en": True,
-    # # "packer_l1_acc": False,
-    # # "deallocate_activation": True,
-    # # "enable_act_double_buffer": True,
-    # # "enable_weights_double_buffer": False,
-    # # "reallocate_halo_output": True,
-    # # "activation": ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-    # # "config_tensors_in_dram": True,
-    # # 'act_block_h' : 256,
-    # "enable_act_double_buffer": True,
-    # "enable_weights_double_buffer": True,
-    # "deallocate_activation": True,
-    # "reallocate_halo_output": True,
 }
-# Optimized config for MaxPool2d layers (only includes applicable parameters)
 pool_config = {
-    # "dtype": ttnn.bfloat8_b,  # Map activation_dtype to dtype for MaxPool2d
-    "dtype": ttnn.bfloat16,  # Map activation_dtype to dtype for MaxPool2d
+    "dtype": ttnn.bfloat16,
     "slice_strategy": L1FullSliceStrategyConfiguration(),
 }
 
 
 def create_config_layers(torch_model, torch_input, model_config=conv_config_optmised, return_out=False):
     conv_config_layers = []
-    # with torch.no_grad():
     x = torch_input
     for i, layer in enumerate(torch_model):
-        # print(layer.__class__.__name__, x.shape)
-        # Create Conv2dConfiguration from the current layer, given torch input height, width, batch_size
         if isinstance(layer, nn.Conv2d):
             conv_config_layers.append(
                 Conv2dConfiguration.from_torch(
@@ -81,12 +55,9 @@ def create_config_layers(torch_model, torch_input, model_config=conv_config_optm
                     channels=x.shape[-3],
                     batch_size=x.shape[0],
                     **pool_config,
-                    # **dtype= ttnne.bfloat8_b
                 )
             )
-        # x = torch.nn.functional.relu(layer(x), inplace=True)
         x = layer(x)
-    # torch_output = x
     if return_out:
         return conv_config_layers, x
     return conv_config_layers
@@ -99,27 +70,14 @@ class Conv2dNormActivation:
         conv_config=None,
         activation_layer=None,
     ):
-        # if activation_layer == ttnn.relu:
-        #     # self.activation_layer = None
-        #     activation = ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)
-        # else:
-        #     self.activation_layer = activation_layer
-        #     activation = None
-
-        # self.conv_config = Conv2dConfiguration.from_torch(
-        #     layer, input_height=input_height, input_width=input_width, batch_size=batch_size
-        # )
         self.conv_config = conv_config
         self.activation_layer = activation_layer
 
         self.conv = TtConv2d(self.conv_config, device)
 
     def __call__(self, device, input_tensor, return_output_dim=True):
-        # input_tensor=input_tensor.to(device, ttnn.DRAM_MEMORY_CONFIG)
         [input_tensor, [_out_height, _out_width]] = self.conv(input_tensor, return_output_dim=True)
-        # input_tensor = post_conv_reshape(input_tensor, out_height=_out_height, out_width=_out_width)
         if self.activation_layer is not None:
-            # input_tensor=input_tensor.to(device, ttnn.DRAM_MEMORY_CONFIG)
             input_tensor = self.activation_layer(input_tensor)
         return input_tensor
 
@@ -129,16 +87,11 @@ class Maxpool2DOperation:
         self,
         device=None,
         conv_config=None,
-        # activation_layer=None,
     ):
         self.conv_config = conv_config
-        # self.activation_layer = activation_layer
-
-        # self.conv = TtConv2d(self.conv_config, device)
         self.pool = TtMaxPool2d(self.conv_config, device)
 
     def __call__(self, device, input_tensor, return_output_dim=True):
-        # input_tensor=input_tensor.to(device, ttnn.DRAM_MEMORY_CONFIG)
         input_tensor = self.pool(input_tensor)
 
         return input_tensor
@@ -154,367 +107,23 @@ class Conv2dNormActivation_2:
         device=None,
         activation_layer=None,
     ):
-        # if activation_layer == ttnn.relu:
-        #     # self.activation_layer = None
-        #     activation = ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)
-        # else:
-        #     self.activation_layer = activation_layer
-        #     activation = None
-
         self.conv_config = Conv2dConfiguration.from_torch(
             layer, input_height=input_height, input_width=input_width, batch_size=batch_size
         )
-        # self.conv_config = conv_config
         self.activation_layer = activation_layer
 
         self.conv = TtConv2d(self.conv_config, device)
 
     def __call__(self, device, input_tensor, return_output_dim=True):
         [input_tensor, [_out_height, _out_width]] = self.conv(input_tensor, return_output_dim=True)
-        # input_tensor = post_conv_reshape(input_tensor, out_height=_out_height, out_width=_out_width)
         if self.activation_layer is not None:
             input_tensor = self.activation_layer(input_tensor)
         return input_tensor
 
 
-# class Maxpool2DOperation:
-#     def __init__(
-#         self,
-#         # conv_config=None,
-#         layer,
-#         input_height,
-#         input_width,
-#         channels,
-#         batch_size,
-#         device=None,
-#         # activation_layer=None,
-#     ):
-#         # self.conv_config = conv_config
-#         self.pool_config = MaxPool2dConfiguration.from_torch(
-#             layer,
-#             input_height=input_height,
-#             input_width=input_width,
-#             channels=input_width,
-#             batch_size=batch_size,
-#             # **dtype= ttnne.bfloat8_b
-#         )
-
-#         self.pool = TtMaxPool2d(self.pool_config, device)
-
-#     def __call__(self, device, input_tensor, return_output_dim=True):
-#         input_tensor = self.pool(input_tensor)
-
-#         return input_tensor
-
-
-# class CreateConfigLayers:
-#     def __init__(self, torch_model, torch_input, device, activation_layer, model_config=None):
-#         # def create_config_layers(torch_model, torch_input,device, activation_layer, model_config=conv_config):
-#         kernel_config_layer = []
-#         # with torch.no_grad():
-#         x = torch_input
-#         for i, layer in enumerate(torch_model):
-#             print(layer.__class__.__name__, x.shape)
-#             # Create Conv2dConfiguration from the current layer, given torch input height, width, batch_size
-#             if isinstance(layer, nn.Conv2d):
-#                 kernel_config_layer.append(
-#                     Conv2dNormActivation(
-#                         layer,
-#                         input_height=x.shape[-2],
-#                         input_width=x.shape[-1],
-#                         batch_size=x.shape[0],
-#                         device=device,
-#                         activation_layer=activation_layer
-#                         # **model_config,
-#                     )
-#                 )
-
-#             elif isinstance(layer, nn.MaxPool2d):
-#                 kernel_config_layer.append(
-#                     Maxpool2DOperation(
-#                         layer,
-#                         input_height=x.shape[-2],
-#                         input_width=x.shape[-1],
-#                         channels=x.shape[-3],
-#                         batch_size=x.shape[0],
-#                         device=device,
-#                         # **dtype= ttnne.bfloat8_b
-#                     )
-#                 )
-#             # x = torch.nn.functional.relu(layer(x), inplace=True)
-#             x = layer(x)
-#             self.block = kernel_config_layer
-
-#     def __call__(self, device, input):
-#         for i, layer in enumerate(self.block):
-#             if i == 0:
-#                 result = layer(device, input)
-#             else:
-#                 result = layer(device, result)
-
-#         return result
-
-# # class CreateConfigLayers_ver_2:
-# def createConfigLayers_ver_2(torch_model, torch_input, device, activation_layer, model_config=None):
-#         # def create_config_layers(torch_model, torch_input,device, activation_layer, model_config=conv_config):
-#         kernel_config_layer = []
-#         # with torch.no_grad():
-#         x = torch_input
-#         for i, layer in enumerate(torch_model):
-#             print(layer.__class__.__name__, x.shape)
-#             # Create Conv2dConfiguration from the current layer, given torch input height, width, batch_size
-#             if isinstance(layer, nn.Conv2d):
-#                 kernel_config_layer.append(
-#                     Conv2dNormActivation(
-#                         layer,
-#                         input_height=x.shape[-2],
-#                         input_width=x.shape[-1],
-#                         batch_size=x.shape[0],
-#                         device=device,
-#                         activation_layer=activation_layer
-#                         # **model_config,
-#                     )
-#                 )
-
-#             elif isinstance(layer, nn.MaxPool2d):
-#                 kernel_config_layer.append(
-#                     Maxpool2DOperation(
-#                         layer,
-#                         input_height=x.shape[-2],
-#                         input_width=x.shape[-1],
-#                         channels=x.shape[-3],
-#                         batch_size=x.shape[0],
-#                         device=device,
-#                         # **dtype= ttnne.bfloat8_b
-#                     )
-#                 )
-#             # x = torch.nn.functional.relu(layer(x), inplace=True)
-#             x = layer(x)
-#             # self.block = kernel_config_layer
-#             return kernel_config_layer
-
-
-# class Conv2dNormActivation_ver_2:
-#     def __init__(
-#         self,
-#         device=None,
-#         conv_config=None,
-#         activation_layer=None,
-#     ):
-#         # if activation_layer == ttnn.relu:
-#         #     # self.activation_layer = None
-#         #     activation = ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)
-#         # else:
-#         #     self.activation_layer = activation_layer
-#         #     activation = None
-
-#         # self.conv_config = Conv2dConfiguration.from_torch(
-#         #     layer, input_height=input_height, input_width=input_width, batch_size=batch_size
-#         # )
-#         self.conv_config = conv_config
-#         self.activation_layer = activation_layer
-
-#         self.conv = TtConv2d(self.conv_config, device)
-
-#     def __call__(self, device, input_tensor, return_output_dim=True):
-#         # input_tensor=input_tensor.to(device, ttnn.DRAM_MEMORY_CONFIG)
-#         [input_tensor, [_out_height, _out_width]] = self.conv(input_tensor, return_output_dim=True)
-#         # input_tensor = post_conv_reshape(input_tensor, out_height=_out_height, out_width=_out_width)
-#         if self.activation_layer is not None:
-#             # input_tensor=input_tensor.to(device, ttnn.DRAM_MEMORY_CONFIG)
-#             input_tensor = self.activation_layer(input_tensor)
-#         return input_tensor
-
-
-# class Maxpool2DOperation_ver_2:
-#     def __init__(
-#         self,
-#         device=None,
-#         conv_config=None,
-#         # activation_layer=None,
-#     ):
-#         self.conv_config = conv_config
-#         # self.activation_layer = activation_layer
-
-#         # self.conv = TtConv2d(self.conv_config, device)
-#         self.pool = TtMaxPool2d(self.conv_config, device)
-
-#     def __call__(self, device, input_tensor, return_output_dim=True):
-#         # input_tensor=input_tensor.to(device, ttnn.DRAM_MEMORY_CONFIG)
-#         input_tensor = self.pool(input_tensor)
-
-#         return input_tensor
-
-
-# def __call__(self, device, input):
-#     for i, layer in enumerate(self.block):
-#         if i == 0:
-#             result = layer(device, input)
-#         else:
-#             result = layer(device, result)
-
-#     return result
-
-
-# def _create_conv_config_from_params(
-#     input_height: int,
-#     input_width: int,
-#     in_channels: int,
-#     out_channels: int,
-#     batch_size: int,
-#     parameters: dict,
-#     device,
-#     kernel_size=(1, 1),
-#     stride=(1, 1),
-#     padding=(0, 0),
-#     dilation=(1, 1),
-#     groups=1,
-#     activation=None,
-#     deallocate_activation=False,
-#     activation_dtype=None,
-#     weights_dtype=None,
-#     output_dtype=None,
-#     math_fidelity=None,
-#     sharding_strategy=AutoShardedStrategyConfiguration(),
-# ) -> Conv2dConfiguration:
-#     weight = parameters["weight"]
-#     bias = parameters.get("bias")
-
-#     if not isinstance(weight, ttnn.Tensor):
-#         weight_ttnn, bias_ttnn = Conv2dConfiguration.convert_torch_weight_and_bias_to_ttnn(weight, bias)
-#         if device is not None:
-#             weight_ttnn = ttnn.to_device(weight_ttnn, device)
-#             if bias_ttnn is not None:
-#                 bias_ttnn = ttnn.to_device(bias_ttnn, device)
-#     else:
-#         weight_ttnn = weight
-#         bias_ttnn = bias
-
-#     return Conv2dConfiguration(
-#         input_height=input_height,
-#         input_width=input_width,
-#         in_channels=in_channels,
-#         out_channels=out_channels,
-#         batch_size=batch_size,
-#         kernel_size=kernel_size,
-#         stride=stride,
-#         padding=padding,
-#         groups=groups,
-#         dilation=dilation,
-#         weight=weight_ttnn,
-#         bias=bias_ttnn,
-#         activation=activation,
-#         activation_dtype=activation_dtype or conv_config["ACTIVATIONS_DTYPE"],
-#         weights_dtype=weights_dtype or conv_config["WEIGHTS_DTYPE"],
-#         output_dtype=output_dtype or conv_config["ACTIVATIONS_DTYPE"],
-#         math_fidelity=math_fidelity or conv_config["MATH_FIDELITY"],
-#         sharding_strategy=sharding_strategy,
-#         slice_strategy=L1FullSliceStrategyConfiguration(),
-#         enable_act_double_buffer=True,
-#         enable_weights_double_buffer=True,
-#         deallocate_activation=deallocate_activation,
-#         reallocate_halo_output=True,
-#     )
-
-
-# import torch.nn as nn
-
-
-# def extract_extras_parameters_from_torch(torch_model, input_height, input_width, batch_size=1):
-#     """
-#     torch_model: typically torch_model.extras (nn.Sequential)
-#     input_height, input_width: spatial size of the tensor coming into extras
-#     """
-#     parameters = []
-#     h, w = input_height, input_width
-
-#     for layer in torch_model:
-#         if isinstance(layer, nn.Conv2d):
-#             weight = layer.weight.data
-#             bias = layer.bias.data if layer.bias is not None else None
-
-#             # store weights + shape metadata
-#             layer_params = {
-#                 "weight": weight,
-#                 "bias": bias,
-#                 "batch_size": batch_size,
-#                 "input_height": h,
-#                 "input_width": w,
-#                 "in_channels": layer.in_channels,
-#                 "out_channels": layer.out_channels,
-#                 "kernel_size": layer.kernel_size,
-#                 "stride": layer.stride,
-#                 "padding": layer.padding,
-#                 "dilation": layer.dilation,
-#                 "groups": layer.groups,
-#             }
-#             parameters.append(layer_params)
-
-#             # update h, w for the next layer using the conv2d formula
-#             kh, kw = (
-#                 layer.kernel_size if isinstance(layer.kernel_size, tuple) else (layer.kernel_size, layer.kernel_size)
-#             )
-#             sh, sw = layer.stride if isinstance(layer.stride, tuple) else (layer.stride, layer.stride)
-#             ph, pw = layer.padding if isinstance(layer.padding, tuple) else (layer.padding, layer.padding)
-#             dh, dw = layer.dilation if isinstance(layer.dilation, tuple) else (layer.dilation, layer.dilation)
-
-#             h = (h + 2 * ph - dh * (kh - 1) - 1) // sh + 1
-#             w = (w + 2 * pw - dw * (kw - 1) - 1) // sw + 1
-
-#         else:
-#             # non-conv layers: assume no spatial change (adjust if you add pools, etc.)
-#             continue
-
-#     return parameters
-
-
-# # Helper function to create Conv2dConfiguration from parameters
-# def _create_conv_config_from_params(
-#     input_height: int,
-#     input_width: int,
-#     in_channels: int,
-#     out_channels: int,
-#     batch_size: int,
-#     parameters: dict,
-#     kernel_size=(1, 1),
-#     stride=(1, 1),
-#     padding=(0, 0),
-#     dilation=(1, 1),
-#     groups=1,
-#     activation=None,
-#     deallocate_activation=False,
-#     activation_dtype=None,
-#     weights_dtype=None,
-#     output_dtype=None,
-#     math_fidelity=None,
-#     sharding_strategy=AutoShardedStrategyConfiguration(),
-# ) -> Conv2dConfiguration:
-#     """
-#     Conv2dConfiguration from parameters dict for SqueezeExcitation.
-#     """
-
-#     return Conv2dConfiguration(
-#         input_height=input_height,
-#         input_width=input_width,
-#         in_channels=in_channels,
-#         out_channels=out_channels,
-#         batch_size=batch_size,
-#         kernel_size=kernel_size,
-#         stride=stride,
-#         padding=padding,
-#         groups=groups,
-#         dilation=dilation,
-#         weight=parameters["weight"],
-#         bias=parameters["bias"],
-#         activation=activation,
-#         activation_dtype=activation_dtype or conv_config["ACTIVATIONS_DTYPE"],
-#         weights_dtype=weights_dtype or conv_config["WEIGHTS_DTYPE"],
-#         output_dtype=output_dtype or conv_config["ACTIVATIONS_DTYPE"],
-#         math_fidelity=math_fidelity or conv_config["MATH_FIDELITY"],
-#         sharding_strategy=sharding_strategy,
-#         slice_strategy=L1FullSliceStrategyConfiguration(),
-#         enable_act_double_buffer=True,
-#         enable_weights_double_buffer=True,
-#         deallocate_activation=deallocate_activation,
-#         reallocate_halo_output=True,
-#     )
+def post_conv_reshape(x, out_height=1, out_width=1):
+    """Convert sharded conv output to [N,1,1,C] tile layout for SE block."""
+    x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
+    x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT)
+    x = ttnn.reshape(x, (x.shape[0], out_height, out_width, x.shape[3]))
+    return ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)

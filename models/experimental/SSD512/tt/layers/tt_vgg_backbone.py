@@ -46,7 +46,6 @@ class TtVGGBackbone:
 vgg_backbone_optimisations = TtVGGBackbone(
     conv1={
         "sharding_strategy": HeightShardedStrategyConfiguration(act_block_h_override=15 * 32),
-        # "sharding_strategy": AutoShardedStrategyConfiguration(),
         "slice_strategy": L1FullSliceStrategyConfiguration(),
         "enable_act_double_buffer": True,
         "enable_weights_double_buffer": True,
@@ -54,13 +53,7 @@ vgg_backbone_optimisations = TtVGGBackbone(
         "reallocate_halo_output": True,
     },
     conv2={
-        # "sharding_strategy": AutoShardedStrategyConfiguration(),
-        # "sharding_strategy": BlockShardedStrategyConfiguration(reshard_if_not_optimal=True),#act_block_h_override=15 * 32),
-        "sharding_strategy": HeightShardedStrategyConfiguration(
-            reshard_if_not_optimal=True, act_block_h_override=32
-        ),  # act_block_h_override=15 * 32),
-        # "sharding_strategy": WidthSliceStrategyConfiguration(reshard_if_not_optimal=True),#act_block_h_override=15 * 32),
-        # "slice_strategy":  WidthSliceStrategyConfiguration(num_slices=4),
+        "sharding_strategy": HeightShardedStrategyConfiguration(reshard_if_not_optimal=True, act_block_h_override=32),
         "enable_act_double_buffer": False,
         "enable_weights_double_buffer": False,
         "deallocate_activation": True,
@@ -132,23 +125,13 @@ vgg_backbone_optimisations = TtVGGBackbone(
     },
     conv11={
         "sharding_strategy": AutoShardedStrategyConfiguration(),
-        # "sharding_strategy": BlockShardedStrategyConfiguration(reshard_if_not_optimal=True),#act_block_h_override=15 * 32),
-        # "sharding_strategy": HeightShardedStrategyConfiguration(reshard_if_not_optimal=True, act_block_h_override=32),#act_block_h_override=15 * 32),
-        # "sharding_strategy": WidthSliceStrategyConfiguration(reshard_if_not_optimal=True),#act_block_h_override=15 * 32),
-        # "slice_strategy":  WidthSliceStrategyConfiguration(num_slices=4),
         "enable_act_double_buffer": False,
         "enable_weights_double_buffer": False,
         "deallocate_activation": True,
         "reallocate_halo_output": True,
     },
     conv12={
-        # "sharding_strategy": AutoShardedStrategyConfiguration(),
-        "sharding_strategy": BlockShardedStrategyConfiguration(
-            reshard_if_not_optimal=True, act_block_h_override=32
-        ),  # act_block_h_override=15 * 32),
-        # "sharding_strategy": HeightShardedStrategyConfiguration(reshard_if_not_optimal=True, act_block_h_override=32),#act_block_h_override=15 * 32),
-        # "sharding_strategy": WidthShardedStrategyConfiguration(reshard_if_not_optimal=True,act_block_w_div=32),#act_block_h_override=15 * 32),
-        # "slice_strategy":  WidthSliceStrategyConfiguration(num_slices=4),
+        "sharding_strategy": BlockShardedStrategyConfiguration(reshard_if_not_optimal=True, act_block_h_override=32),
         "enable_act_double_buffer": False,
         "enable_weights_double_buffer": False,
         "deallocate_activation": True,
@@ -227,12 +210,9 @@ class TtVGGBackbone:
         layers = []
         conv_count = 0
 
-        # print(conv_config_layer)
         for i, conv_config in enumerate(conv_config_layer):
-            # Explicitly distinguish between Conv2dNormActivation and Maxpool2DOperation by checking type or attribute unique to each
             if isinstance(conv_config, Conv2dConfiguration):
                 optimisation_key = f"conv{i+1}"
-                # print("optimiasationkey", optimisation_key)
                 override_dict = getattr(vgg_backbone_optimisations, optimisation_key, {})
                 updated_config = override_conv_config(conv_config, override_dict)
                 layers.append(
@@ -242,9 +222,7 @@ class TtVGGBackbone:
                         activation_layer=ttnn.relu,
                     )
                 )
-                # conv_count+=1
             elif isinstance(conv_config, MaxPool2dConfiguration):
-                # This is a maxpool config, instantiate Maxpool2DOperation
                 layers.append(
                     Maxpool2DOperation(
                         device=device,
@@ -254,19 +232,7 @@ class TtVGGBackbone:
             else:
                 raise ValueError(f"Unsupported layer configuration found: {type(conv_config)}")
 
-            # if i > 2:
-            #     break
         self.block = layers
-
-    # def __call__(self, device, input):
-    #     for i, layer in enumerate(self.block):
-    #         if i == 0:
-    #             result = layer(device, input)
-    #         else:
-    #             result = layer(device, result)
-    #         print("layer_done", i + 1)
-
-    #     return result
 
     def __call__(self, device, input, return_source=False):
         tt_sources = []
@@ -275,11 +241,8 @@ class TtVGGBackbone:
                 result = layer(device, input)
             else:
                 result = layer(device, result)
-            print("data_print", i, result.shape)
             if i == 12:
                 tt_sources.append(result)
-
-        # tt_sources.append(result)
 
         if return_source:
             return result, tt_sources

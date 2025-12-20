@@ -8,7 +8,6 @@ import pytest
 import ttnn
 from loguru import logger
 
-# from models.experimental.SSD512.common import SSD512_NUM_CLASSES
 from models.experimental.SSD512.reference.ssd import multibox, base, mbox, vgg
 from models.common.utility_functions import comp_pcc
 from tests.ttnn.utils_for_testing import assert_with_pcc
@@ -17,37 +16,14 @@ from models.tt_cnn.tt.builder import (
 )
 from models.experimental.SSD512.tt.layers.tt_multibox_heads import TtMultiBoxHEAD
 
-SSD512_NUM_CLASSES = 21
-
-
-def add_extras(cfg, i, batch_norm=False):
-    # Extra layers added to VGG for feature scaling
-    layers = []
-    in_channels = i
-    flag = False
-    for k, v in enumerate(cfg):
-        if in_channels != "S":
-            if v == "S":
-                layers += [nn.Conv2d(in_channels, cfg[k + 1], kernel_size=(1, 3)[flag], stride=2, padding=1)]
-            else:
-                layers += [nn.Conv2d(in_channels, v, kernel_size=(1, 3)[flag])]
-            flag = not flag
-        in_channels = v
-    if len(cfg) == 13:
-        layers += [nn.Conv2d(in_channels, 256, kernel_size=4, padding=1)]  # Fix padding to match Caffe version (pad=1).
-    return layers
+from models.experimental.SSD512.common import SSD512_NUM_CLASSES
+from models.experimental.SSD512.reference.ssd import add_extras, extras
 
 
 @pytest.mark.parametrize("pcc", ((0.99),))
 @pytest.mark.parametrize("size", (512,))
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
 def test_multibox_heads(device, pcc, size, reset_seeds):
-    extras = {
-        "300": [256, "S", 512, 128, "S", 256, 128, 256, 128, 256],
-        "512": [256, "S", 512, 128, "S", 256, 128, "S", 256, 128, "S", 256, 128],
-    }
-    num_classes = SSD512_NUM_CLASSES
-
     vgg_layers = vgg(base[str(size)], i=3, batch_norm=False)
     extra_layers = add_extras(extras[str(size)], i=1024, batch_norm=False)
 
@@ -66,7 +42,7 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
             extra_source_indices.append(idx)
 
     _, _, (torch_loc_layers, torch_conf_layers) = multibox(
-        torch_vgg_model, torch_extras_model, mbox[str(size)], num_classes
+        torch_vgg_model, torch_extras_model, mbox[str(size)], SSD512_NUM_CLASSES
     )
 
     torch_loc_model = nn.ModuleList(torch_loc_layers)
@@ -74,19 +50,13 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
     torch_loc_model.eval()
     torch_conf_model.eval()
 
-    # num_heads = len(loc_layers_with_weights)
     num_heads = 7
     batch_size = 1
     sources = []
 
-    if size == 512:
-        sources.append(torch.randn(batch_size, 512, 64, 64))
-        sources.append(torch.randn(batch_size, 1024, 32, 32))
-        extra_dims = [(512, 16, 16), (256, 8, 8), (256, 4, 4), (256, 2, 2), (256, 1, 1), (256, 1, 1)]
-    else:
-        sources.append(torch.randn(batch_size, 512, 38, 38))
-        sources.append(torch.randn(batch_size, 1024, 19, 19))
-        extra_dims = [(512, 10, 10), (256, 5, 5), (256, 3, 3), (256, 1, 1)]
+    sources.append(torch.randn(batch_size, 512, 64, 64))
+    sources.append(torch.randn(batch_size, 1024, 32, 32))
+    extra_dims = [(512, 16, 16), (256, 8, 8), (256, 4, 4), (256, 2, 2), (256, 1, 1), (256, 1, 1)]
 
     num_extra_sources = num_heads - 2
     for i in range(num_extra_sources):
@@ -95,7 +65,6 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
             sources.append(torch.randn(batch_size, channels, h, w))
         else:
             sources.append(torch.randn(batch_size, 256, 1, 1))
-    #####################################################################3
     loc_config_layers = []
     conf_config_layers = []
     loc_kernel_layers = []
@@ -107,7 +76,6 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
                 input_height=source.shape[-2],
                 input_width=source.shape[-1],
                 batch_size=source.shape[0],
-                # **model_config,
             )
 
             conf_config_layers = Conv2dConfiguration.from_torch(
@@ -115,72 +83,20 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
                 input_height=source.shape[-2],
                 input_width=source.shape[-1],
                 batch_size=source.shape[0],
-                # **model_config,
             )
             loc_kernel_layers.append(
                 TtMultiBoxHEAD(
                     device=device,
                     conv_config_layer=loc_config_layers,
-                    # activation_layer=ttnn.relu,
                 )
             )
             conf_kernel_layers.append(
                 TtMultiBoxHEAD(
                     device=device,
                     conv_config_layer=conf_config_layers,
-                    # activation_layer=ttnn.relu,
                 )
             )
-            # loc_kernel_layers.append(
-            #     Conv2dNormActivation(
-            #         device=device,
-            #         conv_config=loc_config_layers,
-            #         # activation_layer=ttnn.relu,
-            #     )
-            # )
-            # conf_kernel_layers.append(
-            #     Conv2dNormActivation(
-            #         device=device,
-            #         conv_config=conf_config_layers,
-            #         # activation_layer=ttnn.relu,
-            #     )
-            # )
 
-    ############################################################################
-    # # from models.tt_cnn.tt.builder import ( Conv2dConfiguration, )
-    # # sources=sources[:2]
-    # loc_kernel_layers = []
-    # conf_kernel_layers = []
-    # for source_idx, source in enumerate(sources):
-    #     # loc_kernel_layers.append(create_config_layers(torch_loc_model[source_idx], source))
-    #     if isinstance(torch_loc_model[source_idx], nn.Conv2d):
-    #         loc_kernel_layers.append(
-    #             Conv2dNormActivation_2(
-    #                 torch_loc_model[source_idx],
-    #                 input_height=source.shape[-2],
-    #                 input_width=source.shape[-1],
-    #                 batch_size=source.shape[0],
-    #                 device=device,
-    #                 # activation_layer=ttnn.relu
-    #                 # **model_config,
-    #             )
-    #         )
-
-    #     if isinstance(torch_conf_model[source_idx], nn.Conv2d):
-    #         conf_kernel_layers.append(
-    #             Conv2dNormActivation_2(
-    #                 torch_conf_model[source_idx],
-    #                 input_height=source.shape[-2],
-    #                 input_width=source.shape[-1],
-    #                 batch_size=source.shape[0],
-    #                 device=device,
-    #                 # activation_layer=ttnn.relu
-    #                 # **model_config,
-    #             )
-    #         )
-    # #     # conf_kernel_layers.append(create_config_layers(torch_loc_model[source_idx], source))
-    # #     # conf_config_layer=create_config_layers(torch_loc_model, torch_input)
-    #########################################################################
     torch_loc_preds = []
     torch_conf_preds = []
 
@@ -202,16 +118,10 @@ def test_multibox_heads(device, pcc, size, reset_seeds):
             source.permute(0, 2, 3, 1), layout=ttnn.TILE_LAYOUT, dtype=ttnn.bfloat16, device=device
         )
         loc_pred = loc_kernel_layers[source_idx](device, ttnn_input_tensor)
-        # loc_pred = loc_pred.permute(0, 2, 3, 1).contiguous()
         tt_loc_preds.append(loc_pred)
 
         conf_pred = conf_kernel_layers[source_idx](device, ttnn_input_tensor)
-        # conf_pred = conf_pred.permute(0, 2, 3, 1).contiguous()
         tt_conf_preds.append(conf_pred)
-
-    # tt_loc_preds, tt_conf_preds = apply_multibox_heads(
-    #     sources, loc_layers_with_weights, conf_layers_with_weights, device=device, dtype=ttnn.bfloat8_b
-    # )
 
     for source_idx in range(len(sources)):
         tt_loc = ttnn.to_torch(tt_loc_preds[source_idx]).float()

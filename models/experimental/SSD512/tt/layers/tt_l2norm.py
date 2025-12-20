@@ -30,9 +30,6 @@ class TtL2Norm:
         else:
             x_nchw_ttnn = x
 
-        batch_size, channels, height, width = x_nchw_ttnn.shape
-        tensor_size_estimate = batch_size * height * width * channels
-
         if memory_config is None:
             layer_memory_config = ttnn.L1_MEMORY_CONFIG
         else:
@@ -47,7 +44,6 @@ class TtL2Norm:
         squared = ttnn.mul(x_nchw_ttnn, x_nchw_ttnn, memory_config=layer_memory_config)
         squared = ttnn.to_layout(squared, layout=ttnn.TILE_LAYOUT)
         sum_result = ttnn.sum(squared, dim=1, keepdim=True, memory_config=layer_memory_config)
-        # Add eps using ttnn operations
         eps_tensor = ttnn.full_like(sum_result, self.eps, memory_config=layer_memory_config)
         norm = ttnn.sqrt(
             ttnn.add(sum_result, eps_tensor, memory_config=layer_memory_config), memory_config=layer_memory_config
