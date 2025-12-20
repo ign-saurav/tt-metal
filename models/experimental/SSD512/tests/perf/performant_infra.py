@@ -5,7 +5,7 @@
 import torch
 import ttnn
 
-from models.experimental.SSD512.reference.ssd import build_ssd
+from models.experimental.SSD512.common import reshape_prediction_tensors
 
 _TILE_HEIGHT = 32  # 32x32 tile size
 _L1_ALIGNMENT = 32  # L1 memory alignment
@@ -14,6 +14,8 @@ _MAX_CB_PAGES = 60000  # Circular Buffer page limit, max is 65535
 
 
 class SSD512PerformantTestInfra:
+    """Infrastructure for performing end-to-end SSD512 model performance tests."""
+
     def __init__(self, device, ttnn_model, dtype=ttnn.bfloat16):
         self.device = device
         self.ttnn_model = ttnn_model
@@ -31,8 +33,8 @@ class SSD512PerformantTestInfra:
 
         tt_loc_preds, tt_conf_preds = self.ttnn_model(self.device, input_for_model)
 
-        loc = self.reshape_prediction_tensors(tt_loc_preds, self.memory_config)
-        conf = self.reshape_prediction_tensors(tt_conf_preds, self.memory_config)
+        loc = reshape_prediction_tensors(tt_loc_preds, self.memory_config)
+        conf = reshape_prediction_tensors(tt_conf_preds, self.memory_config)
 
         if loc.layout != ttnn.ROW_MAJOR_LAYOUT:
             loc = ttnn.to_layout(loc, ttnn.ROW_MAJOR_LAYOUT)
@@ -43,25 +45,6 @@ class SSD512PerformantTestInfra:
         conf = ttnn.to_memory_config(conf, self.memory_config)
 
         return (loc, conf)
-
-    def reshape_prediction_tensors(self, pred_tensors, memory_config):
-        """Reshape and concatenate prediction tensors from multiple feature scales."""
-        reshaped_tensors = []
-        for pred in pred_tensors:
-            if pred.is_sharded():
-                pred = ttnn.sharded_to_interleaved(pred, memory_config)
-            pred = ttnn.to_memory_config(pred, memory_config)
-            if pred.layout != ttnn.ROW_MAJOR_LAYOUT:
-                pred = ttnn.to_layout(pred, ttnn.ROW_MAJOR_LAYOUT, memory_config=memory_config)
-            batch_size = pred.shape[0]
-            total_elements = pred.shape[1] * pred.shape[2] * pred.shape[3]
-            pred_reshaped = ttnn.experimental.view(pred, (batch_size, total_elements))
-            pred_reshaped = ttnn.to_memory_config(pred_reshaped, memory_config)
-            reshaped_tensors.append(pred_reshaped)
-
-        if len(reshaped_tensors) > 1:
-            return ttnn.concat(reshaped_tensors, dim=1, memory_config=memory_config)
-        return reshaped_tensors[0]
 
     def create_pipeline_memory_configs(self, torch_input):
         """Create L1 and DRAM memory configs for pipeline executor from input tensor."""
@@ -140,10 +123,3 @@ class SSD512PerformantTestInfra:
         )
 
         return ttnn.MemoryConfig(ttnn.TensorMemoryLayout.HEIGHT_SHARDED, ttnn.BufferType.DRAM, dram_shard_spec)
-
-    @staticmethod
-    def load_torch_model(phase="test", size=512, num_classes=21):
-        """Load the SSD512 torch model."""
-        torch_model = build_ssd(phase, size=size, num_classes=num_classes)
-        torch_model.eval()
-        return torch_model
