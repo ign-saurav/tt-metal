@@ -1,18 +1,16 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+#
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
 import pytest
 from collections import OrderedDict
 from typing import Dict, Any, List
-
 import ttnn
 from loguru import logger
-
 from models.experimental.transfuser.reference.config import GlobalConfig
 from models.experimental.transfuser.reference.transfuser_backbone import TransfuserBackbone
 from models.experimental.transfuser.tt.custom_preprocessing import create_custom_mesh_preprocessor
-
 from ttnn.model_preprocessing import infer_ttnn_module_args as infer_ttnn_module_args_torch
 from models.experimental.transfuser.tests.test_gpt import create_gpt_preprocessor
 from models.experimental.transfuser.tt.transfuser_backbone import TtTransfuserBackbone

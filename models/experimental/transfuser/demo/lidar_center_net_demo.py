@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+#
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
@@ -21,12 +22,13 @@ from models.experimental.transfuser.tests.test_gpt import create_gpt_preprocesso
 from models.experimental.transfuser.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from ttnn.model_preprocessing import preprocess_model_parameters
 
+from ttnn.model_preprocessing import infer_ttnn_module_args as infer_ttnn_module_args_torch
+from models.experimental.transfuser.tests.test_transfuser_backbone import regroup_model_args
+
 
 # ============================================================
 # Helpers
 # ============================================================
-
-
 def create_lidar_center_net_head_preprocessor(device, weight_dtype=ttnn.bfloat16):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
@@ -205,8 +207,6 @@ def open_tt_device(device_id: int = 0, l1_small_size: int = 16384, trace_region_
 # ============================================================
 # Demo main
 # ============================================================
-
-
 def main():
     parser = argparse.ArgumentParser(description="LidarCenterNet TTNN vs Torch demo (no pytest).")
     parser.add_argument("--data-root", type=str, required=True, help="Folder with scenario data (images/lidar).")
@@ -369,6 +369,12 @@ def main():
             custom_preprocessor=create_lidar_center_net_head_preprocessor(device, ttnn.bfloat16),
             device=device,
         )
+        model_args = infer_ttnn_module_args_torch(
+            model=torch_model,
+            run_model=lambda model: model(image, lidar_bev, velocity),
+            device=None,
+        )
+        model_args = regroup_model_args(model_args)
 
         transfuser_model = ref_layer._model
         tt_layer = TtLidarCenterNet(
@@ -378,6 +384,7 @@ def main():
             backbone="transFuser",
             torch_model=transfuser_model,
             use_fallback=(not args.no_fallback),
+            model_args=model_args,
         )
 
         # Convert inputs to TTNN
