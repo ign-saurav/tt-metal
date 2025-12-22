@@ -33,7 +33,6 @@ class TTRegNetBottleneck:
         self.groups = groups
         self.model_config = model_config
         self.dtype = ttnn.bfloat16
-
         self.torch_model = torch_model
         self.use_fallback = use_fallback
         self.block_name = block_name
@@ -98,11 +97,6 @@ class TTRegNetBottleneck:
             padding=se_fc2_params["padding"],
             groups=se_fc2_params["groups"],
             activation=None,
-            # enable_act_double_buffer=True,
-            # enable_weights_double_buffer=True,
-            # deallocate_activation=True,
-            # reallocate_halo_output=True,
-            # reshard_if_not_optimal=True,
         )
 
         self.se_fc2 = TtConv2d(se_fc2_config, device=device)
@@ -199,8 +193,8 @@ class TTRegNetBottleneck:
             out_channels=out_channels,
             batch_size=batch_size,
             kernel_size=kernel_size,
-            stride=stride_list,  # List format
-            padding=padding_list,  # List format
+            stride=stride_list,
+            padding=padding_list,
             groups=groups,
             weight=weight,
             bias=bias,
@@ -216,22 +210,16 @@ class TTRegNetBottleneck:
         )
 
     def __call__(self, x, device):
-        input_shape = x.shape
         downsample_input = ttnn.clone(x)
-
         # conv1- 1x1 convolution (using new TtConv2d interface)
         out = self.conv1(x)
-
         out, (height, width) = self.conv2(out, return_output_dim=True)
-
         # SE module
         # reduce mean
         out1 = ttnn.reallocate(out)
-        # Reshape to 4D for mean operation
         out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
         out = ttnn.reshape(out, (1, height, width, out.shape[-1]))
         se_out = ttnn.mean(out, dim=[1, 2], keepdim=True)
-
         if self.use_fallback and self.torch_model is not None:
             # Falling Back SE module
             se_out_torch = ttnn.to_torch(
@@ -250,28 +238,22 @@ class TTRegNetBottleneck:
                 device=device,
             )
             se_out = ttnn.permute(se_out, (0, 2, 3, 1))
-
         else:
             # SE fc1
             se_out = self.se_fc1(se_out)
             # SE fc2
             se_out = self.se_fc2(se_out)
             se_out = ttnn.sigmoid(se_out)
-
         out_4d = ttnn.multiply(out1, se_out)
         # Flatten back to match identity format
         batch, channels = out_4d.shape[0], out_4d.shape[-1]
         out = ttnn.reshape(out_4d, (1, 1, batch * height * width, channels))
-
         # conv3: 1x1 projection
         out = self.conv3(out)
-
         if self.downsample_layer is not None:
             # downsample
             downsample_input = self.downsample_layer(downsample_input)
-
         # Add
         out = ttnn.add(out, downsample_input)
         out = ttnn.relu(out)
-
         return out

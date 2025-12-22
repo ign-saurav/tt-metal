@@ -281,8 +281,7 @@ class Ttstages:
 
         return layers
 
-    def __call__(self, x, device, input_shape=None):
-        shape = input_shape if input_shape is not None else x.shape
+    def __call__(self, x, device):
         for block in self.layer:
-            x = block(x, device, shape)
+            x = block(x, device)
         return x

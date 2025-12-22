@@ -193,9 +193,3 @@ class LidarCenterNet(nn.Module):
         features, _, fused_features = self._model(tt_rgb, tt_lidar_bev, tt_velocity, self.device)
 
         return features, fused_features
-        # Validate output_fused_tensor
-        tt_fused_torch = ttnn.to_torch(fused_features, device=self.device, dtype=torch.float32)
-
-        pred_wp, _, _, _, _ = self.forward_gru(tt_fused_torch, target_point)
-
-        return features, pred_wp
