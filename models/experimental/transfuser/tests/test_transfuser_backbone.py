@@ -170,7 +170,7 @@ class TransfuserBackboneInfra:
             use_velocity=self.use_velocity,
         )
         torch_model.eval()
-        checkpoint_path = "model_seed1_39.pth"
+        checkpoint_path = "models/experimental/transfuser/resources/model_seed1_39.pth"
         modified_state_dict = fix_and_filter_checkpoint_keys(
             checkpoint_path=checkpoint_path,
             target_prefix="module._model.",  # This is the prefix to keep and remove
@@ -199,7 +199,7 @@ class TransfuserBackboneInfra:
         parameters["transformer2"] = gpt2_parameters
         gpt3_parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model.transformer3,
-            custom_preprocessor=create_gpt_preprocessor(device, n_layer, ttnn.bfloat16, use_optimized_self_attn),
+            custom_preprocessor=create_gpt_preprocessor(device, n_layer, ttnn.bfloat16, False),
             device=device,
         )
         parameters["transformer3"] = gpt3_parameters
@@ -376,7 +376,7 @@ model_config = {
     [("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256))],
 )
 @pytest.mark.parametrize("use_fallback", [True])
-@pytest.mark.parametrize("use_optimized_self_attn", [False])
+@pytest.mark.parametrize("use_optimized_self_attn", [True])
 def test_stem(
     device,
     image_architecture,

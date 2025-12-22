@@ -29,7 +29,6 @@ class TtTransfuserBackbone:
         self.device = device
         self.config = config
         self.inplanes = 32
-        # TODO: fix
         self.dtype = ttnn.bfloat16
 
         def make_stage(params, model_args, *, planes, blocks, s, groups, stage_name, with_torch):

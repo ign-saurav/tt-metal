@@ -290,10 +290,19 @@ def test_lidar_center_net(
     weight_dtype,
     use_fallback,
     use_optimized_self_attn,
+    model_location_generator,
 ):
     torch.manual_seed(seed)
     torch.use_deterministic_algorithms(True)
-    data_root = "Scenario3_Town01_curved_route0_11_23_20_02_59/"
+
+    checkpoint_location = model_location_generator(
+        "transfuser/checkpoints", download_if_ci_v2=True, ci_v2_timeout_in_s=300
+    )
+    checkpoint_path = checkpoint_location / "model_seed1_39.pth"
+
+    # Download dataset
+    dataset_location = model_location_generator("transfuser/datasets", download_if_ci_v2=True, ci_v2_timeout_in_s=300)
+    data_root = dataset_location / "Scenario3_Town01_curved_route0_11_23_20_02_59"
     frame = "0120"
 
     config = GlobalConfig(setting="eval")
@@ -317,7 +326,6 @@ def test_lidar_center_net(
         lidar_architecture=lidar_architecture,
         use_velocity=use_velocity,
     ).eval()
-    checkpoint_path = "model_seed1_39.pth"
     modified_state_dict = load_trained_weights(checkpoint_path)
     modified_state_dict = delete_incompatible_keys(
         modified_state_dict,
@@ -402,7 +410,7 @@ def test_lidar_center_net(
     parameters["transformer2"] = gpt2_parameters
     gpt3_parameters = preprocess_model_parameters(
         initialize_model=lambda: torch_model.transformer3,
-        custom_preprocessor=create_gpt_preprocessor(device, n_layer, ttnn.bfloat16, use_optimized_self_attn),
+        custom_preprocessor=create_gpt_preprocessor(device, n_layer, ttnn.bfloat16, False),
         device=device,
     )
     parameters["transformer3"] = gpt3_parameters
