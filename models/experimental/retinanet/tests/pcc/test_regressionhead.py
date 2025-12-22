@@ -10,6 +10,7 @@ from loguru import logger
 from torchvision.models.detection import retinanet_resnet50_fpn_v2, RetinaNet_ResNet50_FPN_V2_Weights
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from models.experimental.retinanet.tt.tt_regression_head import ttnn_retinanet_regression_head
+from ttnn.model_preprocessing import infer_ttnn_module_args
 
 
 def create_regression_head_parameters(torch_head, device, model_config):
@@ -204,6 +205,17 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
     # PyTorch forward pass
     with torch.no_grad():
         torch_output = regression_head(torch_features)
+
+    ################# MODEL ARGS ##################
+    model_args = {}
+    model_args = infer_ttnn_module_args(
+        model=regression_head, run_model=lambda model: regression_head(torch_features), device=device
+    )
+
+    for i in model_args:
+        print(model_args[i])
+        print("")
+    ################# MODEL ARGS ##################
 
     # Convert to TTNN (NHWC format) - convert all features to device
     ttnn_features = [
