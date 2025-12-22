@@ -11,6 +11,12 @@ from models.tt_cnn.tt.builder import (
     AutoShardedStrategyConfiguration,
     L1FullSliceStrategyConfiguration,
 )
+from models.tt_cnn.tt.builder import TtConv2d
+
+from models.tt_cnn.tt.builder import (
+    AutoShardedStrategyConfiguration,
+)
+from typing import Union, Tuple, Optional
 
 conv_config = {
     "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
@@ -324,3 +330,64 @@ class TTUpsample:
             output_tensor = ttnn.to_device(host, device)
 
         return output_tensor
+
+
+class Conv2dNormActivation:
+    def __init__(
+        self,
+        kernel_size: Union[int, Tuple[int, ...]] = 3,
+        stride: Union[int, Tuple[int, ...]] = 1,
+        padding: Optional[Union[int, Tuple[int, ...], str]] = None,
+        activation_layer=ttnn.relu,
+        dilation=1,
+        groups=1,
+        parameters=None,
+        device=None,
+        input_height=1,
+        input_width=1,
+    ):
+        if activation_layer == ttnn.relu:
+            self.activation_layer = None
+            activation = ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)
+        else:
+            self.activation_layer = activation_layer
+            activation = None
+
+        # Normalize integer parameters to tuples
+        if isinstance(kernel_size, int):
+            kernel_size = (kernel_size, kernel_size)
+        if isinstance(stride, int):
+            stride = (stride, stride)
+        if isinstance(dilation, int):
+            dilation = (dilation, dilation)
+
+        if padding is None:
+            padding = (kernel_size[0] - 1) // 2 * dilation[0]
+
+        # Normalize padding to tuple if it's an integer
+        if isinstance(padding, int):
+            padding = (padding, padding)
+
+        self.conv_config = _create_conv_config_from_params(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=parameters[0]["weight"].shape[1] * groups,
+            out_channels=parameters[0]["weight"].shape[0],
+            kernel_size=kernel_size,
+            batch_size=1,
+            parameters=parameters[0],
+            stride=stride,
+            padding=padding,
+            dilation=dilation,
+            groups=groups,
+            activation=activation,
+            sharding_strategy=AutoShardedStrategyConfiguration(),
+        )
+        self.conv = TtConv2d(self.conv_config, device)
+
+    def __call__(self, device, input_tensor, return_output_dim=True):
+        [input_tensor, [_out_height, _out_width]] = self.conv(input_tensor, return_output_dim=True)
+        input_tensor = post_conv_reshape(input_tensor, out_height=_out_height, out_width=_out_width)
+        if self.activation_layer is not None:
+            input_tensor = self.activation_layer(input_tensor)
+        return input_tensor
