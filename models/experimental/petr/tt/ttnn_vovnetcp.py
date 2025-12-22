@@ -4,6 +4,7 @@
 import ttnn
 from models.experimental.petr.tt.common import Conv, Conv_with_split
 from models.tt_cnn.tt.builder import TtMaxPool2d, MaxPool2dConfiguration
+from models.tt_cnn.tt.builder import TtConv2d, Conv2dConfiguration
 import torch
 from loguru import logger
 
@@ -19,21 +20,31 @@ class ttnn_hsigmoid:
         return x
 
 
-class ttnn_esemodule:
-    def __init__(self, parameters, is_split=False):
+class ttnn_eSEModule:
+    def __init__(self, parameters, model_config, conv_args, device, is_split=False):
         if is_split:
             self.fc = Conv_with_split([1, 1, 0, 0], parameters["fc"])
         else:
-            self.fc = Conv([1, 1, 0, 0], parameters["fc"], height_sharding=True)
+            self.fc_config = Conv2dConfiguration.from_model_args(
+                conv2d_args=conv_args,
+                weights=parameters["weight"],
+                bias=parameters["bias"],
+                # **layer_optimisations.conv3,
+                math_fidelity=model_config["MATH_FIDELITY"],
+                weights_dtype=model_config["WEIGHTS_DTYPE"],
+                activation_dtype=model_config["ACTIVATIONS_DTYPE"],
+            )
+            self.fc = TtConv2d(self.fc_config, device)
         self.hsigmoid = ttnn_hsigmoid()
 
-    def __call__(self, device, x):
+    def __call__(self, x):
         input = x
         B, H, W, C = x.shape
         x = ttnn.reshape(x, (B, H * W, C))
         x = ttnn.mean(x, dim=1, keepdim=True)  # [B, 1, C]
         x = ttnn.reshape(x, (B, 1, 1, C))
-        x = self.fc(device, x)
+        x, [out_h, out_w] = self.fc(x, return_output_dim=True)
+        x = ttnn.reshape(x, (self.fc_config.batch_size, out_h, out_w, self.fc_config.out_channels))
         x = self.hsigmoid(x)
         if input.get_layout() != ttnn.TILE_LAYOUT:
             input = ttnn.to_layout(input, ttnn.TILE_LAYOUT)
@@ -143,9 +154,9 @@ class ttnn_osa_module:
                     height_sharding=False,
                 )
         if module_name == "OSA5_1" or module_name == "OSA5_2" or module_name == "OSA5_3":
-            self.ese = ttnn_esemodule(parameters, is_split=True)
+            self.ese = ttnn_eSEModule(parameters, is_split=True)
         else:
-            self.ese = ttnn_esemodule(parameters)
+            self.ese = ttnn_eSEModule(parameters)
 
     def __call__(self, device, x):
         identity_feat = x
