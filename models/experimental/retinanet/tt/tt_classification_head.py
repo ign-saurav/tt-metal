@@ -5,6 +5,11 @@ import ttnn
 from typing import List
 from models.experimental.retinanet.tt.tt_regression_head import Conv2dNormActivation
 from dataclasses import dataclass
+from models.experimental.retinanet.tt.utils import _create_conv_config_from_params
+from models.tt_cnn.tt.builder import TtConv2d
+from models.tt_cnn.tt.builder import (
+    AutoShardedStrategyConfiguration,
+)
 
 
 @dataclass
@@ -156,7 +161,7 @@ def ttnn_retinanet_classification_head(
         x = feature_map
         for conv_idx in range(4):
             conv_block = Conv2dNormActivation(
-                parameters=parameters["conv"][conv_idx],
+                parameters=parameters["conv"].get(str(conv_idx), {}).get("0", None),
                 device=device,
                 in_channels=in_channels,
                 out_channels=in_channels,
@@ -169,33 +174,32 @@ def ttnn_retinanet_classification_head(
                 model_config=model_config,
                 compute_config=compute_config,
                 conv_config=fpn_conv_config,
+                input_height=H,
+                input_width=W,
             )
             x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
             x = conv_block(
                 x, batch_size=batch_size, input_height=H, input_width=W, fpn_level=fpn_idx, conv_block_idx=conv_idx
             )
 
-        cls_logits = ttnn.conv2d(
-            input_tensor=x,
-            weight_tensor=parameters["cls_logits"]["weight"],
-            bias_tensor=parameters["cls_logits"]["bias"],
-            in_channels=in_channels,
-            out_channels=num_anchors * num_classes,
-            device=device,
-            kernel_size=[3, 3],
-            stride=[1, 1],
-            padding=[1, 1],
-            batch_size=batch_size,
+        conv_final_config = _create_conv_config_from_params(
             input_height=H,
             input_width=W,
-            compute_config=compute_config,
-            conv_config=fpn_final_config,
-            memory_config=ttnn.L1_MEMORY_CONFIG,
-            slice_config=ttnn.Conv2dL1FullSliceConfig,
+            in_channels=in_channels,
+            out_channels=num_anchors * num_classes,
+            kernel_size=(3, 3),
+            batch_size=1,
+            parameters=parameters["cls_logits"],
+            stride=(1, 1),
+            padding=(1, 1),
+            sharding_strategy=AutoShardedStrategyConfiguration(),
         )
+        conv_final = TtConv2d(conv_final_config, device)
+        cls_logits, shape = conv_final(x, return_output_dim=True)
 
         N, H_out, W_out, _ = cls_logits.shape
-        cls_logits = ttnn.to_memory_config(cls_logits, ttnn.DRAM_MEMORY_CONFIG)
+        H_out, W_out = shape
+        cls_logits = ttnn.sharded_to_interleaved(cls_logits, ttnn.L1_MEMORY_CONFIG)
         cls_logits = ttnn.reshape(cls_logits, (N, H_out, W_out, num_anchors, num_classes))
 
         cls_logits = ttnn.reshape(cls_logits, (N, H_out * W_out * num_anchors, num_classes))
