@@ -10,9 +10,8 @@ from loguru import logger
 from torchvision.models.detection import retinanet_resnet50_fpn_v2, RetinaNet_ResNet50_FPN_V2_Weights
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from models.experimental.retinanet.tt.tt_regression_head import ttnn_retinanet_regression_head
-from ttnn.model_preprocessing import infer_ttnn_module_args
-
-# from models.experimental.retinanet.tests.pcc.test_resnet50_fpn import infer_ttnn_module_args
+from models.experimental.retinanet.tt.custom_preprocessor import create_custom_mesh_preprocessor
+from ttnn.model_preprocessing import preprocess_model_parameters
 
 
 def create_regression_head_parameters(torch_head, device, model_config):
@@ -198,7 +197,7 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
         # Fallback to random features
         batch_size = 1
         in_channels = 256
-        input_shapes = [(100, 100), (50, 50), (25, 25), (13, 13), (7, 7)]
+        input_shapes = [(64, 64), (32, 32), (16, 16), (8, 8), (4, 4)]
 
         torch_features = [torch.randn(batch_size, in_channels, H, W, dtype=torch.bfloat16) for H, W in input_shapes]
         save_data = {}
@@ -213,24 +212,16 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
 
     # PyTorch forward pass
     with torch.no_grad():
-        print("running : reference model")
-        # torch_output = regression_head(torch_features)
-        print("finished running : reference model")
-
-    ################# MODEL ARGS ##################
-    model_args = {}
-    model_args = infer_ttnn_module_args(
-        model=regression_head, run_model=lambda model: regression_head(torch_features), device=device
-    )
-
-    for i in model_args:
-        print(" ****** i : ", i, "   *********")
-        for j in model_args[i]:
-            print(" ****** j : ", j, "   *********")
-            print(model_args[i][j])
-            print("\n\n\n\n")
-    print(regression_head)
-    ################# MODEL ARGS ##################
+        pickle_path = "models/experimental/retinanet/data/torch_output.pkl"
+        if os.path.exists(pickle_path):
+            with open(pickle_path, "rb") as f:
+                torch_output = pickle.load(f)
+        else:
+            print("running : reference model")
+            torch_output = regression_head(torch_features)
+            with open(pickle_path, "wb") as f:
+                pickle.dump(torch_output, f)
+            print("finished running : reference model")
 
     # Convert to TTNN (NHWC format) - convert all features to device
     ttnn_features = [
@@ -249,7 +240,12 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
         "ACTIVATIONS_DTYPE": ttnn.bfloat16,
     }
     # Create TTNN parameters
-    ttnn_parameters = create_regression_head_parameters(regression_head, device, model_config)
+
+    ttnn_parameters = preprocess_model_parameters(
+        initialize_model=lambda: regression_head,
+        custom_preprocessor=create_custom_mesh_preprocessor(None),
+        device=None,
+    )
 
     # TTNN forward pass
     ttnn_output = ttnn_retinanet_regression_head(

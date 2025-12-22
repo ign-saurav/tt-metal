@@ -9,6 +9,11 @@ from typing import Optional
 from loguru import logger
 import tt_lib.fallback_ops as fallback_ops
 import os
+from models.experimental.retinanet.tt.utils import _create_conv_config_from_params
+from models.tt_cnn.tt.builder import TtConv2d
+from models.tt_cnn.tt.builder import (
+    HeightShardedStrategyConfiguration,
+)
 
 
 @dataclass
@@ -122,6 +127,8 @@ class Conv2dNormActivation:
     def __init__(
         self,
         parameters: dict,
+        input_height: int,
+        input_width: int,
         device: ttnn.Device,
         in_channels: int = 256,
         out_channels: int = 256,
@@ -172,6 +179,20 @@ class Conv2dNormActivation:
             slice_type=ttnn.Conv2dDRAMSliceHeight,
         )
 
+        self.conv_config = _create_conv_config_from_params(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            kernel_size=kernel_size,
+            batch_size=1,
+            parameters=parameters,
+            stride=stride,
+            padding=padding,
+            sharding_strategy=HeightShardedStrategyConfiguration(),
+        )
+        self.conv = TtConv2d(self.conv_config, device)
+
     def __call__(
         self,
         x: ttnn.Tensor,
@@ -202,31 +223,13 @@ class Conv2dNormActivation:
             else "[Conv]"
         )
 
-        x, [H_out, W_out], [prepared_weight, prepared_bias] = ttnn.conv2d(
-            input_tensor=x,
-            weight_tensor=self.conv_weight,
-            in_channels=self.in_channels,
-            out_channels=self.out_channels,
-            device=self.device,
-            bias_tensor=self.conv_bias,
-            kernel_size=list(self.kernel_size),
-            stride=list(self.stride),
-            padding=list(self.padding),
-            batch_size=batch_size,
-            input_height=input_height,
-            input_width=input_width,
-            slice_config=self.slice_config,
-            compute_config=self.compute_config,
-            conv_config=self.conv_config,
-            return_output_dim=True,
-            return_weights_and_bias=True,
-        )
-
+        x, [H_out, W_out] = self.conv(x, return_output_dim=True)
         N, H_out, W_out, C = x.shape
 
         if self.fallback_on_groupnorm:
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-            x = ttnn.reshape(x, (N, H_out, W_out, C))
+            x = ttnn.reshape(x, (N, input_height, input_width, C))
+            x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
             x = ttnn.permute(x, (0, 3, 1, 2))
 
             x = fallback_ops.group_norm(
@@ -340,7 +343,7 @@ def ttnn_retinanet_regression_head(
         conv_blocks = []
         for conv_idx in range(4):
             conv_block = Conv2dNormActivation(
-                parameters=parameters["conv"][conv_idx],
+                parameters=parameters["conv"].get(str(conv_idx), {}).get("0", None),
                 device=device,
                 in_channels=in_channels,
                 out_channels=in_channels,
@@ -353,6 +356,8 @@ def ttnn_retinanet_regression_head(
                 model_config=model_config,
                 compute_config=compute_config,
                 conv_config=conv_config,
+                input_height=H,
+                input_width=W,
             )
             conv_blocks.append(conv_block)
 
@@ -371,26 +376,25 @@ def ttnn_retinanet_regression_head(
         else:
             bbox_reg_config = None
 
-        bbox_regression = ttnn.conv2d(
-            input_tensor=x,
-            weight_tensor=parameters["bbox_reg"]["weight"],
-            in_channels=in_channels,
-            out_channels=num_anchors * 4,
-            device=device,
-            bias_tensor=parameters["bbox_reg"]["bias"],
-            kernel_size=(3, 3),
-            stride=(1, 1),
-            padding=(1, 1),
-            batch_size=batch_size,
+        conv_final_config = _create_conv_config_from_params(
             input_height=H,
             input_width=W,
-            slice_config=bbox_reg_slice_config,
-            compute_config=compute_config,
-            conv_config=bbox_reg_config,
+            in_channels=in_channels,
+            out_channels=num_anchors * 4,
+            kernel_size=(3, 3),
+            batch_size=1,
+            parameters=parameters["bbox_reg"],
+            stride=(1, 1),
+            padding=(1, 1),
+            sharding_strategy=HeightShardedStrategyConfiguration(),
         )
-
+        conv_final = TtConv2d(conv_final_config, device)
+        bbox_regression, shape = conv_final(x, return_output_dim=True)
         # Reshape to (N, H*W*num_anchors, 4)
         N, H_final, W_final, C_final = bbox_regression.shape
+        H_final, W_final = shape
+        bbox_regression = ttnn.sharded_to_interleaved(bbox_regression, ttnn.L1_MEMORY_CONFIG)
+
         bbox_regression = ttnn.reshape(bbox_regression, (N, H_final, W_final, num_anchors, 4))
         bbox_regression = ttnn.reshape(bbox_regression, (N, H_final * W_final * num_anchors, 4))
 
