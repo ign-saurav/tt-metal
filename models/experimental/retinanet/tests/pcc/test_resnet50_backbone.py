@@ -12,6 +12,8 @@ from PIL import Image
 from torchvision import transforms
 from models.experimental.retinanet.tt.tt_backbone import TTBackbone
 from models.experimental.retinanet.tt.custom_preprocessor import create_custom_mesh_preprocessor
+from ttnn.model_preprocessing import infer_ttnn_module_args
+from models.experimental.retinanet.tests.pcc.test_resnet50_fpn import infer_ttnn_module_args as infer_module_args
 
 
 class BackboneTestInfra:
@@ -52,6 +54,24 @@ class BackboneTestInfra:
 
         # Get backbone features
         backbone_features = self.torch_backbone(self.torch_input_tensor)
+
+        ################# MODEL ARGS ##################
+        conv_args = {}
+        backbone = retinanet.backbone.body
+        self.fpn_model = retinanet.backbone.fpn
+        self.torch_fpn_input_tensor = backbone(self.torch_input_tensor)
+
+        conv_args = infer_ttnn_module_args(
+            model=self.torch_backbone,
+            run_model=lambda model: self.torch_backbone(self.torch_input_tensor),
+            device=device,
+        )
+        fpn_args = infer_module_args(
+            model=self.fpn_model, run_model=lambda model: self.fpn_model(self.torch_fpn_input_tensor), device=device
+        )
+
+        print(conv_args)
+        ################# MODEL ARGS ##################
 
         # Store only backbone outputs (FPN levels: "0", "1", "2", "p6", "p7")
         self.torch_output_tensor = backbone_features
