@@ -1,5 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
-#
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
@@ -19,6 +18,8 @@ from models.experimental.transfuser.tests.test_gpt import create_gpt_preprocesso
 
 from models.experimental.transfuser.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from ttnn.model_preprocessing import preprocess_model_parameters
+from ttnn.model_preprocessing import infer_ttnn_module_args as infer_ttnn_module_args_torch
+from models.experimental.transfuser.tests.test_transfuser_backbone import regroup_model_args
 
 
 def create_lidar_center_net_head_preprocessor(device, weight_dtype=ttnn.bfloat16):
@@ -380,6 +381,13 @@ def test_lidar_center_net(
         custom_preprocessor=create_custom_mesh_preprocessor(weights_mesh_mapper),
         device=None,
     )
+    model_args = infer_ttnn_module_args_torch(
+        model=torch_model,
+        run_model=lambda model: model(image, lidar_bev, velocity),
+        device=None,
+        absolute_name=True,
+    )
+    model_args = regroup_model_args(model_args)
     gpt1_parameters = preprocess_model_parameters(
         initialize_model=lambda: torch_model.transformer1,
         custom_preprocessor=create_gpt_preprocessor(device, n_layer, ttnn.bfloat16, use_optimized_self_attn),
@@ -419,6 +427,7 @@ def test_lidar_center_net(
         backbone="transFuser",
         torch_model=transfuser_model,
         use_fallback=use_fallback,
+        model_args=model_args,
     )
 
     # Convert input to TTNN format

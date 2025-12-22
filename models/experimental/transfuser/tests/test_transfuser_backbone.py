@@ -6,14 +6,12 @@ import torch
 import pytest
 from collections import OrderedDict
 from typing import Dict, Any, List
-
 import ttnn
 from loguru import logger
-
 from models.experimental.transfuser.reference.config import GlobalConfig
 from models.experimental.transfuser.reference.transfuser_backbone import TransfuserBackbone
 from models.experimental.transfuser.tt.custom_preprocessing import create_custom_mesh_preprocessor
-
+from ttnn.model_preprocessing import infer_ttnn_module_args as infer_ttnn_module_args_torch
 from models.experimental.transfuser.tests.test_gpt import create_gpt_preprocessor
 from models.experimental.transfuser.tt.transfuser_backbone import TtTransfuserBackbone
 from ttnn.model_preprocessing import (
@@ -82,6 +80,56 @@ def delete_incompatible_keys(state_dict: Dict[str, Any], keys_to_delete: List[st
     return new_state_dict
 
 
+def split_encoder_key(key: str):
+    parts = key.split(".")
+
+    encoder = parts[0]  # image_encoder / lidar_encoder
+    parts = [p for p in parts[1:] if p not in {"features", "_model"}]
+
+    return encoder, parts
+
+
+def normalize_leaf_dict(d):
+    out = {}
+    for k, v in d.items():
+        key = k.split(".")[-1]
+        out[key] = normalize_leaf_dict(v) if isinstance(v, dict) else v
+    return out
+
+
+def insert_nested(d, path, value):
+    cur = d
+    for p in path[:-1]:
+        cur = cur.setdefault(p, {})
+
+    leaf = path[-1]
+
+    if isinstance(value, dict):
+        cur[leaf] = normalize_leaf_dict(value)
+    else:
+        cur[leaf] = value
+
+
+def regroup_model_args(model_args):
+    out = {}
+
+    for k, v in model_args.items():
+        encoder, path = split_encoder_key(k)
+
+        enc_dict = out.setdefault(encoder, {})
+
+        if not path:
+            if isinstance(v, dict):
+                enc_dict.update(normalize_leaf_dict(v))
+            else:
+                raise RuntimeError(f"Unhandled leaf value at encoder root: {k}")
+            continue
+
+        insert_nested(enc_dict, path, v)
+
+    return out
+
+
 class TransfuserBackboneInfra:
     def __init__(
         self,
@@ -98,7 +146,6 @@ class TransfuserBackboneInfra:
         use_optimized_self_attn,
     ):
         super().__init__()
-        torch.manual_seed(42)
         self.device = device
         self.n_layer = n_layer
         self.image_arch = image_architecture
@@ -123,7 +170,7 @@ class TransfuserBackboneInfra:
             use_velocity=self.use_velocity,
         )
         torch_model.eval()
-        checkpoint_path = "model_seed1_39.pth"
+        checkpoint_path = "models/experimental/transfuser/resources/model_seed1_39.pth"
         modified_state_dict = fix_and_filter_checkpoint_keys(
             checkpoint_path=checkpoint_path,
             target_prefix="module._model.",  # This is the prefix to keep and remove
@@ -152,7 +199,7 @@ class TransfuserBackboneInfra:
         parameters["transformer2"] = gpt2_parameters
         gpt3_parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model.transformer3,
-            custom_preprocessor=create_gpt_preprocessor(device, n_layer, ttnn.bfloat16, use_optimized_self_attn),
+            custom_preprocessor=create_gpt_preprocessor(device, n_layer, ttnn.bfloat16, False),
             device=device,
         )
         parameters["transformer3"] = gpt3_parameters
@@ -167,8 +214,17 @@ class TransfuserBackboneInfra:
         self.torch_image_input = inputs["image"]  # RGB camera image tensor
         self.torch_lidar_input = inputs["lidar"]  # LiDAR BEV tensor
         self.torch_velocity_input = inputs["velocity"]  # Ego velocity tensor
+        model_args = infer_ttnn_module_args_torch(
+            model=torch_model,
+            run_model=lambda model: model(self.torch_image_input, self.torch_lidar_input, self.torch_velocity_input),
+            device=None,
+            absolute_name=True,
+        )
+        model_args = regroup_model_args(model_args)
+
         with torch.no_grad():
             self.torch_features, self.torch_image_grid, self.torch_fused = torch_model(
+                # self.torch_image_grid, self.torch_fused = torch_model(
                 self.torch_image_input,
                 self.torch_lidar_input,
                 self.torch_velocity_input,
@@ -203,6 +259,7 @@ class TransfuserBackboneInfra:
         self.ttnn_model = TtTransfuserBackbone(
             device,
             parameters=parameters,
+            model_args=model_args,
             stride=2,
             model_config=model_config,
             config=self.config,
@@ -232,9 +289,14 @@ class TransfuserBackboneInfra:
 
     def run(self):
         self.output_features, self.output_image_grid, self.output_fused = self.ttnn_model(
-            self.input_image_tensor, self.input_lidar_tensor, self.input_velocity_tensor, self.device
+            # self.output_image_grid, self.output_fused = self.ttnn_model(
+            self.input_image_tensor,
+            self.input_lidar_tensor,
+            self.input_velocity_tensor,
+            self.device,
         )
         return self.output_features, self.output_image_grid, self.output_fused
+        # return self.output_image_grid, self.output_fused
 
     def validate(self, model_config, output_tensor=None):
         # Validate image output

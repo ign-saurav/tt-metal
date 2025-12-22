@@ -36,6 +36,7 @@ class LidarCenterNet(nn.Module):
         use_velocity=True,
         torch_model=None,
         use_fallback=False,
+        model_args=None,
     ):
         super().__init__()
         self.device = device
@@ -67,9 +68,11 @@ class LidarCenterNet(nn.Module):
             "math_approx_mode": False,
         }
         assert backbone == "transFuser", "Only Transfuser supported for LidarCenterNet."
+
         self._model = TtTransfuserBackbone(
             device,
             parameters=parameters,
+            model_args=model_args,
             stride=2,
             model_config=model_config,
             config=self.config,
@@ -85,7 +88,6 @@ class LidarCenterNet(nn.Module):
             nn.Conv2d(channel, 3, kernel_size=(1, 1), stride=1, padding=0, bias=True),
         ).to(torch.device("cpu"))
 
-        # prediction heads
         # Initialize TTNN model
 
         self.head = TTLidarCenterNetHead(
@@ -191,3 +193,9 @@ class LidarCenterNet(nn.Module):
         features, _, fused_features = self._model(tt_rgb, tt_lidar_bev, tt_velocity, self.device)
 
         return features, fused_features
+        # Validate output_fused_tensor
+        tt_fused_torch = ttnn.to_torch(fused_features, device=self.device, dtype=torch.float32)
+
+        pred_wp, _, _, _, _ = self.forward_gru(tt_fused_torch, target_point)
+
+        return features, pred_wp

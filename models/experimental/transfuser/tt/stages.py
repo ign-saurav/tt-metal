@@ -134,7 +134,9 @@ optimization_dict: Dict[str, Dict[str, Dict[str, Any]]] = {
 class Ttstages:
     def __init__(
         self,
+        device,
         parameters: Dict[str, Any],
+        model_args,
         stride: int,
         model_config: Dict[str, Any],
         stage_name: str,
@@ -168,7 +170,9 @@ class Ttstages:
         )
 
         self.layer = self._make_layer(
+            device=device,
             parameters=parameters,
+            model_args=model_args,
             planes=planes,
             blocks=blocks,
             stride=stride,
@@ -181,7 +185,9 @@ class Ttstages:
 
     @staticmethod
     def _make_layer(
+        device,
         parameters: Dict[str, Any],
+        model_args,
         planes: int,
         blocks: int,
         stride: int,
@@ -236,7 +242,9 @@ class Ttstages:
         first_block_downsample = stride != 1
         layers.append(
             TTRegNetBottleneck(
+                device=device,
                 parameters=stage_params["b1"],
+                model_args=model_args["b1"],
                 model_config=model_config,
                 layer_config=layer_cfg,
                 stride=stride,
@@ -256,7 +264,9 @@ class Ttstages:
                 raise KeyError(f"Missing block '{bname}' in {stage_name}. Available: {available_block_names}")
             layers.append(
                 TTRegNetBottleneck(
+                    device=device,
                     parameters=stage_params[bname],
+                    model_args=model_args[bname],
                     model_config=model_config,
                     layer_config=layer_cfg,
                     stride=1,
@@ -274,5 +284,5 @@ class Ttstages:
     def __call__(self, x, device, input_shape=None):
         shape = input_shape if input_shape is not None else x.shape
         for block in self.layer:
-            x, shape = block(x, device, shape)
-        return x, shape
+            x = block(x, device, shape)
+        return x

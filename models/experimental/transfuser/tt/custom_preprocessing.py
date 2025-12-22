@@ -5,9 +5,7 @@
 import warnings
 import torch
 import ttnn
-
 from ttnn.model_preprocessing import fold_batch_norm2d_into_conv2d
-
 from models.experimental.transfuser.reference.transfuser_backbone import TransfuserBackbone
 from models.experimental.transfuser.reference.bottleneck import Bottleneck
 from models.experimental.transfuser.reference.stage import Stage

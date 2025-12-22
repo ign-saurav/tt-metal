@@ -4,10 +4,14 @@
 
 import torch
 import ttnn
-from models.experimental.transfuser.tt.utils import TTConv2D
 from models.experimental.transfuser.tt.gpt import TTGpt
 from models.experimental.transfuser.tt.topdown import TtTopDown
 from models.experimental.transfuser.tt.stages import Ttstages
+from models.tt_cnn.tt.builder import (
+    Conv2dConfiguration,
+    TtConv2d,
+    AutoShardedStrategyConfiguration,
+)
 
 
 class TtTransfuserBackbone:
@@ -15,6 +19,7 @@ class TtTransfuserBackbone:
         self,
         device,
         parameters,
+        model_args,
         stride,
         model_config,
         config,
@@ -24,31 +29,13 @@ class TtTransfuserBackbone:
         self.device = device
         self.config = config
         self.inplanes = 32
+        self.dtype = ttnn.bfloat16
 
-        # ---------- Small factories ----------
-        def make_stem(params):
-            return TTConv2D(
-                kernel_size=3,
-                stride=2,
-                padding=1,
-                parameters=params,
-                kernel_fidelity=model_config,
-                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-                shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-                deallocate_activation=True,
-                reallocate_halo_output=True,
-                reshard_if_not_optimal=True,
-                enable_act_double_buffer=True,
-                enable_weights_double_buffer=True,
-                dtype=ttnn.bfloat16,
-                fp32_dest_acc_en=model_config.get("fp32_dest_acc_en", True),
-                packer_l1_acc=model_config.get("packer_l1_acc", True),
-                math_approx_mode=model_config.get("math_approx_mode", False),
-            )
-
-        def make_stage(params, *, planes, blocks, s, groups, stage_name, with_torch):
+        def make_stage(params, model_args, *, planes, blocks, s, groups, stage_name, with_torch):
             return Ttstages._make_layer(
+                device=self.device,
                 parameters=params,
+                model_args=model_args,
                 planes=planes,
                 blocks=blocks,
                 stride=s,
@@ -59,28 +46,44 @@ class TtTransfuserBackbone:
                 use_fallback=(use_fallback if with_torch else False),
             )
 
-        def make_1x1(params):
-            return TTConv2D(
-                kernel_size=1,
-                stride=1,
-                padding=0,
-                parameters=params,
-                kernel_fidelity=model_config,
-                shard_layout=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                dtype=ttnn.bfloat16,
-            )
-
         # ---------- Parameter roots ----------
         img = parameters.image_encoder.features
         lidar = parameters.lidar_encoder._model
 
         # ---------- Stems ----------
-        self.conv1 = make_stem(img.conv1)
-        self.lidar_conv1 = make_stem(lidar.conv1)
+        conv1_params = model_args["image_encoder"]["stem"]["conv"]
+        conv1_config = self._create_conv_config(
+            parameters=img.conv1,
+            batch_size=conv1_params["batch_size"],
+            input_height=conv1_params["input_height"],
+            input_width=conv1_params["input_width"],
+            in_channels=conv1_params["in_channels"],
+            out_channels=conv1_params["out_channels"],
+            stride=conv1_params["stride"],
+            kernel_size=conv1_params["kernel_size"],
+            padding=conv1_params["padding"],
+            groups=conv1_params["groups"],
+        )
+        self.conv1 = TtConv2d(conv1_config, device=device)
+
+        lidar_conv1_params = model_args["lidar_encoder"]["conv1"]
+        lidar_conv1_config = self._create_conv_config(
+            parameters=lidar.conv1,
+            batch_size=lidar_conv1_params["batch_size"],
+            input_height=lidar_conv1_params["input_height"],
+            input_width=lidar_conv1_params["input_width"],
+            in_channels=lidar_conv1_params["in_channels"],
+            out_channels=lidar_conv1_params["out_channels"],
+            stride=lidar_conv1_params["stride"],
+            kernel_size=lidar_conv1_params["kernel_size"],
+            padding=lidar_conv1_params["padding"],
+            groups=lidar_conv1_params["groups"],
+        )
+        self.lidar_conv1 = TtConv2d(lidar_conv1_config, device=device)
 
         # ---------- Stage specs (shared for image & lidar) ----------
         # (name, planes, blocks, stride, groups)
+        # adjust as required
         specs = [
             ("layer1", 72, 2, 2, 3),
             ("layer2", 216, 5, 2, 9),
@@ -95,6 +98,7 @@ class TtTransfuserBackbone:
                 f"image_{name}",
                 make_stage(
                     getattr(img, name),
+                    model_args["image_encoder"][f"s{name.replace('layer', '')}"],
                     planes=planes,
                     blocks=blocks,
                     s=s,
@@ -108,6 +112,7 @@ class TtTransfuserBackbone:
                 f"lidar_{name}",
                 make_stage(
                     getattr(lidar, name),
+                    model_args["lidar_encoder"][f"s{name.replace('layer', '')}"],
                     planes=planes,
                     blocks=blocks,
                     s=s,
@@ -152,8 +157,36 @@ class TtTransfuserBackbone:
 
         # ---------- Optional channel adapters ----------
         if self.config.perception_output_features != 1512:
-            self.change_channel_conv_image = make_1x1(parameters.change_channel_conv_image)
-            self.change_channel_conv_lidar = make_1x1(parameters.change_channel_conv_lidar)
+            conv1x1_params = model_args["change_channel_conv_image"]
+            conv1x1_config = self._create_conv_config(
+                parameters=parameters.change_channel_conv_image,
+                batch_size=conv1x1_params["batch_size"],
+                input_height=conv1x1_params["input_height"],
+                input_width=conv1x1_params["input_width"],
+                in_channels=conv1x1_params["in_channels"],
+                out_channels=conv1x1_params["out_channels"],
+                stride=conv1x1_params["stride"],
+                kernel_size=conv1x1_params["kernel_size"],
+                padding=conv1x1_params["padding"],
+                groups=conv1x1_params["groups"],
+                activation=None,
+            )
+            lidar_conv1x1_params = model_args["change_channel_conv_lidar"]
+            lidar_conv1x1_config = self._create_conv_config(
+                parameters=parameters.change_channel_conv_lidar,
+                batch_size=lidar_conv1x1_params["batch_size"],
+                input_height=lidar_conv1x1_params["input_height"],
+                input_width=lidar_conv1x1_params["input_width"],
+                in_channels=lidar_conv1x1_params["in_channels"],
+                out_channels=lidar_conv1x1_params["out_channels"],
+                stride=lidar_conv1x1_params["stride"],
+                kernel_size=lidar_conv1x1_params["kernel_size"],
+                padding=lidar_conv1x1_params["padding"],
+                groups=lidar_conv1x1_params["groups"],
+                activation=None,
+            )
+            self.change_channel_conv_image = TtConv2d(conv1x1_config, device=device)
+            self.change_channel_conv_lidar = TtConv2d(lidar_conv1x1_config, device=device)
 
         # ---------- Top-down head ----------
         self.top_down = TtTopDown(
@@ -162,6 +195,75 @@ class TtTransfuserBackbone:
             perception_output_features=config.perception_output_features,
             bev_features_channels=config.bev_features_chanels,
             bev_upsample_factor=config.bev_upsample_factor,
+        )
+
+    def _create_conv_config(
+        self,
+        parameters,
+        batch_size,
+        input_height,
+        input_width,
+        in_channels,
+        out_channels,
+        stride,
+        kernel_size,
+        padding,
+        groups,
+        activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+    ):
+        # Convert weights to float32 format (required by tt_cnn builder)
+        weight = parameters.weight
+        if isinstance(weight, ttnn.Tensor):
+            weight = ttnn.from_torch(ttnn.to_torch(weight), dtype=self.dtype)
+
+        # Convert bias to shape (1, 1, 1, out_channels) in float32
+        bias = None
+        if "bias" in parameters and parameters.bias is not None:
+            bias_torch = ttnn.to_torch(parameters.bias).reshape(1, 1, 1, -1)
+            bias = ttnn.from_torch(bias_torch, dtype=self.dtype)
+
+        # Convert stride to list format (required by ttnn.conv2d)
+        if isinstance(stride, int):
+            stride_list = [stride, stride]
+        elif isinstance(stride, tuple) and len(stride) == 2:
+            stride_list = list(stride)
+        else:
+            stride_list = stride
+
+        # Convert padding to list format (required by ttnn.conv2d)
+        if isinstance(padding, int):
+            padding_list = [padding, padding]
+        elif isinstance(padding, tuple) and len(padding) == 2:
+            padding_list = list(padding)
+        elif isinstance(padding, tuple) and len(padding) == 4:
+            padding_list = list(padding)
+        else:
+            padding_list = padding
+
+        # Select math fidelity based on block (HiFi4 for block 2 for better accuracy)
+        math_fidelity = ttnn.MathFidelity.HiFi4
+
+        return Conv2dConfiguration(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=in_channels,
+            out_channels=out_channels,
+            batch_size=batch_size,
+            kernel_size=kernel_size,
+            stride=stride_list,  # List format
+            padding=padding_list,  # List format
+            groups=groups,
+            weight=weight,
+            bias=bias,
+            activation=activation,
+            activation_dtype=self.dtype,
+            weights_dtype=self.dtype,
+            output_dtype=self.dtype,
+            sharding_strategy=AutoShardedStrategyConfiguration(),
+            math_fidelity=math_fidelity,
+            fp32_dest_acc_en=True,
+            deallocate_activation=True,
+            enable_act_double_buffer=False,
         )
 
     def normalize_imagenet_ttnn(self, x):
@@ -233,28 +335,34 @@ class TtTransfuserBackbone:
         image_x = self.normalize_imagenet_ttnn(image_x)
 
         # image_encoder_conv1
-        image_out, image_shape = self.conv1(device, image_x, image_x.shape)
+        image_out = self.conv1(image_x)
+        # image_out, image_shape = self.conv1(device, image_x, image_x.shape)
 
         # lidar_encoder_conv1
-        lidar_out, lidar_shape = self.lidar_conv1(device, lidar_x, lidar_x.shape)
+        lidar_out = self.lidar_conv1(lidar_x)
+        # lidar_out, lidar_shape = self.lidar_conv1(device, lidar_x, lidar_x.shape)
 
+        # return image_out, lidar_out #pass
         # image_encoder_layer1
         for block in self.image_layer1:
-            image_out, image_shape = block(image_out, device, image_shape)
+            image_out = block(image_out, device)
+            # image_out, image_shape = block(image_out, device, image_shape)
         ttnn.ReadDeviceProfiler(device)
 
         # lidar_encoder_layer1
         for block in self.lidar_layer1:
-            lidar_out, lidar_shape = block(lidar_out, device, lidar_shape)
+            lidar_out = block(lidar_out, device)
         ttnn.ReadDeviceProfiler(device)
+        # return image_out, lidar_out #pass
 
         # Layer1 avgpool - image
+        # image_embd_layer1 = _avgpool_to_L1(image_out, image_out.shape, [self.config.img_vert_anchors, self.config.img_horz_anchors])
         image_embd_layer1 = _avgpool_to_L1(
-            image_out, image_shape, [self.config.img_vert_anchors, self.config.img_horz_anchors]
+            image_out, (1, 40, 176, 72), [self.config.img_vert_anchors, self.config.img_horz_anchors]
         )
         # Layer1 avgpool - lidar
         lidar_embd_layer1 = _avgpool_to_L1(
-            lidar_out, lidar_shape, [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
+            lidar_out, (1, 64, 64, 72), [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
         )
 
         # Layer1 transformer
@@ -275,6 +383,8 @@ class TtTransfuserBackbone:
         )
 
         # Layer1 Add
+        image_out = ttnn.sharded_to_interleaved(image_out, ttnn.DRAM_MEMORY_CONFIG)
+        lidar_out = ttnn.sharded_to_interleaved(lidar_out, ttnn.DRAM_MEMORY_CONFIG)
         image_out = ttnn.reshape(image_out, image_features_layer1.shape)
         lidar_out = ttnn.reshape(lidar_out, lidar_features_layer1.shape)
         image_features = ttnn.add(image_out, image_features_layer1)
@@ -284,21 +394,24 @@ class TtTransfuserBackbone:
 
         # image_encoder_layer2
         for block in self.image_layer2:
-            image_features, image_shape = block(image_features, device, image_shape)
+            image_features = block(image_features, device)
+            # image_features, image_shape = block(image_features, device, image_shape)
         ttnn.ReadDeviceProfiler(device)
 
         # lidar_encoder_layer2
         for block in self.lidar_layer2:
-            lidar_features, lidar_shape = block(lidar_features, device, lidar_shape)
+            lidar_features = block(lidar_features, device)
+            # lidar_features, lidar_shape = block(lidar_features, device, lidar_shape)
         ttnn.ReadDeviceProfiler(device)
 
+        # return image_features, lidar_features #pass
         # Layer2 avgpool - image
         image_embd_layer2 = _avgpool_to_L1(
-            image_features, image_shape, [self.config.img_vert_anchors, self.config.img_horz_anchors]
+            image_features, (1, 20, 88, 216), [self.config.img_vert_anchors, self.config.img_horz_anchors]
         )
         # Layer2 avgpool - lidar
         lidar_embd_layer2 = _avgpool_to_L1(
-            lidar_features, lidar_shape, [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
+            lidar_features, (1, 32, 32, 216), [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
         )
 
         # layer2 transformer
@@ -328,29 +441,33 @@ class TtTransfuserBackbone:
         image_shape = image_features.shape
         lidar_shape = lidar_features.shape
 
+        # return image_features, lidar_features #pass
         # image_encoder_layer3
         for block in self.image_layer3:
-            image_features, image_shape = block(image_features, device, image_shape)
+            image_features = block(image_features, device)
         ttnn.ReadDeviceProfiler(device)
 
         # lidar_encoder_layer3
         for block in self.lidar_layer3:
-            lidar_features, lidar_shape = block(lidar_features, device, lidar_shape)
+            lidar_features = block(lidar_features, device)
         ttnn.ReadDeviceProfiler(device)
+
+        # return image_features, lidar_features  # pass
 
         # Layer3 avgpool - image
         image_embd_layer3 = _avgpool_to_L1(
-            image_features, image_shape, [self.config.img_vert_anchors, self.config.img_horz_anchors]
+            image_features, (1, 10, 44, 576), [self.config.img_vert_anchors, self.config.img_horz_anchors]
         )
         # Layer3 avgpool - lidar
         lidar_embd_layer3 = _avgpool_to_L1(
-            lidar_features, lidar_shape, [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
+            lidar_features, (1, 16, 16, 576), [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
         )
 
         # layer3 transformer
         image_features_layer3, lidar_features_layer3 = self.transformer3(
             image_embd_layer3, lidar_embd_layer3, velocity, 576
         )
+        # return image_features_layer3, lidar_features_layer3
         ttnn.ReadDeviceProfiler(device)
         image_features_layer3 = ttnn.permute(image_features_layer3, (0, 2, 3, 1))
         lidar_features_layer3 = ttnn.permute(lidar_features_layer3, (0, 2, 3, 1))
@@ -374,21 +491,21 @@ class TtTransfuserBackbone:
 
         # image_encoder_layer4
         for block in self.image_layer4:
-            image_features, image_shape = block(image_features, device, image_shape)
+            image_features = block(image_features, device)
         ttnn.ReadDeviceProfiler(device)
 
         # lidar_encoder_layer4
         for block in self.lidar_layer4:
-            lidar_features, lidar_shape = block(lidar_features, device, lidar_shape)
+            lidar_features = block(lidar_features, device)
         ttnn.ReadDeviceProfiler(device)
 
         # Layer4 avgpool - image
         image_embd_layer4 = _avgpool_to_L1(
-            image_features, image_shape, [self.config.img_vert_anchors, self.config.img_horz_anchors]
+            image_features, (1, 5, 22, 1512), [self.config.img_vert_anchors, self.config.img_horz_anchors]
         )
         # Layer4 avgpool - lidar
         lidar_embd_layer4 = _avgpool_to_L1_lidar_layer4(
-            lidar_features, lidar_shape, [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
+            lidar_features, (1, 8, 8, 1512), [self.config.lidar_vert_anchors, self.config.lidar_horz_anchors]
         )
 
         # layer4 transformer
@@ -415,10 +532,12 @@ class TtTransfuserBackbone:
         lidar_features = ttnn.add(lidar_features, lidar_features_layer4)
 
         # Downsamples channels to 512
-        image_features, shape_ = self.change_channel_conv_image(device, image_features, image_features.shape)
-        lidar_features, shape_l = self.change_channel_conv_lidar(device, lidar_features, lidar_features.shape)
+        image_features, (iH, iW) = self.change_channel_conv_image(image_features, return_output_dim=True)
+        lidar_features, (lH, lW) = self.change_channel_conv_lidar(lidar_features, return_output_dim=True)
         x4 = lidar_features  # Save for FPN
         image_features_grid = image_features  # For auxiliary information
+        shape_ = (1, iH, iW, image_features.shape[-1])
+        shape_l = (1, lH, lW, lidar_features.shape[-1])
         image_features_grid = ttnn.reshape(image_features_grid, shape_)
         x4 = ttnn.reshape(x4, shape_l)
 

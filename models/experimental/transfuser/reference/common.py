@@ -9,8 +9,6 @@ import torch.nn.functional as F
 # ---------------------------
 # Torch utility modules
 # ---------------------------
-
-
 class Conv2d(torch.nn.Conv2d):
     """
     A wrapper around :class:`torch.nn.Conv2d` to support empty inputs and more features.
