@@ -61,7 +61,9 @@ class Conv2dNormActivation:
             ).permute(0, 2, 3, 1)
             x = ttnn.from_torch(x_normalized, device=self.device, dtype=ttnn.bfloat16)
         else:
-            x = ttnn.group_norm(x, num_groups=32, weight=self.norm_weight, bias=self.norm_bias, epsilon=1e-5)
+            x = ttnn.group_norm(
+                x, num_groups=32, weight=self.norm_weight, bias=self.norm_bias, epsilon=1e-5, inplace=False
+            )
 
         return x
 
