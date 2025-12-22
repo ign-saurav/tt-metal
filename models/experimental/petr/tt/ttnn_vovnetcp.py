@@ -21,15 +21,14 @@ class ttnn_hsigmoid:
 
 
 class ttnn_eSEModule:
-    def __init__(self, parameters, model_config, conv_args, device, is_split=False):
-        if is_split:
-            self.fc = Conv_with_split([1, 1, 0, 0], parameters["fc"])
+    def __init__(self, parameters, model_config=None, conv_args=None, device=None, is_split=False):
+        if is_split or conv_args is None:
+            self.fc = Conv_with_split([1, 1, 0, 0], parameters)
         else:
             self.fc_config = Conv2dConfiguration.from_model_args(
                 conv2d_args=conv_args,
                 weights=parameters["weight"],
                 bias=parameters["bias"],
-                # **layer_optimisations.conv3,
                 math_fidelity=model_config["MATH_FIDELITY"],
                 weights_dtype=model_config["WEIGHTS_DTYPE"],
                 activation_dtype=model_config["ACTIVATIONS_DTYPE"],
@@ -37,14 +36,19 @@ class ttnn_eSEModule:
             self.fc = TtConv2d(self.fc_config, device)
         self.hsigmoid = ttnn_hsigmoid()
 
-    def __call__(self, x):
+    def __call__(self, device, x):
         input = x
         B, H, W, C = x.shape
         x = ttnn.reshape(x, (B, H * W, C))
-        x = ttnn.mean(x, dim=1, keepdim=True)  # [B, 1, C]
+        x = ttnn.mean(x, dim=1, keepdim=True)
         x = ttnn.reshape(x, (B, 1, 1, C))
-        x, [out_h, out_w] = self.fc(x, return_output_dim=True)
-        x = ttnn.reshape(x, (self.fc_config.batch_size, out_h, out_w, self.fc_config.out_channels))
+        if hasattr(self, "fc_config"):
+            x, [out_h, out_w] = self.fc(x, return_output_dim=True)
+            x = ttnn.reshape(x, (self.fc_config.batch_size, out_h, out_w, self.fc_config.out_channels))
+        else:
+            x, [out_h, out_w] = self.fc(device, x, return_output_dim=True)
+            out_channels = x.shape[-1]
+            x = ttnn.reshape(x, (B, out_h, out_w, out_channels))
         x = self.hsigmoid(x)
         if input.get_layout() != ttnn.TILE_LAYOUT:
             input = ttnn.to_layout(input, ttnn.TILE_LAYOUT)
@@ -64,6 +68,9 @@ class ttnn_osa_module:
         identity=False,
         depthwise=False,
         with_cp=True,
+        model_config=None,
+        conv_args=None,
+        device=None,
     ):
         self.identity = identity
         self.depthwise = depthwise
@@ -153,16 +160,37 @@ class ttnn_osa_module:
                     activation="relu",
                     height_sharding=False,
                 )
+        ese_conv_args = None
+        if conv_args is not None:
+            try:
+                if isinstance(conv_args, dict):
+                    if module_name in conv_args:
+                        module_args = conv_args[module_name]
+                        if isinstance(module_args, dict) and "ese" in module_args:
+                            ese_conv_args = module_args["ese"].get("fc")
+                        elif hasattr(module_args, "ese"):
+                            ese_conv_args = getattr(module_args.ese, "fc", None)
+                elif hasattr(conv_args, module_name):
+                    module_args = getattr(conv_args, module_name)
+                    if hasattr(module_args, "ese"):
+                        ese_conv_args = getattr(module_args.ese, "fc", None)
+            except (KeyError, AttributeError):
+                pass
+            if ese_conv_args is not None and not hasattr(ese_conv_args, "input_height"):
+                ese_conv_args = None
         if module_name == "OSA5_1" or module_name == "OSA5_2" or module_name == "OSA5_3":
-            self.ese = ttnn_eSEModule(parameters, is_split=True)
+            self.ese = ttnn_eSEModule(parameters["fc"], model_config, ese_conv_args, device, is_split=True)
         else:
-            self.ese = ttnn_eSEModule(parameters)
+            self.ese = ttnn_eSEModule(parameters["fc"], model_config, ese_conv_args, device)
 
     def __call__(self, device, x):
         identity_feat = x
         output = []
         input_shape = x.shape
         if x.get_layout() != ttnn.ROW_MAJOR_LAYOUT:
+            if hasattr(x, "memory_config") and x.memory_config().is_sharded():
+                if x.memory_config().memory_layout == ttnn.TensorMemoryLayout.BLOCK_SHARDED:
+                    x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
         output.append(x)
 
@@ -177,17 +205,20 @@ class ttnn_osa_module:
                 x = conv_layer(device, x)
             else:
                 x = layer(device, x)
+            if hasattr(x, "memory_config") and x.memory_config().is_sharded():
+                if x.memory_config().memory_layout == ttnn.TensorMemoryLayout.BLOCK_SHARDED:
+                    x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
             if x.get_layout() != ttnn.ROW_MAJOR_LAYOUT:
                 x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-            if hasattr(x, "memory_config") and x.memory_config().is_sharded():
-                x = ttnn.to_memory_config(x, ttnn.L1_MEMORY_CONFIG)
+            x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
             output.append(x)
         output_tensor = []
         for idx in range(len(output)):
+            if hasattr(output[idx], "memory_config") and output[idx].memory_config().is_sharded():
+                if output[idx].memory_config().memory_layout == ttnn.TensorMemoryLayout.BLOCK_SHARDED:
+                    output[idx] = ttnn.to_memory_config(output[idx], ttnn.DRAM_MEMORY_CONFIG)
             if output[idx].get_layout() != ttnn.ROW_MAJOR_LAYOUT:
                 output[idx] = ttnn.to_layout(output[idx], ttnn.ROW_MAJOR_LAYOUT)
-            if hasattr(output[idx], "memory_config") and output[idx].memory_config().is_sharded():
-                output[idx] = ttnn.to_memory_config(output[idx], ttnn.L1_MEMORY_CONFIG)
             output_torch = ttnn.to_torch(output[idx]).to(torch.bfloat16)
             output_tensor.append(ttnn.from_torch(output_torch, dtype=ttnn.bfloat16, device=device))
 
@@ -248,6 +279,9 @@ class ttnn_osa_stage:
         stage_num,
         SE=False,
         depthwise=False,
+        model_config=None,
+        conv_args=None,
+        device=None,
     ):
         self.blocks = []
         if not stage_num == 2:
@@ -270,6 +304,9 @@ class ttnn_osa_stage:
                 module_name,
                 SE,
                 depthwise=depthwise,
+                model_config=model_config,
+                conv_args=conv_args,
+                device=device,
             ),
         )
         self.blocks.append(module_name)
@@ -291,6 +328,9 @@ class ttnn_osa_stage:
                     SE,
                     identity=True,
                     depthwise=depthwise,
+                    model_config=model_config,
+                    conv_args=conv_args,
+                    device=device,
                 ),
             )
             self.blocks.append(module_name)
@@ -340,16 +380,68 @@ class ttnn_VoVNetCP:
 
         self.stem_conv3 = Conv([2, 2, 1, 1], stem_parameters["stem_3"], activation="relu", height_sharding=False)
 
-        # Initialize stages
-        self.stage2 = ttnn_osa_stage(parameters.stage2, 128, 128, 256, 1, 5, 2, SE=True, depthwise=False)
-        self.stage3 = ttnn_osa_stage(parameters.stage3, 256, 160, 512, 3, 5, 3, SE=True, depthwise=False)
-        self.stage4 = ttnn_osa_stage(parameters.stage4, 512, 192, 768, 9, 5, 4, SE=True, depthwise=False)
-        self.stage5 = ttnn_osa_stage(parameters.stage5, 768, 224, 1024, 3, 5, 5, SE=True, depthwise=False)
+        default_model_config = {
+            "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
+            "WEIGHTS_DTYPE": ttnn.bfloat16,
+            "ACTIVATIONS_DTYPE": ttnn.bfloat16,
+        }
 
-        self.stage2 = ttnn_osa_stage(parameters.stage2, 128, 128, 256, 1, 5, 2, SE=True, depthwise=False)
-        self.stage3 = ttnn_osa_stage(parameters.stage3, 256, 160, 512, 3, 5, 3, SE=True, depthwise=False)
-        self.stage4 = ttnn_osa_stage(parameters.stage4, 512, 192, 768, 9, 5, 4, SE=True, depthwise=False)
-        self.stage5 = ttnn_osa_stage(parameters.stage5, 768, 224, 1024, 3, 5, 5, SE=True, depthwise=False)
+        self.stage2 = ttnn_osa_stage(
+            parameters.stage2,
+            128,
+            128,
+            256,
+            1,
+            5,
+            2,
+            SE=True,
+            depthwise=False,
+            model_config=default_model_config,
+            conv_args=None,
+            device=device,
+        )
+        self.stage3 = ttnn_osa_stage(
+            parameters.stage3,
+            256,
+            160,
+            512,
+            3,
+            5,
+            3,
+            SE=True,
+            depthwise=False,
+            model_config=default_model_config,
+            conv_args=None,
+            device=device,
+        )
+        self.stage4 = ttnn_osa_stage(
+            parameters.stage4,
+            512,
+            192,
+            768,
+            9,
+            5,
+            4,
+            SE=True,
+            depthwise=False,
+            model_config=default_model_config,
+            conv_args=None,
+            device=device,
+        )
+        self.stage5 = ttnn_osa_stage(
+            parameters.stage5,
+            768,
+            224,
+            1024,
+            3,
+            5,
+            5,
+            SE=True,
+            depthwise=False,
+            model_config=default_model_config,
+            conv_args=None,
+            device=device,
+        )
 
     def __call__(self, device, x):
         outputs = []

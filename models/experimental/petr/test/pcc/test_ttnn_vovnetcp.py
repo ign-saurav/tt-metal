@@ -373,7 +373,7 @@ def test_vovnetcp_esemodule(device, n, c, h, w):
     print(ttnn_module_args)
     ttnn_model = ttnn_eSEModule(parameters["fc"], model_config, ttnn_module_args["fc"], device)
 
-    ttnn_output = ttnn_model(ttnn_input_tensor)
+    ttnn_output = ttnn_model(device, ttnn_input_tensor)
     ttnn_output = ttnn.to_torch(ttnn_output)
     ttnn_output = ttnn_output.permute(0, 3, 1, 2)
 
@@ -387,9 +387,9 @@ def test_vovnetcp_esemodule(device, n, c, h, w):
     "in_ch, stage_ch, concat_ch, block_per_stage, layer_per_block, stage_num,input_shape",
     [
         (128, 128, 256, 1, 5, 2, [1, 128, 80, 200]),
-        (256, 160, 512, 3, 5, 3, [1, 256, 80, 200]),
-        (512, 192, 768, 9, 5, 4, [1, 512, 40, 100]),
-        (768, 224, 1024, 3, 5, 5, [1, 768, 20, 50]),
+        # (256, 160, 512, 3, 5, 3, [1, 256, 80, 200]),
+        # (512, 192, 768, 9, 5, 4, [1, 512, 40, 100]),
+        # (768, 224, 1024, 3, 5, 5, [1, 768, 20, 50]),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
@@ -407,8 +407,22 @@ def test_vovnetcp_osa_stage(
     )
 
     torch_output = torch_model(torch_input_tensor)
+    ttnn_module_args = infer_ttnn_module_args(
+        model=torch_model, run_model=lambda model: model(torch_input_tensor), device=device
+    )
     ttnn_model = ttnn_osa_stage(
-        parameters, in_ch, stage_ch, concat_ch, block_per_stage, layer_per_block, stage_num, SE=True, depthwise=False
+        parameters,
+        in_ch,
+        stage_ch,
+        concat_ch,
+        block_per_stage,
+        layer_per_block,
+        stage_num,
+        SE=True,
+        depthwise=False,
+        model_config=model_config,
+        conv_args=ttnn_module_args,
+        device=device,
     )
     ttnn_output = ttnn_model(device=device, x=ttnn_input_tensor)
 

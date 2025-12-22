@@ -151,9 +151,13 @@ class Conv:
         input_width = input_tensor.shape[2]
         input_channels = input_tensor.shape[3]
 
-        input_tensor = ttnn.to_memory_config(input_tensor, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         if hasattr(input_tensor, "memory_config") and input_tensor.memory_config().is_sharded():
-            input_tensor = ttnn.sharded_to_interleaved(input_tensor, ttnn.L1_MEMORY_CONFIG)
+            if input_tensor.memory_config().memory_layout == ttnn.TensorMemoryLayout.BLOCK_SHARDED:
+                input_tensor = ttnn.to_memory_config(input_tensor, ttnn.DRAM_MEMORY_CONFIG)
+            else:
+                input_tensor = ttnn.sharded_to_interleaved(input_tensor, ttnn.DRAM_MEMORY_CONFIG)
+        else:
+            input_tensor = ttnn.to_memory_config(input_tensor, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
         activation_param = None
         if self.activation == "relu":
