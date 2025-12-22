@@ -173,8 +173,8 @@ class TransfuserBackboneInfra:
         checkpoint_path = "model_seed1_39.pth"
         modified_state_dict = fix_and_filter_checkpoint_keys(
             checkpoint_path=checkpoint_path,
-            target_prefix="module._model.",  # This is the prefix to keep and remove
-            state_dict_key=None,  # Adjust this if needed
+            target_prefix="module._model.",
+            state_dict_key=None,
         )
         modified_state_dict = delete_incompatible_keys(modified_state_dict, ["lidar_encoder._model.stem.conv.weight"])
         torch_model.load_state_dict(modified_state_dict, strict=True)
@@ -224,7 +224,6 @@ class TransfuserBackboneInfra:
 
         with torch.no_grad():
             self.torch_features, self.torch_image_grid, self.torch_fused = torch_model(
-                # self.torch_image_grid, self.torch_fused = torch_model(
                 self.torch_image_input,
                 self.torch_lidar_input,
                 self.torch_velocity_input,
@@ -289,14 +288,12 @@ class TransfuserBackboneInfra:
 
     def run(self):
         self.output_features, self.output_image_grid, self.output_fused = self.ttnn_model(
-            # self.output_image_grid, self.output_fused = self.ttnn_model(
             self.input_image_tensor,
             self.input_lidar_tensor,
             self.input_velocity_tensor,
             self.device,
         )
         return self.output_features, self.output_image_grid, self.output_fused
-        # return self.output_image_grid, self.output_fused
 
     def validate(self, model_config, output_tensor=None):
         # Validate image output

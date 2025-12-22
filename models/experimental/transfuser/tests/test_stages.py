@@ -72,7 +72,6 @@ def keep_only_stage_model(torch_model, stage_name="layer1"):
         if name not in allowed_keys:
             del features._modules[name]
 
-    # Remove old 's' module if it exists
     if hasattr(torch_model, "s"):
         del torch_model.s
 
@@ -93,7 +92,6 @@ class StageInfra:
         self.stage_name = stage_name
         self.input_shape = input_shape
         self.num_devices = device.get_num_devices()
-        # self.batch_size = batch_size * self.num_devices
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
         self.config = GlobalConfig(setting="eval")
 
