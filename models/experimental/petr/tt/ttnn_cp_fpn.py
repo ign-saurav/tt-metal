@@ -14,27 +14,38 @@ class ttnn_ConvModule:
         parameters=None,
         device=None,
     ):
-        self.conv_config = Conv2dConfiguration.from_model_args(
-            conv2d_args=conv_args,
-            weights=parameters["weight"],
-            bias=parameters["bias"],
-            # **layer_optimisations.conv3,
-            math_fidelity=model_config["MATH_FIDELITY"],
-            weights_dtype=model_config["WEIGHTS_DTYPE"],
-            activation_dtype=model_config["ACTIVATIONS_DTYPE"],
-        )
-        self.conv = TtConv2d(self.conv_config, device)
+        if conv_args is not None:
+            self.conv_config = Conv2dConfiguration.from_model_args(
+                conv2d_args=conv_args,
+                weights=parameters["weight"],
+                bias=parameters["bias"],
+                math_fidelity=model_config["MATH_FIDELITY"],
+                weights_dtype=model_config["WEIGHTS_DTYPE"],
+                activation_dtype=model_config["ACTIVATIONS_DTYPE"],
+            )
+            self.conv = TtConv2d(self.conv_config, device)
+        else:
+            self.conv = None
+            self.parameters = parameters
+            self.device = device
+            self.model_config = model_config
 
     def __call__(
         self,
         device,
         x,
     ):
-        x, [output_height, output_width] = self.conv(x, return_output_dim=True)
+        if self.conv is not None:
+            x, [output_height, output_width] = self.conv(x, return_output_dim=True)
+            x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+            x = ttnn.reshape(
+                x, (self.conv_config.batch_size, output_height, output_width, self.conv_config.out_channels)
+            )
+        else:
+            from models.experimental.petr.tt.common import Conv
 
-        x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-
-        x = ttnn.reshape(x, (self.conv_config.batch_size, output_height, output_width, self.conv_config.out_channels))
+            conv = Conv([1, 1, 0, 0], self.parameters, activation="", height_sharding=False)
+            x = conv(device, x)
         return x
 
 
@@ -88,16 +99,22 @@ class ttnn_CPFPN:
         self.fpn_convs = []
 
         for i in range(self.start_level, self.backbone_end_level):
+            conv_args = None
+            if model_args is not None and "lateral_convs" in model_args:
+                conv_args = model_args["lateral_convs"][i]["conv"]
             l_conv = ttnn_ConvModule(
-                conv_args=model_args["lateral_convs"][i]["conv"],
+                conv_args=conv_args,
                 model_config=model_config,
                 device=device,
                 parameters=parameters["lateral_convs"][i]["conv"],
             )
             self.lateral_convs.append(l_conv)
             if i == 0:
+                fpn_conv_args = None
+                if model_args is not None and "fpn_convs" in model_args:
+                    fpn_conv_args = model_args["fpn_convs"][i]["conv"]
                 fpn_conv = ttnn_ConvModule(
-                    conv_args=model_args["fpn_convs"][i]["conv"],
+                    conv_args=fpn_conv_args,
                     model_config=model_config,
                     device=device,
                     parameters=parameters["fpn_convs"][i]["conv"],

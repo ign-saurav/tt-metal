@@ -263,7 +263,11 @@ class ttnn_PETRHead:
                     if i == ttnn.relu:
                         sin_embed = i(sin_embed)
                     else:
-                        sin_embed = i(device, sin_embed)
+                        result = i(device, sin_embed)
+                        if isinstance(result, tuple):
+                            sin_embed, _ = result
+                        else:
+                            sin_embed = result
                 sin_embed = ttnn.permute(sin_embed, (0, 3, 1, 2))
                 sin_embed = ttnn.reshape(sin_embed, (x.shape[0], x.shape[1], x.shape[2], x.shape[3], x.shape[4]))
                 pos_embed = pos_embed + sin_embed
