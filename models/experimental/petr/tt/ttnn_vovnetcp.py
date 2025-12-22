@@ -46,7 +46,7 @@ class ttnn_eSEModule:
             x, [out_h, out_w] = self.fc(x, return_output_dim=True)
             x = ttnn.reshape(x, (self.fc_config.batch_size, out_h, out_w, self.fc_config.out_channels))
         else:
-            x, [out_h, out_w] = self.fc(device, x, return_output_dim=True)
+            x, [out_h, out_w] = self.fc(device, x)
             out_channels = x.shape[-1]
             x = ttnn.reshape(x, (B, out_h, out_w, out_channels))
         x = self.hsigmoid(x)
@@ -228,7 +228,9 @@ class ttnn_osa_module:
             x = self.conv_concat(device, x)
         else:
             conv_layer = Conv(
-                [1, 1, 0, 0], self.parameters["{}_{}".format(self.module_name, "concat")], activation="relu"
+                [1, 1, 0, 0],
+                self.parameters["{}_{}".format(self.module_name, "concat")],
+                activation="relu",
             )
             x = conv_layer(device, x)
 
@@ -356,6 +358,7 @@ class ttnn_osa_stage:
 
         for module_name in self.blocks:
             module = getattr(self, module_name)  # Retrieve the block by name
+            # x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
             x = module(device, x)  # Forward pass through each `ttnn_osa_module`
 
         return x

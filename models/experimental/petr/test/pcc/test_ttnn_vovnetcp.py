@@ -387,9 +387,9 @@ def test_vovnetcp_esemodule(device, n, c, h, w):
     "in_ch, stage_ch, concat_ch, block_per_stage, layer_per_block, stage_num,input_shape",
     [
         (128, 128, 256, 1, 5, 2, [1, 128, 80, 200]),
-        # (256, 160, 512, 3, 5, 3, [1, 256, 80, 200]),
-        # (512, 192, 768, 9, 5, 4, [1, 512, 40, 100]),
-        # (768, 224, 1024, 3, 5, 5, [1, 768, 20, 50]),
+        (256, 160, 512, 3, 5, 3, [1, 256, 80, 200]),
+        (512, 192, 768, 9, 5, 4, [1, 512, 40, 100]),
+        (768, 224, 1024, 3, 5, 5, [1, 768, 20, 50]),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)

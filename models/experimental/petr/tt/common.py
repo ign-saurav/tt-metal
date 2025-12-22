@@ -30,9 +30,7 @@ from models.experimental.petr.reference.vovnetcp import VoVNetCP, eSEModule, _OS
 from models.tt_cnn.tt.builder import (
     TtConv2d,
     Conv2dConfiguration,
-    HeightShardedStrategyConfiguration,
-    WidthShardedStrategyConfiguration,
-    BlockShardedStrategyConfiguration,
+    AutoShardedStrategyConfiguration,
 )
 from typing import Optional, Dict, Tuple
 
@@ -60,17 +58,13 @@ def create_conv_config_from_parameters(
     packer_l1_acc: bool = True,
     enable_weights_double_buffer: bool = True,
     enable_act_double_buffer: bool = False,
+    reshard_if_not_optimal: bool = True,
 ) -> Conv2dConfiguration:
     if kernel_size is None:
         weight = parameters["weight"]
         kernel_size = (weight.shape[2], weight.shape[3])
 
-    if width_sharding is True:
-        sharding_strategy = WidthShardedStrategyConfiguration()
-    elif height_sharding:
-        sharding_strategy = HeightShardedStrategyConfiguration()
-    else:
-        sharding_strategy = BlockShardedStrategyConfiguration()
+    sharding_strategy = AutoShardedStrategyConfiguration()
 
     if isinstance(activation, str):
         if activation == "relu":
@@ -151,13 +145,9 @@ class Conv:
         input_width = input_tensor.shape[2]
         input_channels = input_tensor.shape[3]
 
-        if hasattr(input_tensor, "memory_config") and input_tensor.memory_config().is_sharded():
-            if input_tensor.memory_config().memory_layout == ttnn.TensorMemoryLayout.BLOCK_SHARDED:
-                input_tensor = ttnn.to_memory_config(input_tensor, ttnn.DRAM_MEMORY_CONFIG)
-            else:
-                input_tensor = ttnn.sharded_to_interleaved(input_tensor, ttnn.DRAM_MEMORY_CONFIG)
-        else:
-            input_tensor = ttnn.to_memory_config(input_tensor, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        input_tensor = ttnn.to_memory_config(input_tensor, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        if hasattr(self.weights, "memory_config") and self.weights.memory_config().is_sharded():
+            self.weights = ttnn.sharded_to_interleaved(self.weights, ttnn.DRAM_MEMORY_CONFIG)
 
         activation_param = None
         if self.activation == "relu":
@@ -175,21 +165,23 @@ class Conv:
             conv_params=self.conv_params,
             activation=activation_param,
             deallocate_activation=self.deallocate,
-            height_sharding=self.height_sharding,
-            width_sharding=self.width_sharding,
+            height_sharding=False,
+            width_sharding=False,
             groups=self.groups,
             dilation=self.dilation,
             math_fidelity=ttnn.MathFidelity.HiFi4,
             fp32_dest_acc_en=True,
-            packer_l1_acc=True,
+            packer_l1_acc=False,
             enable_act_double_buffer=False,
+            enable_weights_double_buffer=False,
+            reshard_if_not_optimal=True,
         )
 
         tt_conv2d = TtConv2d(conv_config, device)
         output_tensor, (out_height, out_width) = tt_conv2d(input_tensor, return_output_dim=True)
 
         if hasattr(output_tensor, "memory_config") and output_tensor.memory_config().is_sharded():
-            output_tensor = ttnn.sharded_to_interleaved(output_tensor, ttnn.L1_MEMORY_CONFIG)
+            output_tensor = ttnn.sharded_to_interleaved(output_tensor, ttnn.DRAM_MEMORY_CONFIG)
 
         output_tensor = ttnn.to_layout(output_tensor, layout=ttnn.ROW_MAJOR_LAYOUT)
         output_tensor = ttnn.reshape(output_tensor, (batch_size, out_height, out_width, output_tensor.shape[3]))
@@ -321,7 +313,7 @@ class Conv_with_split:
         if self.activation == "relu":
             accumulated_output = ttnn.relu(accumulated_output)
 
-        return accumulated_output
+        return accumulated_output, [out_height, out_width]
 
 
 def move_to_device(object, device):
