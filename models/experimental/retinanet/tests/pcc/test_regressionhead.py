@@ -12,6 +12,8 @@ from tests.ttnn.utils_for_testing import assert_with_pcc
 from models.experimental.retinanet.tt.tt_regression_head import ttnn_retinanet_regression_head
 from ttnn.model_preprocessing import infer_ttnn_module_args
 
+# from models.experimental.retinanet.tests.pcc.test_resnet50_fpn import infer_ttnn_module_args
+
 
 def create_regression_head_parameters(torch_head, device, model_config):
     """Convert PyTorch regression head weights to TTNN format."""
@@ -199,12 +201,21 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
         input_shapes = [(100, 100), (50, 50), (25, 25), (13, 13), (7, 7)]
 
         torch_features = [torch.randn(batch_size, in_channels, H, W, dtype=torch.bfloat16) for H, W in input_shapes]
+        save_data = {}
+        save_data["features"] = torch_features
+        save_data["input_shapes"] = input_shapes
+        save_data["batch_size"] = batch_size
+        save_data["in_channels"] = in_channels
+        with open(pickle_path, "wb") as f:
+            pickle.dump(save_data, f)
 
     num_anchors = 9
 
     # PyTorch forward pass
     with torch.no_grad():
-        torch_output = regression_head(torch_features)
+        print("running : reference model")
+        # torch_output = regression_head(torch_features)
+        print("finished running : reference model")
 
     ################# MODEL ARGS ##################
     model_args = {}
@@ -213,8 +224,12 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
     )
 
     for i in model_args:
-        print(model_args[i])
-        print("")
+        print(" ****** i : ", i, "   *********")
+        for j in model_args[i]:
+            print(" ****** j : ", j, "   *********")
+            print(model_args[i][j])
+            print("\n\n\n\n")
+    print(regression_head)
     ################# MODEL ARGS ##################
 
     # Convert to TTNN (NHWC format) - convert all features to device
