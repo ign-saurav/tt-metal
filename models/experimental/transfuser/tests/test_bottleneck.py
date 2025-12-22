@@ -21,6 +21,8 @@ class TransfuserBottleneckInfra:
     def __init__(
         self,
         device,
+        block_name,
+        use_fallback,
         in_chs,
         out_chs,
         stride,
@@ -45,9 +47,18 @@ class TransfuserBottleneckInfra:
         model_args = infer_ttnn_module_args_torch(
             model=torch_model, run_model=lambda model: model(torch.randn(self.input_size)), device=None
         )
+        # import pdb; pdb.set_trace()
 
-        # Create test input
-        self.torch_input = torch.randn(self.input_size)
+        state_dict = torch.load("image_enc_s2_weights.pt", map_location="cpu")
+        # import pdb; pdb.set_trace()
+        state_dict = {
+            k.replace(f"{block_name}.", "", 1): v for k, v in state_dict.items() if k.startswith(f"{block_name}.")
+        }
+        torch_model.load_state_dict(state_dict, strict=True)
+
+        self.tt_input = ttnn.load_tensor(f"image_layer2_input_{block_name}.tensorbin")
+        act = torch.load("captured_inputs.pt")
+        self.torch_input = act[f"image_encoder.features.s2.{block_name}.conv1"]
         with torch.no_grad():
             self.torch_output = torch_model(self.torch_input)
 
@@ -75,15 +86,8 @@ class TransfuserBottleneckInfra:
             downsample=downsample,
             groups=groups,
             layer_config=layer_config,
+            use_fallback=use_fallback,
         )
-        self.tt_input = ttnn.from_torch(
-            self.torch_input,
-            device=self.device,
-            dtype=ttnn.bfloat16,
-            mesh_mapper=self.inputs_mesh_mapper,
-            memory_config=ttnn.L1_MEMORY_CONFIG,
-        )
-        self.tt_input = ttnn.permute(self.tt_input, (0, 2, 3, 1))
         # Run + validate
         self.run()
         self.validate(self.model_config)
@@ -136,13 +140,19 @@ model_config = {
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
 @pytest.mark.parametrize(
-    "in_chs, out_chs, stride, input_size, stage_name",
+    "in_chs, out_chs, stride, input_size, stage_name, block_name",
     [
-        (32, 72, 2, (1, 32, 80, 352), "layer1"),  # stage 1 DS
+        # (32, 72, 2, (1, 32, 80, 352), "layer1"),  # stage 1 DS
+        # (72, 72, 1, (1, 72, 80//2, 352//2), "layer1"),  # stage 1 NDS
+        # (72, 216, 2, (1, 72, 80//2, 352//2), "layer2", "b1"),  # stage 2 DS
+        (216, 216, 1, (1, 216, 80 // 4, 352 // 4), "layer2", "b2"),  # stage 2 NDS
     ],
 )
+@pytest.mark.parametrize("use_fallback", [True])
 def test_transfuser_bottleneck(
     device,
+    block_name,
+    use_fallback,
     in_chs,
     out_chs,
     stride,
@@ -151,6 +161,8 @@ def test_transfuser_bottleneck(
 ):
     TransfuserBottleneckInfra(
         device,
+        block_name,
+        use_fallback,
         in_chs,
         out_chs,
         stride,

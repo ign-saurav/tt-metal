@@ -216,6 +216,7 @@ class TTRegNetBottleneck:
         )
 
     def __call__(self, x, device):
+        x = ttnn.to_device(x, device)
         input_shape = x.shape
         downsample_input = ttnn.clone(x)
 
@@ -271,6 +272,7 @@ class TTRegNetBottleneck:
             downsample_input = self.downsample_layer(downsample_input)
 
         # Add
+        downsample_input = ttnn.reshape(downsample_input, out.shape)
         out = ttnn.add(out, downsample_input)
         out = ttnn.relu(out)
 

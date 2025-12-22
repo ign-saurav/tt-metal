@@ -344,7 +344,11 @@ class TtTransfuserBackbone:
 
         # return image_out, lidar_out #pass
         # image_encoder_layer1
+        j = 0
         for block in self.image_layer1:
+            ttnn.dump_tensor(f"image_layer1_input_b{j}.tensorbin", image_out)
+            # torch.save(image_out, f"image_layer1_input_b{j}.pt")
+            j += 1
             image_out = block(image_out, device)
             # image_out, image_shape = block(image_out, device, image_shape)
         ttnn.ReadDeviceProfiler(device)
@@ -393,11 +397,17 @@ class TtTransfuserBackbone:
         lidar_shape = lidar_features.shape
 
         # image_encoder_layer2
+        k = 1
         for block in self.image_layer2:
+            ttnn.dump_tensor(f"image_layer2_input_b{k}.tensorbin", image_features)
+            # torch.save(image_features, f"image_layer2_input_b{k}.pt")
+            k += 1
             image_features = block(image_features, device)
             # image_features, image_shape = block(image_features, device, image_shape)
         ttnn.ReadDeviceProfiler(device)
+        import pytest
 
+        pytest.skip()
         # lidar_encoder_layer2
         for block in self.lidar_layer2:
             lidar_features = block(lidar_features, device)

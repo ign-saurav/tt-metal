@@ -19,6 +19,17 @@ from ttnn.model_preprocessing import (
 )
 from tests.ttnn.utils_for_testing import check_with_pcc
 
+activations = {}
+
+
+def save_input_hook(name):
+    def hook(module, inputs, output):
+        # inputs is a tuple
+        x = inputs[0].detach().cpu()
+        activations[name] = x
+
+    return hook
+
 
 def fix_and_filter_checkpoint_keys(
     checkpoint_path: str, target_prefix: str = "module._model.", state_dict_key: str = None
@@ -170,7 +181,17 @@ class TransfuserBackboneInfra:
             use_velocity=self.use_velocity,
         )
         torch_model.eval()
-        checkpoint_path = "models/experimental/transfuser/resources/model_seed1_39.pth"
+        hooks = []
+
+        for sname in ["s1", "s2", "s3"]:
+            stage = torch_model.image_encoder.features.__getattr__(sname)
+            for bname, block in stage.named_children():
+                if hasattr(block, "conv1"):
+                    full_name = f"image_encoder.features.{sname}.{bname}.conv1"
+                    print("Hooking:", full_name)
+                    h = block.conv1.register_forward_hook(save_input_hook(full_name))
+                    hooks.append(h)
+        checkpoint_path = "model_seed1_39.pth"
         modified_state_dict = fix_and_filter_checkpoint_keys(
             checkpoint_path=checkpoint_path,
             target_prefix="module._model.",  # This is the prefix to keep and remove
@@ -178,6 +199,7 @@ class TransfuserBackboneInfra:
         )
         modified_state_dict = delete_incompatible_keys(modified_state_dict, ["lidar_encoder._model.stem.conv.weight"])
         torch_model.load_state_dict(modified_state_dict, strict=True)
+        torch.save(torch_model.image_encoder.features.s2.state_dict(), "image_enc_s2_weights.pt")
 
         # Preprocess parameters for TTNN
         parameters = preprocess_model_parameters(
@@ -218,6 +240,7 @@ class TransfuserBackboneInfra:
             model=torch_model,
             run_model=lambda model: model(self.torch_image_input, self.torch_lidar_input, self.torch_velocity_input),
             device=None,
+            absolute_name=True,
         )
         model_args = regroup_model_args(model_args)
 
@@ -229,6 +252,7 @@ class TransfuserBackboneInfra:
                 self.torch_velocity_input,
             )
 
+        torch.save(activations, "captured_inputs.pt")
         # Convert input to TTNN format
         self.input_image_tensor = ttnn.from_torch(
             self.torch_image_input.permute(0, 2, 3, 1),
@@ -376,7 +400,7 @@ model_config = {
     [("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256))],
 )
 @pytest.mark.parametrize("use_fallback", [True])
-@pytest.mark.parametrize("use_optimized_self_attn", [True])
+@pytest.mark.parametrize("use_optimized_self_attn", [False])
 def test_stem(
     device,
     image_architecture,
