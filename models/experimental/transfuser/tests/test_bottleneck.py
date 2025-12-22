@@ -17,6 +17,33 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from loguru import logger
 
 
+def fix_regnet_downsample_keys(state_dict):
+    """
+    Remap RegNet downsample keys:
+      downsample.conv.* -> downsample.0.*
+      downsample.bn.*   -> downsample.1.*
+
+    Args:
+        state_dict (dict): input state_dict
+
+    Returns:
+        dict: new state_dict with corrected keys
+    """
+    new_sd = {}
+
+    for k, v in state_dict.items():
+        new_k = k
+
+        if k.startswith("downsample.conv."):
+            new_k = k.replace("downsample.conv.", "downsample.0.", 1)
+        elif k.startswith("downsample.bn."):
+            new_k = k.replace("downsample.bn.", "downsample.1.", 1)
+
+        new_sd[new_k] = v
+
+    return new_sd
+
+
 class TransfuserBottleneckInfra:
     def __init__(
         self,
@@ -37,6 +64,7 @@ class TransfuserBottleneckInfra:
         self.stride = stride
         self.input_size = input_size
         self.stage_name = stage_name
+        self.use_fallback = use_fallback
         self.model_config = model_config
         self.num_devices = device.get_num_devices()
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
@@ -47,13 +75,13 @@ class TransfuserBottleneckInfra:
         model_args = infer_ttnn_module_args_torch(
             model=torch_model, run_model=lambda model: model(torch.randn(self.input_size)), device=None
         )
-        # import pdb; pdb.set_trace()
 
         state_dict = torch.load("image_enc_s2_weights.pt", map_location="cpu")
         # import pdb; pdb.set_trace()
         state_dict = {
             k.replace(f"{block_name}.", "", 1): v for k, v in state_dict.items() if k.startswith(f"{block_name}.")
         }
+        state_dict = fix_regnet_downsample_keys(state_dict)
         torch_model.load_state_dict(state_dict, strict=True)
 
         self.tt_input = ttnn.load_tensor(f"image_layer2_input_{block_name}.tensorbin")
@@ -86,7 +114,9 @@ class TransfuserBottleneckInfra:
             downsample=downsample,
             groups=groups,
             layer_config=layer_config,
-            use_fallback=use_fallback,
+            use_fallback=self.use_fallback,
+            torch_model=torch_model if self.use_fallback else None,
+            stage_name=stage_name,
         )
         # Run + validate
         self.run()
@@ -144,11 +174,14 @@ model_config = {
     [
         # (32, 72, 2, (1, 32, 80, 352), "layer1"),  # stage 1 DS
         # (72, 72, 1, (1, 72, 80//2, 352//2), "layer1"),  # stage 1 NDS
-        # (72, 216, 2, (1, 72, 80//2, 352//2), "layer2", "b1"),  # stage 2 DS
-        (216, 216, 1, (1, 216, 80 // 4, 352 // 4), "layer2", "b2"),  # stage 2 NDS
+        # (72, 216, 2, (1, 72, 80//2, 352//2), "layer2", "b1"),  # stage 2 DS b1
+        (216, 216, 1, (1, 216, 80 // 4, 352 // 4), "layer2", "b2"),  # stage 2 NDS b1
+        # (216, 216, 1, (1, 216, 80 // 4, 352 // 4), "layer2", "b3"),  # stage 2 NDS b1
+        # (216, 216, 1, (1, 216, 80 // 4, 352 // 4), "layer2", "b4"),  # stage 2 NDS b1
+        # (216, 216, 1, (1, 216, 80 // 4, 352 // 4), "layer2", "b5"),  # stage 2 NDS b1
     ],
 )
-@pytest.mark.parametrize("use_fallback", [True])
+@pytest.mark.parametrize("use_fallback", [False])
 def test_transfuser_bottleneck(
     device,
     block_name,
