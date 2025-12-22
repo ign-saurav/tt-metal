@@ -24,7 +24,18 @@ class ttnn_esemodule:
         if is_split:
             self.fc = Conv_with_split([1, 1, 0, 0], parameters["fc"])
         else:
-            self.fc = Conv([1, 1, 0, 0], parameters["fc"], height_sharding=True)
+            weight = parameters["fc"]["weight"]
+            if isinstance(weight, torch.Tensor):
+                channels = weight.shape[0]
+            else:
+                channels = weight.shape[0]
+            height_sharding = channels < 768
+            self.fc = Conv(
+                [1, 1, 0, 0],
+                parameters["fc"],
+                height_sharding=height_sharding,
+                act_block_h=64 if not height_sharding else None,
+            )
         self.hsigmoid = ttnn_hsigmoid()
 
     def __call__(self, device, x):
@@ -110,6 +121,7 @@ class ttnn_osa_module:
                         parameters["{}_{}".format(module_name, i)],
                         activation="relu",
                         height_sharding=False,
+                        act_block_h=32,
                     )
                 )
 
@@ -120,6 +132,7 @@ class ttnn_osa_module:
                     parameters["{}_{}".format(module_name, "concat")],
                     activation="relu",
                     height_sharding=False,
+                    act_block_h=16,
                 )
             elif module_name == "OSA4_1":
                 self.conv_concat = Conv(
@@ -127,6 +140,7 @@ class ttnn_osa_module:
                     parameters["{}_{}".format(module_name, "concat")],
                     activation="relu",
                     height_sharding=False,
+                    act_block_h=16,
                 )
             elif "OSA5" in module_name:
                 self.conv_concat = Conv(
@@ -134,6 +148,7 @@ class ttnn_osa_module:
                     parameters["{}_{}".format(module_name, "concat")],
                     activation="relu",
                     height_sharding=False,
+                    act_block_h=16,
                 )
             else:
                 self.conv_concat = Conv(
@@ -141,6 +156,7 @@ class ttnn_osa_module:
                     parameters["{}_{}".format(module_name, "concat")],
                     activation="relu",
                     height_sharding=False,
+                    act_block_h=16,
                 )
         if module_name == "OSA5_1" or module_name == "OSA5_2" or module_name == "OSA5_3":
             self.ese = ttnn_esemodule(parameters, is_split=True)
@@ -151,8 +167,20 @@ class ttnn_osa_module:
         identity_feat = x
         output = []
         input_shape = x.shape
+        if hasattr(x, "memory_config") and x.memory_config().is_sharded():
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
         if x.get_layout() != ttnn.ROW_MAJOR_LAYOUT:
-            x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
+            if hasattr(x, "memory_config") and x.memory_config().is_sharded():
+                x_torch = ttnn.to_torch(x)
+                x = ttnn.from_torch(
+                    x_torch,
+                    dtype=ttnn.bfloat16,
+                    layout=ttnn.ROW_MAJOR_LAYOUT,
+                    device=device,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                )
+            else:
+                x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
         output.append(x)
 
         if self.depthwise and self.isReduced:
@@ -162,21 +190,47 @@ class ttnn_osa_module:
             module_name_with_i = "{}_{}".format(self.module_name, i)
 
             if "OSA2_1" in module_name_with_i:
-                conv_layer = Conv([1, 1, 1, 1], self.parameters["{}_{}".format(self.module_name, i)], activation="relu")
+                conv_layer = Conv(
+                    [1, 1, 1, 1],
+                    self.parameters["{}_{}".format(self.module_name, i)],
+                    activation="relu",
+                    height_sharding=False,
+                    act_block_h=64,
+                )
                 x = conv_layer(device, x)
             else:
                 x = layer(device, x)
-            if x.get_layout() != ttnn.ROW_MAJOR_LAYOUT:
-                x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
             if hasattr(x, "memory_config") and x.memory_config().is_sharded():
-                x = ttnn.to_memory_config(x, ttnn.L1_MEMORY_CONFIG)
+                x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+            if x.get_layout() != ttnn.ROW_MAJOR_LAYOUT:
+                if hasattr(x, "memory_config") and x.memory_config().is_sharded():
+                    x_torch = ttnn.to_torch(x)
+                    x = ttnn.from_torch(
+                        x_torch,
+                        dtype=ttnn.bfloat16,
+                        layout=ttnn.ROW_MAJOR_LAYOUT,
+                        device=device,
+                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    )
+                else:
+                    x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
             output.append(x)
         output_tensor = []
         for idx in range(len(output)):
-            if output[idx].get_layout() != ttnn.ROW_MAJOR_LAYOUT:
-                output[idx] = ttnn.to_layout(output[idx], ttnn.ROW_MAJOR_LAYOUT)
             if hasattr(output[idx], "memory_config") and output[idx].memory_config().is_sharded():
-                output[idx] = ttnn.to_memory_config(output[idx], ttnn.L1_MEMORY_CONFIG)
+                output[idx] = ttnn.sharded_to_interleaved(output[idx], ttnn.DRAM_MEMORY_CONFIG)
+            if output[idx].get_layout() != ttnn.ROW_MAJOR_LAYOUT:
+                if hasattr(output[idx], "memory_config") and output[idx].memory_config().is_sharded():
+                    output_torch = ttnn.to_torch(output[idx])
+                    output[idx] = ttnn.from_torch(
+                        output_torch,
+                        dtype=ttnn.bfloat16,
+                        layout=ttnn.ROW_MAJOR_LAYOUT,
+                        device=device,
+                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    )
+                else:
+                    output[idx] = ttnn.to_layout(output[idx], ttnn.ROW_MAJOR_LAYOUT)
             output_torch = ttnn.to_torch(output[idx]).to(torch.bfloat16)
             output_tensor.append(ttnn.from_torch(output_torch, dtype=ttnn.bfloat16, device=device))
 
@@ -186,7 +240,11 @@ class ttnn_osa_module:
             x = self.conv_concat(device, x)
         else:
             conv_layer = Conv(
-                [1, 1, 0, 0], self.parameters["{}_{}".format(self.module_name, "concat")], activation="relu"
+                [1, 1, 0, 0],
+                self.parameters["{}_{}".format(self.module_name, "concat")],
+                activation="relu",
+                height_sharding=False,
+                act_block_h=64,
             )
             x = conv_layer(device, x)
 

@@ -60,6 +60,7 @@ def create_conv_config_from_parameters(
     packer_l1_acc: bool = True,
     enable_weights_double_buffer: bool = True,
     enable_act_double_buffer: bool = False,
+    act_block_h: Optional[int] = None,
 ) -> Conv2dConfiguration:
     if kernel_size is None:
         weight = parameters["weight"]
@@ -68,9 +69,15 @@ def create_conv_config_from_parameters(
     if width_sharding is True:
         sharding_strategy = WidthShardedStrategyConfiguration()
     elif height_sharding:
-        sharding_strategy = HeightShardedStrategyConfiguration()
+        if act_block_h is not None and act_block_h > 0:
+            sharding_strategy = HeightShardedStrategyConfiguration(act_block_h_override=act_block_h)
+        else:
+            sharding_strategy = HeightShardedStrategyConfiguration()
     else:
-        sharding_strategy = BlockShardedStrategyConfiguration()
+        if act_block_h is not None and act_block_h > 0:
+            sharding_strategy = BlockShardedStrategyConfiguration(act_block_h_override=act_block_h)
+        else:
+            sharding_strategy = BlockShardedStrategyConfiguration()
 
     if isinstance(activation, str):
         if activation == "relu":
@@ -144,6 +151,7 @@ class Conv:
         self.height_sharding = height_sharding
         self.width_sharding = width_sharding
         self.device = device
+        self.act_block_h = act_block_h
 
     def __call__(self, device, input_tensor):
         batch_size = input_tensor.shape[0]
@@ -153,13 +161,26 @@ class Conv:
 
         input_tensor = ttnn.to_memory_config(input_tensor, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         if hasattr(input_tensor, "memory_config") and input_tensor.memory_config().is_sharded():
-            input_tensor = ttnn.sharded_to_interleaved(input_tensor, ttnn.L1_MEMORY_CONFIG)
+            input_tensor = ttnn.sharded_to_interleaved(input_tensor, ttnn.DRAM_MEMORY_CONFIG)
 
         activation_param = None
         if self.activation == "relu":
             activation_param = ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)
         elif self.activation == "gelu":
             activation_param = ttnn.UnaryWithParam(ttnn.UnaryOpType.GELU)
+
+        height_sharding_actual = self.height_sharding
+        width_sharding_actual = self.width_sharding
+        act_block_h_actual = self.act_block_h
+        if not self.height_sharding:
+            spatial_size = input_height * input_width
+            if spatial_size > 10000 and input_channels >= 32:
+                width_sharding_actual = True
+            elif spatial_size > 4000:
+                if act_block_h_actual is None:
+                    act_block_h_actual = 32
+                elif act_block_h_actual > 32:
+                    act_block_h_actual = 32
 
         conv_config = create_conv_config_from_parameters(
             input_height=input_height,
@@ -171,23 +192,39 @@ class Conv:
             conv_params=self.conv_params,
             activation=activation_param,
             deallocate_activation=self.deallocate,
-            height_sharding=self.height_sharding,
-            width_sharding=self.width_sharding,
+            height_sharding=height_sharding_actual,
+            width_sharding=width_sharding_actual,
             groups=self.groups,
             dilation=self.dilation,
             math_fidelity=ttnn.MathFidelity.HiFi4,
             fp32_dest_acc_en=True,
             packer_l1_acc=True,
             enable_act_double_buffer=False,
+            act_block_h=act_block_h_actual if not width_sharding_actual else None,
         )
 
         tt_conv2d = TtConv2d(conv_config, device)
         output_tensor, (out_height, out_width) = tt_conv2d(input_tensor, return_output_dim=True)
 
         if hasattr(output_tensor, "memory_config") and output_tensor.memory_config().is_sharded():
-            output_tensor = ttnn.sharded_to_interleaved(output_tensor, ttnn.L1_MEMORY_CONFIG)
-
-        output_tensor = ttnn.to_layout(output_tensor, layout=ttnn.ROW_MAJOR_LAYOUT)
+            output_tensor = ttnn.sharded_to_interleaved(output_tensor, ttnn.DRAM_MEMORY_CONFIG)
+            if hasattr(output_tensor, "memory_config") and output_tensor.memory_config().is_sharded():
+                output_tensor_torch = ttnn.to_torch(output_tensor)
+                output_tensor = ttnn.from_torch(
+                    output_tensor_torch,
+                    dtype=ttnn.bfloat16,
+                    layout=ttnn.ROW_MAJOR_LAYOUT,
+                    device=device,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                )
+            elif output_tensor.get_layout() != ttnn.ROW_MAJOR_LAYOUT:
+                output_tensor = ttnn.to_layout(
+                    output_tensor, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG
+                )
+        elif output_tensor.get_layout() != ttnn.ROW_MAJOR_LAYOUT:
+            output_tensor = ttnn.to_layout(
+                output_tensor, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG
+            )
         output_tensor = ttnn.reshape(output_tensor, (batch_size, out_height, out_width, output_tensor.shape[3]))
         output_tensor = ttnn.to_layout(output_tensor, layout=ttnn.TILE_LAYOUT)
         return output_tensor
@@ -253,7 +290,7 @@ class Conv_with_split:
 
         for i in range(self.split_factor):
             split_input_ttnn = ttnn.from_torch(
-                split_input_tensors[i], dtype=ttnn.bfloat16, memory_config=ttnn.L1_MEMORY_CONFIG, device=device
+                split_input_tensors[i], dtype=ttnn.bfloat16, memory_config=ttnn.DRAM_MEMORY_CONFIG, device=device
             )
 
             if isinstance(self.weights, torch.Tensor):
@@ -306,7 +343,7 @@ class Conv_with_split:
             accumulated_output = ttnn.add(accumulated_output, bias_ttnn, output_tensor=accumulated_output)
 
         if hasattr(accumulated_output, "memory_config") and accumulated_output.memory_config().is_sharded():
-            accumulated_output = ttnn.sharded_to_interleaved(accumulated_output, ttnn.L1_MEMORY_CONFIG)
+            accumulated_output = ttnn.sharded_to_interleaved(accumulated_output, ttnn.DRAM_MEMORY_CONFIG)
 
         accumulated_output = ttnn.to_layout(accumulated_output, layout=ttnn.ROW_MAJOR_LAYOUT)
         if accumulated_output.shape[1] != out_height or accumulated_output.shape[2] != out_width:
