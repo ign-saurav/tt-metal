@@ -1,11 +1,8 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
-
 import ttnn
-from typing import List
-from typing import Optional
+from typing import List, Optional
 from dataclasses import dataclass
-from typing import Optional
 from loguru import logger
 import tt_lib.fallback_ops as fallback_ops
 import os
@@ -13,14 +10,13 @@ from models.experimental.retinanet.tt.utils import _create_conv_config_from_para
 from models.tt_cnn.tt.builder import TtConv2d
 from models.tt_cnn.tt.builder import (
     HeightShardedStrategyConfiguration,
+    Conv2dConfiguration,
     AutoShardedStrategyConfiguration,
 )
 
 
 @dataclass
 class RetinaNetHeadOptimizer:
-    """Optimization configuration for RetinaNet head conv blocks"""
-
     fpn0_conv_blocks: dict
     fpn1_conv_blocks: dict
     fpn2_conv_blocks: dict
@@ -121,10 +117,6 @@ retinanet_head_optimizations = {
 
 
 class Conv2dNormActivation:
-    """
-    TTNN implementation of Conv2d + GroupNorm + ReLU block.
-    """
-
     def __init__(
         self,
         parameters: dict,
@@ -141,7 +133,7 @@ class Conv2dNormActivation:
         input_mask: Optional[ttnn.Tensor] = None,
         model_config: dict = None,
         compute_config: Optional[ttnn.DeviceComputeKernelConfig] = None,
-        conv_config: Optional[ttnn.Conv2dConfig] = None,
+        conv_config: dict = None,  # Changed to dict for optimizer config
     ):
         self.device = device
         self.in_channels = in_channels
@@ -152,22 +144,17 @@ class Conv2dNormActivation:
         self.num_groups = num_groups
         self.model_config = model_config
         self.compute_config = compute_config
-        self.conv_config = conv_config
+
         self.conv_weight = parameters["weight"]
         self.conv_bias = parameters["bias"]
         self.norm_weight = parameters["norm_weight"]
         self.norm_bias = parameters["norm_bias"]
-        # GroupNorm fallback flag
+
         self.fallback_on_groupnorm = os.environ.get("FALLBACK_ON_GROUPNORM", "1") == "1"
         self.grid_size = grid_size if grid_size is not None else ttnn.CoreGrid(y=8, x=8)
-
         self.input_mask = input_mask
 
-        self.slice_config = ttnn.Conv2dSliceConfig(
-            slice_type=ttnn.Conv2dDRAMSliceHeight,
-        )
-
-        self.conv_config = _create_conv_config_from_params(
+        base_conv_config = _create_conv_config_from_params(
             input_height=input_height,
             input_width=input_width,
             in_channels=in_channels,
@@ -181,6 +168,15 @@ class Conv2dNormActivation:
             if input_height == 4
             else AutoShardedStrategyConfiguration(),
         )
+
+        config_dict = base_conv_config.__dict__.copy()
+
+        if conv_config:  # conv_config is a dict
+            for key, value in conv_config.items():
+                if key in config_dict:
+                    config_dict[key] = value
+
+        self.conv_config = Conv2dConfiguration(**config_dict)
         self.conv = TtConv2d(self.conv_config, device)
 
     def __call__(
@@ -192,21 +188,6 @@ class Conv2dNormActivation:
         fpn_level: int = None,
         conv_block_idx: int = None,
     ) -> ttnn.Tensor:
-        """
-        Forward pass: Conv2d -> GroupNorm -> ReLU
-
-        Args:
-            x: Input tensor in NHWC format
-            batch_size: Batch size
-            input_height: Input height
-            input_width: Input width
-            fpn_level: FPN level
-            conv_block_idx: Index of the convolution block
-
-        Returns:
-            Output tensor after Conv2d + GroupNorm + ReLU
-        """
-
         prefix = (
             f"[FPN{fpn_level}][Conv{conv_block_idx}]"
             if fpn_level is not None and conv_block_idx is not None
@@ -233,9 +214,7 @@ class Conv2dNormActivation:
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
 
         else:
-            # Use TTNN native GroupNorm (when FALLBACK_ON_GROUPNORM=0)
             logger.debug(f"{prefix} Using TTNN native GroupNorm")
-
             spatial_size = H_out * W_out
             required_size = ((spatial_size + self.grid_size.y * 32 - 1) // (self.grid_size.y * 32)) * (
                 self.grid_size.y * 32
@@ -248,7 +227,6 @@ class Conv2dNormActivation:
             else:
                 x_padded = ttnn.reshape(x, (N, 1, spatial_size, C))
 
-            # Apply GroupNorm
             x_normalized = ttnn.group_norm(
                 x_padded,
                 num_groups=self.num_groups,
@@ -269,17 +247,12 @@ class Conv2dNormActivation:
         H_out = input_height
         W_out = input_width
 
-        # ReLU activation
         x = ttnn.relu(x)
 
         return x
 
 
 class TtnnRetinaNetRegressionHead:
-    """
-    TTNN implementation of RetinaNet regression head as a class.
-    """
-
     def __init__(
         self,
         parameters: dict,
@@ -291,19 +264,6 @@ class TtnnRetinaNetRegressionHead:
         model_config: dict = None,
         optimization_profile: str = "optimized",
     ):
-        """
-        Initialize the TTNN RetinaNet regression head.
-
-        Args:
-            parameters: Model parameters dictionary
-            device: TTNN device
-            in_channels: Number of input channels (default: 256)
-            num_anchors: Number of anchors per position (default: 9)
-            batch_size: Batch size (default: 1)
-            input_shapes: List of input shapes for each FPN level
-            model_config: Model configuration dictionary
-            optimization_profile: Optimization profile to use
-        """
         self.device = device
         self.in_channels = in_channels
         self.num_anchors = num_anchors
@@ -313,24 +273,7 @@ class TtnnRetinaNetRegressionHead:
         self.optimization_profile = optimization_profile
 
         self.parameters = parameters
-
         self.opt_config = retinanet_head_optimizations[optimization_profile]
-
-        self.fpn_conv_configs = [
-            self.opt_config.fpn0_conv_blocks,
-            self.opt_config.fpn1_conv_blocks,
-            self.opt_config.fpn2_conv_blocks,
-            self.opt_config.fpn3_conv_blocks,
-            self.opt_config.fpn4_conv_blocks,
-        ]
-
-        self.fpn_final_configs = [
-            self.opt_config.fpn0_final_conv,
-            self.opt_config.fpn1_final_conv,
-            self.opt_config.fpn2_final_conv,
-            self.opt_config.fpn3_final_conv,
-            self.opt_config.fpn4_final_conv,
-        ]
 
         self.compute_config = ttnn.init_device_compute_kernel_config(
             device.arch(),
@@ -344,41 +287,18 @@ class TtnnRetinaNetRegressionHead:
         input_mask_tensor = ttnn.create_group_norm_input_mask(in_channels, 32, self.grid_size.y)
         self.input_mask_tensor = input_mask_tensor.to(device, ttnn.DRAM_MEMORY_CONFIG)
 
-    def forward(
-        self,
-        feature_maps: List[ttnn.Tensor],
-        batch_size: Optional[int] = None,
-        input_shapes: Optional[List[tuple]] = None,
-    ) -> ttnn.Tensor:
-        """
-        Forward pass through the regression head.
+        self.fpn_optimizer_configs = {
+            0: (self.opt_config.fpn0_conv_blocks, self.opt_config.fpn0_final_conv),
+            1: (self.opt_config.fpn1_conv_blocks, self.opt_config.fpn1_final_conv),
+            2: (self.opt_config.fpn2_conv_blocks, self.opt_config.fpn2_final_conv),
+            3: (self.opt_config.fpn3_conv_blocks, self.opt_config.fpn3_final_conv),
+            4: (self.opt_config.fpn4_conv_blocks, self.opt_config.fpn4_final_conv),
+        }
 
-        Args:
-            feature_maps: List of feature maps from FPN levels
-            batch_size: Optional override for batch size
-            input_shapes: Optional override for input shapes
+        self.conv_blocks_by_fpn = {}
 
-        Returns:
-            Output tensor with bounding box regressions
-        """
-
-        current_batch_size = batch_size if batch_size is not None else self.batch_size
-        current_input_shapes = input_shapes if input_shapes is not None else self.input_shapes
-
-        all_bbox_regression = []
-
-        for fpn_idx, feature_map in enumerate(feature_maps):
-            N = 1
-            H, W = current_input_shapes[fpn_idx]
-            print(H, W)
-
-            conv_blocks_config = self.fpn_conv_configs[fpn_idx]
-            final_conv_config = self.fpn_final_configs[fpn_idx]
-
-            if conv_blocks_config is not None:
-                conv_config = ttnn.Conv2dConfig(**conv_blocks_config)
-            else:
-                conv_config = None
+        for fpn_idx in range(5):
+            conv_opt, final_opt = self.fpn_optimizer_configs[fpn_idx]
 
             conv_blocks = []
             for conv_idx in range(4):
@@ -395,13 +315,34 @@ class TtnnRetinaNetRegressionHead:
                     input_mask=self.input_mask_tensor,
                     model_config=self.model_config,
                     compute_config=self.compute_config,
-                    conv_config=conv_config,
-                    input_height=H,
-                    input_width=W,
+                    conv_config=conv_opt,  # Apply optimizer config
+                    input_height=64,  # Default, will be updated in forward
+                    input_width=64,  # Default, will be updated in forward
                 )
                 conv_blocks.append(conv_block)
 
-            # Apply conv blocks to feature map
+            self.conv_blocks_by_fpn[fpn_idx] = conv_blocks
+
+            self.final_conv_configs = {}
+            self.final_conv_configs[fpn_idx] = final_opt
+
+    def forward(
+        self,
+        feature_maps: List[ttnn.Tensor],
+        batch_size: Optional[int] = None,
+        input_shapes: Optional[List[tuple]] = None,
+    ) -> ttnn.Tensor:
+        current_batch_size = batch_size if batch_size is not None else self.batch_size
+        current_input_shapes = input_shapes if input_shapes is not None else self.input_shapes
+
+        if current_input_shapes is None:
+            current_input_shapes = [(fm.shape[1], fm.shape[2]) for fm in feature_maps]
+
+        all_bbox_regression = []
+
+        for fpn_idx, (feature_map, (H, W)) in enumerate(zip(feature_maps, current_input_shapes)):
+            conv_blocks = self.conv_blocks_by_fpn[fpn_idx]
+
             x = feature_map
             for conv_idx, conv_block in enumerate(conv_blocks):
                 x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
@@ -414,12 +355,7 @@ class TtnnRetinaNetRegressionHead:
                     conv_block_idx=conv_idx,
                 )
 
-            # Final bbox_reg conv layer with config
-            bbox_reg_slice_config = ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dDRAMSliceHeight, num_slices=4)
-            if final_conv_config is not None:
-                bbox_reg_config = ttnn.Conv2dConfig(**final_conv_config)
-            else:
-                bbox_reg_config = None
+            final_conv_optimizer = self.final_conv_configs[fpn_idx]
 
             conv_final_config = _create_conv_config_from_params(
                 input_height=H,
@@ -433,16 +369,22 @@ class TtnnRetinaNetRegressionHead:
                 padding=(1, 1),
                 sharding_strategy=HeightShardedStrategyConfiguration(),
             )
+
+            if final_conv_optimizer:
+                config_dict = conv_final_config.__dict__.copy()
+                for key, value in final_conv_optimizer.items():
+                    if key in config_dict:
+                        config_dict[key] = value
+                conv_final_config = Conv2dConfiguration(**config_dict)
+
             conv_final = TtConv2d(conv_final_config, self.device)
             bbox_regression, shape = conv_final(x, return_output_dim=True)
 
-            # Reshape to (N, H*W*num_anchors, 4)
-            N, H_final, W_final, C_final = bbox_regression.shape
-            H_final, W_final = shape
+            N, H_out, W_out, _ = bbox_regression.shape
+            H_out, W_out = shape
             bbox_regression = ttnn.sharded_to_interleaved(bbox_regression, ttnn.DRAM_MEMORY_CONFIG)
-
-            bbox_regression = ttnn.reshape(bbox_regression, (N, H_final, W_final, self.num_anchors, 4))
-            bbox_regression = ttnn.reshape(bbox_regression, (N, H_final * W_final * self.num_anchors, 4))
+            bbox_regression = ttnn.reshape(bbox_regression, (N, H_out, W_out, self.num_anchors, 4))
+            bbox_regression = ttnn.reshape(bbox_regression, (N, H_out * W_out * self.num_anchors, 4))
 
             all_bbox_regression.append(bbox_regression)
 
@@ -450,5 +392,4 @@ class TtnnRetinaNetRegressionHead:
         return output
 
     def __call__(self, feature_maps: List[ttnn.Tensor], **kwargs) -> ttnn.Tensor:
-        """Alias for forward method."""
         return self.forward(feature_maps, **kwargs)
