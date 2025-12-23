@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
 
 import argparse
@@ -20,15 +20,19 @@ from torchvision.ops import boxes as box_ops
 from torchvision.models.detection.image_list import ImageList
 from typing import Any, Dict, List, Optional
 from torch import Tensor
-from models.experimental.retinanet.tt.tt_regression_head import ttnn_retinanet_regression_head
-from models.experimental.retinanet.tt.tt_classification_head import ttnn_retinanet_classification_head
+
+# from models.experimental.retinanet.tt.tt_regression_head import ttnn_retinanet_regression_head
+# from models.experimental.retinanet.tt.tt_classification_head import ttnn_retinanet_classification_head
 from models.experimental.retinanet.tt.tt_backbone import TTBackbone
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.experimental.retinanet.tt.custom_preprocessor import (
     create_custom_mesh_preprocessor,
-    preprocess_regression_head_parameters,
-    preprocess_classification_head_parameters,
 )
+from models.experimental.retinanet.tt.tt_backbone import TTBackbone
+from models.experimental.retinanet.tt.tt_regression_head import TtnnRetinaNetRegressionHead
+from models.experimental.retinanet.tt.tt_classification_head import TtnnRetinaNetClassificationHead
+from models.experimental.retinanet.tests.pcc.test_resnet50_fpn import infer_ttnn_module_args as infer_module_args
+from ttnn.model_preprocessing import infer_ttnn_module_args
 
 # LUT
 COCO_INSTANCE_CATEGORY_NAMES = [
@@ -142,25 +146,74 @@ class Demo:
         self.torch_regression_head = retinanet.head.regression_head
         self.torch_classification_head = retinanet.head.classification_head
 
+        ################# MODEL ARGS ##################
+        conv_args = {}
+        backbone = retinanet.backbone.body
+        self.fpn_model = retinanet.backbone.fpn
+        self.torch_fpn_input_tensor = backbone(input_tensor)
+
+        conv_args = infer_ttnn_module_args(
+            model=self.torch_backbone,
+            run_model=lambda model: self.torch_backbone(input_tensor),
+            device=device,
+        )
+        fpn_args = infer_module_args(
+            model=self.fpn_model, run_model=lambda model: self.fpn_model(self.torch_fpn_input_tensor), device=device
+        )
+
+        self.model_args = {}
+        self.model_args["stem"] = {}
+        self.model_args["stem"]["conv1"] = conv_args["body"]["conv1"]
+        self.model_args["stem"]["maxpool"] = conv_args["body"]["maxpool"]
+
+        self.model_args["fpn"] = {}
+        self.model_args["fpn"]["inner_blocks"] = {}
+        self.model_args["fpn"]["inner_blocks"][0] = fpn_args["fpn"]["fpn"]["inner_blocks"][0]["fpn"]["inner_blocks"][0][
+            0
+        ]
+        self.model_args["fpn"]["inner_blocks"][1] = fpn_args["fpn"]["fpn"]["inner_blocks"][1]["fpn"]["inner_blocks"][1][
+            0
+        ]
+        self.model_args["fpn"]["inner_blocks"][2] = fpn_args["fpn"]["fpn"]["inner_blocks"][2]["fpn"]["inner_blocks"][2][
+            0
+        ]
+
+        self.model_args["fpn"]["layer_blocks"] = {}
+        self.model_args["fpn"]["layer_blocks"][0] = fpn_args["fpn"]["fpn"]["layer_blocks"][0]["fpn"]["layer_blocks"][0][
+            0
+        ]
+        self.model_args["fpn"]["layer_blocks"][1] = fpn_args["fpn"]["fpn"]["layer_blocks"][1]["fpn"]["layer_blocks"][1][
+            0
+        ]
+        self.model_args["fpn"]["layer_blocks"][2] = fpn_args["fpn"]["fpn"]["layer_blocks"][2]["fpn"]["layer_blocks"][2][
+            0
+        ]
+
+        self.model_args["fpn"]["extra_blocks"] = {}
+        self.model_args["fpn"]["extra_blocks"]["p6"] = fpn_args["fpn"]["fpn"]["extra_blocks"]["fpn"]["extra_blocks"][
+            "p6"
+        ]
+        self.model_args["fpn"]["extra_blocks"]["p7"] = fpn_args["fpn"]["fpn"]["extra_blocks"]["fpn"]["extra_blocks"][
+            "p7"
+        ]
+
+        self.model_args["layer1"] = {}
+        self.model_args["layer1"] = conv_args["body"]["layer1"]
+
+        self.model_args["layer2"] = {}
+        self.model_args["layer2"] = conv_args["body"]["layer2"]
+
+        self.model_args["layer3"] = {}
+        self.model_args["layer3"] = conv_args["body"]["layer3"]
+
+        self.model_args["layer4"] = {}
+        self.model_args["layer4"] = conv_args["body"]["layer4"]
+        ################# MODEL ARGS ##################
+
         self.parameters = preprocess_model_parameters(
-            initialize_model=lambda: retinanet,
+            initialize_model=lambda: retinanet,  # Full model, not just backbone
             custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
             device=None,
-        )
-        self.backbone_parameters = self.parameters.get("backbone", self.parameters)
-
-        self.regression_parameters = preprocess_regression_head_parameters(
-            torch_head=retinanet.head.regression_head,
-            device=device,
-            mesh_mapper=self.weights_mesh_mapper,
-            model_config=model_config,
-        )
-
-        self.classification_parameters = preprocess_classification_head_parameters(
-            torch_head=retinanet.head.classification_head,
-            device=device,
-            mesh_mapper=self.weights_mesh_mapper,
-            model_config=model_config,
         )
 
         backbone_features = self.torch_backbone(input_tensor)
@@ -177,42 +230,30 @@ class Demo:
 
     def run_ttnn_inference(self, input_tensor, model_config, device):
         """Run TTNN inference."""
-        self.ttnn_model = TTBackbone(parameters=self.backbone_parameters, model_config=model_config)
+        self.backbone = TTBackbone(
+            parameters=self.parameters["backbone"], model_config=model_config, device=device, model_args=self.model_args
+        )
 
-        backbone_output = self.ttnn_model(input_tensor, device)
+        input_shapes = [(64, 64), (32, 32), (16, 16), (8, 8), (4, 4)]
+
+        self.regression_head = TtnnRetinaNetRegressionHead(
+            parameters=self.parameters["head"]["regression_head"],
+            device=device,
+            input_shapes=input_shapes,
+            model_config=model_config,
+        )
+        self.classification_head = TtnnRetinaNetClassificationHead(
+            parameters=self.parameters["head"]["classification_head"],
+            device=device,
+            input_shapes=input_shapes,
+            model_config=model_config,
+        )
+
+        backbone_output = self.backbone(input_tensor, device)
         fpn_features = [backbone_output[key] for key in ["0", "1", "2", "p6", "p7"]]
-        input_shapes = [
-            (backbone_output["0"].shape[1], backbone_output["0"].shape[2]),
-            (backbone_output["1"].shape[1], backbone_output["1"].shape[2]),
-            (backbone_output["2"].shape[1], backbone_output["2"].shape[2]),
-            (backbone_output["p6"].shape[1], backbone_output["p6"].shape[2]),
-            (backbone_output["p7"].shape[1], backbone_output["p7"].shape[2]),
-        ]
-        # Run regression head
-        regression_output = ttnn_retinanet_regression_head(
-            feature_maps=fpn_features,
-            parameters=self.regression_parameters,
-            device=device,
-            in_channels=256,
-            num_anchors=9,
-            batch_size=1,
-            input_shapes=input_shapes,
-            model_config=model_config,
-            optimization_profile="optimized",
-        )
-        logger.debug("Regression head completed")
-        # Run classification head
-        classification_output = ttnn_retinanet_classification_head(
-            feature_maps=fpn_features,
-            parameters=self.classification_parameters,
-            device=device,
-            in_channels=256,
-            num_anchors=9,
-            batch_size=1,
-            input_shapes=input_shapes,
-            model_config=model_config,
-            optimization_profile="optimized",
-        )
+
+        regression_output = self.regression_head(fpn_features)
+        classification_output = self.classification_head(fpn_features)
 
         for key in backbone_output:
             backbone_output[key] = ttnn.to_torch(backbone_output[key], dtype=torch.float32).permute((0, 3, 1, 2))
@@ -238,8 +279,8 @@ class Demo:
         normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
         transform = transforms.Compose(
             [
-                transforms.ToTensor(),
-                normalize,
+                transforms.ToTensor(),  # Convert image to tensor (range [0, 1])
+                normalize,  # Normalize with ImageNet stats
             ]
         )
 
@@ -250,16 +291,22 @@ class Demo:
             mean=[-0.485 / 0.229, -0.456 / 0.224, -0.406 / 0.225], std=[1 / 0.229, 1 / 0.224, 1 / 0.225]
         )
 
+        # Remove batch dimension if it exists
         img = image_tensor.squeeze(0)
+
+        # Denormalize
         img = denorm(img)
+
+        # Clamp to [0,1] just to avoid out-of-range values after denorm
         img = img.clamp(0, 1)
 
+        # Convert to PIL
         to_pil = transforms.ToPILImage()
         restored_image = to_pil(img)
+
+        # Save
         restored_image.save("models/experimental/retinanet/resources/outputs/restored.jpg")
-        logger.info(
-            f"Saved restored image to the default output directory: models/experimental/retinanet/resources/outputs/restored.jpg"
-        )
+        print("Saved restored image to restored.jpg")
 
         return image_tensor, og_size
 
@@ -288,6 +335,7 @@ class Demo:
         return torch.stack((x1, y1, x2, y2), dim=1)
 
     def postprocess_detections(self, head_outputs, anchors, image_shapes):
+        # type: (Dict[str, List[Tensor]], List[List[Tensor]], List[Tuple[int, int]]) -> List[Dict[str, Tensor]]
         class_logits = head_outputs["cls_logits"]
         box_regression = head_outputs["bbox_regression"]
 
@@ -309,11 +357,13 @@ class Demo:
             ):
                 num_classes = logits_per_level.shape[-1]
 
+                # remove low scoring boxes
                 scores_per_level = torch.sigmoid(logits_per_level).flatten()
                 keep_idxs = scores_per_level > self.score_thresh
                 scores_per_level = scores_per_level[keep_idxs]
                 topk_idxs = torch.where(keep_idxs)[0]
 
+                # keep only topk scoring predictions
                 num_topk = det_utils._topk_min(topk_idxs, self.topk_candidates, 0)
                 scores_per_level, idxs = scores_per_level.topk(num_topk)
                 topk_idxs = topk_idxs[idxs]
@@ -446,14 +496,15 @@ class Demo:
 
         # Postprocess to comparable outputs
         detections = self.postprocess_detections(split_head_outputs, split_anchors, image_list.image_sizes)
-        logger.info(f"image_list.image_sizes: {image_list.image_sizes}, original_image_sizes: {original_image_sizes}")
+        # original_image_sizes = [(900, 600)]
+        print(f"image_list.image_sizes: {image_list.image_sizes}, original_image_sizes: {original_image_sizes}")
         for i, (pred, im_s, o_im_s) in enumerate(zip(detections, image_list.image_sizes, original_image_sizes)):
-            logger.info(f"im_s:{im_s}, o_im_s:{o_im_s}")
+            print(f"im_s:{im_s}, o_im_s:{o_im_s}")
             boxes = pred["boxes"]
             boxes = Demo.resize_boxes(boxes, im_s, o_im_s)
             detections[i]["boxes"] = boxes
 
-        logger.info(detections)
+        print(detections)
         self.visualize_detections(image_path, detections, output_dir)
 
         logger.info("Demo completed. Output dir: {}", output_dir)
