@@ -34,8 +34,7 @@ class BackboneTestInfra:
         self.inputs_mesh_mapper, self.weights_mesh_mapper, self.output_mesh_composer = self.get_mesh_mappers(device)
 
         # Load RetinaNet model to extract backbone
-        retinanet = retinanet_resnet50_fpn_v2(weights=RetinaNet_ResNet50_FPN_V2_Weights.DEFAULT)
-        retinanet.eval()
+        retinanet = retinanet_resnet50_fpn_v2(weights=RetinaNet_ResNet50_FPN_V2_Weights.DEFAULT).eval()
 
         # Store only backbone
         self.torch_backbone = retinanet.backbone
@@ -76,7 +75,19 @@ class BackboneTestInfra:
         model_args["stem"]["maxpool"] = conv_args["body"]["maxpool"]
 
         model_args["fpn"] = {}
-        model_args["fpn"] = fpn_args["fpn"]["fpn"]
+        model_args["fpn"]["inner_blocks"] = {}
+        model_args["fpn"]["inner_blocks"][0] = fpn_args["fpn"]["fpn"]["inner_blocks"][0]["fpn"]["inner_blocks"][0][0]
+        model_args["fpn"]["inner_blocks"][1] = fpn_args["fpn"]["fpn"]["inner_blocks"][1]["fpn"]["inner_blocks"][1][0]
+        model_args["fpn"]["inner_blocks"][2] = fpn_args["fpn"]["fpn"]["inner_blocks"][2]["fpn"]["inner_blocks"][2][0]
+
+        model_args["fpn"]["layer_blocks"] = {}
+        model_args["fpn"]["layer_blocks"][0] = fpn_args["fpn"]["fpn"]["layer_blocks"][0]["fpn"]["layer_blocks"][0][0]
+        model_args["fpn"]["layer_blocks"][1] = fpn_args["fpn"]["fpn"]["layer_blocks"][1]["fpn"]["layer_blocks"][1][0]
+        model_args["fpn"]["layer_blocks"][2] = fpn_args["fpn"]["fpn"]["layer_blocks"][2]["fpn"]["layer_blocks"][2][0]
+
+        model_args["fpn"]["extra_blocks"] = {}
+        model_args["fpn"]["extra_blocks"]["p6"] = fpn_args["fpn"]["fpn"]["extra_blocks"]["fpn"]["extra_blocks"]["p6"]
+        model_args["fpn"]["extra_blocks"]["p7"] = fpn_args["fpn"]["fpn"]["extra_blocks"]["fpn"]["extra_blocks"]["p7"]
 
         model_args["layer1"] = {}
         model_args["layer1"] = conv_args["body"]["layer1"]
