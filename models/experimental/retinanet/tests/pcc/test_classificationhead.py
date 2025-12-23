@@ -9,7 +9,7 @@ import os
 from torchvision.models.detection import retinanet_resnet50_fpn_v2, RetinaNet_ResNet50_FPN_V2_Weights
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from loguru import logger
-from models.experimental.retinanet.tt.tt_classification_head import ttnn_retinanet_classification_head
+from models.experimental.retinanet.tt.tt_classification_head import TtnnRetinaNetClassificationHead
 from models.experimental.retinanet.tt.custom_preprocessor import create_custom_mesh_preprocessor
 from ttnn.model_preprocessing import preprocess_model_parameters
 
@@ -172,7 +172,7 @@ def test_classification_head_full(device, pcc, reset_seeds):
     classification_head = torch_model.head.classification_head
 
     # Load pickled FPN features
-    pickle_path = "models/experimental/retinanet/data/fpn_features.pkl"
+    pickle_path = "fpn_features.pkl"
 
     if os.path.exists(pickle_path):
         logger.info(f"✓ Loading real FPN features from {pickle_path}")
@@ -201,7 +201,7 @@ def test_classification_head_full(device, pcc, reset_seeds):
 
     # PyTorch forward pass
     with torch.no_grad():
-        pickle_path = "models/experimental/retinanet/data/torch_output_classification.pkl"
+        pickle_path = "torch_output_classification.pkl"
         if os.path.exists(pickle_path):
             with open(pickle_path, "rb") as f:
                 torch_output = pickle.load(f)
@@ -229,8 +229,8 @@ def test_classification_head_full(device, pcc, reset_seeds):
         "WEIGHTS_DTYPE": ttnn.bfloat16,
         "ACTIVATIONS_DTYPE": ttnn.bfloat16,
     }
+
     # Create TTNN parameters
-    # ttnn_parameters = create_classification_head_parameters(classification_head, device, model_config)
     ttnn_parameters = preprocess_model_parameters(
         initialize_model=lambda: classification_head,
         custom_preprocessor=create_custom_mesh_preprocessor(None),
@@ -238,9 +238,9 @@ def test_classification_head_full(device, pcc, reset_seeds):
     )
 
     print(ttnn_parameters)
-    # TTNN forward pass
-    ttnn_output = ttnn_retinanet_classification_head(
-        feature_maps=ttnn_features,
+
+    # TTNN forward pass - using the class instead of function
+    ttnn_head = TtnnRetinaNetClassificationHead(
         parameters=ttnn_parameters,
         device=device,
         in_channels=in_channels,
@@ -251,6 +251,8 @@ def test_classification_head_full(device, pcc, reset_seeds):
         model_config=model_config,
         optimization_profile="optimized",
     )
+
+    ttnn_output = ttnn_head.forward(feature_maps=ttnn_features)
 
     # Convert back to PyTorch for comparison
     ttnn_output_torch = ttnn.to_torch(ttnn_output)

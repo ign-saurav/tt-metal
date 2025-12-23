@@ -9,7 +9,9 @@ import os
 from loguru import logger
 from torchvision.models.detection import retinanet_resnet50_fpn_v2, RetinaNet_ResNet50_FPN_V2_Weights
 from tests.ttnn.utils_for_testing import assert_with_pcc
-from models.experimental.retinanet.tt.tt_regression_head import ttnn_retinanet_regression_head
+
+# Update import to use the class version
+from models.experimental.retinanet.tt.tt_reghaed import TtnnRetinaNetRegressionHead  # Changed import
 from models.experimental.retinanet.tt.custom_preprocessor import create_custom_mesh_preprocessor
 from ttnn.model_preprocessing import preprocess_model_parameters
 
@@ -176,7 +178,7 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
     regression_head = torch_model.head.regression_head
 
     # Load pickled FPN features
-    pickle_path = "models/experimental/retinanet/data/fpn_features.pkl"
+    pickle_path = "fpn_features.pkl"
 
     if os.path.exists(pickle_path):
         logger.info(f"Loading FPN features from {pickle_path}")
@@ -212,7 +214,7 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
 
     # PyTorch forward pass
     with torch.no_grad():
-        pickle_path = "models/experimental/retinanet/data/torch_output.pkl"
+        pickle_path = "torch_output.pkl"
         if os.path.exists(pickle_path):
             with open(pickle_path, "rb") as f:
                 torch_output = pickle.load(f)
@@ -247,9 +249,9 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
         device=None,
     )
 
-    # TTNN forward pass
-    ttnn_output = ttnn_retinanet_regression_head(
-        feature_maps=ttnn_features,
+    # TTNN forward pass - using the class instead of function
+    # CORRECTION: Create the head instance first, then call forward with features
+    ttnn_head = TtnnRetinaNetRegressionHead(
         parameters=ttnn_parameters,
         device=device,
         in_channels=in_channels,
@@ -259,6 +261,9 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
         model_config=model_config,
         optimization_profile="optimized",
     )
+
+    # Now call forward with the feature maps
+    ttnn_output = ttnn_head.forward(feature_maps=ttnn_features)
 
     # Convert back to PyTorch for comparison
     ttnn_output_torch = ttnn.to_torch(ttnn_output)
