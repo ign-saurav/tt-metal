@@ -28,7 +28,7 @@ class TTBackbone:
             parameters_body.stem,
             device=device,
             model_config=model_config,
-            model_args=model_args.stem,
+            model_args=model_args["stem"],
             layer_optimisations=neck_optimisations,
         )
         # Four bottleneck stages (layer1, layer2, layer3, layer4)
@@ -36,7 +36,7 @@ class TTBackbone:
         self.layer1 = self._make_layer(
             name=f"{name}.layer1",
             device=device,
-            model_args=model_args.layer1,
+            model_args=model_args["layer1"],
             parameters=parameters_body.layer1,
             planes=64,
             blocks=layers[0],
@@ -48,7 +48,7 @@ class TTBackbone:
         self.layer2 = self._make_layer(
             name=f"{name}.layer2",
             device=device,
-            model_args=model_args.layer2,
+            model_args=model_args["layer2"],
             parameters=parameters_body.layer2,
             planes=128,
             blocks=layers[1],
@@ -60,7 +60,7 @@ class TTBackbone:
         self.layer3 = self._make_layer(
             name=f"{name}.layer3",
             device=device,
-            model_args=model_args.layer3,
+            model_args=model_args["layer3"],
             parameters=parameters_body.layer3,
             planes=256,
             blocks=layers[2],
@@ -72,7 +72,7 @@ class TTBackbone:
         self.layer4 = self._make_layer(
             name=f"{name}.layer4",
             device=device,
-            model_args=model_args.layer4,
+            model_args=model_args["layer4"],
             parameters=parameters_body.layer4,
             planes=512,
             blocks=layers[3],
@@ -85,7 +85,7 @@ class TTBackbone:
             parameters=parameters_fpn,
             device=device,
             model_config=model_config,
-            model_args=model_args.fpn,
+            model_args=model_args["fpn"],
             layer_optimisations=fpn_optimisations,
         )
 
