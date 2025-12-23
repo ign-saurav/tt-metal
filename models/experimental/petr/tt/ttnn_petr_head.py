@@ -213,11 +213,9 @@ class ttnn_PETRHead:
 
         return ttnn.reshape(coords_position_embeding, (B, N, self.embed_dims, H, W)), coords_mask
 
-    def __call__(self, mlvl_feats, img_metas, device=None, return_ttnn_tensors=False):
+    def __call__(self, mlvl_feats, img_metas, device=None):
         """
         PETR Head Forward function.
-        Args:
-            return_ttnn_tensors: If True, returns TTNN tensors instead of PyTorch tensors (for pipeline).
         """
         for i in range(len(mlvl_feats)):
             mlvl_feats[i] = ttnn.to_memory_config(mlvl_feats[i], memory_config=ttnn.L1_MEMORY_CONFIG)
@@ -396,33 +394,19 @@ class ttnn_PETRHead:
         all_cls_scores = ttnn.concat(outputs_classes, dim=0)
         all_bbox_preds = ttnn.concat(outputs_coords, dim=0)
 
-        if return_ttnn_tensors:
-            all_cls_scores_torch = ttnn.to_torch(all_cls_scores)
-            all_bbox_preds_torch = ttnn.to_torch(all_bbox_preds)
-            all_bbox_preds_torch[..., 0:1] = (
-                all_bbox_preds_torch[..., 0:1] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
-            )
-            all_bbox_preds_torch[..., 1:2] = (
-                all_bbox_preds_torch[..., 1:2] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
-            )
-            all_bbox_preds_torch[..., 4:5] = (
-                all_bbox_preds_torch[..., 4:5] * (self.pc_range[5] - self.pc_range[2]) + self.pc_range[2]
-            )
-            all_bbox_preds = ttnn.from_torch(
-                all_bbox_preds_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
-            )
-        else:
-            all_cls_scores = ttnn.to_torch(all_cls_scores)
-            all_bbox_preds = ttnn.to_torch(all_bbox_preds)
-            all_bbox_preds[..., 0:1] = (
-                all_bbox_preds[..., 0:1] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
-            )
-            all_bbox_preds[..., 1:2] = (
-                all_bbox_preds[..., 1:2] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
-            )
-            all_bbox_preds[..., 4:5] = (
-                all_bbox_preds[..., 4:5] * (self.pc_range[5] - self.pc_range[2]) + self.pc_range[2]
-            )
+        all_bbox_preds_torch = ttnn.to_torch(all_bbox_preds)
+        all_bbox_preds_torch[..., 0:1] = (
+            all_bbox_preds_torch[..., 0:1] * (self.pc_range[3] - self.pc_range[0]) + self.pc_range[0]
+        )
+        all_bbox_preds_torch[..., 1:2] = (
+            all_bbox_preds_torch[..., 1:2] * (self.pc_range[4] - self.pc_range[1]) + self.pc_range[1]
+        )
+        all_bbox_preds_torch[..., 4:5] = (
+            all_bbox_preds_torch[..., 4:5] * (self.pc_range[5] - self.pc_range[2]) + self.pc_range[2]
+        )
+        all_bbox_preds = ttnn.from_torch(
+            all_bbox_preds_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
+        )
 
         outs = {
             "all_cls_scores": all_cls_scores,

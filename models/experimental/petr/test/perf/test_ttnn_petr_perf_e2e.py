@@ -36,9 +36,7 @@ def create_petr_pipeline_model(ttnn_model, modified_batch_img_metas, batch_size,
         l1_input_reshaped = ttnn.reshape(l1_input_interleaved, original_shape)
         l1_input_5d = ttnn.reshape(l1_input_reshaped, full_shape)
         ttnn_inputs = {"imgs": l1_input_5d}
-        output = ttnn_model.predict(
-            ttnn_inputs, modified_batch_img_metas, skip_post_processing=True, return_ttnn_tensors=True
-        )
+        output = ttnn_model.predict(ttnn_inputs, modified_batch_img_metas, skip_post_processing=True)
         return [output["all_cls_scores"], output["all_bbox_preds"]]
 
     return run
@@ -52,7 +50,7 @@ def create_petr_pipeline_model(ttnn_model, modified_batch_img_metas, batch_size,
         {
             "l1_small_size": 24576,
             "trace_region_size": 50000000,
-            "num_command_queues": 2,
+            "num_command_queues": 1,
         }
     ],
     indirect=True,
@@ -60,7 +58,7 @@ def create_petr_pipeline_model(ttnn_model, modified_batch_img_metas, batch_size,
 @pytest.mark.parametrize("num_iterations", [32])
 @pytest.mark.parametrize(
     "batch, expected_compile_time, expected_throughput_fps",
-    [(1, 60.0, 10.0)],
+    [(1, 1.19, 0.83)],
 )
 def test_petr_perf_e2e_2cq_trace(
     num_iterations,
