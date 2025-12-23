@@ -1,22 +1,19 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
-
 import ttnn
-from typing import Optional
-from typing import List
+from typing import List, Optional
 from models.experimental.retinanet.tt.tt_regression_head import Conv2dNormActivation
 from dataclasses import dataclass
 from models.experimental.retinanet.tt.utils import _create_conv_config_from_params
 from models.tt_cnn.tt.builder import TtConv2d
 from models.tt_cnn.tt.builder import (
     AutoShardedStrategyConfiguration,
+    Conv2dConfiguration,
 )
 
 
 @dataclass
 class RetinaNetClassificationHeadOptimizer:
-    """Optimization configuration for RetinaNet classification head conv blocks"""
-
     fpn0_conv_blocks: dict
     fpn1_conv_blocks: dict
     fpn2_conv_blocks: dict
@@ -30,7 +27,6 @@ class RetinaNetClassificationHeadOptimizer:
     fpn4_final_conv: dict
 
 
-# Define optimization configurations
 retinanet_classification_head_optimizations = {
     "optimized": RetinaNetClassificationHeadOptimizer(
         fpn0_conv_blocks={
@@ -118,10 +114,6 @@ retinanet_classification_head_optimizations = {
 
 
 class TtnnRetinaNetClassificationHead:
-    """
-    TTNN implementation of RetinaNet classification head as a class.
-    """
-
     def __init__(
         self,
         parameters: dict,
@@ -134,20 +126,6 @@ class TtnnRetinaNetClassificationHead:
         model_config: dict = None,
         optimization_profile: str = "optimized",
     ):
-        """
-        Initialize the TTNN RetinaNet classification head.
-
-        Args:
-            parameters: Model parameters dictionary
-            device: TTNN device
-            in_channels: Number of input channels (default: 256)
-            num_anchors: Number of anchors per position (default: 9)
-            num_classes: Number of classes (default: 91)
-            batch_size: Batch size (default: 1)
-            input_shapes: List of input shapes for each FPN level
-            model_config: Model configuration dictionary
-            optimization_profile: Optimization profile to use
-        """
         self.device = device
         self.in_channels = in_channels
         self.num_anchors = num_anchors
@@ -157,20 +135,10 @@ class TtnnRetinaNetClassificationHead:
         self.model_config = model_config
         self.optimization_profile = optimization_profile
 
-        # Store parameters
         self.parameters = parameters
 
-        # Get optimization configuration
         self.opt_config = retinanet_classification_head_optimizations[optimization_profile]
 
-        # Initialize grid size and compute config
-        self.grid_size = ttnn.CoreGrid(y=8, x=8)
-
-        # Create input mask for GroupNorm
-        input_mask_tensor = ttnn.create_group_norm_input_mask(in_channels, 32, self.grid_size.y)
-        self.input_mask_tensor = input_mask_tensor.to(device, ttnn.DRAM_MEMORY_CONFIG)
-
-        # Initialize compute config
         self.compute_config = ttnn.init_device_compute_kernel_config(
             device.arch(),
             math_fidelity=model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
@@ -179,40 +147,33 @@ class TtnnRetinaNetClassificationHead:
             packer_l1_acc=model_config.get("PACKER_L1_ACC", False),
         )
 
+        self.grid_size = ttnn.CoreGrid(y=8, x=8)
+        input_mask_tensor = ttnn.create_group_norm_input_mask(in_channels, 32, self.grid_size.y)
+        self.input_mask_tensor = input_mask_tensor.to(device, ttnn.DRAM_MEMORY_CONFIG)
+
+        self.fpn_optimizer_configs = {
+            0: (self.opt_config.fpn0_conv_blocks, self.opt_config.fpn0_final_conv),
+            1: (self.opt_config.fpn1_conv_blocks, self.opt_config.fpn1_final_conv),
+            2: (self.opt_config.fpn2_conv_blocks, self.opt_config.fpn2_final_conv),
+            3: (self.opt_config.fpn3_conv_blocks, self.opt_config.fpn3_final_conv),
+            4: (self.opt_config.fpn4_conv_blocks, self.opt_config.fpn4_final_conv),
+        }
+
     def forward(
         self,
         feature_maps: List[ttnn.Tensor],
         batch_size: Optional[int] = None,
         input_shapes: Optional[List[tuple]] = None,
     ) -> ttnn.Tensor:
-        """
-        Forward pass through the classification head.
-
-        Args:
-            feature_maps: List of feature maps from FPN levels
-            batch_size: Optional override for batch size
-            input_shapes: Optional override for input shapes
-
-        Returns:
-            Output tensor with classification logits
-        """
-        # Use instance values or override with provided values
         current_batch_size = batch_size if batch_size is not None else self.batch_size
         current_input_shapes = input_shapes if input_shapes is not None else self.input_shapes
 
-        # If input_shapes is None, extract from feature maps
         if current_input_shapes is None:
             current_input_shapes = [(fm.shape[1], fm.shape[2]) for fm in feature_maps]
 
-        # Process each FPN level
         all_cls_logits = []
         for fpn_idx, (feature_map, (H, W)) in enumerate(zip(feature_maps, current_input_shapes)):
-            # Get optimization configs for this FPN level
-            fpn_conv_config_dict = getattr(self.opt_config, f"fpn{fpn_idx}_conv_blocks")
-            fpn_final_config_dict = getattr(self.opt_config, f"fpn{fpn_idx}_final_conv")
-
-            fpn_conv_config = ttnn.Conv2dConfig(**fpn_conv_config_dict) if fpn_conv_config_dict else None
-            fpn_final_config = ttnn.Conv2dConfig(**fpn_final_config_dict) if fpn_final_config_dict else None
+            conv_optimizer_config, final_conv_optimizer = self.fpn_optimizer_configs[fpn_idx]
 
             x = feature_map
             for conv_idx in range(4):
@@ -229,10 +190,11 @@ class TtnnRetinaNetClassificationHead:
                     input_mask=self.input_mask_tensor,
                     model_config=self.model_config,
                     compute_config=self.compute_config,
-                    conv_config=fpn_conv_config,
+                    conv_config=conv_optimizer_config,
                     input_height=H,
                     input_width=W,
                 )
+
                 x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
                 x = conv_block(
                     x,
@@ -255,14 +217,22 @@ class TtnnRetinaNetClassificationHead:
                 padding=(1, 1),
                 sharding_strategy=AutoShardedStrategyConfiguration(),
             )
-            conv_final = TtConv2d(conv_final_config, self.device)
+
+            config_dict = conv_final_config.__dict__.copy()
+
+            for key, value in final_conv_optimizer.items():
+                if key in config_dict:
+                    config_dict[key] = value
+
+            updated_config = Conv2dConfiguration(**config_dict)
+
+            conv_final = TtConv2d(updated_config, self.device)
             cls_logits, shape = conv_final(x, return_output_dim=True)
 
             N, H_out, W_out, _ = cls_logits.shape
             H_out, W_out = shape
             cls_logits = ttnn.sharded_to_interleaved(cls_logits, ttnn.L1_MEMORY_CONFIG)
             cls_logits = ttnn.reshape(cls_logits, (N, H_out, W_out, self.num_anchors, self.num_classes))
-
             cls_logits = ttnn.reshape(cls_logits, (N, H_out * W_out * self.num_anchors, self.num_classes))
 
             all_cls_logits.append(cls_logits)
@@ -271,5 +241,4 @@ class TtnnRetinaNetClassificationHead:
         return output
 
     def __call__(self, feature_maps: List[ttnn.Tensor], **kwargs) -> ttnn.Tensor:
-        """Alias for forward method."""
         return self.forward(feature_maps, **kwargs)

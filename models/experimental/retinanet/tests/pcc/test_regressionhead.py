@@ -262,10 +262,8 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
         optimization_profile="optimized",
     )
 
-    # Now call forward with the feature maps
     ttnn_output = ttnn_head.forward(feature_maps=ttnn_features)
 
-    # Convert back to PyTorch for comparison
     ttnn_output_torch = ttnn.to_torch(ttnn_output)
 
     # Assert PCC
