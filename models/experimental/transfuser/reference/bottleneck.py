@@ -216,10 +216,10 @@ class Bottleneck(nn.Module):
         Returns:
             Output tensor after SE fc1, relu, fc2, and sigmoid operations
         """
-        # x = self.se.fc1(image)
-        # x = x.relu()
+        x = self.se.fc1(image)
+        x = x.relu()
         x = self.se.fc2(image)
-        # x = x.sigmoid()
+        x = x.sigmoid()
         return x
 
     def zero_init_last(self) -> None:
