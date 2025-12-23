@@ -373,7 +373,7 @@ model_config = {
     "image_architecture, lidar_architecture, n_layer, use_velocity, use_target_point_image, img_input_shape, lidar_input_shape",
     [("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256))],
 )
-@pytest.mark.parametrize("use_fallback", [True])
+@pytest.mark.parametrize("use_fallback", [False])
 @pytest.mark.parametrize("use_optimized_self_attn", [True])
 def test_stem(
     device,
