@@ -141,7 +141,6 @@ class Ttstages:
         model_config: Dict[str, Any],
         stage_name: str,
         torch_model=None,
-        use_fallback: bool = False,
     ) -> None:
         """
         Builds a sequence of TTRegNetBottleneck blocks for a given stage (layer1..layer4).
@@ -180,7 +179,6 @@ class Ttstages:
             model_config=model_config,
             stage_name=stage_name,
             torch_model=torch_model,
-            use_fallback=use_fallback,
         )
 
     @staticmethod
@@ -195,7 +193,6 @@ class Ttstages:
         model_config: Dict[str, Any] = None,
         stage_name: str = None,
         torch_model=None,
-        use_fallback: bool = False,
     ) -> List[TTRegNetBottleneck]:
         """
         Build TTRegNetBottleneck blocks for a stage.
@@ -251,7 +248,6 @@ class Ttstages:
                 downsample=first_block_downsample,
                 groups=groups,
                 torch_model=torch_model,
-                use_fallback=use_fallback,
                 block_name="b1",
                 stage_name=stage_name,
             )
@@ -273,7 +269,6 @@ class Ttstages:
                     downsample=False,
                     groups=groups,
                     torch_model=torch_model,
-                    use_fallback=use_fallback,
                     block_name=bname,
                     stage_name=stage_name,
                 )

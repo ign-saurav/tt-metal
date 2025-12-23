@@ -24,7 +24,6 @@ class TtTransfuserBackbone:
         model_config,
         config,
         torch_model=None,
-        use_fallback=False,
     ) -> None:
         self.device = device
         self.config = config
@@ -43,7 +42,6 @@ class TtTransfuserBackbone:
                 model_config=model_config,
                 stage_name=stage_name,
                 torch_model=(torch_model if with_torch else None),
-                use_fallback=(use_fallback if with_torch else False),
             )
 
         # ---------- Parameter roots ----------
@@ -90,7 +88,7 @@ class TtTransfuserBackbone:
             ("layer4", 1512, 1, 2, 63),
         ]
 
-        # Build image stages (with torch_model/use_fallback), and lidar stages (pure TT)
+        # Build image stages and lidar stages (pure TT)
         for name, planes, blocks, s, groups in specs:
             setattr(
                 self,

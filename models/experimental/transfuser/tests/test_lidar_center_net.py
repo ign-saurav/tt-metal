@@ -277,7 +277,6 @@ def delete_incompatible_keys(state_dict: Dict[str, Any], keys_to_delete: List[st
 )
 @pytest.mark.parametrize("seed", list(range(1)))
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
-@pytest.mark.parametrize("use_fallback", [True])
 @pytest.mark.parametrize("use_optimized_self_attn", [False])
 def test_lidar_center_net(
     device,
@@ -287,7 +286,6 @@ def test_lidar_center_net(
     use_velocity,
     seed,
     weight_dtype,
-    use_fallback,
     use_optimized_self_attn,
 ):
     torch.manual_seed(seed)
@@ -426,7 +424,6 @@ def test_lidar_center_net(
         config,
         backbone="transFuser",
         torch_model=transfuser_model,
-        use_fallback=use_fallback,
         model_args=model_args,
     )
 

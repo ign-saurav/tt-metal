@@ -84,7 +84,6 @@ class StageInfra:
         device,
         stage_name,
         input_shape,
-        use_fallback,
     ):
         super().__init__()
         self._init_seeds()
@@ -139,7 +138,6 @@ class StageInfra:
             model_config=model_config,
             stage_name=stage_name,
             torch_model=torch_model,
-            use_fallback=use_fallback,
         )
 
         # Convert input to TTNN format
@@ -239,16 +237,13 @@ model_config = {
         ("layer4", (1, 576, 16, 16)),
     ],
 )
-@pytest.mark.parametrize("use_fallback", [True])
 def test_stage(
     device,
     stage_name,
     input_shape,
-    use_fallback,
 ):
     StageInfra(
         device,
         stage_name,
         input_shape,
-        use_fallback,
     )

@@ -142,7 +142,6 @@ class TransfuserBackboneInfra:
         img_input_shape,
         lidar_input_shape,
         model_config,
-        use_fallback,
         use_optimized_self_attn,
     ):
         super().__init__()
@@ -210,10 +209,11 @@ class TransfuserBackboneInfra:
         )
         parameters["transformer4"] = gpt4_parameters
 
-        inputs = torch.load("transfuser_inputs_final.pt")
-        self.torch_image_input = inputs["image"]  # RGB camera image tensor
-        self.torch_lidar_input = inputs["lidar"]  # LiDAR BEV tensor
-        self.torch_velocity_input = inputs["velocity"]  # Ego velocity tensor
+        B = 1  # batch size
+        self.torch_image_input = torch.randn(B, 3, 160, 704)
+        self.torch_lidar_input = torch.randn(B, 3, 256, 256)
+        self.torch_velocity_input = torch.randn(B, 1)
+
         model_args = infer_ttnn_module_args_torch(
             model=torch_model,
             run_model=lambda model: model(self.torch_image_input, self.torch_lidar_input, self.torch_velocity_input),
@@ -263,7 +263,6 @@ class TransfuserBackboneInfra:
             model_config=model_config,
             config=self.config,
             torch_model=torch_model,
-            use_fallback=use_fallback,
         )
 
         # Run + validate
@@ -373,9 +372,8 @@ model_config = {
     "image_architecture, lidar_architecture, n_layer, use_velocity, use_target_point_image, img_input_shape, lidar_input_shape",
     [("regnety_032", "regnety_032", 4, False, True, (1, 3, 160, 704), (1, 3, 256, 256))],
 )
-@pytest.mark.parametrize("use_fallback", [False])
 @pytest.mark.parametrize("use_optimized_self_attn", [True])
-def test_stem(
+def test_transfuser_backbone(
     device,
     image_architecture,
     lidar_architecture,
@@ -384,7 +382,6 @@ def test_stem(
     use_target_point_image,
     img_input_shape,
     lidar_input_shape,
-    use_fallback,
     use_optimized_self_attn,
 ):
     TransfuserBackboneInfra(
@@ -397,6 +394,5 @@ def test_stem(
         img_input_shape,
         lidar_input_shape,
         model_config,
-        use_fallback,
         use_optimized_self_attn,
     )

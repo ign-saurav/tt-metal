@@ -35,7 +35,6 @@ class LidarCenterNet(nn.Module):
         lidar_architecture="resnet18",
         use_velocity=True,
         torch_model=None,
-        use_fallback=False,
         model_args=None,
     ):
         super().__init__()
@@ -77,7 +76,6 @@ class LidarCenterNet(nn.Module):
             model_config=model_config,
             config=self.config,
             torch_model=torch_model,
-            use_fallback=use_fallback,
         )
 
         channel = config.channel

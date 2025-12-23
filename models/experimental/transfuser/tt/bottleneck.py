@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 import ttnn
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
@@ -24,7 +23,6 @@ class TTRegNetBottleneck:
         groups=1,
         shard_layout=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
         torch_model=None,
-        use_fallback=False,
         block_name=None,
         stage_name=None,
     ):
@@ -34,7 +32,6 @@ class TTRegNetBottleneck:
         self.model_config = model_config
         self.dtype = ttnn.bfloat16
         self.torch_model = torch_model
-        self.use_fallback = use_fallback
         self.block_name = block_name
         self.stage_name = stage_name
         # ------------------------- conv1: 1x1 + ReLU -------------------------
@@ -220,30 +217,11 @@ class TTRegNetBottleneck:
         out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
         out = ttnn.reshape(out, (1, height, width, out.shape[-1]))
         se_out = ttnn.mean(out, dim=[1, 2], keepdim=True)
-        if self.use_fallback and self.torch_model is not None:
-            # Falling Back SE module
-            se_out_torch = ttnn.to_torch(
-                se_out,
-                device=device,
-            )
-            se_out_torch = torch.permute(se_out_torch, (0, 3, 1, 2))
-            se_out_torch = se_out_torch.to(torch.float32)
-            se_out_torch = self.torch_model.fallback(
-                se_out_torch, block_name=self.block_name, stage_name=self.stage_name
-            )
-            se_out = ttnn.from_torch(
-                se_out_torch,
-                dtype=ttnn.bfloat16,
-                memory_config=ttnn.L1_MEMORY_CONFIG,
-                device=device,
-            )
-            se_out = ttnn.permute(se_out, (0, 2, 3, 1))
-        else:
-            # SE fc1
-            se_out = self.se_fc1(se_out)
-            # SE fc2
-            se_out = self.se_fc2(se_out)
-            se_out = ttnn.sigmoid(se_out)
+        # SE fc1
+        se_out = self.se_fc1(se_out)
+        # SE fc2
+        se_out = self.se_fc2(se_out)
+        se_out = ttnn.sigmoid(se_out)
         out_4d = ttnn.multiply(out1, se_out)
         # Flatten back to match identity format
         batch, channels = out_4d.shape[0], out_4d.shape[-1]

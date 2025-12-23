@@ -217,8 +217,6 @@ def main():
     parser.add_argument("--layers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
 
-    # Fallback flags
-    parser.add_argument("--no-fallback", action="store_true", help="Disable TTNN fallback paths.")
     parser.add_argument(
         "--use-optimized-self-attn",
         action="store_true",
@@ -384,7 +382,6 @@ def main():
             config,
             backbone="transFuser",
             torch_model=transfuser_model,
-            use_fallback=(not args.no_fallback),
             model_args=model_args,
         )
 
