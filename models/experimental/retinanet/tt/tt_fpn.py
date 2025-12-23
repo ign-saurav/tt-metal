@@ -100,8 +100,9 @@ class resnet50Fpn:
         model_args,
         layer_optimisations=fpn_optimisations,
     ) -> None:
+        print(model_args)
         self.conv_config_1 = Conv2dConfiguration.from_model_args(
-            model_args["inner_blocks"][0]["inner_blocks"][0][0],
+            model_args["inner_blocks"][0],
             weights=parameters["inner_blocks"].get("0", {}).get("0", None)["weight"],
             bias=parameters["inner_blocks"].get("0", {}).get("0", None)["bias"],
             # **layer_optimisations.conv1,
@@ -112,7 +113,7 @@ class resnet50Fpn:
         self.conv1 = TtConv2d(self.conv_config_1, device)
 
         self.conv_config_2 = Conv2dConfiguration.from_model_args(
-            model_args["inner_blocks"][1]["inner_blocks"][1][0],
+            model_args["inner_blocks"][1],
             weights=parameters["inner_blocks"].get("1", {}).get("0", None)["weight"],
             bias=parameters["inner_blocks"].get("1", {}).get("0", None)["bias"],
             # **layer_optimisations.conv2,
@@ -123,7 +124,7 @@ class resnet50Fpn:
         self.conv2 = TtConv2d(self.conv_config_2, device)
 
         self.conv_config_3 = Conv2dConfiguration.from_model_args(
-            model_args["inner_blocks"][2]["inner_blocks"][2][0],
+            model_args["inner_blocks"][2],
             weights=parameters["inner_blocks"].get("2", {}).get("0", None)["weight"],
             bias=parameters["inner_blocks"].get("2", {}).get("0", None)["bias"],
             # **layer_optimisations.conv3,
@@ -134,7 +135,7 @@ class resnet50Fpn:
         self.conv3 = TtConv2d(self.conv_config_3, device)
 
         self.conv_config_4 = Conv2dConfiguration.from_model_args(
-            model_args["layer_blocks"][0]["layer_blocks"][0][0],
+            model_args["layer_blocks"][0],
             weights=parameters["layer_blocks"].get("0", {}).get("0", None)["weight"],
             bias=parameters["layer_blocks"].get("0", {}).get("0", None)["bias"],
             # **layer_optimisations.conv4,
@@ -145,7 +146,7 @@ class resnet50Fpn:
         self.conv4 = TtConv2d(self.conv_config_4, device)
 
         self.conv_config_5 = Conv2dConfiguration.from_model_args(
-            model_args["layer_blocks"][1]["layer_blocks"][1][0],
+            model_args["layer_blocks"][1],
             weights=parameters["layer_blocks"].get("1", {}).get("0", None)["weight"],
             bias=parameters["layer_blocks"].get("1", {}).get("0", None)["bias"],
             # **layer_optimisations.conv5,
@@ -156,7 +157,7 @@ class resnet50Fpn:
         self.conv5 = TtConv2d(self.conv_config_5, device)
 
         self.conv_config_6 = Conv2dConfiguration.from_model_args(
-            model_args["layer_blocks"][2]["layer_blocks"][2][0],
+            model_args["layer_blocks"][2],
             weights=parameters["layer_blocks"].get("2", {}).get("0", None)["weight"],
             bias=parameters["layer_blocks"].get("2", {}).get("0", None)["bias"],
             # **layer_optimisations.conv6,
@@ -167,7 +168,7 @@ class resnet50Fpn:
         self.conv6 = TtConv2d(self.conv_config_6, device)
 
         self.conv_config_7 = Conv2dConfiguration.from_model_args(
-            model_args["extra_blocks"]["extra_blocks"]["p6"],
+            model_args["extra_blocks"]["p6"],
             weights=getattr(parameters.extra_blocks, "p6", None)["weight"],
             bias=getattr(parameters.extra_blocks, "p6", None)["bias"],
             # **layer_optimisations.conv7,
@@ -178,7 +179,7 @@ class resnet50Fpn:
         self.conv7 = TtConv2d(self.conv_config_7, device)
 
         self.conv_config_8 = Conv2dConfiguration.from_model_args(
-            model_args["extra_blocks"]["extra_blocks"]["p7"],
+            model_args["extra_blocks"]["p7"],
             weights=getattr(parameters.extra_blocks, "p7", None)["weight"],
             bias=getattr(parameters.extra_blocks, "p7", None)["bias"],
             # **layer_optimisations.conv8,
