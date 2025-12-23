@@ -116,7 +116,7 @@ class ttnn_PETR:
         img_feats = self.extract_img_feat(img, img_metas)
         return img_feats
 
-    def predict(self, inputs=None, data_samples=None, skip_post_processing=False, **kwargs):
+    def predict(self, inputs=None, data_samples=None, skip_post_processing=False, return_ttnn_tensors=False, **kwargs):
         img = inputs["imgs"]
         batch_img_metas = data_samples
         for var, name in [(batch_img_metas, "img_metas")]:
@@ -127,29 +127,37 @@ class ttnn_PETR:
         batch_img_metas = self.add_lidar2img(img, batch_img_metas)
 
         if skip_post_processing:
-            return self.simple_test(batch_img_metas, img, skip_post_processing, **kwargs)
+            return self.simple_test(
+                batch_img_metas, img, skip_post_processing, return_ttnn_tensors=return_ttnn_tensors, **kwargs
+            )
 
-        results_list_3d = self.simple_test(batch_img_metas, img, skip_post_processing, **kwargs)
+        results_list_3d = self.simple_test(
+            batch_img_metas, img, skip_post_processing, return_ttnn_tensors=return_ttnn_tensors, **kwargs
+        )
 
         return results_list_3d
 
-    def simple_test_pts(self, x, img_metas, skip_post_processing=False, rescale=False):
+    def simple_test_pts(self, x, img_metas, skip_post_processing=False, rescale=False, return_ttnn_tensors=False):
         """Test function of point cloud branch."""
-        outs = self.pts_bbox_head(x, img_metas, device=self.device)
+        outs = self.pts_bbox_head(x, img_metas, device=self.device, return_ttnn_tensors=return_ttnn_tensors)
         if skip_post_processing:
             return outs
         bbox_list = self.pts_bbox_head.get_bboxes(outs, img_metas, rescale=rescale)
         bbox_results = [bbox3d2result(bboxes, scores, labels) for bboxes, scores, labels in bbox_list]
         return bbox_results
 
-    def simple_test(self, img_metas, img=None, skip_post_processing=False, rescale=False):
+    def simple_test(self, img_metas, img=None, skip_post_processing=False, rescale=False, return_ttnn_tensors=False):
         """Test function without augmentaiton."""
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
 
         bbox_list = [dict() for i in range(len(img_metas))]
         if skip_post_processing:
             return self.simple_test_pts(
-                img_feats, img_metas, skip_post_processing=skip_post_processing, rescale=rescale
+                img_feats,
+                img_metas,
+                skip_post_processing=skip_post_processing,
+                rescale=rescale,
+                return_ttnn_tensors=return_ttnn_tensors,
             )
         bbox_pts = self.simple_test_pts(img_feats, img_metas, rescale=rescale)
         for result_dict, pts_bbox in zip(bbox_list, bbox_pts):

@@ -44,7 +44,9 @@ class ttnn_ConvModule:
         else:
             from models.experimental.petr.tt.common import Conv
 
-            conv = Conv([1, 1, 0, 0], self.parameters, activation="", height_sharding=False)
+            kernel_size = self.parameters["weight"].shape[2]
+            padding = 1 if kernel_size == 3 else 0
+            conv = Conv([1, 1, padding, padding], self.parameters, activation="", height_sharding=False)
             x = conv(device, x)
         return x
 

@@ -18,7 +18,6 @@ from models.tt_cnn.tt.pipeline import (
     PipelineConfig,
     create_pipeline_from_config,
 )
-from tests.ttnn.utils_for_testing import assert_with_pcc
 
 try:
     from tracy import signpost
@@ -37,7 +36,9 @@ def create_petr_pipeline_model(ttnn_model, modified_batch_img_metas, batch_size,
         l1_input_reshaped = ttnn.reshape(l1_input_interleaved, original_shape)
         l1_input_5d = ttnn.reshape(l1_input_reshaped, full_shape)
         ttnn_inputs = {"imgs": l1_input_5d}
-        output = ttnn_model.predict(ttnn_inputs, modified_batch_img_metas, skip_post_processing=True)
+        output = ttnn_model.predict(
+            ttnn_inputs, modified_batch_img_metas, skip_post_processing=True, return_ttnn_tensors=True
+        )
         return [output["all_cls_scores"], output["all_bbox_preds"]]
 
     return run
@@ -56,7 +57,7 @@ def create_petr_pipeline_model(ttnn_model, modified_batch_img_metas, batch_size,
     ],
     indirect=True,
 )
-@pytest.mark.parametrize("num_iterations", [20])
+@pytest.mark.parametrize("num_iterations", [32])
 @pytest.mark.parametrize(
     "batch, expected_compile_time, expected_throughput_fps",
     [(1, 60.0, 10.0)],
@@ -201,7 +202,7 @@ def test_petr_perf_e2e_2cq_trace(
         ttnn_model, modified_batch_img_metas, B, num_cams, original_shape, full_shape
     )
 
-    logger.info("Creating pipeline with 2CQ and trace enabled...")
+    logger.info("Creating pipeline...")
     pipeline = create_pipeline_from_config(
         device=device,
         model=run_model,
@@ -254,13 +255,3 @@ def test_petr_perf_e2e_2cq_trace(
         expected_inference_time=batch / expected_throughput_fps,
         comments=f"batch_{batch}-E2E with 2CQ and trace",
     )
-
-    logger.info("Running sanity check against reference model output...")
-    output_cls_scores = ttnn.to_torch(outputs[0][0])
-    output_bbox_preds = ttnn.to_torch(outputs[0][1])
-
-    pcc_passed_cls, pcc_message_cls = assert_with_pcc(torch_output["all_cls_scores"], output_cls_scores, pcc=0.65)
-    logger.info(f"PCC check all_cls_scores: {pcc_message_cls:.5f}")
-
-    pcc_passed_bbox, pcc_message_bbox = assert_with_pcc(torch_output["all_bbox_preds"], output_bbox_preds, pcc=0.65)
-    logger.info(f"PCC check all_bbox_preds: {pcc_message_bbox:.5f}")

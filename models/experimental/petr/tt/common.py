@@ -171,7 +171,7 @@ class Conv:
             dilation=self.dilation,
             math_fidelity=ttnn.MathFidelity.HiFi4,
             fp32_dest_acc_en=True,
-            packer_l1_acc=False,
+            packer_l1_acc=True,
             enable_act_double_buffer=False,
             enable_weights_double_buffer=False,
             reshard_if_not_optimal=True,

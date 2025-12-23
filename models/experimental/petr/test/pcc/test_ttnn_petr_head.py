@@ -219,10 +219,6 @@ def test_petr_head(device, reset_seeds):
     logger.info("Running TTNN model...")
     ttnn_output = ttnn_model(mlvl_feats, img_metas, device=device)
 
-    # Convert outputs back to torch
-    ttnn_output["all_cls_scores"] = ttnn.to_torch(ttnn_output["all_cls_scores"])
-    ttnn_output["all_bbox_preds"] = ttnn.to_torch(ttnn_output["all_bbox_preds"])
-
     # Verify outputs
     passed, msg = check_with_pcc(output["all_cls_scores"], ttnn_output["all_cls_scores"], pcc=0.99)
     passed1, msg1 = check_with_pcc(output["all_bbox_preds"], ttnn_output["all_bbox_preds"], pcc=0.99)
