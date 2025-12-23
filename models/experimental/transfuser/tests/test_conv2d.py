@@ -4,6 +4,7 @@
 import pytest
 import torch
 import ttnn
+from loguru import logger
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
     TtConv2d,
@@ -26,26 +27,37 @@ def test_conv2d_1x1_zero_padding_stride_1_from_files(device):
 
     # Load state dict containing weights
     state_dict = torch.load("se_fc2_state_dict.pt")
-    print("Available keys in state dict:")
-    for key in state_dict.keys():
-        print(f"  {key}")
+    # Get dimensions from loaded tensors
+    batch_size, in_channels, input_height, input_width = torch_input_tensor.shape
+    out_channels = state_dict["weight"].shape[0]
 
-    conv_weight = state_dict["weight"]
-    conv_bias = state_dict.get("bias", None)
+    # Create a PyTorch Conv2d model and load state dict properly
+    torch_model = torch.nn.Conv2d(
+        in_channels=in_channels,
+        out_channels=out_channels,
+        kernel_size=(1, 1),
+        padding=(0, 0),
+        stride=(1, 1),
+        bias=state_dict.get("bias") is not None,
+    )
+
+    # Load state dict into model
+    torch_model.load_state_dict(state_dict, strict=True)
+    torch_model.eval()
+
+    # Extract weights and bias from the loaded model
+    conv_weight = torch_model.weight.data
+    conv_bias = torch_model.bias.data if torch_model.bias is not None else None
 
     # Convert weights to TTNN format
     ttnn_weight_tensor = ttnn.from_torch(conv_weight, device=device)
 
     # Reshape bias to (1, 1, 1, out_channels) before converting to TTNN
     if conv_bias is not None:
-        conv_bias = conv_bias.reshape((1, 1, 1, -1))
-        ttnn_bias_tensor = ttnn.from_torch(conv_bias, device=device)
+        conv_bias_reshaped = conv_bias.reshape((1, 1, 1, -1))
+        ttnn_bias_tensor = ttnn.from_torch(conv_bias_reshaped, device=device)
     else:
         ttnn_bias_tensor = None
-
-    # Get dimensions from loaded tensors
-    batch_size, in_channels, input_height, input_width = torch_input_tensor.shape
-    out_channels = conv_weight.shape[0]
 
     # Create configuration with loaded weights
     configuration = Conv2dConfiguration(
@@ -65,21 +77,16 @@ def test_conv2d_1x1_zero_padding_stride_1_from_files(device):
     layer = TtConv2d(configuration, device)
     ttnn_output_tensor = layer(ttnn_input_tensor)
 
-    # Reference PyTorch implementation
-    torch_output_tensor = torch.nn.functional.conv2d(
-        torch_input_tensor,
-        conv_weight,
-        conv_bias.reshape(-1) if conv_bias is not None else None,  # Use original 1D bias for PyTorch
-        padding=configuration.padding,
-        stride=configuration.stride,
-    )
+    # Reference PyTorch implementation using the loaded model
+    torch_output_tensor = torch_model(torch_input_tensor)
 
     # Compare results
     output_height, output_width = torch_output_tensor.shape[-2:]  # [B, C, H, W]
-    assert_with_pcc(
+    pcc, pcc_msg = assert_with_pcc(
         torch_output_tensor,
         ttnn.to_torch(ttnn_output_tensor)
         .reshape(configuration.batch_size, output_height, output_width, configuration.out_channels)
         .permute(0, 3, 1, 2),
         PCC_THRESHOLD,
     )
+    logger.info(f"PCC = {pcc_msg}. Threshold = {PCC_THRESHOLD}")
