@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-License-Identifier: Apache-2.0
+
 from models.experimental.retinanet.tt.tt_backbone import TTBackbone
 from models.experimental.retinanet.tt.tt_regression_head import TtnnRetinaNetRegressionHead
 from models.experimental.retinanet.tt.tt_classification_head import TtnnRetinaNetClassificationHead
