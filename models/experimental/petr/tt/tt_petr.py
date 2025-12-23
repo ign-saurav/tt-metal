@@ -1,12 +1,13 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
 import ttnn
-from models.experimental.petr.tt.ttnn_petr_head import ttnn_PETRHead
-from models.experimental.petr.tt.ttnn_vovnetcp import ttnn_VoVNetCP
-from models.experimental.petr.tt.ttnn_cp_fpn import ttnn_CPFPN
-from models.experimental.petr.tt.ttnn_grid_mask import ttnn_GridMask
+from models.experimental.petr.tt.tt_petr_head import ttnn_PETRHead
+from models.experimental.petr.tt.tt_vovnetcp import ttnn_VoVNetCP
+from models.experimental.petr.tt.tt_cp_fpn import ttnn_CPFPN
+from models.experimental.petr.tt.tt_grid_mask import ttnn_GridMask
 from models.experimental.petr.reference.utils import bbox3d2result
 
 
@@ -19,6 +20,7 @@ class ttnn_PETR:
         parameters=None,
         query_embedding_input=None,
         device=None,
+        model_config=None,
     ):
         self.with_img_neck = True
         self.pts_bbox_head = ttnn_PETRHead(
@@ -36,8 +38,21 @@ class ttnn_PETR:
         self.img_backbone = ttnn_VoVNetCP(
             parameters=parameters["img_backbone"], stem_parameters=parameters["stem_parameters"], device=device
         )
+        if model_config is None:
+            model_config = {
+                "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
+                "WEIGHTS_DTYPE": ttnn.bfloat16,
+                "ACTIVATIONS_DTYPE": ttnn.bfloat16,
+            }
         self.img_neck = ttnn_CPFPN(
-            in_channels=[768, 1024], out_channels=256, num_outs=2, parameters=parameters["img_neck"]
+            in_channels=[768, 1024],
+            out_channels=256,
+            num_outs=2,
+            batch_size=1,
+            parameters=parameters["img_neck"],
+            model_config=model_config,
+            model_args=None,
+            device=device,
         )
         self.grid_mask = ttnn_GridMask(True, True, rotate=1, offset=False, ratio=0.5, mode=1, prob=0.7)
         self.use_grid_mask = use_grid_mask
@@ -87,7 +102,7 @@ class ttnn_PETR:
             return None
 
         if self.with_img_neck:
-            img_feats = self.img_neck(device=self.device, inputs=img_feats)
+            img_feats = self.img_neck(inputs=img_feats)
 
         img_feats_reshaped = []
         for img_feat in img_feats:
