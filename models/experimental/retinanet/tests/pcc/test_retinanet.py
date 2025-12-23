@@ -13,15 +13,15 @@ from torchvision.models.detection import retinanet_resnet50_fpn_v2, RetinaNet_Re
 from PIL import Image
 from torchvision import transforms
 
-from models.experimental.retinanet.tt.tt_backbone import TTBackbone
+from models.experimental.retinanet.tt.tt_retinanet import TTRetinaNet
 from models.experimental.retinanet.tt.custom_preprocessor import (
     create_custom_mesh_preprocessor,
-    preprocess_regression_head_parameters,
-    preprocess_classification_head_parameters,
 )
 
 from models.experimental.retinanet.tt.tt_regression_head import ttnn_retinanet_regression_head
 from models.experimental.retinanet.tt.tt_classification_head import ttnn_retinanet_classification_head
+from models.experimental.retinanet.tests.pcc.test_resnet50_fpn import infer_ttnn_module_args as infer_module_args
+from ttnn.model_preprocessing import infer_ttnn_module_args
 
 
 class RetinaNetTestInfra:
@@ -71,6 +71,54 @@ class RetinaNetTestInfra:
         # Run PyTorch classifiction head to get golden output
         torch_classification_output = self.torch_classification_head(list(backbone_features.values()))
 
+        ################# MODEL ARGS ##################
+        conv_args = {}
+        backbone = retinanet.backbone.body
+        self.fpn_model = retinanet.backbone.fpn
+        self.torch_fpn_input_tensor = backbone(self.torch_input_tensor)
+
+        conv_args = infer_ttnn_module_args(
+            model=self.torch_backbone,
+            run_model=lambda model: self.torch_backbone(self.torch_input_tensor),
+            device=device,
+        )
+        fpn_args = infer_module_args(
+            model=self.fpn_model, run_model=lambda model: self.fpn_model(self.torch_fpn_input_tensor), device=device
+        )
+
+        model_args = {}
+        model_args["stem"] = {}
+        model_args["stem"]["conv1"] = conv_args["body"]["conv1"]
+        model_args["stem"]["maxpool"] = conv_args["body"]["maxpool"]
+
+        model_args["fpn"] = {}
+        model_args["fpn"]["inner_blocks"] = {}
+        model_args["fpn"]["inner_blocks"][0] = fpn_args["fpn"]["fpn"]["inner_blocks"][0]["fpn"]["inner_blocks"][0][0]
+        model_args["fpn"]["inner_blocks"][1] = fpn_args["fpn"]["fpn"]["inner_blocks"][1]["fpn"]["inner_blocks"][1][0]
+        model_args["fpn"]["inner_blocks"][2] = fpn_args["fpn"]["fpn"]["inner_blocks"][2]["fpn"]["inner_blocks"][2][0]
+
+        model_args["fpn"]["layer_blocks"] = {}
+        model_args["fpn"]["layer_blocks"][0] = fpn_args["fpn"]["fpn"]["layer_blocks"][0]["fpn"]["layer_blocks"][0][0]
+        model_args["fpn"]["layer_blocks"][1] = fpn_args["fpn"]["fpn"]["layer_blocks"][1]["fpn"]["layer_blocks"][1][0]
+        model_args["fpn"]["layer_blocks"][2] = fpn_args["fpn"]["fpn"]["layer_blocks"][2]["fpn"]["layer_blocks"][2][0]
+
+        model_args["fpn"]["extra_blocks"] = {}
+        model_args["fpn"]["extra_blocks"]["p6"] = fpn_args["fpn"]["fpn"]["extra_blocks"]["fpn"]["extra_blocks"]["p6"]
+        model_args["fpn"]["extra_blocks"]["p7"] = fpn_args["fpn"]["fpn"]["extra_blocks"]["fpn"]["extra_blocks"]["p7"]
+
+        model_args["layer1"] = {}
+        model_args["layer1"] = conv_args["body"]["layer1"]
+
+        model_args["layer2"] = {}
+        model_args["layer2"] = conv_args["body"]["layer2"]
+
+        model_args["layer3"] = {}
+        model_args["layer3"] = conv_args["body"]["layer3"]
+
+        model_args["layer4"] = {}
+        model_args["layer4"] = conv_args["body"]["layer4"]
+        ################# MODEL ARGS ##################
+
         # Store all outputs (backbone + regression head)
         self.torch_output_tensor = {
             **backbone_features,  # FPN levels: "0", "1", "2", "p6", "p7"
@@ -84,24 +132,6 @@ class RetinaNetTestInfra:
             custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
             device=None,
         )
-        # Preprocess regression head parameters using specialized preprocessor
-        regression_parameters = preprocess_regression_head_parameters(
-            torch_head=retinanet.head.regression_head,
-            device=device,
-            mesh_mapper=self.weights_mesh_mapper,
-            model_config=model_config,
-        )
-        # preprocess classification head parameters
-        classification_parameters = preprocess_classification_head_parameters(
-            torch_head=retinanet.head.classification_head,
-            device=device,
-            mesh_mapper=self.weights_mesh_mapper,
-            model_config=model_config,
-        )
-        # Extract parameters for backbone and regression head
-        self.backbone_parameters = parameters.get("backbone", parameters)  # Fallback to full params if no backbone key
-        self.regression_parameters = regression_parameters
-        self.classification_parameters = classification_parameters
 
         # Convert input to TTNN host tensor
         def to_ttnn_host(tensor):
@@ -115,7 +145,7 @@ class RetinaNetTestInfra:
         tt_host_tensor = to_ttnn_host(self.torch_input_tensor)
 
         # TTNN backbone model
-        self.ttnn_model = TTBackbone(parameters=self.backbone_parameters, model_config=model_config)
+        self.ttnn_model = TTRetinaNet(parameters=self.backbone_parameters, model_config=model_config)
 
         # Move input to device
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
