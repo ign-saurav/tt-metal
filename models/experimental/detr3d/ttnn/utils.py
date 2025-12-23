@@ -7,6 +7,85 @@ import torch
 import numpy as np
 from models.common.lightweightmodule import LightweightModule
 from models.tt_cnn.tt.builder import TtMaxPool2d, MaxPool2dConfiguration
+from models.experimental.detr3d.reference.model_3detr import BoxProcessor
+
+
+def box_post_processing(
+    cls_logits,
+    center_offset,
+    size_normalized,
+    angle_logits,
+    angle_residual_normalized,
+    angle_residual,
+    num_layers,
+    torch_query_xyz,
+    torch_point_cloud_dims,
+    dataset_config,
+):
+    torch_cls_logits = ttnn.to_torch(cls_logits)
+    torch_center_offset = ttnn.to_torch(center_offset)
+    torch_size_normalized = ttnn.to_torch(size_normalized)
+    torch_angle_logits = ttnn.to_torch(angle_logits)
+    torch_angle_residual_normalized = ttnn.to_torch(angle_residual_normalized)
+    torch_angle_residual = ttnn.to_torch(angle_residual)
+    if not isinstance(torch_point_cloud_dims[0], torch.Tensor):
+        for i in range(len(torch_point_cloud_dims)):
+            torch_point_cloud_dims[i] = ttnn.to_torch(torch_point_cloud_dims[i])
+    if not isinstance(torch_query_xyz, torch.Tensor):
+        torch_query_xyz = ttnn.to_torch(torch_query_xyz)
+
+    torch_box_processor = BoxProcessor(dataset_config)
+
+    torch_outputs = []
+    for l in range(num_layers):
+        # box processor converts outputs so we can get a 3D bounding box
+        (
+            torch_center_normalized,
+            torch_center_unnormalized,
+        ) = torch_box_processor.compute_predicted_center(
+            torch_center_offset[l], torch_query_xyz, torch_point_cloud_dims
+        )
+        torch_angle_continuous = torch_box_processor.compute_predicted_angle(
+            torch_angle_logits[l], torch_angle_residual[l]
+        )
+        torch_size_unnormalized = torch_box_processor.compute_predicted_size(
+            torch_size_normalized[l], torch_point_cloud_dims
+        )
+        torch_box_corners = torch_box_processor.box_parametrization_to_corners(
+            torch_center_unnormalized, torch_size_unnormalized, torch_angle_continuous
+        )
+
+        # below are used for matching/mAP eval
+        (
+            torch_semcls_prob,
+            torch_objectness_prob,
+        ) = torch_box_processor.compute_objectness_and_cls_prob(torch_cls_logits[l])
+
+        torch_box_prediction = {
+            "sem_cls_logits": torch_cls_logits[l],
+            "center_normalized": torch_center_normalized,
+            "center_unnormalized": torch_center_unnormalized,
+            "size_normalized": torch_size_normalized[l],
+            "size_unnormalized": torch_size_unnormalized,
+            "angle_logits": torch_angle_logits[l],
+            "angle_residual": torch_angle_residual[l],
+            "angle_residual_normalized": torch_angle_residual_normalized[l],
+            "angle_continuous": torch_angle_continuous,
+            "objectness_prob": torch_objectness_prob,
+            "sem_cls_prob": torch_semcls_prob,
+            "box_corners": torch_box_corners,
+        }
+        torch_outputs.append(torch_box_prediction)
+
+    # intermediate decoder layer outputs are only used during training
+    # we use them to check for any instability in PCC
+    torch_aux_outputs = torch_outputs[:-1]
+    torch_outputs = torch_outputs[-1]
+
+    return {
+        "outputs": torch_outputs,  # output from last layer of decoder
+        "aux_outputs": torch_aux_outputs,  # output from intermediate layers of decoder
+    }
 
 
 class TtnnConv1D(LightweightModule):

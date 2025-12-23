@@ -10,7 +10,7 @@ from models.experimental.detr3d.ttnn.shared_mlp import TtnnSharedMLP
 from models.experimental.detr3d.reference import torch_pointnet2_ops as pointnet2_utils
 from models.experimental.detr3d.ttnn.utils import TtnnMaxPool2DSlice
 
-# from models.experimental.detr3d.tests.pcc.test_ttnn_3detr import ON_DEVICE
+from models.experimental.detr3d.ttnn.constant import ON_DEVICE
 
 
 # class TtnnBallQuery(LightweightModule):
@@ -207,7 +207,9 @@ class TtnnGroupingOperation(LightweightModule):
 
         # Expand points to 4D for gather operation
         points_expanded = ttnn.unsqueeze(points, 3)  # (B, C, N, 1)
-        points_expanded = ttnn.expand(points_expanded, (B, C, N, nsample))  # (B, C, N, nsample)
+        points_expanded = ttnn.expand(
+            points_expanded, (B, C, N, nsample), memory_config=ttnn.DRAM_MEMORY_CONFIG
+        )  # (B, C, N, nsample)
 
         # Fix: Ensure both tensors are in TILE_LAYOUT before gather
         if points_expanded.layout != ttnn.TILE_LAYOUT:
@@ -333,7 +335,7 @@ class TtnnFurthestPointSampling(LightweightModule):
             # Find farthest point for next iteration
             farthest = ttnn.argmax(distance, dim=1)
 
-        centroids = ttnn.typecast(centroids, ttnn.int32)
+        centroids = ttnn.typecast(centroids, ttnn.uint32)
 
         return centroids
 
@@ -369,15 +371,27 @@ class TtnnPointnetSAModuleVotes(LightweightModule):
         self.sample_uniformly = sample_uniformly
 
         if npoint is not None:
-            self.grouper = pointnet2_utils.QueryAndGroup(
-                radius,
-                nsample,
-                use_xyz=use_xyz,
-                ret_grouped_xyz=True,
-                normalize_xyz=normalize_xyz,
-                sample_uniformly=sample_uniformly,
-                ret_unique_cnt=ret_unique_cnt,
-            )
+            if ON_DEVICE:
+                self.grouper = TtnnQueryAndGroup(
+                    self.device,
+                    radius,
+                    nsample,
+                    use_xyz=use_xyz,
+                    ret_grouped_xyz=True,
+                    normalize_xyz=normalize_xyz,
+                    sample_uniformly=sample_uniformly,
+                    ret_unique_cnt=ret_unique_cnt,
+                )
+            else:
+                self.grouper = pointnet2_utils.QueryAndGroup(
+                    radius,
+                    nsample,
+                    use_xyz=use_xyz,
+                    ret_grouped_xyz=True,
+                    normalize_xyz=normalize_xyz,
+                    sample_uniformly=sample_uniformly,
+                    ret_unique_cnt=ret_unique_cnt,
+                )
         else:
             raise NotImplementedError("Not supported currently")
 
@@ -391,33 +405,43 @@ class TtnnPointnetSAModuleVotes(LightweightModule):
         )
 
     def forward(self, xyz, features=None, inds=None):
-        if not isinstance(xyz, torch.Tensor):
-            xyz = ttnn.to_torch(xyz, dtype=torch.float32)
-        if not isinstance(features, torch.Tensor) and features is not None:
-            features = ttnn.to_torch(features, dtype=torch.float32)
-        if not isinstance(inds, torch.Tensor) and inds is not None:
-            inds = ttnn.to_torch(inds, dtype=torch.int64)
+        if not ON_DEVICE:
+            if not isinstance(xyz, torch.Tensor):
+                xyz = ttnn.to_torch(xyz, dtype=torch.float32)
+            if not isinstance(features, torch.Tensor) and features is not None:
+                features = ttnn.to_torch(features, dtype=torch.float32)
+            if not isinstance(inds, torch.Tensor) and inds is not None:
+                inds = ttnn.to_torch(inds, dtype=torch.int64)
 
-        xyz_flipped = xyz.transpose(1, 2).contiguous()
+            xyz_flipped = xyz.transpose(1, 2).contiguous()
+        else:
+            if not isinstance(xyz, ttnn.Tensor):
+                xyz = ttnn.from_torch(
+                    xyz,
+                    dtype=ttnn.bfloat16,
+                    device=self.device,
+                )
+            xyz_flipped = ttnn.permute(xyz, (0, 2, 1))
+
         if inds is None:
-            inds = pointnet2_utils.furthest_point_sample(xyz, self.npoint)
+            if ON_DEVICE:
+                inds = TtnnFurthestPointSampling()(xyz, self.npoint, device=self.device)
+            else:
+                inds = pointnet2_utils.furthest_point_sample(xyz, self.npoint)
         else:
             assert inds.shape[1] == self.npoint
-        if 0:
+        if ON_DEVICE:
             new_xyz_ttnn_out = TtnnGatherOperation()(
-                ttnn.from_torch(xyz_flipped, dtype=ttnn.bfloat16, device=self.device),
-                ttnn.from_torch(inds, dtype=ttnn.uint32, device=self.device),
+                xyz_flipped,
+                inds,
             )
-            new_xyz = ttnn.to_torch(new_xyz_ttnn_out, dtype=torch.bfloat16).transpose(1, 2).contiguous()
+            new_xyz = ttnn.permute(new_xyz_ttnn_out, (0, 2, 1))
         else:
             new_xyz = (
                 pointnet2_utils.gather_operation(xyz_flipped, inds).transpose(1, 2).contiguous()
                 if self.npoint is not None
                 else None
             )
-            import pdb
-
-            pdb.set_trace()
 
         unique_cnt = None
         if not self.ret_unique_cnt:
@@ -429,14 +453,17 @@ class TtnnPointnetSAModuleVotes(LightweightModule):
 
         if unique_cnt is not None:
             unique_cnt = ttnn.from_torch(unique_cnt, dtype=ttnn.bfloat16, device=self.device)
-        grouped_features = ttnn.from_torch(
-            grouped_features.permute(0, 2, 3, 1),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device,
-            memory_config=ttnn.L1_MEMORY_CONFIG,
-        )
-
+        if not ON_DEVICE:
+            grouped_features = ttnn.from_torch(
+                grouped_features.permute(0, 2, 3, 1),
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+                memory_config=ttnn.L1_MEMORY_CONFIG,
+            )
+        else:
+            grouped_features = ttnn.permute(grouped_features, (0, 2, 3, 1))
+        # Shape([1, 2048, 64, 3])
         new_features = self.mlp_module(grouped_features)  # (B, mlp[-1], npoint, nsample)
         ttnn.deallocate(grouped_features)
 

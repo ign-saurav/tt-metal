@@ -29,16 +29,16 @@ from ttnn.model_preprocessing import infer_ttnn_module_args
             None,  # features
             "pre_encoder",
         ),
-        # (
-        #     [256, 256, 256, 256],  # mlp
-        #     1024,  # npoint
-        #     0.4,  # radius
-        #     32,  # nsample
-        #     True,  # normalize_xyz
-        #     (1, 2048, 3),  # xyz
-        #     (1, 256, 2048),  # features
-        #     "encoder.interim_downsampling",
-        # ),
+        (
+            [256, 256, 256, 256],  # mlp
+            1024,  # npoint
+            0.4,  # radius
+            32,  # nsample
+            True,  # normalize_xyz
+            (1, 2048, 3),  # xyz
+            (1, 256, 2048),  # features
+            "encoder.interim_downsampling",
+        ),
     ],
 )
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
@@ -98,6 +98,7 @@ def test_pointnet_samodule_votes(
             dtype=ttnn.bfloat16,
             device=device,
         )
+
     tt_output = ttnn_model(xyz=xyz, features=ttnn_features, inds=None)
 
     ttnn_torch_out = []

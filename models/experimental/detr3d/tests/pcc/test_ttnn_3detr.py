@@ -12,12 +12,12 @@ from models.common.utility_functions import comp_pcc, comp_allclose
 
 from models.experimental.detr3d.common import load_torch_model_state
 from models.experimental.detr3d.ttnn.model_3detr import build_ttnn_3detr
+from models.experimental.detr3d.ttnn.utils import box_post_processing
 from models.experimental.detr3d.reference.model_3detr import build_3detr
 from models.experimental.detr3d.reference.model_config import Detr3dArgs
 from models.experimental.detr3d.reference.utils.dataset import SunrgbdDatasetConfig
 from models.experimental.detr3d.ttnn.custom_preprocessing import create_custom_mesh_preprocessor
-
-ON_DEVICE = True
+from models.experimental.detr3d.ttnn.constant import ON_DEVICE
 
 
 class Tt3DetrArgs(Detr3dArgs):
@@ -75,13 +75,56 @@ def test_3detr_model(encoder_only, input_shape, device):
         run_model=lambda model: ref_module(inputs=input_dict, encoder_only=encoder_only),
         device=device,
     )
+    if ON_DEVICE:
+        ttnn_dict = {}
+        for key, value in input_dict.items():
+            if isinstance(value, torch.Tensor):
+                ttnn_dict[key] = ttnn.from_torch(value, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+            else:
+                ttnn_dict[key] = value
 
     ttnn_args = Tt3DetrArgs()
     ttnn_args.parameters = ref_module_parameters
     ttnn_args.device = device
 
     ttnn_module, _ = build_ttnn_3detr(ttnn_args, dataset_config)
-    tt_output = ttnn_module(inputs=input_dict, encoder_only=encoder_only)
+    if ON_DEVICE:
+        (
+            cls_logits,
+            center_offset,
+            size_normalized,
+            angle_logits,
+            angle_residual_normalized,
+            angle_residual,
+            num_layers,
+            torch_query_xyz,
+            torch_point_cloud_dims,
+        ) = ttnn_module(inputs=ttnn_dict, encoder_only=encoder_only)
+    else:
+        (
+            cls_logits,
+            center_offset,
+            size_normalized,
+            angle_logits,
+            angle_residual_normalized,
+            angle_residual,
+            num_layers,
+            torch_query_xyz,
+            torch_point_cloud_dims,
+        ) = ttnn_module(inputs=input_dict, encoder_only=encoder_only)
+
+    tt_output = box_post_processing(
+        cls_logits,
+        center_offset,
+        size_normalized,
+        angle_logits,
+        angle_residual_normalized,
+        angle_residual,
+        num_layers,
+        torch_query_xyz,
+        torch_point_cloud_dims,
+        dataset_config,
+    )
 
     all_passing = True
     if encoder_only:
