@@ -10,6 +10,43 @@ from models.tt_cnn.tt.builder import (
     TtConv2d,
 )
 from tests.ttnn.utils_for_testing import assert_with_pcc
+from models.experimental.transfuser.reference.bottleneck import Bottleneck as PyTorchBottleneck
+
+
+def convert_to_bottleneck_state_dict(state_dict):
+    """Convert simple weight/bias state dict to Bottleneck format"""
+    new_state_dict = {}
+
+    # Map your weight/bias to se.fc2 (squeeze-excitation second layer)
+    if "weight" in state_dict:
+        new_state_dict["se.fc2.weight"] = state_dict["weight"]
+    if "bias" in state_dict:
+        new_state_dict["se.fc2.bias"] = state_dict["bias"]
+
+    # Add dummy values for missing required keys (zeros or proper initialization)
+    # You may need to adjust these based on your specific use case
+    # missing_keys = [
+    #     "conv1.conv.weight", "conv1.bn.weight", "conv1.bn.bias",
+    #     "conv1.bn.running_mean", "conv1.bn.running_var",
+    #     "conv2.conv.weight", "conv2.bn.weight", "conv2.bn.bias",
+    #     "conv2.bn.running_mean", "conv2.bn.running_var",
+    #     "se.fc1.weight", "se.fc1.bias",
+    #     "conv3.conv.weight", "conv3.bn.weight", "conv3.bn.bias",
+    #     "conv3.bn.running_mean", "conv3.bn.running_var"
+    # ]
+
+    # # For missing keys, you might want to initialize them properly
+    # # This is just a placeholder - you'll need proper initialization
+    # for key in missing_keys:
+    #     if "weight" in key:
+    #         new_state_dict[key] = torch.zeros_like(torch.randn(1, 1, 1, 1))  # placeholder
+    #     elif "bias" in key:
+    #         new_state_dict[key] = torch.zeros(1)  # placeholder
+    #     else:  # batch norm running stats
+    #         new_state_dict[key] = torch.zeros(1)  # placeholder
+
+    return new_state_dict
+
 
 DEVICE_PARAMS = {"l1_small_size": 32768}
 PCC_THRESHOLD = 0.99
@@ -27,27 +64,31 @@ def test_conv2d_1x1_zero_padding_stride_1_from_files(device):
 
     # Load state dict containing weights
     state_dict = torch.load("se_fc2_state_dict.pt")
+    state_dict = convert_to_bottleneck_state_dict(state_dict)
     # Get dimensions from loaded tensors
     batch_size, in_channels, input_height, input_width = torch_input_tensor.shape
-    out_channels = state_dict["weight"].shape[0]
+    # out_channels = state_dict["se.fcweight"].shape[0]
 
     # Create a PyTorch Conv2d model and load state dict properly
-    torch_model = torch.nn.Conv2d(
-        in_channels=in_channels,
-        out_channels=out_channels,
-        kernel_size=(1, 1),
-        padding=(0, 0),
-        stride=(1, 1),
-        bias=state_dict.get("bias") is not None,
-    )
+    # torch_model = torch.nn.Conv2d(
+    #     in_channels=in_channels,
+    #     out_channels=out_channels,
+    #     kernel_size=(1, 1),
+    #     padding=(0, 0),
+    #     stride=(1, 1),
+    #     bias=state_dict.get("bias") is not None,
+    # )
+    torch_model = PyTorchBottleneck(in_chs=216, out_chs=216, stride=1, group_size=24)
+    print(torch_model.se.fc2.weight)
 
     # Load state dict into model
-    torch_model.load_state_dict(state_dict, strict=True)
+    torch_model.load_state_dict(state_dict, strict=False)
     torch_model.eval()
+    print(torch_model.se.fc2.weight)
 
     # Extract weights and bias from the loaded model
-    conv_weight = torch_model.weight.data
-    conv_bias = torch_model.bias.data if torch_model.bias is not None else None
+    conv_weight = torch_model.se.fc2.weight
+    conv_bias = torch_model.se.fc2.bias if torch_model.se.fc2.bias is not None else None
 
     # Convert weights to TTNN format
     ttnn_weight_tensor = ttnn.from_torch(conv_weight, device=device)
@@ -64,7 +105,7 @@ def test_conv2d_1x1_zero_padding_stride_1_from_files(device):
         input_height=input_height,
         input_width=input_width,
         in_channels=in_channels,
-        out_channels=out_channels,
+        out_channels=216,
         batch_size=batch_size,
         kernel_size=(1, 1),  # 1x1 convolution
         padding=(0, 0),  # 0 padding
@@ -78,7 +119,7 @@ def test_conv2d_1x1_zero_padding_stride_1_from_files(device):
     ttnn_output_tensor = layer(ttnn_input_tensor)
 
     # Reference PyTorch implementation using the loaded model
-    torch_output_tensor = torch_model(torch_input_tensor)
+    torch_output_tensor = torch_model.forward_fc2(torch_input_tensor)
 
     # Compare results
     output_height, output_width = torch_output_tensor.shape[-2:]  # [B, C, H, W]
