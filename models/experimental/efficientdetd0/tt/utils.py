@@ -4,6 +4,7 @@
 
 import ttnn
 import math
+import torch
 
 from typing import Union
 from dataclasses import replace
@@ -15,7 +16,38 @@ from models.tt_cnn.tt.builder import (
     MaxPool2dConfiguration,
     AutoShardedStrategyConfiguration,
 )
+from models.tt_cnn.tt.pipeline import get_memory_config_for_persistent_dram_tensor
 from models.experimental.efficientdetd0.tt.custom_preprocessor import UpsampleArgs, MaxPool2dArgs, Conv2dArgs
+
+
+def prepare_sharded_inputs(device: ttnn.Device, torch_input_tensor: torch.Tensor, dtype=ttnn.bfloat16, min_channels=16):
+    N, C, H, W = torch_input_tensor.shape
+    ttnn_input_host = ttnn.from_torch(
+        torch_input_tensor,  # NCHW format
+        device=None,
+        dtype=dtype,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+    )
+
+    # DRAM memory config for persistent tensors
+    dram_memory_config = get_memory_config_for_persistent_dram_tensor(
+        shape=((N * min_channels * H), W),  # NCHW format
+        shard_strategy=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+        dram_grid_size=device.dram_grid_size(),
+    )
+
+    # L1 memory config for model processing
+    core_grid = device.core_grid
+    num_cores = core_grid.x * core_grid.y
+    l1_memory_config = ttnn.create_sharded_memory_config(
+        shape=((N * min_channels * H) // num_cores, W),  # Height sharded: [NCH//cores, W]
+        core_grid=device.core_grid,
+        strategy=ttnn.ShardStrategy.HEIGHT,
+        orientation=ttnn.ShardOrientation.ROW_MAJOR,
+        use_height_and_width_as_shard_shape=True,
+    )
+
+    return ttnn_input_host, dram_memory_config, l1_memory_config
 
 
 def generate_conv_configuration_from_args(conv2d_args: Conv2dArgs, parameters_dict: dict, **kwargs):
