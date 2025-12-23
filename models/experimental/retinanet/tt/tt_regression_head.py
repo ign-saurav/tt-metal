@@ -142,19 +142,6 @@ class Conv2dNormActivation:
         compute_config: Optional[ttnn.DeviceComputeKernelConfig] = None,
         conv_config: Optional[ttnn.Conv2dConfig] = None,
     ):
-        """
-        Args:
-            parameters: Dict with keys 'weight', 'norm_weight', 'norm_bias'
-            device: TTNN device
-            in_channels: Number of input channels
-            out_channels: Number of output channels
-            kernel_size: Convolution kernel size
-            stride: Convolution stride
-            padding: Convolution padding
-            num_groups: Number of groups for GroupNorm
-            grid_size: CoreGrid for GroupNorm (defaults to 8x8)
-            input_mask: Pre-created input mask for GroupNorm
-        """
         self.device = device
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -239,7 +226,7 @@ class Conv2dNormActivation:
                 bias=self.norm_bias,
             )
             x = x.to(self.device)
-            x = ttnn.permute(x, (0, 2, 3, 1))  # NCHW -> NHWC
+            x = ttnn.permute(x, (0, 2, 3, 1))
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
 
         else:
@@ -285,120 +272,178 @@ class Conv2dNormActivation:
         return x
 
 
-# Usage in ttnn_retinanet_regression_head
-def ttnn_retinanet_regression_head(
-    feature_maps: List[ttnn.Tensor],
-    parameters: dict,
-    device: ttnn.Device,
-    in_channels: int = 256,
-    num_anchors: int = 9,
-    batch_size: int = 1,
-    input_shapes: List[tuple] = None,
-    model_config: dict = None,
-    optimization_profile: str = "optimized",
-) -> ttnn.Tensor:
-    opt_config = retinanet_head_optimizations[optimization_profile]
+class TtnnRetinaNetRegressionHead:
+    """
+    TTNN implementation of RetinaNet regression head as a class.
+    """
 
-    fpn_conv_configs = [
-        opt_config.fpn0_conv_blocks,
-        opt_config.fpn1_conv_blocks,
-        opt_config.fpn2_conv_blocks,
-        opt_config.fpn3_conv_blocks,
-        opt_config.fpn4_conv_blocks,
-    ]
+    def __init__(
+        self,
+        parameters: dict,
+        device: ttnn.Device,
+        in_channels: int = 256,
+        num_anchors: int = 9,
+        batch_size: int = 1,
+        input_shapes: List[tuple] = None,
+        model_config: dict = None,
+        optimization_profile: str = "optimized",
+    ):
+        """
+        Initialize the TTNN RetinaNet regression head.
 
-    fpn_final_configs = [
-        opt_config.fpn0_final_conv,
-        opt_config.fpn1_final_conv,
-        opt_config.fpn2_final_conv,
-        opt_config.fpn3_final_conv,
-        opt_config.fpn4_final_conv,
-    ]
+        Args:
+            parameters: Model parameters dictionary
+            device: TTNN device
+            in_channels: Number of input channels (default: 256)
+            num_anchors: Number of anchors per position (default: 9)
+            batch_size: Batch size (default: 1)
+            input_shapes: List of input shapes for each FPN level
+            model_config: Model configuration dictionary
+            optimization_profile: Optimization profile to use
+        """
+        self.device = device
+        self.in_channels = in_channels
+        self.num_anchors = num_anchors
+        self.batch_size = batch_size
+        self.input_shapes = input_shapes
+        self.model_config = model_config
+        self.optimization_profile = optimization_profile
 
-    all_bbox_regression = []
+        self.parameters = parameters
 
-    grid_size = ttnn.CoreGrid(y=8, x=8)
-    input_mask_tensor = ttnn.create_group_norm_input_mask(in_channels, 32, grid_size.y)
-    input_mask_tensor = input_mask_tensor.to(device, ttnn.DRAM_MEMORY_CONFIG)
+        self.opt_config = retinanet_head_optimizations[optimization_profile]
 
-    compute_config = ttnn.init_device_compute_kernel_config(
-        device.arch(),
-        math_fidelity=model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-        math_approx_mode=model_config.get("MATH_APPROX_MODE", False),
-        fp32_dest_acc_en=model_config.get("FP32_DEST_ACC_EN", True),
-        packer_l1_acc=model_config.get("PACKER_L1_ACC", False),
-    )
+        self.fpn_conv_configs = [
+            self.opt_config.fpn0_conv_blocks,
+            self.opt_config.fpn1_conv_blocks,
+            self.opt_config.fpn2_conv_blocks,
+            self.opt_config.fpn3_conv_blocks,
+            self.opt_config.fpn4_conv_blocks,
+        ]
 
-    for fpn_idx, feature_map in enumerate(feature_maps):
-        N, H, W, C = feature_map.shape
+        self.fpn_final_configs = [
+            self.opt_config.fpn0_final_conv,
+            self.opt_config.fpn1_final_conv,
+            self.opt_config.fpn2_final_conv,
+            self.opt_config.fpn3_final_conv,
+            self.opt_config.fpn4_final_conv,
+        ]
 
-        conv_blocks_config = fpn_conv_configs[fpn_idx]
-        final_conv_config = fpn_final_configs[fpn_idx]
+        self.compute_config = ttnn.init_device_compute_kernel_config(
+            device.arch(),
+            math_fidelity=model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
+            math_approx_mode=model_config.get("MATH_APPROX_MODE", False),
+            fp32_dest_acc_en=model_config.get("FP32_DEST_ACC_EN", True),
+            packer_l1_acc=model_config.get("PACKER_L1_ACC", False),
+        )
 
-        if conv_blocks_config is not None:
-            conv_config = ttnn.Conv2dConfig(**conv_blocks_config)
-        else:
-            conv_config = None
+        self.grid_size = ttnn.CoreGrid(y=8, x=8)
+        input_mask_tensor = ttnn.create_group_norm_input_mask(in_channels, 32, self.grid_size.y)
+        self.input_mask_tensor = input_mask_tensor.to(device, ttnn.DRAM_MEMORY_CONFIG)
 
-        conv_blocks = []
-        for conv_idx in range(4):
-            conv_block = Conv2dNormActivation(
-                parameters=parameters["conv"].get(str(conv_idx), {}).get("0", None),
-                device=device,
-                in_channels=in_channels,
-                out_channels=in_channels,
-                kernel_size=(3, 3),
-                stride=(1, 1),
-                padding=(1, 1),
-                num_groups=32,
-                grid_size=grid_size,
-                input_mask=input_mask_tensor,
-                model_config=model_config,
-                compute_config=compute_config,
-                conv_config=conv_config,
+    def forward(
+        self,
+        feature_maps: List[ttnn.Tensor],
+        batch_size: Optional[int] = None,
+        input_shapes: Optional[List[tuple]] = None,
+    ) -> ttnn.Tensor:
+        """
+        Forward pass through the regression head.
+
+        Args:
+            feature_maps: List of feature maps from FPN levels
+            batch_size: Optional override for batch size
+            input_shapes: Optional override for input shapes
+
+        Returns:
+            Output tensor with bounding box regressions
+        """
+
+        current_batch_size = batch_size if batch_size is not None else self.batch_size
+        current_input_shapes = input_shapes if input_shapes is not None else self.input_shapes
+
+        all_bbox_regression = []
+
+        for fpn_idx, feature_map in enumerate(feature_maps):
+            N, H, W, C = feature_map.shape
+
+            conv_blocks_config = self.fpn_conv_configs[fpn_idx]
+            final_conv_config = self.fpn_final_configs[fpn_idx]
+
+            if conv_blocks_config is not None:
+                conv_config = ttnn.Conv2dConfig(**conv_blocks_config)
+            else:
+                conv_config = None
+
+            conv_blocks = []
+            for conv_idx in range(4):
+                conv_block = Conv2dNormActivation(
+                    parameters=self.parameters["conv"].get(str(conv_idx), {}).get("0", None),
+                    device=self.device,
+                    in_channels=self.in_channels,
+                    out_channels=self.in_channels,
+                    kernel_size=(3, 3),
+                    stride=(1, 1),
+                    padding=(1, 1),
+                    num_groups=32,
+                    grid_size=self.grid_size,
+                    input_mask=self.input_mask_tensor,
+                    model_config=self.model_config,
+                    compute_config=self.compute_config,
+                    conv_config=conv_config,
+                    input_height=H,
+                    input_width=W,
+                )
+                conv_blocks.append(conv_block)
+
+            # Apply conv blocks to feature map
+            x = feature_map
+            for conv_idx, conv_block in enumerate(conv_blocks):
+                x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+                x = conv_block(
+                    x,
+                    batch_size=current_batch_size,
+                    input_height=H,
+                    input_width=W,
+                    fpn_level=fpn_idx,
+                    conv_block_idx=conv_idx,
+                )
+
+            # Final bbox_reg conv layer with config
+            bbox_reg_slice_config = ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dDRAMSliceHeight, num_slices=4)
+            if final_conv_config is not None:
+                bbox_reg_config = ttnn.Conv2dConfig(**final_conv_config)
+            else:
+                bbox_reg_config = None
+
+            conv_final_config = _create_conv_config_from_params(
                 input_height=H,
                 input_width=W,
+                in_channels=self.in_channels,
+                out_channels=self.num_anchors * 4,
+                kernel_size=(3, 3),
+                batch_size=1,
+                parameters=self.parameters["bbox_reg"],
+                stride=(1, 1),
+                padding=(1, 1),
+                sharding_strategy=HeightShardedStrategyConfiguration(),
             )
-            conv_blocks.append(conv_block)
+            conv_final = TtConv2d(conv_final_config, self.device)
+            bbox_regression, shape = conv_final(x, return_output_dim=True)
 
-        # Apply conv blocks to feature map
-        x = feature_map
-        for conv_idx, conv_block in enumerate(conv_blocks):
-            x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-            x = conv_block(
-                x, batch_size=batch_size, input_height=H, input_width=W, fpn_level=fpn_idx, conv_block_idx=conv_idx
-            )
+            # Reshape to (N, H*W*num_anchors, 4)
+            N, H_final, W_final, C_final = bbox_regression.shape
+            H_final, W_final = shape
+            bbox_regression = ttnn.sharded_to_interleaved(bbox_regression, ttnn.L1_MEMORY_CONFIG)
 
-        # Final bbox_reg conv layer with config
-        bbox_reg_slice_config = ttnn.Conv2dSliceConfig(slice_type=ttnn.Conv2dDRAMSliceHeight, num_slices=4)
-        if final_conv_config is not None:
-            bbox_reg_config = ttnn.Conv2dConfig(**final_conv_config)
-        else:
-            bbox_reg_config = None
+            bbox_regression = ttnn.reshape(bbox_regression, (N, H_final, W_final, self.num_anchors, 4))
+            bbox_regression = ttnn.reshape(bbox_regression, (N, H_final * W_final * self.num_anchors, 4))
 
-        conv_final_config = _create_conv_config_from_params(
-            input_height=H,
-            input_width=W,
-            in_channels=in_channels,
-            out_channels=num_anchors * 4,
-            kernel_size=(3, 3),
-            batch_size=1,
-            parameters=parameters["bbox_reg"],
-            stride=(1, 1),
-            padding=(1, 1),
-            sharding_strategy=HeightShardedStrategyConfiguration(),
-        )
-        conv_final = TtConv2d(conv_final_config, device)
-        bbox_regression, shape = conv_final(x, return_output_dim=True)
-        # Reshape to (N, H*W*num_anchors, 4)
-        N, H_final, W_final, C_final = bbox_regression.shape
-        H_final, W_final = shape
-        bbox_regression = ttnn.sharded_to_interleaved(bbox_regression, ttnn.L1_MEMORY_CONFIG)
+            all_bbox_regression.append(bbox_regression)
 
-        bbox_regression = ttnn.reshape(bbox_regression, (N, H_final, W_final, num_anchors, 4))
-        bbox_regression = ttnn.reshape(bbox_regression, (N, H_final * W_final * num_anchors, 4))
+        output = ttnn.concat(all_bbox_regression, dim=1)
+        return output
 
-        all_bbox_regression.append(bbox_regression)
-
-    output = ttnn.concat(all_bbox_regression, dim=1)
-    return output
+    def __call__(self, feature_maps: List[ttnn.Tensor], **kwargs) -> ttnn.Tensor:
+        """Alias for forward method."""
+        return self.forward(feature_maps, **kwargs)
