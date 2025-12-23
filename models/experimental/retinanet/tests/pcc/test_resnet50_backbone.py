@@ -70,6 +70,26 @@ class BackboneTestInfra:
             model=self.fpn_model, run_model=lambda model: self.fpn_model(self.torch_fpn_input_tensor), device=device
         )
 
+        model_args = {}
+        model_args["stem"] = {}
+        model_args["stem"]["conv1"] = conv_args["body"]["conv1"]
+        model_args["stem"]["maxpool"] = conv_args["body"]["maxpool"]
+
+        model_args["fpn"] = {}
+        model_args["fpn"] = fpn_args["fpn"]["fpn"]
+
+        model_args["layer1"] = {}
+        model_args["layer1"] = conv_args["body"]["layer1"]
+
+        model_args["layer2"] = {}
+        model_args["layer2"] = conv_args["body"]["layer2"]
+
+        model_args["layer3"] = {}
+        model_args["layer3"] = conv_args["body"]["layer3"]
+
+        model_args["layer4"] = {}
+        model_args["layer4"] = conv_args["body"]["layer4"]
+
         print(conv_args)
         ################# MODEL ARGS ##################
 
@@ -98,7 +118,9 @@ class BackboneTestInfra:
         tt_host_tensor = to_ttnn_host(self.torch_input_tensor)
 
         # TTNN backbone model
-        self.ttnn_model = TTBackbone(parameters=self.backbone_parameters, model_config=model_config)
+        self.ttnn_model = TTBackbone(
+            parameters=self.backbone_parameters, model_config=model_config, device=device, model_args=model_args
+        )
 
         # Move input to device
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
