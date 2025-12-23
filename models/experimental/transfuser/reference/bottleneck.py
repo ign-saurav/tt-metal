@@ -243,3 +243,15 @@ class Bottleneck(nn.Module):
             x = self.drop_path(x) + self.downsample(shortcut)
         x = self.act3(x)
         return x
+
+    def forward_fc2(self, x: torch.Tensor) -> torch.Tensor:
+        """Forward pass."""
+        # shortcut = x
+        # x = self.conv1(x)
+        # x = self.conv2(x)
+        x = self.se.fc2(x)
+        # x = self.conv3(x)
+        # if self.downsample is not None:
+        #     x = self.drop_path(x) + self.downsample(shortcut)
+        # x = self.act3(x)
+        return x
