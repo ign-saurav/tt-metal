@@ -172,13 +172,14 @@ def test_masked_transformer_encoder_inference(
     tt_args = Tt3DetrArgs()
     tt_args.device = device
     tt_args.parameters = make_dot_access_dict({"encoder": parameters})
-    tt_args.layer_args = {}
-    tt_args.layer_args = infer_ttnn_module_args(
-        model=reference_model, run_model=lambda model: reference_model(src=src, xyz=xyz), device=device
+    tt_args.parameters.layer_args = {}
+    tt_args.parameters.layer_args = make_dot_access_dict(
+        {
+            "encoder": infer_ttnn_module_args(
+                model=reference_model, run_model=lambda model: reference_model(src=src, xyz=xyz), device=device
+            )
+        }
     )
-    import pdb
-
-    pdb.set_trace()
 
     tt_encoder = build_ttnn_encoder(tt_args)
 
