@@ -84,7 +84,6 @@ class resnet50Fpn:
         model_args,
         layer_optimisations=fpn_optimisations,
     ) -> None:
-        print(model_args)
         self.conv_config_1 = Conv2dConfiguration.from_model_args(
             model_args["inner_blocks"][0],
             weights=parameters["inner_blocks"].get("0", {}).get("0", None)["weight"],

@@ -221,8 +221,6 @@ def test_classification_head_full(device, pcc, reset_seeds):
         device=None,
     )
 
-    print(ttnn_parameters)
-
     ttnn_head = TtnnRetinaNetClassificationHead(
         parameters=ttnn_parameters,
         device=device,
