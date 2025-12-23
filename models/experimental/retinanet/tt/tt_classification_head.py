@@ -269,3 +269,7 @@ class TtnnRetinaNetClassificationHead:
 
         output = ttnn.concat(all_cls_logits, dim=1)
         return output
+
+    def __call__(self, feature_maps: List[ttnn.Tensor], **kwargs) -> ttnn.Tensor:
+        """Alias for forward method."""
+        return self.forward(feature_maps, **kwargs)
