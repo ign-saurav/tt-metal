@@ -14,7 +14,7 @@ from pathlib import Path
 from loguru import logger
 
 from models.experimental.petr.reference.utils import LiDARInstance3DBoxes
-from models.experimental.petr.tt.common import generate_petr_inputs
+from models.experimental.petr.tt.model_preprocessing import generate_petr_inputs
 
 
 NUSCENES_CLASSES = [

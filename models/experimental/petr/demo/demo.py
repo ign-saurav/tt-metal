@@ -11,7 +11,7 @@ from loguru import logger
 
 from models.experimental.petr.reference.petr import PETR
 from models.experimental.petr.tt.tt_petr import ttnn_PETR
-from models.experimental.petr.tt.common import get_parameters
+from models.experimental.petr.tt.model_preprocessing import get_parameters
 from models.experimental.petr.demo.visualization import (
     load_images_with_calibration,
     Det3DDataPreprocessor,

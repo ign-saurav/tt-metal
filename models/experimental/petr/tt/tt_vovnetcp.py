@@ -368,9 +368,8 @@ class ttnn_OSA_stage:
                 x = maxpool(x)
 
         for module_name in self.blocks:
-            module = getattr(self, module_name)  # Retrieve the block by name
-            # x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-            x = module(device, x)  # Forward pass through each `ttnn_OSA_module`
+            module = getattr(self, module_name)
+            x = module(device, x)
 
         return x
 

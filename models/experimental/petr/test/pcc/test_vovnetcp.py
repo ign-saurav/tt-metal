@@ -22,7 +22,7 @@ from models.experimental.petr.tt.tt_vovnetcp import (
 from tests.ttnn.utils_for_testing import assert_with_pcc, check_with_pcc
 from ttnn.model_preprocessing import preprocess_model_parameters
 from loguru import logger
-from models.experimental.petr.tt.common import (
+from models.experimental.petr.tt.model_preprocessing import (
     create_custom_preprocessor_vovnetcp,
     stem_parameters_preprocess,
 )
@@ -218,5 +218,3 @@ def test_vovnetcp(
     logger.info(f"Stage 5 output PCC: {msg1}")
     assert_with_pcc(output[0], ttnn_out0_torch, pcc=0.99)
     assert_with_pcc(output[1], ttnn_out1_torch, pcc=0.99)
-    assert passed0, f"Stage 4 PCC failed: {msg0}"
-    assert passed1, f"Stage 5 PCC failed: {msg1}"

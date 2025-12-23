@@ -10,7 +10,7 @@ from loguru import logger
 from models.experimental.petr.reference.petr import PETR
 from models.experimental.petr.tt.tt_petr import ttnn_PETR
 import os
-from models.experimental.petr.tt.common import get_parameters, generate_petr_inputs
+from models.experimental.petr.tt.model_preprocessing import get_parameters, generate_petr_inputs
 
 
 def prepare_inputs():

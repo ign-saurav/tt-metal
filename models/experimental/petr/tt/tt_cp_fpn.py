@@ -85,7 +85,6 @@ class ttnn_CPFPN:
             self.backbone_end_level = self.num_ins
             assert num_outs >= self.num_ins - start_level
         else:
-            # if end_level < inputs, no extra level is allowed
             self.backbone_end_level = end_level
             assert end_level <= len(in_channels)
             assert num_outs == end_level - start_level
@@ -95,7 +94,7 @@ class ttnn_CPFPN:
         assert isinstance(add_extra_convs, (str, bool))
         if isinstance(add_extra_convs, str):
             assert add_extra_convs in ("on_input", "on_lateral", "on_output")
-        elif add_extra_convs:  # True
+        elif add_extra_convs:
             self.add_extra_convs = "on_input"
 
         self.lateral_convs = []

@@ -10,7 +10,10 @@ from tests.ttnn.utils_for_testing import assert_with_pcc, check_with_pcc
 from loguru import logger
 from models.experimental.petr.tt.tt_cp_fpn import ttnn_CPFPN
 from models.experimental.petr.reference.cp_fpn import CPFPN
-from models.experimental.petr.tt.common import create_custom_preprocessor_cpfpn, infer_ttnn_module_args_cp_fpn
+from models.experimental.petr.tt.model_preprocessing import (
+    create_custom_preprocessor_cpfpn,
+    infer_ttnn_module_args_cp_fpn,
+)
 
 
 model_config = {

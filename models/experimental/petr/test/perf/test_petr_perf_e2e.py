@@ -13,7 +13,7 @@ import ttnn
 from models.common.utility_functions import run_for_wormhole_b0
 from models.experimental.petr.tt.tt_petr import ttnn_PETR
 from models.experimental.petr.reference.petr import PETR
-from models.experimental.petr.tt.common import get_parameters
+from models.experimental.petr.tt.model_preprocessing import get_parameters
 from models.perf.perf_utils import prep_perf_report
 from models.tt_cnn.tt.pipeline import (
     PipelineConfig,
