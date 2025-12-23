@@ -101,7 +101,6 @@ class BackboneTestInfra:
         model_args["layer4"] = {}
         model_args["layer4"] = conv_args["body"]["layer4"]
 
-        print(conv_args)
         ################# MODEL ARGS ##################
 
         # Store only backbone outputs (FPN levels: "0", "1", "2", "p6", "p7")

@@ -12,215 +12,7 @@ from ttnn.model_preprocessing import preprocess_model_parameters
 from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.retinanet.tt.tt_fpn import resnet50Fpn, fpn_optimisations
 from ttnn.model_preprocessing import fold_batch_norm2d_into_conv2d
-from ttnn.model_preprocessing import infer_ttnn_module_args
-from ttnn.dot_access import make_dot_access_dict
-from ttnn.torch_tracer import trace, visualize
-
-
-class ModuleArgs(dict):
-    ...
-
-
-class Conv2dArgs(ModuleArgs):
-    __getattr__ = dict.__getitem__
-    __delattr__ = dict.__delitem__
-
-    def __repr__(self):
-        return super().__repr__()
-
-
-class ConvTranspose2dArgs(ModuleArgs):
-    __getattr__ = dict.__getitem__
-    __delattr__ = dict.__delitem__
-
-    def __repr__(self):
-        return super().__repr__()
-
-
-class MaxPool2dArgs(ModuleArgs):
-    __getattr__ = dict.__getitem__
-    __delattr__ = dict.__delitem__
-
-    def __repr__(self):
-        return super().__repr__()
-
-
-class GroupNormArgs(ModuleArgs):
-    __getattr__ = dict.__getitem__
-    __delattr__ = dict.__delitem__
-
-    def __repr__(self):
-        return super().__repr__()
-
-
-def infer_ttnn_module_args(*, model, run_model, device):
-    if run_model is None:
-        return None
-
-    # ------------------------------------------------------------------
-    # Run model under TTNN tracing
-    # ------------------------------------------------------------------
-    with trace():
-        output = run_model(model)
-
-    visualize(output, file_name=ttnn.CONFIG.tmp_dir / "model_graph.svg")
-
-    # ------------------------------------------------------------------
-    # Helper: insert value into nested dict using module path
-    # ------------------------------------------------------------------
-    def insert_nested(d, path, value):
-        for key in path[:-1]:
-            key = int(key) if isinstance(key, str) and key.isdigit() else key
-            d = d.setdefault(key, {})
-        last = path[-1]
-        last = int(last) if isinstance(last, str) and last.isdigit() else last
-        d[last] = value
-
-    # ------------------------------------------------------------------
-    # Recursive graph walk
-    # ------------------------------------------------------------------
-    def _infer_ttnn_module_args(graph):
-        ttnn_module_args = {}
-
-        for node in graph:
-            attributes = graph.nodes[node]
-            operation = attributes.get("operation")
-
-            if not isinstance(operation, ttnn.tracer.TorchModule):
-                continue
-
-            # Full hierarchical module path
-            module_path = operation.module.__ttnn_tracer_name__.split(".")
-
-            # Infer input shape (assumes single input edge)
-            in_edges = list(graph.in_edges(node, data=True))
-            if not in_edges:
-                continue
-
-            input_node, _, edge_data = in_edges[0]
-            input_shape = graph.nodes[input_node]["shapes"][edge_data["source_output_index"]]
-
-            module = operation.module
-
-            # ----------------------------------------------------------
-            # Conv2d
-            # ----------------------------------------------------------
-            if isinstance(module, torch.nn.Conv2d):
-                insert_nested(
-                    ttnn_module_args,
-                    module_path,
-                    Conv2dArgs(
-                        in_channels=module.in_channels,
-                        out_channels=module.out_channels,
-                        kernel_size=module.kernel_size,
-                        stride=module.stride,
-                        padding=module.padding,
-                        dilation=module.dilation,
-                        groups=module.groups,
-                        padding_mode=module.padding_mode,
-                        batch_size=input_shape[0],
-                        input_height=input_shape[-2],
-                        input_width=input_shape[-1],
-                        math_fidelity=ttnn.MathFidelity.HiFi4,
-                        dtype=ttnn.bfloat16,
-                        weights_dtype=ttnn.bfloat16,
-                        use_1d_systolic_array=True,
-                        enable_auto_formatting=False,
-                        conv_blocking_and_parallelization_config_override={},
-                        device=device,
-                    ),
-                )
-
-            # ----------------------------------------------------------
-            # ConvTranspose2d
-            # ----------------------------------------------------------
-            elif isinstance(module, torch.nn.ConvTranspose2d):
-                insert_nested(
-                    ttnn_module_args,
-                    module_path,
-                    ConvTranspose2dArgs(
-                        in_channels=module.in_channels,
-                        out_channels=module.out_channels,
-                        kernel_size=module.kernel_size,
-                        stride=module.stride,
-                        padding=module.padding,
-                        output_padding=module.output_padding,
-                        dilation=module.dilation,
-                        groups=module.groups,
-                        padding_mode=module.padding_mode,
-                        batch_size=input_shape[0],
-                        input_height=input_shape[-2],
-                        input_width=input_shape[-1],
-                        math_fidelity=ttnn.MathFidelity.HiFi4,
-                        dtype=ttnn.bfloat16,
-                        weights_dtype=ttnn.bfloat16,
-                        use_1d_systolic_array=True,
-                        enable_auto_formatting=False,
-                        conv_blocking_and_parallelization_config_override={},
-                        device=device,
-                    ),
-                )
-
-            # ----------------------------------------------------------
-            # MaxPool2d
-            # ----------------------------------------------------------
-            elif isinstance(module, torch.nn.MaxPool2d):
-                insert_nested(
-                    ttnn_module_args,
-                    module_path,
-                    MaxPool2dArgs(
-                        kernel_size=module.kernel_size,
-                        stride=module.stride,
-                        padding=module.padding,
-                        dilation=module.dilation,
-                        batch_size=input_shape[0],
-                        input_channels=input_shape[1],
-                        input_height=input_shape[-2],
-                        input_width=input_shape[-1],
-                        dtype=ttnn.bfloat16,
-                    ),
-                )
-
-            # ----------------------------------------------------------
-            # GroupNorm
-            # ----------------------------------------------------------
-            elif isinstance(module, torch.nn.GroupNorm):
-                insert_nested(
-                    ttnn_module_args,
-                    module_path,
-                    GroupNormArgs(
-                        num_groups=module.num_groups,
-                        num_channels=module.num_channels,
-                        eps=module.eps,
-                        affine=module.affine,
-                        batch_size=input_shape[0],
-                        input_height=input_shape[-2],
-                        input_width=input_shape[-1],
-                        dtype=ttnn.bfloat16,
-                    ),
-                )
-
-            # ----------------------------------------------------------
-            # Container / composite module → recurse
-            # ----------------------------------------------------------
-            else:
-                nested = _infer_ttnn_module_args(operation.graph)
-                if nested:
-                    insert_nested(
-                        ttnn_module_args,
-                        module_path,
-                        nested,
-                    )
-
-        return make_dot_access_dict(ttnn_module_args, ignore_types=(ModuleArgs,))
-
-    # ------------------------------------------------------------------
-    # Kick off inference from traced graph
-    # ------------------------------------------------------------------
-    full_args = _infer_ttnn_module_args(ttnn.tracer.get_graph(output))
-
-    # Root module is stored under empty name ""
-    return full_args.get("", full_args)
+from models.experimental.retinanet.tt.utils import infer_ttnn_module_args
 
 
 def conv_bn_to_params(conv, bn, mesh_mapper):
@@ -349,6 +141,22 @@ class Resnet50FpnTestInfra:
         conv_args = infer_ttnn_module_args(
             model=torch_model, run_model=lambda model: torch_model(self.torch_input_tensor), device=device
         )
+
+        model_args = {}
+        model_args["fpn"] = {}
+        model_args["fpn"]["inner_blocks"] = {}
+        model_args["fpn"]["inner_blocks"][0] = conv_args["inner_blocks"][0]["inner_blocks"][0][0]
+        model_args["fpn"]["inner_blocks"][1] = conv_args["inner_blocks"][1]["inner_blocks"][1][0]
+        model_args["fpn"]["inner_blocks"][2] = conv_args["inner_blocks"][2]["inner_blocks"][2][0]
+
+        model_args["fpn"]["layer_blocks"] = {}
+        model_args["fpn"]["layer_blocks"][0] = conv_args["layer_blocks"][0]["layer_blocks"][0][0]
+        model_args["fpn"]["layer_blocks"][1] = conv_args["layer_blocks"][1]["layer_blocks"][1][0]
+        model_args["fpn"]["layer_blocks"][2] = conv_args["layer_blocks"][2]["layer_blocks"][2][0]
+
+        model_args["fpn"]["extra_blocks"] = {}
+        model_args["fpn"]["extra_blocks"]["p6"] = conv_args["extra_blocks"]["extra_blocks"]["p6"]
+        model_args["fpn"]["extra_blocks"]["p7"] = conv_args["extra_blocks"]["extra_blocks"]["p7"]
         ################# MODEL ARGS ##################
 
         # Convert input to TTNN format
@@ -366,7 +174,7 @@ class Resnet50FpnTestInfra:
         self.ttnn_model = resnet50Fpn(
             parameters=parameters,
             model_config=model_config,
-            model_args=conv_args,
+            model_args=model_args["fpn"],
             device=device,
             layer_optimisations=fpn_optimisations,
         )

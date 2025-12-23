@@ -22,7 +22,6 @@ neck_optimisations = NeckOptimizer(
         "reallocate_halo_output": True,
         "enable_act_double_buffer": True,
         "enable_weights_double_buffer": True,
-        # "slice_strategy": ttnn.Conv2dL1FullSliceConfig,
         "activation": ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
     }
 )
@@ -58,8 +57,6 @@ class resnet50Stem:
     ):
         # conv1 is stride 2 conv 3x3
         out, shape = self.conv1(x, return_output_dim=True)
-        # out = ttnn.relu(out)
-
         out = self.maxpool(out)
         out = ttnn.reshape(out, (1, shape[-2] // 2, shape[-1] // 2, 64))
 

@@ -17,9 +17,6 @@ from models.experimental.retinanet.tt.tt_retinanet import TTRetinaNet
 from models.experimental.retinanet.tt.custom_preprocessor import (
     create_custom_mesh_preprocessor,
 )
-
-# from models.experimental.retinanet.tt.tt_regression_head import ttnn_retinanet_regression_head
-# from models.experimental.retinanet.tt.tt_classification_head import ttnn_retinanet_classification_head
 from models.experimental.retinanet.tests.pcc.test_resnet50_fpn import infer_ttnn_module_args as infer_module_args
 from ttnn.model_preprocessing import infer_ttnn_module_args
 

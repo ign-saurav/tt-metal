@@ -2,7 +2,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-from tests.ttnn.ttnn_utility_fuction import get_shard_grid_from_num_cores
 
 import ttnn
 from models.tt_cnn.tt.builder import (
@@ -11,12 +10,13 @@ from models.tt_cnn.tt.builder import (
     AutoShardedStrategyConfiguration,
     L1FullSliceStrategyConfiguration,
 )
-from models.tt_cnn.tt.builder import TtConv2d
 
 from models.tt_cnn.tt.builder import (
     AutoShardedStrategyConfiguration,
 )
-from typing import Union, Tuple, Optional
+from ttnn.dot_access import make_dot_access_dict
+from ttnn.torch_tracer import trace, visualize
+import torch
 
 conv_config = {
     "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
@@ -101,165 +101,6 @@ def _create_conv_config_from_params(
     )
 
 
-# ---------------------------
-# TTNN utility modules
-# ---------------------------
-
-
-class TTConv2D:
-    def __init__(
-        self,
-        kernel_size: int = 1,
-        stride: int = 1,
-        padding: int = 0,
-        dilation: int = 1,
-        parameters: dict | None = None,
-        kernel_fidelity: dict | None = None,
-        *,
-        memory_config=None,
-        act_block_h=None,
-        act_block_w=None,
-        deallocate_activation=False,
-        reallocate_halo_output=False,
-        shard_layout=None,
-        activation=None,
-        groups=1,
-        num_cores_nhw=None,
-        is_reshape=True,
-        enable_act_double_buffer=False,
-        enable_weights_double_buffer=False,
-        fp32_dest_acc_en=False,
-        packer_l1_acc=False,
-        math_approx_mode=False,
-        input_channels_alignment=32,
-        reshard_if_not_optimal=False,
-        slice_config=None,
-        dtype=None,
-        weights_dtype=None,
-        math_fidelity=None,
-    ) -> None:
-        if isinstance(kernel_size, int):
-            self.kernel_size = (kernel_size, kernel_size)
-        elif isinstance(kernel_size, tuple):
-            self.kernel_size = kernel_size
-        else:
-            ValueError("Invalid config")
-        if isinstance(stride, int):
-            self.stride = (stride, stride)
-        elif isinstance(stride, tuple):
-            self.stride = stride
-        else:
-            ValueError("Invalid config")
-        if isinstance(padding, int):
-            self.padding = (padding, padding, padding, padding)
-        elif isinstance(padding, tuple):
-            self.padding = padding
-        else:
-            ValueError("Invalid config")
-        if isinstance(dilation, int):
-            self.dilation = (dilation, dilation)
-        elif isinstance(dilation, tuple):
-            self.dilation = dilation
-        else:
-            ValueError("Invalid config")
-
-        self.kernel_fidelity = kernel_fidelity
-        self.weights = parameters["weight"]
-        self.bias = parameters["bias"]
-        self.deallocate_activation = deallocate_activation
-        self.reallocate_halo_output = reallocate_halo_output
-        self.fp32_dest_acc_en = fp32_dest_acc_en
-        self.packer_l1_acc = packer_l1_acc
-        self.math_approx_mode = math_approx_mode
-        self.input_channels_alignment = input_channels_alignment
-        self.reshard_if_not_optimal = reshard_if_not_optimal
-        self.out_channels = self.weights.shape[0]
-        self.act_block_h = act_block_h
-        self.act_block_w = act_block_w
-        self.groups = groups
-        self.activation = activation
-        self.memory_config = memory_config
-        self.shard_layout = shard_layout
-        self.slice_config = slice_config
-        self.num_cores_nhw = num_cores_nhw
-        self.is_reshape = is_reshape
-        self.enable_act_double_buffer = enable_act_double_buffer
-        self.enable_weights_double_buffer = enable_weights_double_buffer
-        if dtype is not None:
-            self.dtype = dtype
-        else:
-            self.dtype = self.kernel_fidelity["ACTIVATIONS_DTYPE"]
-        if weights_dtype is not None:
-            self.weights_dtype = weights_dtype
-        else:
-            self.weights_dtype = self.kernel_fidelity["WEIGHTS_DTYPE"]
-        if math_fidelity is not None:
-            self.math_fidelity = math_fidelity
-        else:
-            self.math_fidelity = self.kernel_fidelity["MATH_FIDELITY"]
-
-    def __call__(self, device, input_tensor, input_shape):
-        conv_config = ttnn.Conv2dConfig(
-            weights_dtype=self.weights_dtype,
-            activation=self.activation,
-            deallocate_activation=self.deallocate_activation,
-            reallocate_halo_output=self.reallocate_halo_output,
-            reshard_if_not_optimal=self.reshard_if_not_optimal,
-            shard_layout=self.shard_layout,
-            enable_act_double_buffer=self.enable_act_double_buffer,
-            enable_weights_double_buffer=self.enable_weights_double_buffer,
-            in_place=False,
-        )
-        compute_config = ttnn.init_device_compute_kernel_config(
-            device.arch(),
-            math_fidelity=self.kernel_fidelity["MATH_FIDELITY"],
-            fp32_dest_acc_en=self.fp32_dest_acc_en,
-            packer_l1_acc=self.packer_l1_acc,
-            math_approx_mode=self.math_approx_mode,
-        )
-        if self.num_cores_nhw is not None:
-            shard_grid = get_shard_grid_from_num_cores(self.num_cores_nhw, device)
-            conv_config.core_grid = shard_grid
-            conv_config.override_sharding_config = True
-
-        if self.act_block_h is not None:
-            conv_config.act_block_h_override = self.act_block_h
-        if self.act_block_w is not None:
-            conv_config.act_block_w_div = self.act_block_w
-
-        [output_tensor, [_out_height, _out_width], [self.weights, self.bias]] = ttnn.conv2d(
-            input_tensor=input_tensor,
-            weight_tensor=self.weights,
-            bias_tensor=self.bias,
-            in_channels=self.weights.shape[1],
-            out_channels=self.out_channels,
-            device=device,
-            kernel_size=self.kernel_size,
-            stride=self.stride,
-            padding=self.padding,
-            dilation=self.dilation,
-            batch_size=input_shape[-4],
-            input_height=input_shape[-3],
-            input_width=input_shape[-2],
-            conv_config=conv_config,
-            compute_config=compute_config,
-            slice_config=self.slice_config,
-            groups=self.groups,
-            return_weights_and_bias=True,
-            return_output_dim=True,
-            dtype=self.dtype,
-            memory_config=self.memory_config,
-        )
-
-        if self.is_reshape:
-            output_tensor = ttnn.sharded_to_interleaved(output_tensor, ttnn.L1_MEMORY_CONFIG)
-            output_tensor = ttnn.to_layout(output_tensor, ttnn.TILE_LAYOUT)
-            output_tensor = ttnn.reshape(
-                output_tensor, (input_tensor.shape[0], _out_height, _out_width, output_tensor.shape[-1])
-            )
-        return output_tensor, (input_tensor.shape[0], _out_height, _out_width, output_tensor.shape[-1])
-
-
 class TTUpsample:
     def __init__(
         self,
@@ -332,62 +173,207 @@ class TTUpsample:
         return output_tensor
 
 
-class Conv2dNormActivation:
-    def __init__(
-        self,
-        kernel_size: Union[int, Tuple[int, ...]] = 3,
-        stride: Union[int, Tuple[int, ...]] = 1,
-        padding: Optional[Union[int, Tuple[int, ...], str]] = None,
-        activation_layer=ttnn.relu,
-        dilation=1,
-        groups=1,
-        parameters=None,
-        device=None,
-        input_height=1,
-        input_width=1,
-    ):
-        if activation_layer == ttnn.relu:
-            self.activation_layer = None
-            activation = ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU)
-        else:
-            self.activation_layer = activation_layer
-            activation = None
+class ModuleArgs(dict):
+    ...
 
-        # Normalize integer parameters to tuples
-        if isinstance(kernel_size, int):
-            kernel_size = (kernel_size, kernel_size)
-        if isinstance(stride, int):
-            stride = (stride, stride)
-        if isinstance(dilation, int):
-            dilation = (dilation, dilation)
 
-        if padding is None:
-            padding = (kernel_size[0] - 1) // 2 * dilation[0]
+class Conv2dArgs(ModuleArgs):
+    __getattr__ = dict.__getitem__
+    __delattr__ = dict.__delitem__
 
-        # Normalize padding to tuple if it's an integer
-        if isinstance(padding, int):
-            padding = (padding, padding)
+    def __repr__(self):
+        return super().__repr__()
 
-        self.conv_config = _create_conv_config_from_params(
-            input_height=input_height,
-            input_width=input_width,
-            in_channels=parameters[0]["weight"].shape[1] * groups,
-            out_channels=parameters[0]["weight"].shape[0],
-            kernel_size=kernel_size,
-            batch_size=1,
-            parameters=parameters[0],
-            stride=stride,
-            padding=padding,
-            dilation=dilation,
-            groups=groups,
-            activation=activation,
-            sharding_strategy=AutoShardedStrategyConfiguration(),
-        )
-        self.conv = TtConv2d(self.conv_config, device)
 
-    def __call__(self, device, input_tensor, return_output_dim=True):
-        [input_tensor, [_out_height, _out_width]] = self.conv(input_tensor, return_output_dim=True)
-        input_tensor = post_conv_reshape(input_tensor, out_height=_out_height, out_width=_out_width)
-        if self.activation_layer is not None:
-            input_tensor = self.activation_layer(input_tensor)
-        return input_tensor
+class ConvTranspose2dArgs(ModuleArgs):
+    __getattr__ = dict.__getitem__
+    __delattr__ = dict.__delitem__
+
+    def __repr__(self):
+        return super().__repr__()
+
+
+class MaxPool2dArgs(ModuleArgs):
+    __getattr__ = dict.__getitem__
+    __delattr__ = dict.__delitem__
+
+    def __repr__(self):
+        return super().__repr__()
+
+
+class GroupNormArgs(ModuleArgs):
+    __getattr__ = dict.__getitem__
+    __delattr__ = dict.__delitem__
+
+    def __repr__(self):
+        return super().__repr__()
+
+
+def infer_ttnn_module_args(*, model, run_model, device):
+    if run_model is None:
+        return None
+
+    # ------------------------------------------------------------------
+    # Run model under TTNN tracing
+    # ------------------------------------------------------------------
+    with trace():
+        output = run_model(model)
+
+    visualize(output, file_name=ttnn.CONFIG.tmp_dir / "model_graph.svg")
+
+    # ------------------------------------------------------------------
+    # Helper: insert value into nested dict using module path
+    # ------------------------------------------------------------------
+    def insert_nested(d, path, value):
+        for key in path[:-1]:
+            key = int(key) if isinstance(key, str) and key.isdigit() else key
+            d = d.setdefault(key, {})
+        last = path[-1]
+        last = int(last) if isinstance(last, str) and last.isdigit() else last
+        d[last] = value
+
+    # ------------------------------------------------------------------
+    # Recursive graph walk
+    # ------------------------------------------------------------------
+    def _infer_ttnn_module_args(graph):
+        ttnn_module_args = {}
+
+        for node in graph:
+            attributes = graph.nodes[node]
+            operation = attributes.get("operation")
+
+            if not isinstance(operation, ttnn.tracer.TorchModule):
+                continue
+
+            # Full hierarchical module path
+            module_path = operation.module.__ttnn_tracer_name__.split(".")
+
+            # Infer input shape (assumes single input edge)
+            in_edges = list(graph.in_edges(node, data=True))
+            if not in_edges:
+                continue
+
+            input_node, _, edge_data = in_edges[0]
+            input_shape = graph.nodes[input_node]["shapes"][edge_data["source_output_index"]]
+
+            module = operation.module
+
+            # ----------------------------------------------------------
+            # Conv2d
+            # ----------------------------------------------------------
+            if isinstance(module, torch.nn.Conv2d):
+                insert_nested(
+                    ttnn_module_args,
+                    module_path,
+                    Conv2dArgs(
+                        in_channels=module.in_channels,
+                        out_channels=module.out_channels,
+                        kernel_size=module.kernel_size,
+                        stride=module.stride,
+                        padding=module.padding,
+                        dilation=module.dilation,
+                        groups=module.groups,
+                        padding_mode=module.padding_mode,
+                        batch_size=input_shape[0],
+                        input_height=input_shape[-2],
+                        input_width=input_shape[-1],
+                        math_fidelity=ttnn.MathFidelity.HiFi4,
+                        dtype=ttnn.bfloat16,
+                        weights_dtype=ttnn.bfloat16,
+                        use_1d_systolic_array=True,
+                        enable_auto_formatting=False,
+                        conv_blocking_and_parallelization_config_override={},
+                        device=device,
+                    ),
+                )
+
+            # ----------------------------------------------------------
+            # ConvTranspose2d
+            # ----------------------------------------------------------
+            elif isinstance(module, torch.nn.ConvTranspose2d):
+                insert_nested(
+                    ttnn_module_args,
+                    module_path,
+                    ConvTranspose2dArgs(
+                        in_channels=module.in_channels,
+                        out_channels=module.out_channels,
+                        kernel_size=module.kernel_size,
+                        stride=module.stride,
+                        padding=module.padding,
+                        output_padding=module.output_padding,
+                        dilation=module.dilation,
+                        groups=module.groups,
+                        padding_mode=module.padding_mode,
+                        batch_size=input_shape[0],
+                        input_height=input_shape[-2],
+                        input_width=input_shape[-1],
+                        math_fidelity=ttnn.MathFidelity.HiFi4,
+                        dtype=ttnn.bfloat16,
+                        weights_dtype=ttnn.bfloat16,
+                        use_1d_systolic_array=True,
+                        enable_auto_formatting=False,
+                        conv_blocking_and_parallelization_config_override={},
+                        device=device,
+                    ),
+                )
+
+            # ----------------------------------------------------------
+            # MaxPool2d
+            # ----------------------------------------------------------
+            elif isinstance(module, torch.nn.MaxPool2d):
+                insert_nested(
+                    ttnn_module_args,
+                    module_path,
+                    MaxPool2dArgs(
+                        kernel_size=module.kernel_size,
+                        stride=module.stride,
+                        padding=module.padding,
+                        dilation=module.dilation,
+                        batch_size=input_shape[0],
+                        input_channels=input_shape[1],
+                        input_height=input_shape[-2],
+                        input_width=input_shape[-1],
+                        dtype=ttnn.bfloat16,
+                    ),
+                )
+
+            # ----------------------------------------------------------
+            # GroupNorm
+            # ----------------------------------------------------------
+            elif isinstance(module, torch.nn.GroupNorm):
+                insert_nested(
+                    ttnn_module_args,
+                    module_path,
+                    GroupNormArgs(
+                        num_groups=module.num_groups,
+                        num_channels=module.num_channels,
+                        eps=module.eps,
+                        affine=module.affine,
+                        batch_size=input_shape[0],
+                        input_height=input_shape[-2],
+                        input_width=input_shape[-1],
+                        dtype=ttnn.bfloat16,
+                    ),
+                )
+
+            # ----------------------------------------------------------
+            # Container / composite module → recurse
+            # ----------------------------------------------------------
+            else:
+                nested = _infer_ttnn_module_args(operation.graph)
+                if nested:
+                    insert_nested(
+                        ttnn_module_args,
+                        module_path,
+                        nested,
+                    )
+
+        return make_dot_access_dict(ttnn_module_args, ignore_types=(ModuleArgs,))
+
+    # ------------------------------------------------------------------
+    # Kick off inference from traced graph
+    # ------------------------------------------------------------------
+    full_args = _infer_ttnn_module_args(ttnn.tracer.get_graph(output))
+
+    # Root module is stored under empty name ""
+    return full_args.get("", full_args)
