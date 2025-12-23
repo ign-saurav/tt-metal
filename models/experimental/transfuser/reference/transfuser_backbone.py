@@ -72,7 +72,6 @@ class LidarEncoder(nn.Module):
         self._model.head = nn.Sequential()
 
         # Change the first conv layer so that it matches the amount of channels in the LiDAR
-        # Timm might be able to do this automatically
         _tmp = self._model.conv1
         use_bias = _tmp.bias != None
         self._model.conv1 = nn.Conv2d(

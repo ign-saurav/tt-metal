@@ -44,9 +44,6 @@ class Stage(nn.Module):
             architecture=image_architecture, normalize=True, out_features=self.config.perception_output_features
         )
 
-        # You don’t prune or delete features outside layer1
-        # just use layer1 in forward
-
     def fallback(self, image, block_name=None, stage_name=None):
         """
         Fallback method for SE module that dynamically accesses the correct stage and block.
@@ -82,16 +79,5 @@ class Stage(nn.Module):
     def forward(self, image):
         # Dynamically access the stage layer based on stage_name
         stage_layer = getattr(self.image_encoder.features, self.stage_name)
-        # x = stage_layer.b1.conv1(image)
-        # x = stage_layer.b1.conv2(x)
-        # x = stage_layer.b1.se(x)
-        # x = stage_layer.b1.conv3(x)
-        # import pdb; pdb.set_trace()
         x = stage_layer(image)
         return x
-
-    # def forward_c3(self, x):
-    #     # Dynamically access the stage layer based on stage_name
-    #     stage_layer = getattr(self.image_encoder.features, self.stage_name)
-    #     x = stage_layer.b1.conv3(x)
-    #     return x
