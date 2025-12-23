@@ -16,7 +16,7 @@ RetinaNet employs a ResNet50 backbone with an FPN to extract multi-scale feature
 The demo currently uses default pre-trained weights (RetinaNet_ResNet50_FPN_V2_Weight)
 
 
-## 🗂️ Repository Layout
+##  Repository Layout
 s
 | Directory | Purpose |
 |------------|----------|
@@ -54,7 +54,8 @@ This runs an end-to-end flow that:
 # Test full model performance
 pytest models/experimental/retinanet/tests/perf/test_perf.py
 ```
-- FPS is 35.75
+- Device Perf is 39.5
+- E2E perf without trace 3.11
 ### Run the Demo
 ```bash
 # Process images from a directory
