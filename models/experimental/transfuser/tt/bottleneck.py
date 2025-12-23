@@ -220,30 +220,26 @@ class TTRegNetBottleneck:
         out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
         out = ttnn.reshape(out, (1, height, width, out.shape[-1]))
         se_out = ttnn.mean(out, dim=[1, 2], keepdim=True)
+
+        se_out = self.se_fc1(se_out)
         if self.use_fallback and self.torch_model is not None:
             # Falling Back SE module
-            se_out_torch = ttnn.to_torch(
-                se_out,
-                device=device,
-            )
+            se_out_torch = ttnn.to_torch(se_out, device=device)
             se_out_torch = torch.permute(se_out_torch, (0, 3, 1, 2))
             se_out_torch = se_out_torch.to(torch.float32)
+
             se_out_torch = self.torch_model.fallback(
                 se_out_torch, block_name=self.block_name, stage_name=self.stage_name
             )
+
             se_out = ttnn.from_torch(
-                se_out_torch,
-                dtype=ttnn.bfloat16,
-                memory_config=ttnn.L1_MEMORY_CONFIG,
-                device=device,
+                se_out_torch, dtype=ttnn.bfloat16, memory_config=ttnn.L1_MEMORY_CONFIG, device=device
             )
             se_out = ttnn.permute(se_out, (0, 2, 3, 1))
         else:
-            # SE fc1
-            se_out = self.se_fc1(se_out)
-            # SE fc2
             se_out = self.se_fc2(se_out)
             se_out = ttnn.sigmoid(se_out)
+
         out_4d = ttnn.multiply(out1, se_out)
         # Flatten back to match identity format
         batch, channels = out_4d.shape[0], out_4d.shape[-1]

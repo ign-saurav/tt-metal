@@ -44,20 +44,21 @@ class Stage(nn.Module):
             architecture=image_architecture, normalize=True, out_features=self.config.perception_output_features
         )
 
-        # You don’t prune or delete features outside layer1
+        # You don't prune or delete features outside layer1
         # just use layer1 in forward
 
     def fallback(self, image, block_name=None, stage_name=None):
         """
         Fallback method for SE module that dynamically accesses the correct stage and block.
+        Only handles fc2 and sigmoid operations, as fc1 is executed in TTNN.
 
         Args:
-            image: Input tensor for SE module
+            image: Input tensor for SE module (output after fc1 from TTNN)
             block_name: Name of the block (e.g., "b1", "b2", etc.). Defaults to "b1" if None.
             stage_name: Name of the stage (e.g., "layer1", "layer2", etc.). Must be provided.
 
         Returns:
-            Output tensor after SE fc1, relu, fc2, and sigmoid operations
+            Output tensor after SE fc2 and sigmoid operations
         """
         if stage_name is None:
             raise ValueError("stage_name must be provided for fallback method")
@@ -71,11 +72,9 @@ class Stage(nn.Module):
         # Dynamically access the block based on block_name
         block = getattr(stage_layer, block_name)
 
-        # Run SE operations: fc1 -> relu -> fc2 -> sigmoid
-        x = block.se.fc1(image)
-        x = x.relu()
-        x = block.se.fc2(x)
-        x = x.sigmoid()
+        # Run only SE fc2 and sigmoid operations (fc1 is done in TTNN)
+        x = block.se.fc2(image)  # Second SE convolution
+        x = x.sigmoid()  # Sigmoid activation
 
         return x
 
