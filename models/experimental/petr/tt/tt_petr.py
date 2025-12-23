@@ -1,12 +1,13 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
 import ttnn
-from models.experimental.petr.tt.ttnn_petr_head import ttnn_PETRHead
-from models.experimental.petr.tt.ttnn_vovnetcp import ttnn_VoVNetCP
-from models.experimental.petr.tt.ttnn_cp_fpn import ttnn_CPFPN
-from models.experimental.petr.tt.ttnn_grid_mask import ttnn_GridMask
+from models.experimental.petr.tt.tt_petr_head import ttnn_PETRHead
+from models.experimental.petr.tt.tt_vovnetcp import ttnn_VoVNetCP
+from models.experimental.petr.tt.tt_cp_fpn import ttnn_CPFPN
+from models.experimental.petr.tt.tt_grid_mask import ttnn_GridMask
 from models.experimental.petr.reference.utils import bbox3d2result
 
 

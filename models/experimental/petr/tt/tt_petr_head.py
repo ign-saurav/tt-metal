@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
@@ -6,8 +7,8 @@ import torch
 import numpy as np
 import torch.nn.functional as F
 from loguru import logger
-from models.experimental.petr.tt.ttnn_positional_encoding import ttnn_SinePositionalEncoding3D
-from models.experimental.petr.tt.ttnn_petr_transformer import TTPETRTransformer
+from models.experimental.petr.tt.tt_positional_encoding import ttnn_SinePositionalEncoding3D
+from models.experimental.petr.tt.tt_petr_transformer import TTPETRTransformer
 from models.experimental.petr.reference.nms_free_coder import NMSFreeCoder
 from models.experimental.petr.tt.utils import inverse_sigmoid as ttnn_inverse_sigmoid
 from models.experimental.petr.tt.common import Conv, Conv_with_split

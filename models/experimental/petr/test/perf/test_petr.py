@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
@@ -7,7 +8,7 @@ import ttnn
 import tracy
 from loguru import logger
 from models.experimental.petr.reference.petr import PETR
-from models.experimental.petr.tt.ttnn_petr import ttnn_PETR
+from models.experimental.petr.tt.tt_petr import ttnn_PETR
 import os
 from models.experimental.petr.tt.common import get_parameters, generate_petr_inputs
 

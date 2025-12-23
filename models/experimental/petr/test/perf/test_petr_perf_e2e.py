@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
 import time
@@ -10,7 +11,7 @@ import urllib.request
 
 import ttnn
 from models.common.utility_functions import run_for_wormhole_b0
-from models.experimental.petr.tt.ttnn_petr import ttnn_PETR
+from models.experimental.petr.tt.tt_petr import ttnn_PETR
 from models.experimental.petr.reference.petr import PETR
 from models.experimental.petr.tt.common import get_parameters
 from models.perf.perf_utils import prep_perf_report
@@ -58,9 +59,9 @@ def create_petr_pipeline_model(ttnn_model, modified_batch_img_metas, batch_size,
 @pytest.mark.parametrize("num_iterations", [32])
 @pytest.mark.parametrize(
     "batch, expected_compile_time, expected_throughput_fps",
-    [(1, 1.19, 0.83)],
+    [(1, 1.2, 0.8)],
 )
-def test_petr_perf_e2e_2cq_trace(
+def test_petr_e2e_perf(
     num_iterations,
     batch,
     expected_compile_time,

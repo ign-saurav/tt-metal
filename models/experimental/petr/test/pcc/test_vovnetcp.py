@@ -1,4 +1,5 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
@@ -12,7 +13,7 @@ from models.experimental.petr.reference.vovnetcp import (
     eSEModule,
     _OSA_stage,
 )
-from models.experimental.petr.tt.ttnn_vovnetcp import (
+from models.experimental.petr.tt.tt_vovnetcp import (
     ttnn_hsigmoid,
     ttnn_eSEModule,
     ttnn_OSA_stage,
