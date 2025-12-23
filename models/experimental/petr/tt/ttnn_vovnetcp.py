@@ -55,7 +55,7 @@ class ttnn_eSEModule:
         return input * x
 
 
-class ttnn_osa_module:
+class ttnn_OSA_module:
     def __init__(
         self,
         parameters,
@@ -269,7 +269,7 @@ class ttnn_osa_module:
         return x
 
 
-class ttnn_osa_stage:
+class ttnn_OSA_stage:
     def __init__(
         self,
         parameters,
@@ -299,7 +299,7 @@ class ttnn_osa_stage:
         setattr(
             self,
             module_name,
-            ttnn_osa_module(
+            ttnn_OSA_module(
                 parameters[module_name],
                 in_ch,
                 stage_ch,
@@ -322,7 +322,7 @@ class ttnn_osa_stage:
             setattr(
                 self,
                 module_name,
-                ttnn_osa_module(
+                ttnn_OSA_module(
                     parameters[module_name],
                     concat_ch,
                     stage_ch,
@@ -369,7 +369,7 @@ class ttnn_osa_stage:
         for module_name in self.blocks:
             module = getattr(self, module_name)  # Retrieve the block by name
             # x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-            x = module(device, x)  # Forward pass through each `ttnn_osa_module`
+            x = module(device, x)  # Forward pass through each `ttnn_OSA_module`
 
         return x
 
@@ -399,7 +399,7 @@ class ttnn_VoVNetCP:
             "ACTIVATIONS_DTYPE": ttnn.bfloat16,
         }
 
-        self.stage2 = ttnn_osa_stage(
+        self.stage2 = ttnn_OSA_stage(
             parameters.stage2,
             128,
             128,
@@ -413,7 +413,7 @@ class ttnn_VoVNetCP:
             conv_args=None,
             device=device,
         )
-        self.stage3 = ttnn_osa_stage(
+        self.stage3 = ttnn_OSA_stage(
             parameters.stage3,
             256,
             160,
@@ -427,7 +427,7 @@ class ttnn_VoVNetCP:
             conv_args=None,
             device=device,
         )
-        self.stage4 = ttnn_osa_stage(
+        self.stage4 = ttnn_OSA_stage(
             parameters.stage4,
             512,
             192,
@@ -441,7 +441,7 @@ class ttnn_VoVNetCP:
             conv_args=None,
             device=device,
         )
-        self.stage5 = ttnn_osa_stage(
+        self.stage5 = ttnn_OSA_stage(
             parameters.stage5,
             768,
             224,
