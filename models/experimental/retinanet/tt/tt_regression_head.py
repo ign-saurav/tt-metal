@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from loguru import logger
 import tt_lib.fallback_ops as fallback_ops
 import os
+from dataclasses import replace
 from models.experimental.retinanet.tt.utils import _create_conv_config_from_params
 from models.tt_cnn.tt.builder import TtConv2d
 from models.tt_cnn.tt.builder import (
@@ -33,95 +34,50 @@ class RetinaNetHeadOptimizer:
 retinanet_head_optimizations = {
     "optimized": RetinaNetHeadOptimizer(
         fpn0_conv_blocks={
-            "act_block_h_override": 1024,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            "sharding_strategy": AutoShardedStrategyConfiguration(),
         },
         fpn0_final_conv={
-            "act_block_h_override": 1024,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            "sharding_strategy": AutoShardedStrategyConfiguration(),
         },
         fpn1_conv_blocks={
-            "act_block_h_override": 256,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            "sharding_strategy": AutoShardedStrategyConfiguration(),
         },
         fpn1_final_conv={
-            "act_block_h_override": 256,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            "sharding_strategy": AutoShardedStrategyConfiguration(),
         },
         fpn2_conv_blocks={
-            "act_block_h_override": 256,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            "sharding_strategy": AutoShardedStrategyConfiguration(),
         },
         fpn2_final_conv={
-            "act_block_h_override": 256,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            "sharding_strategy": AutoShardedStrategyConfiguration(),
         },
         fpn3_conv_blocks={
-            "act_block_h_override": 256,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            "sharding_strategy": AutoShardedStrategyConfiguration(),
         },
         fpn3_final_conv={
-            "act_block_h_override": 256,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            "sharding_strategy": AutoShardedStrategyConfiguration(),
         },
         fpn4_conv_blocks={
-            "act_block_h_override": 32,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            "sharding_strategy": HeightShardedStrategyConfiguration(act_block_h_override=32),
         },
         fpn4_final_conv={
-            "act_block_h_override": 32,
-            "shard_layout": ttnn.TensorMemoryLayout.BLOCK_SHARDED,
-            "deallocate_activation": False,
-            "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            "sharding_strategy": HeightShardedStrategyConfiguration(act_block_h_override=32),
         },
     ),
 }
+
+
+def override_conv_config(config, override_dict):
+    """Apply override dictionary to Conv2dConfiguration using dataclasses.replace"""
+    if not isinstance(config, Conv2dConfiguration):
+        return config
+    return replace(config, **override_dict)
 
 
 class Conv2dNormActivation:
     def __init__(
         self,
         parameters: dict,
-        input_height: int,
-        input_width: int,
         device: ttnn.Device,
         in_channels: int = 256,
         out_channels: int = 256,
@@ -154,30 +110,9 @@ class Conv2dNormActivation:
         self.grid_size = grid_size if grid_size is not None else ttnn.CoreGrid(y=8, x=8)
         self.input_mask = input_mask
 
-        base_conv_config = _create_conv_config_from_params(
-            input_height=input_height,
-            input_width=input_width,
-            in_channels=in_channels,
-            out_channels=out_channels,
-            kernel_size=kernel_size,
-            batch_size=1,
-            parameters=parameters,
-            stride=stride,
-            padding=padding,
-            sharding_strategy=HeightShardedStrategyConfiguration()
-            if input_height == 4
-            else AutoShardedStrategyConfiguration(),
-        )
-
-        config_dict = base_conv_config.__dict__.copy()
-
-        if conv_config:  # conv_config is a dict
-            for key, value in conv_config.items():
-                if key in config_dict:
-                    config_dict[key] = value
-
-        self.conv_config = Conv2dConfiguration(**config_dict)
-        self.conv = TtConv2d(self.conv_config, device)
+        self.conv_config_dict = conv_config
+        self.parameters = parameters
+        self.conv = None
 
     def __call__(
         self,
@@ -194,13 +129,36 @@ class Conv2dNormActivation:
             else "[Conv]"
         )
 
+        if self.conv is None:
+            base_conv_config = _create_conv_config_from_params(
+                input_height=input_height,
+                input_width=input_width,
+                in_channels=self.in_channels,
+                out_channels=self.out_channels,
+                kernel_size=self.kernel_size,
+                batch_size=batch_size,
+                parameters=self.parameters,
+                stride=self.stride,
+                padding=self.padding,
+            )
+
+            if self.conv_config_dict:  # conv_config is a dict
+                self.conv_config = override_conv_config(base_conv_config, self.conv_config_dict)
+            else:
+                self.conv_config = base_conv_config
+
+            self.conv = TtConv2d(self.conv_config, self.device)
+
         x, [H_out, W_out] = self.conv(x, return_output_dim=True)
         N, H_out, W_out, C = x.shape
 
         if self.fallback_on_groupnorm:
+            if ttnn.is_sharded(x):
+                x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+
+            # Now we can safely convert layout
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
             x = ttnn.reshape(x, (N, input_height, input_width, C))
-            x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
             x = ttnn.permute(x, (0, 3, 1, 2))
 
             x = fallback_ops.group_norm(
@@ -244,11 +202,7 @@ class Conv2dNormActivation:
 
             x = ttnn.reshape(x_normalized, (N, input_height, input_width, C))
 
-        H_out = input_height
-        W_out = input_width
-
         x = ttnn.relu(x)
-
         return x
 
 
@@ -268,7 +222,7 @@ class TtnnRetinaNetRegressionHead:
         self.in_channels = in_channels
         self.num_anchors = num_anchors
         self.batch_size = batch_size
-        self.input_shapes = input_shapes
+        self.input_shapes = input_shapes if input_shapes is not None else [(64, 64), (32, 32), (16, 16), (8, 8), (4, 4)]
         self.model_config = model_config
         self.optimization_profile = optimization_profile
 
@@ -296,14 +250,20 @@ class TtnnRetinaNetRegressionHead:
         }
 
         self.conv_blocks_by_fpn = {}
+        self.final_conv_configs = {}
 
         for fpn_idx in range(5):
             conv_opt, final_opt = self.fpn_optimizer_configs[fpn_idx]
+            H, W = self.input_shapes[fpn_idx]
 
             conv_blocks = []
             for conv_idx in range(4):
+                conv_params = self.parameters["conv"].get(str(conv_idx), {}).get("0", None)
+                if conv_params is None:
+                    conv_params = self.parameters["conv"][conv_idx]
+
                 conv_block = Conv2dNormActivation(
-                    parameters=self.parameters["conv"].get(str(conv_idx), {}).get("0", None),
+                    parameters=conv_params,
                     device=self.device,
                     in_channels=self.in_channels,
                     out_channels=self.in_channels,
@@ -315,15 +275,11 @@ class TtnnRetinaNetRegressionHead:
                     input_mask=self.input_mask_tensor,
                     model_config=self.model_config,
                     compute_config=self.compute_config,
-                    conv_config=conv_opt,  # Apply optimizer config
-                    input_height=64,  # Default, will be updated in forward
-                    input_width=64,  # Default, will be updated in forward
+                    conv_config=conv_opt,
                 )
                 conv_blocks.append(conv_block)
 
             self.conv_blocks_by_fpn[fpn_idx] = conv_blocks
-
-            self.final_conv_configs = {}
             self.final_conv_configs[fpn_idx] = final_opt
 
     def forward(
@@ -363,25 +319,20 @@ class TtnnRetinaNetRegressionHead:
                 in_channels=self.in_channels,
                 out_channels=self.num_anchors * 4,
                 kernel_size=(3, 3),
-                batch_size=1,
+                batch_size=current_batch_size,
                 parameters=self.parameters["bbox_reg"],
                 stride=(1, 1),
                 padding=(1, 1),
-                sharding_strategy=HeightShardedStrategyConfiguration(),
             )
 
             if final_conv_optimizer:
-                config_dict = conv_final_config.__dict__.copy()
-                for key, value in final_conv_optimizer.items():
-                    if key in config_dict:
-                        config_dict[key] = value
-                conv_final_config = Conv2dConfiguration(**config_dict)
+                conv_final_config = override_conv_config(conv_final_config, final_conv_optimizer)
 
             conv_final = TtConv2d(conv_final_config, self.device)
-            bbox_regression, shape = conv_final(x, return_output_dim=True)
+            bbox_regression, [H_out, W_out] = conv_final(x, return_output_dim=True)
 
-            N, H_out, W_out, _ = bbox_regression.shape
-            H_out, W_out = shape
+            N, _, _, _ = bbox_regression.shape
+            bbox_regression = ttnn.to_memory_config(bbox_regression, ttnn.DRAM_MEMORY_CONFIG)
             bbox_regression = ttnn.sharded_to_interleaved(bbox_regression, ttnn.DRAM_MEMORY_CONFIG)
             bbox_regression = ttnn.reshape(bbox_regression, (N, H_out, W_out, self.num_anchors, 4))
             bbox_regression = ttnn.reshape(bbox_regression, (N, H_out * W_out * self.num_anchors, 4))

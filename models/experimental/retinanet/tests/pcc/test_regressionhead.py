@@ -10,41 +10,32 @@ from loguru import logger
 from torchvision.models.detection import retinanet_resnet50_fpn_v2, RetinaNet_ResNet50_FPN_V2_Weights
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
-# Update import to use the class version
-from models.experimental.retinanet.tt.tt_reghaed import TtnnRetinaNetRegressionHead  # Changed import
+from models.experimental.retinanet.tt.tt_regression_head import TtnnRetinaNetRegressionHead
 from models.experimental.retinanet.tt.custom_preprocessor import create_custom_mesh_preprocessor
 from ttnn.model_preprocessing import preprocess_model_parameters
 
 
 def create_regression_head_parameters(torch_head, device, model_config):
-    """Convert PyTorch regression head weights to TTNN format."""
     parameters = {}
 
-    # Define grid configuration
-    # Grid size for GroupNorm
     grid_size = ttnn.CoreGrid(y=8, x=8)
     layout = (
         ttnn.TILE_LAYOUT if model_config["WEIGHTS_DTYPE"] in [ttnn.bfloat8_b, ttnn.bfloat4_b] else ttnn.ROW_MAJOR_LAYOUT
     )
-    # Convert 4 conv layers (Conv2d + GroupNorm weights)
     parameters["conv"] = []
     for i in range(4):
-        # Conv2d weights
         conv_weight = torch_head.conv[i][0].weight.detach().to(torch.bfloat16)
         bias = torch.zeros(conv_weight.shape[0]).to(torch.bfloat16)
 
-        # GroupNorm weights - MUST use create_group_norm_weight_bias_rm()
         norm_weight = torch_head.conv[i][1].weight.detach()
         norm_bias = torch_head.conv[i][1].bias.detach()
 
-        # Format GroupNorm parameters using helper function
         formatted_norm_weight = ttnn.create_group_norm_weight_bias_rm(
             norm_weight, num_channels=256, num_cores_x=grid_size.y
         )
         formatted_norm_bias = ttnn.create_group_norm_weight_bias_rm(
             norm_bias, num_channels=256, num_cores_x=grid_size.y
         )
-        # Prepare weights using ttnn.prepare_conv_weights
         prepared_weight = ttnn.prepare_conv_weights(
             weight_tensor=ttnn.from_torch(conv_weight, dtype=ttnn.bfloat16),
             input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
@@ -53,8 +44,8 @@ def create_regression_head_parameters(torch_head, device, model_config):
             in_channels=conv_weight.shape[1],
             out_channels=conv_weight.shape[0],
             batch_size=1,
-            input_height=64,  # Adjust based on FPN level
-            input_width=64,  # Adjust based on FPN level
+            input_height=64,
+            input_width=64,
             kernel_size=(3, 3),
             stride=(1, 1),
             padding=(1, 1),
@@ -65,7 +56,6 @@ def create_regression_head_parameters(torch_head, device, model_config):
             input_dtype=ttnn.bfloat16,
         )
 
-        # Prepare bias using ttnn.prepare_conv_bias
         prepared_bias = ttnn.prepare_conv_bias(
             bias_tensor=ttnn.from_torch(bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16),
             input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
@@ -105,17 +95,13 @@ def create_regression_head_parameters(torch_head, device, model_config):
 
         parameters["conv"].append(conv_params)
 
-        # Convert bbox_reg layer
         bbox_weight = torch_head.bbox_reg.weight.detach().to(torch.bfloat16)
         bbox_bias = torch_head.bbox_reg.bias.detach().to(torch.bfloat16)
-        # Convert to TTNN tensor (host)
         bbox_weight_ttnn = ttnn.from_torch(bbox_weight, dtype=model_config["WEIGHTS_DTYPE"])
-        # First convert to TTNN format
         bbox_bias_ttnn = ttnn.from_torch(
             bbox_bias.reshape(1, 1, 1, -1),
             dtype=ttnn.bfloat16,
         )
-        # Use prepare_conv_weights to transform to proper format
         prepared_bbox_weight = ttnn.prepare_conv_weights(
             weight_tensor=bbox_weight_ttnn,
             input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
@@ -138,7 +124,6 @@ def create_regression_head_parameters(torch_head, device, model_config):
             conv_config=ttnn.Conv2dConfig(weights_dtype=model_config["WEIGHTS_DTYPE"]),
             compute_config=None,
         )
-        # Prepare the bias using prepare_conv_bias
         prepared_bbox_bias = ttnn.prepare_conv_bias(
             bias_tensor=bbox_bias_ttnn,
             input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
@@ -168,16 +153,13 @@ def create_regression_head_parameters(torch_head, device, model_config):
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
 @pytest.mark.parametrize("pcc", [0.99])
 def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc, reset_seeds):
-    """Test TTNN RetinaNet V2 regression head with 5 FPN levels using real features."""
     torch.manual_seed(0)
 
-    # Load pretrained model
     torch_model = retinanet_resnet50_fpn_v2(weights=RetinaNet_ResNet50_FPN_V2_Weights.DEFAULT)
     torch_model.eval()
     torch_model = torch_model.to(dtype=torch.bfloat16)
     regression_head = torch_model.head.regression_head
 
-    # Load pickled FPN features
     pickle_path = "fpn_features.pkl"
 
     if os.path.exists(pickle_path):
@@ -196,7 +178,6 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
     else:
         logger.info(f"Pickle file not found at {pickle_path}, using random features")
 
-        # Fallback to random features
         batch_size = 1
         in_channels = 256
         input_shapes = [(64, 64), (32, 32), (16, 16), (8, 8), (4, 4)]
@@ -212,7 +193,6 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
 
     num_anchors = 9
 
-    # PyTorch forward pass
     with torch.no_grad():
         pickle_path = "torch_output.pkl"
         if os.path.exists(pickle_path):
@@ -225,7 +205,6 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
                 pickle.dump(torch_output, f)
             print("finished running : reference model")
 
-    # Convert to TTNN (NHWC format) - convert all features to device
     ttnn_features = [
         ttnn.from_torch(
             feature.permute(0, 2, 3, 1),
@@ -241,7 +220,6 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
         "WEIGHTS_DTYPE": ttnn.bfloat16,
         "ACTIVATIONS_DTYPE": ttnn.bfloat16,
     }
-    # Create TTNN parameters
 
     ttnn_parameters = preprocess_model_parameters(
         initialize_model=lambda: regression_head,
@@ -249,8 +227,6 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
         device=None,
     )
 
-    # TTNN forward pass - using the class instead of function
-    # CORRECTION: Create the head instance first, then call forward with features
     ttnn_head = TtnnRetinaNetRegressionHead(
         parameters=ttnn_parameters,
         device=device,
@@ -266,7 +242,6 @@ def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc,
 
     ttnn_output_torch = ttnn.to_torch(ttnn_output)
 
-    # Assert PCC
     passed, pcc_msg = assert_with_pcc(torch_output, ttnn_output_torch, pcc=pcc)
     logger.info(f"Regression Head PCC: {pcc_msg}")
     assert passed, f"PCC test failed: {pcc_msg}"
