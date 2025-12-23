@@ -10,8 +10,8 @@ import numpy as np
 from loguru import logger
 
 from models.experimental.detr3d.ttnn.model_3detr import build_ttnn_3detr
-from models.experimental.detr3d.ttnn.utils import box_post_processing
-from models.experimental.detr3d.reference.model_3detr import build_3detr
+from models.experimental.detr3d.ttnn.utils import box_post_processing as tt_box_post_processing
+from models.experimental.detr3d.reference.model_3detr import build_3detr, box_post_processing
 from models.experimental.detr3d.reference.model_config import Detr3dArgs
 from models.experimental.detr3d.reference.utils.dataset import build_dataset
 from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_module_args
@@ -130,7 +130,29 @@ def run_detr3d_inference(
 
             # Run PyTorch reference inference
             with torch.no_grad():
-                ref_outputs = ref_module(inputs=inputs, encoder_only=encoder_only)
+                (
+                    cls_logits,
+                    center_offset,
+                    size_normalized,
+                    angle_logits,
+                    angle_residual_normalized,
+                    angle_residual,
+                    num_layers,
+                    query_xyz,
+                    point_cloud_dims,
+                ) = ref_module(inputs=inputs, encoder_only=encoder_only)
+                ref_outputs = box_post_processing(
+                    cls_logits,
+                    center_offset,
+                    size_normalized,
+                    angle_logits,
+                    angle_residual_normalized,
+                    angle_residual,
+                    num_layers,
+                    query_xyz,
+                    point_cloud_dims,
+                    dataset_config,
+                )
 
             # Accumulate AP for PyTorch model
             ref_ap_calculator.step_meter(ref_outputs, batch_data_label)
@@ -162,7 +184,7 @@ def run_detr3d_inference(
                 torch_query_xyz,
                 torch_point_cloud_dims,
             ) = ttnn_module(inputs=inputs, encoder_only=encoder_only)
-            tt_outputs = box_post_processing(
+            tt_outputs = tt_box_post_processing(
                 cls_logits,
                 center_offset,
                 size_normalized,

@@ -28,6 +28,66 @@ from models.experimental.detr3d.reference.torch_pointnet2_ops import furthest_po
 from models.experimental.detr3d.reference.utils.pc_util import scale_points, shift_scale_points
 
 
+def box_post_processing(
+    cls_logits,
+    center_offset,
+    size_normalized,
+    angle_logits,
+    angle_residual_normalized,
+    angle_residual,
+    num_layers,
+    query_xyz,
+    point_cloud_dims,
+    dataset_config,
+):
+    box_processor = BoxProcessor(dataset_config)
+    outputs = []
+    for l in range(num_layers.item()):
+        # box processor converts outputs so we can get a 3D bounding box
+        (
+            center_normalized,
+            center_unnormalized,
+        ) = box_processor.compute_predicted_center(center_offset[l], query_xyz, point_cloud_dims)
+        angle_continuous = box_processor.compute_predicted_angle(angle_logits[l], angle_residual[l])
+        size_unnormalized = box_processor.compute_predicted_size(size_normalized[l], point_cloud_dims)
+        box_corners = box_processor.box_parametrization_to_corners(
+            center_unnormalized, size_unnormalized, angle_continuous
+        )
+
+        # below are not used in computing loss (only for matching/mAP eval)
+        # we compute them with no_grad() so that distributed training does not complain about unused variables
+        with torch.no_grad():
+            (
+                semcls_prob,
+                objectness_prob,
+            ) = box_processor.compute_objectness_and_cls_prob(cls_logits[l])
+
+        box_prediction = {
+            "sem_cls_logits": cls_logits[l],
+            "center_normalized": center_normalized.contiguous(),
+            "center_unnormalized": center_unnormalized,
+            "size_normalized": size_normalized[l],
+            "size_unnormalized": size_unnormalized,
+            "angle_logits": angle_logits[l],
+            "angle_residual": angle_residual[l],
+            "angle_residual_normalized": angle_residual_normalized[l],
+            "angle_continuous": angle_continuous,
+            "objectness_prob": objectness_prob,
+            "sem_cls_prob": semcls_prob,
+            "box_corners": box_corners,
+        }
+        outputs.append(box_prediction)
+
+    # intermediate decoder layer outputs are only used during training
+    aux_outputs = outputs[:-1]
+    outputs = outputs[-1]
+
+    return {
+        "outputs": outputs,  # output from last layer of decoder
+        "aux_outputs": aux_outputs,  # output from intermediate layers of decoder
+    }
+
+
 class BoxProcessor(object):
     """
     Class to convert 3DETR MLP head outputs into bounding boxes
@@ -241,51 +301,17 @@ class Model3DETR(nn.Module):
         angle_residual_normalized = angle_residual_normalized.reshape(num_layers, batch, num_queries, -1)
         angle_residual = angle_residual_normalized * (np.pi / angle_residual_normalized.shape[-1])
 
-        outputs = []
-        for l in range(num_layers):
-            # box processor converts outputs so we can get a 3D bounding box
-            (
-                center_normalized,
-                center_unnormalized,
-            ) = self.box_processor.compute_predicted_center(center_offset[l], query_xyz, point_cloud_dims)
-            angle_continuous = self.box_processor.compute_predicted_angle(angle_logits[l], angle_residual[l])
-            size_unnormalized = self.box_processor.compute_predicted_size(size_normalized[l], point_cloud_dims)
-            box_corners = self.box_processor.box_parametrization_to_corners(
-                center_unnormalized, size_unnormalized, angle_continuous
-            )
-
-            # below are not used in computing loss (only for matching/mAP eval)
-            # we compute them with no_grad() so that distributed training does not complain about unused variables
-            with torch.no_grad():
-                (
-                    semcls_prob,
-                    objectness_prob,
-                ) = self.box_processor.compute_objectness_and_cls_prob(cls_logits[l])
-
-            box_prediction = {
-                "sem_cls_logits": cls_logits[l],
-                "center_normalized": center_normalized.contiguous(),
-                "center_unnormalized": center_unnormalized,
-                "size_normalized": size_normalized[l],
-                "size_unnormalized": size_unnormalized,
-                "angle_logits": angle_logits[l],
-                "angle_residual": angle_residual[l],
-                "angle_residual_normalized": angle_residual_normalized[l],
-                "angle_continuous": angle_continuous,
-                "objectness_prob": objectness_prob,
-                "sem_cls_prob": semcls_prob,
-                "box_corners": box_corners,
-            }
-            outputs.append(box_prediction)
-
-        # intermediate decoder layer outputs are only used during training
-        aux_outputs = outputs[:-1]
-        outputs = outputs[-1]
-
-        return {
-            "outputs": outputs,  # output from last layer of decoder
-            "aux_outputs": aux_outputs,  # output from intermediate layers of decoder
-        }
+        return (
+            cls_logits,
+            center_offset,
+            size_normalized,
+            angle_logits,
+            angle_residual_normalized,
+            angle_residual,
+            torch.tensor(num_layers, dtype=torch.int32),
+            query_xyz,
+            point_cloud_dims,
+        )
 
     def forward(self, inputs, encoder_only=False):
         point_clouds = inputs["point_clouds"]
