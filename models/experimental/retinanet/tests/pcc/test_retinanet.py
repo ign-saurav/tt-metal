@@ -18,8 +18,8 @@ from models.experimental.retinanet.tt.custom_preprocessor import (
     create_custom_mesh_preprocessor,
 )
 
-from models.experimental.retinanet.tt.tt_regression_head import ttnn_retinanet_regression_head
-from models.experimental.retinanet.tt.tt_classification_head import ttnn_retinanet_classification_head
+# from models.experimental.retinanet.tt.tt_regression_head import ttnn_retinanet_regression_head
+# from models.experimental.retinanet.tt.tt_classification_head import ttnn_retinanet_classification_head
 from models.experimental.retinanet.tests.pcc.test_resnet50_fpn import infer_ttnn_module_args as infer_module_args
 from ttnn.model_preprocessing import infer_ttnn_module_args
 
@@ -145,7 +145,9 @@ class RetinaNetTestInfra:
         tt_host_tensor = to_ttnn_host(self.torch_input_tensor)
 
         # TTNN backbone model
-        self.ttnn_model = TTRetinaNet(parameters=self.backbone_parameters, model_config=model_config)
+        self.ttnn_model = TTRetinaNet(
+            parameters=parameters, model_config=model_config, device=device, model_args=model_args
+        )
 
         # Move input to device
         self.input_tensor = ttnn.to_device(tt_host_tensor, device)
@@ -167,52 +169,7 @@ class RetinaNetTestInfra:
 
     def run(self):
         # Run backbone to get FPN features
-        backbone_output = self.ttnn_model(self.input_tensor, self.device)
-
-        # Convert backbone output dict to list for regression head
-        fpn_features = [backbone_output[key] for key in ["0", "1", "2", "p6", "p7"]]
-
-        # Determine input shapes based on actual feature map sizes
-        input_shapes = [
-            (self.torch_output_tensor["0"].shape[2], self.torch_output_tensor["0"].shape[3]),
-            (self.torch_output_tensor["1"].shape[2], self.torch_output_tensor["1"].shape[3]),
-            (self.torch_output_tensor["2"].shape[2], self.torch_output_tensor["2"].shape[3]),
-            (self.torch_output_tensor["p6"].shape[2], self.torch_output_tensor["p6"].shape[3]),
-            (self.torch_output_tensor["p7"].shape[2], self.torch_output_tensor["p7"].shape[3]),
-        ]
-
-        # Run regression head
-        regression_output = ttnn_retinanet_regression_head(
-            feature_maps=fpn_features,
-            parameters=self.regression_parameters,
-            device=self.device,
-            in_channels=256,
-            num_anchors=9,
-            batch_size=self.batch_size,
-            input_shapes=input_shapes,
-            model_config=model_config,
-            optimization_profile="optimized",
-        )
-
-        # Run classification head
-        classification_output = ttnn_retinanet_classification_head(
-            feature_maps=fpn_features,
-            parameters=self.classification_parameters,
-            device=self.device,
-            in_channels=256,
-            num_anchors=9,
-            batch_size=self.batch_size,
-            input_shapes=input_shapes,
-            model_config=model_config,
-            optimization_profile="optimized",
-        )
-
-        # Combine all outputs
-        self.output_tensor = {
-            **backbone_output,
-            "regression": regression_output,
-            "classification": classification_output,
-        }
+        self.output_tensor = self.ttnn_model(self.input_tensor, self.device)
 
         return self.output_tensor
 

@@ -40,101 +40,101 @@ bottleneck_layer_optimisations = {
     ),
     "layer1": BottleneckOptimizer(
         conv1={
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
             "reallocate_halo_output": True,
         },
         conv2={
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
         conv3={
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
         downsample={
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
     ),
     "layer2": BottleneckOptimizer(
         conv1={
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
         conv2={
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
         conv3={
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
         downsample={
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
     ),
     "layer3": BottleneckOptimizer(
         conv1={
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
         conv2={
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
         conv3={
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
         downsample={
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
     ),
     "layer4": BottleneckOptimizer(
         conv1={
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
         conv2={
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
         conv3={
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
         downsample={
             "deallocate_activation": True,
             "reallocate_halo_output": True,
-            "enable_act_double_buffer": True,
-            "enable_weights_double_buffer": True,
+            # "enable_act_double_buffer": True,
+            # "enable_weights_double_buffer": True,
         },
     ),
 }
@@ -174,6 +174,7 @@ class TTBottleneck:
             weights_dtype=model_config["WEIGHTS_DTYPE"],
             activation_dtype=model_config["ACTIVATIONS_DTYPE"],
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+            # sharding_strategy=HeightShardedStrategyConfiguration(),
         )
         self.conv1 = TtConv2d(self.conv_config_1, device)
 
@@ -227,6 +228,7 @@ class TTBottleneck:
             "slice_config", False
         ):
             x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+        x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
 
         # conv1 is 1x1 conv
         out, shape = self.conv1(x, return_output_dim=True)

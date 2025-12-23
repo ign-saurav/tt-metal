@@ -13,6 +13,7 @@ from models.experimental.retinanet.tt.utils import _create_conv_config_from_para
 from models.tt_cnn.tt.builder import TtConv2d
 from models.tt_cnn.tt.builder import (
     HeightShardedStrategyConfiguration,
+    AutoShardedStrategyConfiguration,
 )
 
 
@@ -176,7 +177,9 @@ class Conv2dNormActivation:
             parameters=parameters,
             stride=stride,
             padding=padding,
-            sharding_strategy=HeightShardedStrategyConfiguration(),
+            sharding_strategy=HeightShardedStrategyConfiguration()
+            if input_height == 4
+            else AutoShardedStrategyConfiguration(),
         )
         self.conv = TtConv2d(self.conv_config, device)
 
@@ -365,7 +368,9 @@ class TtnnRetinaNetRegressionHead:
         all_bbox_regression = []
 
         for fpn_idx, feature_map in enumerate(feature_maps):
-            N, H, W, C = feature_map.shape
+            N = 1
+            H, W = current_input_shapes[fpn_idx]
+            print(H, W)
 
             conv_blocks_config = self.fpn_conv_configs[fpn_idx]
             final_conv_config = self.fpn_final_configs[fpn_idx]
@@ -434,7 +439,7 @@ class TtnnRetinaNetRegressionHead:
             # Reshape to (N, H*W*num_anchors, 4)
             N, H_final, W_final, C_final = bbox_regression.shape
             H_final, W_final = shape
-            bbox_regression = ttnn.sharded_to_interleaved(bbox_regression, ttnn.L1_MEMORY_CONFIG)
+            bbox_regression = ttnn.sharded_to_interleaved(bbox_regression, ttnn.DRAM_MEMORY_CONFIG)
 
             bbox_regression = ttnn.reshape(bbox_regression, (N, H_final, W_final, self.num_anchors, 4))
             bbox_regression = ttnn.reshape(bbox_regression, (N, H_final * W_final * self.num_anchors, 4))
