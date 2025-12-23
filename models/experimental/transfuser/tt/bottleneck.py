@@ -27,6 +27,7 @@ class TTRegNetBottleneck:
         use_fallback=False,
         block_name=None,
         stage_name=None,
+        save_fc2_data=False,
     ):
         self.stride = stride
         self.downsample = downsample
@@ -38,6 +39,7 @@ class TTRegNetBottleneck:
         self.use_fallback = use_fallback
         self.block_name = block_name
         self.stage_name = stage_name
+        self.save_fc2_data = save_fc2_data
         # ------------------------- conv1: 1x1 + ReLU -------------------------
         conv1_params = model_args["conv1"]["conv"]
         conv1_config = self._create_conv_config(
@@ -233,6 +235,8 @@ class TTRegNetBottleneck:
         out = ttnn.reshape(out, (1, height, width, out.shape[-1]))
         se_out = ttnn.mean(out, dim=[1, 2], keepdim=True)
 
+        se_out = self.se_fc1(se_out)
+
         if self.use_fallback and self.torch_model is not None:
             # Falling Back SE module
             se_out_torch = ttnn.to_torch(
@@ -254,10 +258,17 @@ class TTRegNetBottleneck:
 
         else:
             # SE fc1
-            se_out = self.se_fc1(se_out)
+            # se_out = self.se_fc1(se_out)
             # SE fc2
+            if self.save_fc2_data:
+                print("dumping ttnn fc2 input...")
+                ttnn.dump_tensor(f"se_fc2_input.tensorbin", se_out)
+            print(f"{se_out.shape =}")
             se_out = self.se_fc2(se_out)
-            se_out = ttnn.sigmoid(se_out)
+            # se_out = ttnn.sigmoid(se_out)
+
+        se_out = ttnn.to_layout(se_out, ttnn.TILE_LAYOUT)
+        se_out = ttnn.sigmoid(se_out)
 
         out_4d = ttnn.multiply(out1, se_out)
         # Flatten back to match identity format

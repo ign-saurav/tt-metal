@@ -16,6 +16,14 @@ from ttnn.model_preprocessing import (
 from tests.ttnn.utils_for_testing import check_with_pcc
 from loguru import logger
 
+activations = {}
+
+
+def hook_fn(module, inp, out):
+    # inp is a tuple
+    activations["se_fc2_in"] = inp[0].detach().cpu()
+    activations["se_fc2_out"] = out.detach().cpu()
+
 
 def fix_regnet_downsample_keys(state_dict):
     """
@@ -50,6 +58,7 @@ class TransfuserBottleneckInfra:
         device,
         block_name,
         use_fallback,
+        save_fc2_data,
         in_chs,
         out_chs,
         stride,
@@ -84,12 +93,19 @@ class TransfuserBottleneckInfra:
         state_dict = fix_regnet_downsample_keys(state_dict)
         torch_model.load_state_dict(state_dict, strict=True)
 
+        fc2_hook = torch_model.se.fc2.register_forward_hook(hook_fn)
+
         self.tt_input = ttnn.load_tensor(f"image_layer2_input_{block_name}.tensorbin")
         act = torch.load("captured_inputs.pt")
         self.torch_input = act[f"image_encoder.features.s2.{block_name}.conv1"]
         with torch.no_grad():
             self.torch_output = torch_model(self.torch_input)
 
+        if save_fc2_data:
+            print("dumping torch fc2 input and state_dict...")
+            torch.save(activations["se_fc2_in"], "se_fc2_torch_input.pt")
+            torch.save(torch_model.se.fc2.state_dict(), "se_fc2_state_dict.pt")
+        fc2_hook.remove()
         parameters = preprocess_model_parameters(
             initialize_model=lambda: torch_model,
             custom_preprocessor=create_custom_mesh_preprocessor(self.weights_mesh_mapper),
@@ -117,6 +133,7 @@ class TransfuserBottleneckInfra:
             use_fallback=self.use_fallback,
             torch_model=torch_model if self.use_fallback else None,
             stage_name=stage_name,
+            save_fc2_data=save_fc2_data,
         )
         # Run + validate
         self.run()
@@ -182,10 +199,12 @@ model_config = {
     ],
 )
 @pytest.mark.parametrize("use_fallback", [False])
+@pytest.mark.parametrize("save_fc2_data", [True])
 def test_transfuser_bottleneck(
     device,
     block_name,
     use_fallback,
+    save_fc2_data,
     in_chs,
     out_chs,
     stride,
@@ -196,6 +215,7 @@ def test_transfuser_bottleneck(
         device,
         block_name,
         use_fallback,
+        save_fc2_data,
         in_chs,
         out_chs,
         stride,

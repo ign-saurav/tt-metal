@@ -211,20 +211,15 @@ class Bottleneck(nn.Module):
 
     def fallback(self, image, block_name=None, stage_name=None):
         """
-        Fallback method for SE module that dynamically accesses the correct stage and block.
-
-        Args:
-            image: Input tensor for SE module
-            block_name: Name of the block (e.g., "b1", "b2", etc.). Defaults to "b1" if None.
-            stage_name: Name of the stage (e.g., "layer1", "layer2", etc.). Must be provided.
+        Fallback method for SE module.
 
         Returns:
             Output tensor after SE fc1, relu, fc2, and sigmoid operations
         """
-        x = self.se.fc1(image)
-        x = x.relu()
-        x = self.se.fc2(x)
-        x = x.sigmoid()
+        # x = self.se.fc1(image)
+        # x = x.relu()
+        x = self.se.fc2(image)
+        # x = x.sigmoid()
         return x
 
     def zero_init_last(self) -> None:
