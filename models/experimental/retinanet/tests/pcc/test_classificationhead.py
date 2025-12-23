@@ -4,8 +4,6 @@
 import torch
 import pytest
 import ttnn
-import pickle
-import os
 from torchvision.models.detection import retinanet_resnet50_fpn_v2, RetinaNet_ResNet50_FPN_V2_Weights
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from loguru import logger
@@ -25,43 +23,17 @@ def test_classification_head_full(device, pcc, reset_seeds):
     torch_model = torch_model.to(dtype=torch.bfloat16)
     classification_head = torch_model.head.classification_head
 
-    pickle_path = "fpn_features.pkl"
+    batch_size = 1
+    in_channels = 256
+    input_shapes = [(64, 64), (32, 32), (16, 16), (8, 8), (4, 4)]
 
-    if os.path.exists(pickle_path):
-        logger.info(f"✓ Loading real FPN features from {pickle_path}")
-        with open(pickle_path, "rb") as f:
-            saved_data = pickle.load(f)
-
-        torch_features = saved_data["features"]
-        input_shapes = saved_data["input_shapes"]
-        batch_size = saved_data["batch_size"]
-        in_channels = saved_data["in_channels"]
-
-        logger.info(f"  Loaded {len(torch_features)} FPN levels:")
-        for i, feat in enumerate(torch_features):
-            logger.info(f"    Level {i}: {feat.shape}")
-    else:
-        logger.info(f"Pickle file not found at {pickle_path}, using random features")
-        batch_size = 1
-        in_channels = 256
-        input_shapes = [(64, 64), (32, 32), (16, 16), (8, 8), (4, 4)]
-
-        torch_features = [torch.randn(batch_size, in_channels, H, W, dtype=torch.bfloat16) for H, W in input_shapes]
+    torch_features = [torch.randn(batch_size, in_channels, H, W, dtype=torch.bfloat16) for H, W in input_shapes]
 
     num_anchors = 9
     num_classes = 91
 
     with torch.no_grad():
-        pickle_path = "torch_output_classification.pkl"
-        if os.path.exists(pickle_path):
-            with open(pickle_path, "rb") as f:
-                torch_output = pickle.load(f)
-        else:
-            print("running : reference model")
-            torch_output = classification_head(torch_features)
-            with open(pickle_path, "wb") as f:
-                pickle.dump(torch_output, f)
-            print("finished running : reference model")
+        torch_output = classification_head(torch_features)
 
     ttnn_features = [
         ttnn.from_torch(
