@@ -134,7 +134,7 @@ See `reference/config.py` for all available options.
 
 ### Downloading Checkpoints
 
-Download the pre-trained TransFuser model checkpoint from the official repository:
+Download the pre-trained TransFuser model checkpoint from the official repository if not automatically downloaded:
 
 ```bash
 # Download checkpoint (example: model_seed1_39.pth)
@@ -147,7 +147,7 @@ git clone https://github.com/autonomousvision/transfuser.git
 ```
 
 **Checkpoint location:**
-- Place the checkpoint file (e.g., `model_seed1_39.pth`) in your working directory or specify the full path when running tests/demo.
+- Place the checkpoint file (e.g., `model_seed1_39.pth`) in the correct directory.
 
 **Alternative checkpoint paths:**
 - Some checkpoints may be in `model_ckpt/models_2022/transfuser/` directory structure
@@ -167,10 +167,10 @@ For running the demo and tests, you need CARLA simulation data. Download scenari
 # Example: Download scenario data from TransFuser releases
 # Check the TransFuser repository for data download links
 ```
-Steps
+Steps to download dataset if not automatically downloaded.
 ```bash
-mkdir -p data
-cd data
+mkdir -p models/experimental/transfuser/reference/data
+cd models/experimental/transfuser/reference/data
 wget -nc https://s3.eu-central-1.amazonaws.com/avg-projects/transfuser/data/LICENSE.txt
 wget -nc https://s3.eu-central-1.amazonaws.com/avg-projects/transfuser/data/2022_data/s3.zip
 unzip -q s3.zip
@@ -247,7 +247,7 @@ The TransFuserBackbone TTNN implementation achieves the following PCC scores com
 | Predicted Waypoints      | 0.9999 |
 | Feature Map              | 0.9997 |
 | Detection Head (Overall) | 0.9973 |
-| Bounding Boxes (Boxes)   | 0.9379 |
+| Bounding Boxes (Boxes)   | 0.9079 |
 
 
 ### Detection Head – Per-Head PCC Breakdown
@@ -269,28 +269,9 @@ The TransFuserBackbone TTNN implementation achieves the following PCC scores com
 Run the LidarCenterNet demo to compare TTNN and PyTorch implementations:
 
 ```bash
-python models/experimental/transfuser/demo/lidar_center_net_demo.py \
-    --data-root <path_to_scenario_folder> \
-    --frame <frame_id> \
-    --weights <path_to_model.pth> \
-    --device-id 0
+python models/experimental/transfuser/demo/lidar_center_net_demo.py
 ```
 
-**Required arguments:**
-- `--data-root`: Path to folder containing scenario data (images/lidar)
-- `--frame`: Frame ID inside data_root (e.g., "0120")
-- `--weights`: Path to Transfuser weight file (.pth)
-- `--device-id`: TTNN device ID (default: 0)
-
-
-**Example:**
-```bash
-python models/experimental/transfuser/demo/lidar_center_net_demo.py \
-    --data-root Scenario3_Town01_curved_route0_11_23_20_02_59/ \
-    --frame 0120 \
-    --weights model_seed1_39.pth \
-    --device-id 0
-```
 
 The demo will:
 1. Load inputs from the specified data root and frame

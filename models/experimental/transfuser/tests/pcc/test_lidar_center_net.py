@@ -14,12 +14,14 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.transfuser.reference.config import GlobalConfig
 from models.experimental.transfuser.reference.lidar_center_net import LidarCenterNet, process_input
 from models.experimental.transfuser.tt.lidar_center_net import LidarCenterNet as TtLidarCenterNet
-from models.experimental.transfuser.tests.test_gpt import create_gpt_preprocessor
+from models.experimental.transfuser.tests.pcc.test_gpt import create_gpt_preprocessor
 
 from models.experimental.transfuser.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from ttnn.model_preprocessing import preprocess_model_parameters
 from ttnn.model_preprocessing import infer_ttnn_module_args as infer_ttnn_module_args_torch
-from models.experimental.transfuser.tests.test_transfuser_backbone import regroup_model_args
+from models.experimental.transfuser.tests.pcc.test_transfuser_backbone import regroup_model_args
+from models.experimental.transfuser.resources.transfuser_dataset import ensure_scenario3_town01_curved_route0
+from models.experimental.transfuser.resources.transfuser_checkpoint import ensure_transfuser_checkpoint_2022
 
 
 def create_lidar_center_net_head_preprocessor(device, weight_dtype=ttnn.bfloat16):
@@ -290,7 +292,7 @@ def test_lidar_center_net(
 ):
     torch.manual_seed(seed)
     torch.use_deterministic_algorithms(True)
-    data_root = "Scenario3_Town01_curved_route0_11_23_20_02_59/"
+    data_root = ensure_scenario3_town01_curved_route0()
     frame = "0120"
 
     config = GlobalConfig(setting="eval")
@@ -314,7 +316,7 @@ def test_lidar_center_net(
         lidar_architecture=lidar_architecture,
         use_velocity=use_velocity,
     ).eval()
-    checkpoint_path = "model_seed1_39.pth"
+    checkpoint_path = ensure_transfuser_checkpoint_2022()
     modified_state_dict = load_trained_weights(checkpoint_path)
     modified_state_dict = delete_incompatible_keys(
         modified_state_dict,

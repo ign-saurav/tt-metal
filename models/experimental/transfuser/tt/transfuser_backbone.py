@@ -338,9 +338,11 @@ class TtTransfuserBackbone:
         # image_encoder_layer1
         for block in self.image_layer1:
             image_out = block(image_out, device)
+        ttnn.ReadDeviceProfiler(device)
         # lidar_encoder_layer1
         for block in self.lidar_layer1:
             lidar_out = block(lidar_out, device)
+        ttnn.ReadDeviceProfiler(device)
         # Layer1 avgpool - image
         image_embd_layer1 = _avgpool_to_L1(
             image_out, (1, 40, 176, 72), [self.config.img_vert_anchors, self.config.img_horz_anchors]
@@ -373,9 +375,11 @@ class TtTransfuserBackbone:
         # image_encoder_layer2
         for block in self.image_layer2:
             image_features = block(image_features, device)
+        ttnn.ReadDeviceProfiler(device)
         # lidar_encoder_layer2
         for block in self.lidar_layer2:
             lidar_features = block(lidar_features, device)
+        ttnn.ReadDeviceProfiler(device)
         # Layer2 avgpool - image
         image_embd_layer2 = _avgpool_to_L1(
             image_features, (1, 20, 88, 216), [self.config.img_vert_anchors, self.config.img_horz_anchors]
@@ -408,9 +412,11 @@ class TtTransfuserBackbone:
         # image_encoder_layer3
         for block in self.image_layer3:
             image_features = block(image_features, device)
+        ttnn.ReadDeviceProfiler(device)
         # lidar_encoder_layer3
         for block in self.lidar_layer3:
             lidar_features = block(lidar_features, device)
+        ttnn.ReadDeviceProfiler(device)
         # Layer3 avgpool - image
         image_embd_layer3 = _avgpool_to_L1(
             image_features, (1, 10, 44, 576), [self.config.img_vert_anchors, self.config.img_horz_anchors]
@@ -441,9 +447,11 @@ class TtTransfuserBackbone:
         # image_encoder_layer4
         for block in self.image_layer4:
             image_features = block(image_features, device)
+        ttnn.ReadDeviceProfiler(device)
         # lidar_encoder_layer4
         for block in self.lidar_layer4:
             lidar_features = block(lidar_features, device)
+        ttnn.ReadDeviceProfiler(device)
         # Layer4 avgpool - image
         image_embd_layer4 = _avgpool_to_L1(
             image_features, (1, 5, 22, 1512), [self.config.img_vert_anchors, self.config.img_horz_anchors]
