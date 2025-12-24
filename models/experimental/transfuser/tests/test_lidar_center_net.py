@@ -18,6 +18,8 @@ from models.experimental.transfuser.tests.test_gpt import create_gpt_preprocesso
 
 from models.experimental.transfuser.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from ttnn.model_preprocessing import preprocess_model_parameters
+from ttnn.model_preprocessing import infer_ttnn_module_args as infer_ttnn_module_args_torch
+from models.experimental.transfuser.tests.test_transfuser_backbone import regroup_model_args
 
 
 def create_lidar_center_net_head_preprocessor(device, weight_dtype=ttnn.bfloat16):
@@ -275,7 +277,6 @@ def delete_incompatible_keys(state_dict: Dict[str, Any], keys_to_delete: List[st
 )
 @pytest.mark.parametrize("seed", list(range(1)))
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
-@pytest.mark.parametrize("use_fallback", [True])
 @pytest.mark.parametrize("use_optimized_self_attn", [False])
 def test_lidar_center_net(
     device,
@@ -285,7 +286,6 @@ def test_lidar_center_net(
     use_velocity,
     seed,
     weight_dtype,
-    use_fallback,
     use_optimized_self_attn,
 ):
     torch.manual_seed(seed)
@@ -314,7 +314,7 @@ def test_lidar_center_net(
         lidar_architecture=lidar_architecture,
         use_velocity=use_velocity,
     ).eval()
-    checkpoint_path = "model_ckpt/models_2022/transfuser/model_seed1_39.pth"
+    checkpoint_path = "model_seed1_39.pth"
     modified_state_dict = load_trained_weights(checkpoint_path)
     modified_state_dict = delete_incompatible_keys(
         modified_state_dict,
@@ -379,6 +379,13 @@ def test_lidar_center_net(
         custom_preprocessor=create_custom_mesh_preprocessor(weights_mesh_mapper),
         device=None,
     )
+    model_args = infer_ttnn_module_args_torch(
+        model=torch_model,
+        run_model=lambda model: model(image, lidar_bev, velocity),
+        device=None,
+        absolute_name=True,
+    )
+    model_args = regroup_model_args(model_args)
     gpt1_parameters = preprocess_model_parameters(
         initialize_model=lambda: torch_model.transformer1,
         custom_preprocessor=create_gpt_preprocessor(device, n_layer, ttnn.bfloat16, use_optimized_self_attn),
@@ -417,7 +424,7 @@ def test_lidar_center_net(
         config,
         backbone="transFuser",
         torch_model=transfuser_model,
-        use_fallback=use_fallback,
+        model_args=model_args,
     )
 
     # Convert input to TTNN format
