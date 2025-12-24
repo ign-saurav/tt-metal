@@ -94,6 +94,8 @@ class Conv2dNormActivation:
         self.conv_bias = parameters["bias"]
         self.norm_weight = parameters["norm_weight"]
         self.norm_bias = parameters["norm_bias"]
+        self.norm_weight = ttnn.to_device(self.norm_weight, self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        self.norm_bias = ttnn.to_device(self.norm_bias, self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
         self.fallback_on_groupnorm = os.environ.get("FALLBACK_ON_GROUPNORM", "1") == "1"
         self.grid_size = grid_size if grid_size is not None else ttnn.CoreGrid(y=8, x=8)
@@ -141,6 +143,8 @@ class Conv2dNormActivation:
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
 
         else:
+            if ttnn.is_sharded(x):
+                x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
             spatial_size = H_out * W_out
             required_size = ((spatial_size + self.grid_size.y * 32 - 1) // (self.grid_size.y * 32)) * (
                 self.grid_size.y * 32
@@ -153,8 +157,10 @@ class Conv2dNormActivation:
             else:
                 x_padded = ttnn.reshape(x, (N, 1, spatial_size, C))
 
+            x_padded = ttnn.to_device(x_padded, self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
             x_normalized = ttnn.group_norm(
                 x_padded,
+                epsilon=1e-5,
                 num_groups=self.num_groups,
                 input_mask=self.input_mask,
                 weight=self.norm_weight,
