@@ -1,11 +1,6 @@
 import ttnn
-import json
 import torch
 import pytest
-import os
-
-from models.experimental.miniCPMo.reference.modeling_minicpmo import MiniCPMO
-from models.experimental.miniCPMo.reference.configuration_minicpm import MiniCPMOConfig
 
 from loguru import logger
 from models.common.utility_functions import (
@@ -13,8 +8,7 @@ from models.common.utility_functions import (
 )
 from tests.ttnn.utils_for_testing import check_with_pcc
 
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-from models.experimental.miniCPMo.reference.tokenization_minicpmo_fast import MiniCPMOTokenizerFast
+from transformers import AutoModel
 
 from models.experimental.miniCPMo.tt.tt_resampler import TTResampler
 
@@ -22,16 +16,8 @@ from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_lin
 from models.experimental.miniCPMo.tests.test_multi_head_attn import create_self_attn_preprocessor
 
 
-def load_or_create(path, shape, dtype):
-    if os.path.exists(path):
-        print(f"Loading: {path}")
-        return torch.load(path)
-    else:
-        print(f"File not found, creating random tensor for: {path}")
-
-        return (
-            torch.randn(shape, dtype=dtype) if dtype.is_floating_point else torch.tensor([[27, 37]], dtype=torch.int32)
-        )
+def create_tensor(shape, dtype):
+    return torch.randn(shape, dtype=dtype) if dtype.is_floating_point else torch.tensor([[27, 37]], dtype=torch.int32)
 
 
 def create_resampler_preprocessor(device, weight_dtype=ttnn.bfloat16):
@@ -90,43 +76,22 @@ def create_resampler_preprocessor(device, weight_dtype=ttnn.bfloat16):
 @pytest.mark.parametrize("input_dtype", [ttnn.bfloat16])
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
 def test_mini_cpm_o(device, input_dtype, weight_dtype):
-    # Load config directly from local JSON file
-    config_path = "models/experimental/miniCPMo/reference/config.json"
-    with open(config_path, "r") as f:
-        config_dict = json.load(f)
+    model_name = "openbmb/MiniCPM-o-2_6"
+    logger.info(f"Loading model from HuggingFace: {model_name}")
 
-    config = MiniCPMOConfig.from_dict(
-        config_dict,
+    model = AutoModel.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        attn_implementation="sdpa",
+        torch_dtype=torch.bfloat16,
         init_vision=True,
         init_audio=False,
         init_tts=False,
     )
-
-    print("Initializing MiniCPM-o model...")
-    # Initialize the model directly with the config
-    # with torch.device("meta"):
-    with init_empty_weights():
-        model = MiniCPMO(config)
-
-    # local_checkpoint_path = "/home/ubuntu/.cache/huggingface/hub/models--openbmb--MiniCPM-o-2_6/snapshots/509805e84db1c84f154034d71a21c4f2331e6e11"
-    local_checkpoint_path = "models/experimental/miniCPMo/reference/safetensors"
-    load_checkpoint_and_dispatch(
-        model,
-        local_checkpoint_path,
-        device_map="auto",
-        dtype=torch.bfloat16,
-    )
-    # Set model to eval mode
     model = model.eval()
 
-    # Load tokenizer directly from local reference folder files
-    tokenizer_path = "models/experimental/miniCPMo/reference"
-    tokenizer = MiniCPMOTokenizerFast(tokenizer_file=f"{tokenizer_path}/tokenizer.json")
-
-    torch.load("vision_embedding.pt")
-
-    vision_embedding = load_or_create("vision_embedding.pt", (1, 999, 1152), torch.bfloat16)
-    tgt_sizes = load_or_create("tgt_sizes.pt", (1, 2), torch.int32)
+    vision_embedding = create_tensor((1, 999, 1152), torch.bfloat16)
+    tgt_sizes = create_tensor((1, 2), torch.int32)
 
     resampler = model.resampler
     resampler_out = resampler(vision_embedding, tgt_sizes)
