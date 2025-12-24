@@ -383,7 +383,7 @@ class GroupNormArgs(ModuleArgs):
         return super().__repr__()
 
 
-def infer_ttnn_module_args(*, model, run_model, device):
+def infer_ttnn_module_args(*, model, run_model, device, absolute_name=False):
     if run_model is None:
         return None
 
@@ -398,7 +398,10 @@ def infer_ttnn_module_args(*, model, run_model, device):
             attributes = graph.nodes[node]
             operation = attributes["operation"]
             if isinstance(operation, ttnn.tracer.TorchModule):
-                *_, module_name = operation.module.__ttnn_tracer_name__.split(".")
+                if absolute_name:
+                    module_name = operation.module.__ttnn_tracer_name__
+                else:
+                    *_, module_name = operation.module.__ttnn_tracer_name__.split(".")
                 (input_node, _, edge_data), *_ = graph.in_edges(node, data=True)
                 input_shape = graph.nodes[input_node]["shapes"][edge_data["source_output_index"]]
                 if isinstance(operation.module, torch.nn.Conv2d):

@@ -12,12 +12,13 @@ from models.experimental.transfuser.reference.config import GlobalConfig
 from models.experimental.transfuser.reference.transfuser_backbone import TransfuserBackbone
 from models.experimental.transfuser.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from ttnn.model_preprocessing import infer_ttnn_module_args as infer_ttnn_module_args_torch
-from models.experimental.transfuser.tests.test_gpt import create_gpt_preprocessor
+from models.experimental.transfuser.tests.pcc.test_gpt import create_gpt_preprocessor
 from models.experimental.transfuser.tt.transfuser_backbone import TtTransfuserBackbone
 from ttnn.model_preprocessing import (
     preprocess_model_parameters,
 )
 from tests.ttnn.utils_for_testing import check_with_pcc
+from models.experimental.transfuser.resources.transfuser_checkpoint import ensure_transfuser_checkpoint_2022
 
 
 def fix_and_filter_checkpoint_keys(
@@ -169,7 +170,7 @@ class TransfuserBackboneInfra:
             use_velocity=self.use_velocity,
         )
         torch_model.eval()
-        checkpoint_path = "model_seed1_39.pth"
+        checkpoint_path = ensure_transfuser_checkpoint_2022()
         modified_state_dict = fix_and_filter_checkpoint_keys(
             checkpoint_path=checkpoint_path,
             target_prefix="module._model.",

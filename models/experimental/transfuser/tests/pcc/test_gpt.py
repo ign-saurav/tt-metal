@@ -13,7 +13,7 @@ from models.experimental.transfuser.reference.config import GlobalConfig
 from models.experimental.transfuser.reference.gpt import GPT
 from models.experimental.transfuser.tt.gpt import TTGpt
 
-from models.experimental.transfuser.tests.test_gpt_block import create_gpt_block_preprocessor
+from models.experimental.transfuser.tests.pcc.test_gpt_block import create_gpt_block_preprocessor
 
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_weight
 from models.common.utility_functions import (
