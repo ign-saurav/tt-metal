@@ -1,37 +1,17 @@
 import ttnn
-import json
-import warnings
 import torch
 import pytest
-import os
 
 from loguru import logger
 
-# Suppress accelerate warnings about unused weights
-warnings.filterwarnings("ignore", message="Some weights of the model checkpoint", category=UserWarning)
-from models.experimental.miniCPMo.reference.modeling_minicpmo import MiniCPMO
-from models.experimental.miniCPMo.reference.configuration_minicpm import MiniCPMOConfig
+from transformers import AutoModel
 
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
 from models.experimental.miniCPMo.tt.tt_resampler import TTMultiheadAttention
 
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_bias, preprocess_linear_weight
 
-from models.experimental.miniCPMo.tt.tt_resampler import TTMultiheadAttention
-from models.common.utility_functions import (
-    tt2torch_tensor,
-)
+from models.common.utility_functions import tt2torch_tensor
 from tests.ttnn.utils_for_testing import check_with_pcc
-
-
-def load_or_randn(path, shape):
-    if os.path.exists(path):
-        print(f"Loading real input from : {path}")
-        return torch.load(path)
-    else:
-        print(f"File not found, creating random tensor for: {path}")
-        print("Expect Drop in PCC")
-        return torch.randn(shape, dtype=torch.bfloat16)
 
 
 def create_self_attn_preprocessor(device, weight_dtype=ttnn.bfloat16):
@@ -75,46 +55,32 @@ def create_self_attn_preprocessor(device, weight_dtype=ttnn.bfloat16):
 @pytest.mark.parametrize("input_dtype", [ttnn.bfloat16])
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
 def test_self_attn(device, input_dtype, weight_dtype):
-    # Load config directly from local JSON file
-    config_path = "models/experimental/miniCPMo/reference/config.json"
-    with open(config_path, "r") as f:
-        config_dict = json.load(f)
+    model_name = "openbmb/MiniCPM-o-2_6"
+    logger.info(f"Loading model from HuggingFace: {model_name}")
 
-    config = MiniCPMOConfig.from_dict(
-        config_dict,
+    model = AutoModel.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        attn_implementation="sdpa",
+        torch_dtype=torch.bfloat16,
         init_vision=True,
         init_audio=False,
         init_tts=False,
     )
 
-    print("Initializing MiniCPM-o model...")
-    # Initialize the model directly with the config
-    # with torch.device("meta"):
-    with init_empty_weights():
-        model = MiniCPMO(config)
-
-    # local_checkpoint_path = "/home/ubuntu/.cache/huggingface/hub/models--openbmb--MiniCPM-o-2_6/snapshots/509805e84db1c84f154034d71a21c4f2331e6e11"
-    local_checkpoint_path = "models/experimental/miniCPMo/reference/safetensors"
-    load_checkpoint_and_dispatch(
-        model,
-        local_checkpoint_path,
-        device_map="auto",
-        dtype=torch.bfloat16,
-    )
     # Set model to eval mode
     model = model.eval()
 
-    query = load_or_randn("attn_input_1.pt", (64, 1, 3584))
-    key = load_or_randn("attn_input_2.pt", (999, 1, 3584))
-    value = load_or_randn("attn_input_3.pt", (999, 1, 3584))
-    key_padding_mask = load_or_randn("attn_input_mask.pt", (1, 999))
+    query = torch.randn((64, 1, 3584), dtype=torch.bfloat16)
+    key = torch.randn((999, 1, 3584), dtype=torch.bfloat16)
+    value = torch.randn((999, 1, 3584), dtype=torch.bfloat16)
+    key_padding_mask = torch.zeros((1, 999), dtype=torch.bool)
 
     print(query.shape, key.shape, value.shape, key_padding_mask.shape)
     print(query.dtype, key.dtype, value.dtype, key_padding_mask.dtype)
     # Access the attention module and its parameters
-    attn_module = model.resampler.attn  # This is a MultiheadAttention instance
+    attn_module = model.resampler.attn
 
-    # mha_output, mha_weights = attn_module(query, key, value, key_padding_mask=key_padding_mask)
     mha_output = attn_module(query, key, value, key_padding_mask=key_padding_mask)
 
     # Get other attributes
@@ -124,8 +90,6 @@ def test_self_attn(device, input_dtype, weight_dtype):
     add_zero_attn = attn_module.add_zero_attn
     dropout = attn_module.dropout
     training = attn_module.training
-
-    print(f"embed_dim: {embed_dim}, num_heads: {num_heads}")
 
     tt_query = ttnn.from_torch(
         query, device=device, layout=ttnn.TILE_LAYOUT, dtype=input_dtype, memory_config=ttnn.DRAM_MEMORY_CONFIG
