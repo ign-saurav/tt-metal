@@ -56,7 +56,8 @@ class RetinaNetTestInfra:
             ]
         )
 
-        img = Image.open("models/experimental/retinanet/resources/dog_800x800.jpg").convert("RGB")
+        # img = Image.open("models/experimental/retinanet/resources/dog_800x800.jpg").convert("RGB")
+        img = Image.open("models/experimental/retinanet/resources/dog_512x512.jpg").convert("RGB")
         self.torch_input_tensor = preprocess(img).unsqueeze(0)
 
         # Get backbone features

@@ -1,15 +1,16 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
+
 import ttnn
 from typing import List, Optional
-from dataclasses import dataclass, replace
-from models.experimental.retinanet.tt.tt_regression_head import Conv2dNormActivation
-from models.experimental.retinanet.tt.utils import _create_conv_config_from_params
-from models.tt_cnn.tt.builder import TtConv2d
-from models.tt_cnn.tt.builder import (
-    AutoShardedStrategyConfiguration,
-    Conv2dConfiguration,
+from dataclasses import dataclass
+
+from models.experimental.retinanet.tt.utils import (
+    _create_conv_config_from_params,
+    override_conv_config,
+    Conv2dNormActivation,
 )
+from models.tt_cnn.tt.builder import TtConv2d, AutoShardedStrategyConfiguration
 
 
 @dataclass
@@ -29,45 +30,18 @@ class RetinaNetClassificationHeadOptimizer:
 
 retinanet_classification_head_optimizations = {
     "optimized": RetinaNetClassificationHeadOptimizer(
-        fpn0_conv_blocks={
-            "sharding_strategy": AutoShardedStrategyConfiguration(),
-        },
-        fpn0_final_conv={
-            "sharding_strategy": AutoShardedStrategyConfiguration(),
-        },
-        fpn1_conv_blocks={
-            "sharding_strategy": AutoShardedStrategyConfiguration(),
-        },
-        fpn1_final_conv={
-            "sharding_strategy": AutoShardedStrategyConfiguration(),
-        },
-        fpn2_conv_blocks={
-            "sharding_strategy": AutoShardedStrategyConfiguration(),
-        },
-        fpn2_final_conv={
-            "sharding_strategy": AutoShardedStrategyConfiguration(),
-        },
-        fpn3_conv_blocks={
-            "sharding_strategy": AutoShardedStrategyConfiguration(),
-        },
-        fpn3_final_conv={
-            "sharding_strategy": AutoShardedStrategyConfiguration(),
-        },
-        fpn4_conv_blocks={
-            "sharding_strategy": AutoShardedStrategyConfiguration(),
-        },
-        fpn4_final_conv={
-            "sharding_strategy": AutoShardedStrategyConfiguration(),
-        },
+        fpn0_conv_blocks={"sharding_strategy": AutoShardedStrategyConfiguration()},
+        fpn0_final_conv={"sharding_strategy": AutoShardedStrategyConfiguration()},
+        fpn1_conv_blocks={"sharding_strategy": AutoShardedStrategyConfiguration()},
+        fpn1_final_conv={"sharding_strategy": AutoShardedStrategyConfiguration()},
+        fpn2_conv_blocks={"sharding_strategy": AutoShardedStrategyConfiguration()},
+        fpn2_final_conv={"sharding_strategy": AutoShardedStrategyConfiguration()},
+        fpn3_conv_blocks={"sharding_strategy": AutoShardedStrategyConfiguration()},
+        fpn3_final_conv={"sharding_strategy": AutoShardedStrategyConfiguration()},
+        fpn4_conv_blocks={"sharding_strategy": AutoShardedStrategyConfiguration()},
+        fpn4_final_conv={"sharding_strategy": AutoShardedStrategyConfiguration()},
     ),
 }
-
-
-def override_conv_config(config, override_dict):
-    """Apply override dictionary to Conv2dConfiguration using dataclasses.replace"""
-    if not isinstance(config, Conv2dConfiguration):
-        return config
-    return replace(config, **override_dict)
 
 
 class TtnnRetinaNetClassificationHead:
@@ -99,8 +73,6 @@ class TtnnRetinaNetClassificationHead:
             device.arch(),
             math_fidelity=model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
             math_approx_mode=model_config.get("MATH_APPROX_MODE", False),
-            fp32_dest_acc_en=model_config.get("FP32_DEST_ACC_EN", True),
-            packer_l1_acc=model_config.get("PACKER_L1_ACC", False),
         )
 
         self.grid_size = ttnn.CoreGrid(y=8, x=8)
@@ -116,7 +88,7 @@ class TtnnRetinaNetClassificationHead:
         }
 
         self.conv_blocks_by_fpn = {}
-        self.final_conv_configs = {}
+        self.final_convs_by_fpn = {}
 
         for fpn_idx in range(5):
             conv_opt, final_opt = self.fpn_optimizer_configs[fpn_idx]
@@ -142,11 +114,30 @@ class TtnnRetinaNetClassificationHead:
                     model_config=self.model_config,
                     compute_config=self.compute_config,
                     conv_config=conv_opt,
+                    batch_size=self.batch_size,
+                    input_height=H,
+                    input_width=W,
                 )
                 conv_blocks.append(conv_block)
 
             self.conv_blocks_by_fpn[fpn_idx] = conv_blocks
-            self.final_conv_configs[fpn_idx] = final_opt
+
+            conv_final_config = _create_conv_config_from_params(
+                input_height=H,
+                input_width=W,
+                in_channels=self.in_channels,
+                out_channels=self.num_anchors * self.num_classes,
+                kernel_size=(3, 3),
+                batch_size=self.batch_size,
+                parameters=self.parameters["cls_logits"],
+                stride=(1, 1),
+                padding=(1, 1),
+            )
+
+            if final_opt:
+                conv_final_config = override_conv_config(conv_final_config, final_opt)
+
+            self.final_convs_by_fpn[fpn_idx] = TtConv2d(conv_final_config, self.device)
 
     def forward(
         self,
@@ -163,36 +154,13 @@ class TtnnRetinaNetClassificationHead:
         all_cls_logits = []
         for fpn_idx, (feature_map, (H, W)) in enumerate(zip(feature_maps, current_input_shapes)):
             conv_blocks = self.conv_blocks_by_fpn[fpn_idx]
-            final_conv_optimizer = self.final_conv_configs[fpn_idx]
+            conv_final = self.final_convs_by_fpn[fpn_idx]
 
             x = feature_map
-            for conv_idx, conv_block in enumerate(conv_blocks):
+            for conv_block in conv_blocks:
                 x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
-                x = conv_block(
-                    x,
-                    batch_size=current_batch_size,
-                    input_height=H,
-                    input_width=W,
-                    fpn_level=fpn_idx,
-                    conv_block_idx=conv_idx,
-                )
+                x = conv_block(x)
 
-            conv_final_config = _create_conv_config_from_params(
-                input_height=H,
-                input_width=W,
-                in_channels=self.in_channels,
-                out_channels=self.num_anchors * self.num_classes,
-                kernel_size=(3, 3),
-                batch_size=current_batch_size,
-                parameters=self.parameters["cls_logits"],
-                stride=(1, 1),
-                padding=(1, 1),
-            )
-
-            if final_conv_optimizer:
-                conv_final_config = override_conv_config(conv_final_config, final_conv_optimizer)
-
-            conv_final = TtConv2d(conv_final_config, self.device)
             cls_logits, [H_out, W_out] = conv_final(x, return_output_dim=True)
 
             N, _, _, _ = cls_logits.shape

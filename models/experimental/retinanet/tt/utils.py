@@ -1,22 +1,22 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import torch
 import ttnn
+import tt_lib.fallback_ops as fallback_ops
+from dataclasses import replace
+from typing import Optional
 
-import ttnn
 from models.tt_cnn.tt.builder import (
+    TtConv2d,
     Conv2dConfiguration,
     MaxPool2dConfiguration,
     AutoShardedStrategyConfiguration,
     L1FullSliceStrategyConfiguration,
 )
-
-from models.tt_cnn.tt.builder import (
-    AutoShardedStrategyConfiguration,
-)
 from ttnn.dot_access import make_dot_access_dict
 from ttnn.torch_tracer import trace, visualize
-import torch
 
 conv_config = {
     "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
@@ -41,12 +41,137 @@ class MaxPoolConfiguration(MaxPool2dConfiguration):
         )
 
 
+def override_conv_config(config, override_dict):
+    """Apply override dictionary to Conv2dConfiguration using dataclasses.replace"""
+    if not isinstance(config, Conv2dConfiguration):
+        return config
+    return replace(config, **override_dict)
+
+
 def post_conv_reshape(x, out_height=1, out_width=1):
     """Convert sharded conv output to [N,1,1,C] tile layout for SE block."""
     x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
     x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT)
     x = ttnn.reshape(x, (x.shape[0], out_height, out_width, x.shape[3]))
     return ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
+
+
+class Conv2dNormActivation:
+    """Conv2d followed by GroupNorm and ReLU activation - reusable building block."""
+
+    def __init__(
+        self,
+        parameters: dict,
+        device: ttnn.Device,
+        in_channels: int = 256,
+        out_channels: int = 256,
+        kernel_size: tuple = (3, 3),
+        stride: tuple = (1, 1),
+        padding: tuple = (1, 1),
+        num_groups: int = 32,
+        grid_size: Optional[ttnn.CoreGrid] = None,
+        input_mask: Optional[ttnn.Tensor] = None,
+        model_config: dict = None,
+        compute_config: Optional[ttnn.DeviceComputeKernelConfig] = None,
+        conv_config: dict = None,
+        batch_size: int = 1,
+        input_height: int = 64,
+        input_width: int = 64,
+    ):
+        self.device = device
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.kernel_size = kernel_size
+        self.stride = stride
+        self.padding = padding
+        self.num_groups = num_groups
+        self.model_config = model_config
+        self.compute_config = compute_config
+        self.input_height = input_height
+        self.input_width = input_width
+
+        self.conv_weight = parameters["weight"]
+        self.conv_bias = parameters["bias"]
+        self.norm_weight = parameters["norm_weight"]
+        self.norm_bias = parameters["norm_bias"]
+
+        self.fallback_on_groupnorm = os.environ.get("FALLBACK_ON_GROUPNORM", "1") == "1"
+        self.grid_size = grid_size if grid_size is not None else ttnn.CoreGrid(y=8, x=8)
+        self.input_mask = input_mask
+
+        base_conv_config = _create_conv_config_from_params(
+            input_height=input_height,
+            input_width=input_width,
+            in_channels=self.in_channels,
+            out_channels=self.out_channels,
+            kernel_size=self.kernel_size,
+            batch_size=batch_size,
+            parameters=parameters,
+            stride=self.stride,
+            padding=self.padding,
+        )
+
+        if conv_config:
+            self.conv_config = override_conv_config(base_conv_config, conv_config)
+        else:
+            self.conv_config = base_conv_config
+
+        self.conv = TtConv2d(self.conv_config, self.device)
+
+    def __call__(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        x, [H_out, W_out] = self.conv(x, return_output_dim=True)
+        N, H_out, W_out, C = x.shape
+
+        if self.fallback_on_groupnorm:
+            if ttnn.is_sharded(x):
+                x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+
+            x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
+            x = ttnn.reshape(x, (N, self.input_height, self.input_width, C))
+            x = ttnn.permute(x, (0, 3, 1, 2))
+
+            x = fallback_ops.group_norm(
+                x,
+                num_groups=self.num_groups,
+                weight=self.norm_weight,
+                bias=self.norm_bias,
+            )
+            x = x.to(self.device)
+            x = ttnn.permute(x, (0, 2, 3, 1))
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+
+        else:
+            spatial_size = H_out * W_out
+            required_size = ((spatial_size + self.grid_size.y * 32 - 1) // (self.grid_size.y * 32)) * (
+                self.grid_size.y * 32
+            )
+
+            if spatial_size != required_size:
+                pad_amount = required_size - spatial_size
+                x_flat = ttnn.reshape(x, (N, 1, spatial_size, C))
+                x_padded = ttnn.pad(x_flat, padding=((0, 0), (0, 0), (0, pad_amount), (0, 0)), value=0.0)
+            else:
+                x_padded = ttnn.reshape(x, (N, 1, spatial_size, C))
+
+            x_normalized = ttnn.group_norm(
+                x_padded,
+                num_groups=self.num_groups,
+                input_mask=self.input_mask,
+                weight=self.norm_weight,
+                bias=self.norm_bias,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                core_grid=self.grid_size,
+                inplace=False,
+                compute_kernel_config=self.compute_config,
+            )
+
+            if spatial_size != required_size:
+                x_normalized = x_normalized[:, :, :spatial_size, :]
+
+            x = ttnn.reshape(x_normalized, (N, self.input_height, self.input_width, C))
+
+        x = ttnn.relu(x)
+        return x
 
 
 # Helper function to create Conv2dConfiguration from parameters
@@ -68,6 +193,8 @@ def _create_conv_config_from_params(
     weights_dtype=None,
     output_dtype=None,
     math_fidelity=None,
+    fp32_dest_acc_en=False,
+    packer_l1_acc=False,
     sharding_strategy=AutoShardedStrategyConfiguration(),
 ) -> Conv2dConfiguration:
     """
@@ -92,6 +219,8 @@ def _create_conv_config_from_params(
         weights_dtype=weights_dtype or conv_config["WEIGHTS_DTYPE"],
         output_dtype=output_dtype or conv_config["ACTIVATIONS_DTYPE"],
         math_fidelity=math_fidelity or conv_config["MATH_FIDELITY"],
+        fp32_dest_acc_en=fp32_dest_acc_en,
+        packer_l1_acc=packer_l1_acc,
         sharding_strategy=sharding_strategy,
         slice_strategy=L1FullSliceStrategyConfiguration(),
         enable_act_double_buffer=True,
