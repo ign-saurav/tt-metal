@@ -1,19 +1,14 @@
 import ttnn
 import pytest
-import json
-import librosa
 import torch
-from models.experimental.miniCPMo.reference.modeling_minicpmo import MiniCPMO
-from models.experimental.miniCPMo.reference.configuration_minicpm import MiniCPMOConfig
 
+from transformers import AutoModel
 from loguru import logger
 from models.common.utility_functions import (
     tt2torch_tensor,
 )
 from tests.ttnn.utils_for_testing import check_with_pcc
 
-from accelerate import init_empty_weights, load_checkpoint_and_dispatch
-from models.experimental.miniCPMo.reference.tokenization_minicpmo_fast import MiniCPMOTokenizerFast
 from models.experimental.miniCPMo.tt.ttnn_whisper_encoder import TtnnWhisperEncoder
 
 
@@ -21,73 +16,34 @@ from models.experimental.miniCPMo.tt.ttnn_whisper_encoder import TtnnWhisperEnco
 @pytest.mark.parametrize("input_dtype", [ttnn.bfloat16])
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
 def test_ttnn_whisper_encoder(device, input_dtype, weight_dtype):
-    # Load config directly from local JSON file
-    config_path = "models/experimental/miniCPMo/reference/config.json"
-    with open(config_path, "r") as f:
-        config_dict = json.load(f)
+    model_name = "openbmb/MiniCPM-o-2_6"
+    logger.info(f"Loading model from HuggingFace: {model_name}")
 
-    config = MiniCPMOConfig.from_dict(
-        config_dict,
+    model = AutoModel.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        attn_implementation="sdpa",
+        torch_dtype=torch.bfloat16,
         init_vision=False,
         init_audio=True,
         init_tts=False,
     )
-
-    print("Initializing MiniCPM-o model...")
-    # Initialize the model directly with the config
-    # with torch.device("meta"):
-    with init_empty_weights():
-        model = MiniCPMO(config)
-
-    # local_checkpoint_path = "/home/ubuntu/.cache/huggingface/hub/models--openbmb--MiniCPM-o-2_6/snapshots/509805e84db1c84f154034d71a21c4f2331e6e11"
-    local_checkpoint_path = "models/experimental/miniCPMo/reference/safetensors"
-    load_checkpoint_and_dispatch(
-        model,
-        local_checkpoint_path,
-        device_map="auto",
-        dtype=torch.bfloat16,
-    )
-    # Set model to eval mode
     model = model.eval()
-
-    # Load tokenizer directly from local reference folder files
-    tokenizer_path = "models/experimental/miniCPMo/reference"
-    tokenizer = MiniCPMOTokenizerFast(tokenizer_file=f"{tokenizer_path}/tokenizer.json")
-
-    task_prompt = (
-        "Please listen to the audio snippet carefully and transcribe the content." + "\n"
-    )  # can change to other prompts.
-    audio_input, _ = librosa.load("audio_understanding.mp3", sr=16000, mono=True)  # load the audio to be captioned
-
-    msgs = [{"role": "user", "content": [task_prompt, audio_input]}]
-
-    # res = model.chat(
-    #     msgs=msgs,
-    #     tokenizer=tokenizer,
-    #     sampling=True,
-    #     max_new_tokens=128,
-    #     use_tts_template=False,
-    #     generate_audio=False,
-    #     # temperature=0.3,
-    #     # output_audio_path='result_audio_understanding.wav',
-    # )
-    # print(res)
 
     apm = model.apm
     apm_state_dict = apm.state_dict()
-    print(f"APM state dict has {len(apm_state_dict)} parameters")
 
-    wavforms = torch.load("wavforms.pt")
-    audio_attention_mask = torch.load("audio_attention_mask.pt")
+    wavforms = torch.rand(1, 80, 1000) * 2 - 1
+    audio_attention_mask = torch.full((1, 1, 500, 500), float("-inf"), dtype=torch.bfloat16)
+    audio_attention_mask = torch.triu(audio_attention_mask, diagonal=1)
     apm.audio_encoder_layer = -1
     audio_states = apm(wavforms, output_hidden_states=True, attention_mask=audio_attention_mask).hidden_states[
         apm.audio_encoder_layer
     ]
-    print(audio_states.shape)
 
     ttnn_model = TtnnWhisperEncoder(
         mesh_device=device,
-        config=config.audio_config.to_dict(),
+        config=model.config.audio_config.to_dict(),
     )
 
     # Load weights into TTNN model

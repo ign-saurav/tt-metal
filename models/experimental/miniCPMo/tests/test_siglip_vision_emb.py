@@ -79,9 +79,6 @@ def test_siglip_vision_embedding(device, input_dtype, weight_dtype):
     patch_attn_mask = torch.ones((1, 999), dtype=torch.bool)
     tgt_sizes = create_tensor((1, 2), torch.int32)
 
-    import pdb
-
-    pdb.set_trace()
     embeddings_model = model.vpm.embeddings
     torch_output = embeddings_model.forward(all_pixel_values, patch_attn_mask, tgt_sizes)
 
