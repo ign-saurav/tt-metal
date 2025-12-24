@@ -17,14 +17,14 @@ The demo currently uses default pre-trained weights (RetinaNet_ResNet50_FPN_V2_W
 
 
 ## 🗂️ Repository Layout
-s
+
 | Directory | Purpose |
 |------------|----------|
 | `tt/` | Core Tenstorrent native modules of **Retinanet** |
 | `demo/` | Demo scripts and visualization |
 | `resources/` | Sample images for testing |
 | `tests/` | Validation(PCC) and Performance test scripts |
-| `runner/` | Standardized model execution framework (Work in-progress) |
+
 
 
 The `retinanet/` directory plugs into this structure, exposing inference, profiling, and test utilities consistent with other models in the repo.
@@ -46,7 +46,7 @@ This runs an end-to-end flow that:
 
   - Optionally compares results and saves artifacts.
 
-  - **Note**: GroupNorm in the head is set to fall back to the PyTorch implementation because the TTNN version resulted in lower PCC — around 0.97 for the regression head and 0.88 for the classification head. With the fallback enabled, the PCC improves to approximately 0.99. To disable this behavior, set **export FALLBACK_ON_GROUPNORM=0**
+  - **Note**: GroupNorm in the head is set to fall back to the PyTorch implementation because the TTNN version resulted in lower PCC — around 0.96 for the regression head and 0.91 for the classification head. With the fallback enabled, the PCC improves to approximately 0.99. To disable this behavior, set **export FALLBACK_ON_GROUPNORM=0**
 ### Performance
 
 ### Run Device Performance Test
@@ -54,7 +54,7 @@ This runs an end-to-end flow that:
 # Test full model performance
 pytest models/experimental/retinanet/tests/perf/test_perf.py
 ```
-- FPS is 35.75
+- FPS is 39.40
 ### Run the Demo
 ```bash
 # Process images from a directory

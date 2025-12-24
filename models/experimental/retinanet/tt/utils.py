@@ -48,14 +48,6 @@ def override_conv_config(config, override_dict):
     return replace(config, **override_dict)
 
 
-def post_conv_reshape(x, out_height=1, out_width=1):
-    """Convert sharded conv output to [N,1,1,C] tile layout for SE block."""
-    x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
-    x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT)
-    x = ttnn.reshape(x, (x.shape[0], out_height, out_width, x.shape[3]))
-    return ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
-
-
 class Conv2dNormActivation:
     """Conv2d followed by GroupNorm and ReLU activation - reusable building block."""
 
@@ -266,10 +258,6 @@ class TTUpsample:
         sent_to_dram=False,
         dtype=ttnn.bfloat8_b,
     ):
-        # Convert a **sharded** tensor (distributed across cores) into a single **interleaved** tensor, choosing the backing memory
-        # - DRAM: use when tensors are large or when later ops expect DRAM residency.
-        # - L1  : fastest on-chip memory; use when the tensor fits and you’ll run
-        #         compute-heavy kernels immediately after.
         if sent_to_dram:
             input_tensor = ttnn.sharded_to_interleaved(input_tensor, ttnn.DRAM_MEMORY_CONFIG)
         else:
@@ -345,17 +333,13 @@ def infer_ttnn_module_args(*, model, run_model, device):
     if run_model is None:
         return None
 
-    # ------------------------------------------------------------------
     # Run model under TTNN tracing
-    # ------------------------------------------------------------------
     with trace():
         output = run_model(model)
 
     visualize(output, file_name=ttnn.CONFIG.tmp_dir / "model_graph.svg")
 
-    # ------------------------------------------------------------------
     # Helper: insert value into nested dict using module path
-    # ------------------------------------------------------------------
     def insert_nested(d, path, value):
         for key in path[:-1]:
             key = int(key) if isinstance(key, str) and key.isdigit() else key
@@ -364,9 +348,7 @@ def infer_ttnn_module_args(*, model, run_model, device):
         last = int(last) if isinstance(last, str) and last.isdigit() else last
         d[last] = value
 
-    # ------------------------------------------------------------------
     # Recursive graph walk
-    # ------------------------------------------------------------------
     def _infer_ttnn_module_args(graph):
         ttnn_module_args = {}
 
@@ -377,10 +359,8 @@ def infer_ttnn_module_args(*, model, run_model, device):
             if not isinstance(operation, ttnn.tracer.TorchModule):
                 continue
 
-            # Full hierarchical module path
             module_path = operation.module.__ttnn_tracer_name__.split(".")
 
-            # Infer input shape (assumes single input edge)
             in_edges = list(graph.in_edges(node, data=True))
             if not in_edges:
                 continue
@@ -390,9 +370,7 @@ def infer_ttnn_module_args(*, model, run_model, device):
 
             module = operation.module
 
-            # ----------------------------------------------------------
             # Conv2d
-            # ----------------------------------------------------------
             if isinstance(module, torch.nn.Conv2d):
                 insert_nested(
                     ttnn_module_args,
@@ -419,9 +397,7 @@ def infer_ttnn_module_args(*, model, run_model, device):
                     ),
                 )
 
-            # ----------------------------------------------------------
             # ConvTranspose2d
-            # ----------------------------------------------------------
             elif isinstance(module, torch.nn.ConvTranspose2d):
                 insert_nested(
                     ttnn_module_args,
@@ -449,9 +425,7 @@ def infer_ttnn_module_args(*, model, run_model, device):
                     ),
                 )
 
-            # ----------------------------------------------------------
             # MaxPool2d
-            # ----------------------------------------------------------
             elif isinstance(module, torch.nn.MaxPool2d):
                 insert_nested(
                     ttnn_module_args,
@@ -469,9 +443,7 @@ def infer_ttnn_module_args(*, model, run_model, device):
                     ),
                 )
 
-            # ----------------------------------------------------------
             # GroupNorm
-            # ----------------------------------------------------------
             elif isinstance(module, torch.nn.GroupNorm):
                 insert_nested(
                     ttnn_module_args,
@@ -488,9 +460,6 @@ def infer_ttnn_module_args(*, model, run_model, device):
                     ),
                 )
 
-            # ----------------------------------------------------------
-            # Container / composite module → recurse
-            # ----------------------------------------------------------
             else:
                 nested = _infer_ttnn_module_args(operation.graph)
                 if nested:
@@ -502,9 +471,6 @@ def infer_ttnn_module_args(*, model, run_model, device):
 
         return make_dot_access_dict(ttnn_module_args, ignore_types=(ModuleArgs,))
 
-    # ------------------------------------------------------------------
-    # Kick off inference from traced graph
-    # ------------------------------------------------------------------
     full_args = _infer_ttnn_module_args(ttnn.tracer.get_graph(output))
 
     # Root module is stored under empty name ""
