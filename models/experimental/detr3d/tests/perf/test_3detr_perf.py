@@ -15,6 +15,9 @@ from models.tt_cnn.tt.pipeline import (
     create_pipeline_from_config,
     get_memory_config_for_persistent_dram_tensor,
 )
+import math
+import torch
+import ttnn
 
 
 def run_model_pipeline(device, test_infra, num_measurement_iterations):
@@ -25,17 +28,20 @@ def run_model_pipeline(device, test_infra, num_measurement_iterations):
     # Use point_clouds as the main input tensor for pipeline
     tt_inputs_host = ttnn_dict["point_clouds"]
 
+    # >>> FIX: ensure HOST tensor
+    assert tt_inputs_host.storage_type() == ttnn.StorageType.HOST
+
+    # >>> FIX: pad last dimension 3 -> 32
+    torch_pc = ttnn.to_torch(tt_inputs_host)
+    if torch_pc.shape[-1] < 32:
+        pad_w = 32 - torch_pc.shape[-1]
+        torch_pc = torch.nn.functional.pad(torch_pc, (0, pad_w, 0, 0, 0, 0), value=0.0)
+
     # Create proper sharded DRAM memory config for point cloud input
-    dram_input_mem_config = get_memory_config_for_persistent_dram_tensor(
-        tt_inputs_host.shape, ttnn.TensorMemoryLayout.HEIGHT_SHARDED, device.dram_grid_size()
-    )
-
-    # Get device grid size and create appropriate core grid
+    # >>> FIX: defer creation until after padding
     device_grid_size = device.compute_with_storage_grid_size()
-    import pdb
 
-    pdb.set_trace()
-    height_dim = tt_inputs_host.shape[-2]
+    height_dim = torch_pc.shape[-2]
 
     # Find optimal core grid that fits device and divides height evenly
     max_cores = device_grid_size.x * device_grid_size.y
@@ -59,8 +65,30 @@ def run_model_pipeline(device, test_infra, num_measurement_iterations):
 
     input_l1_core_grid = ttnn.CoreGrid(x=core_grid_x, y=core_grid_y)
 
+    # >>> FIX: pad HEIGHT so num_shards <= num_cores
+    shard_height = math.ceil(height_dim / input_l1_core_grid.num_cores)
+    padded_height = shard_height * input_l1_core_grid.num_cores
+    pad_h = padded_height - height_dim
+    if pad_h > 0:
+        torch_pc = torch.nn.functional.pad(torch_pc, (0, 0, 0, pad_h, 0, 0), value=0.0)
+
+    # >>> FIX: recreate TT tensor AFTER padding
+    tt_inputs_host = ttnn.from_torch(
+        torch_pc,
+        dtype=ttnn.bfloat16,
+        layout=ttnn.Layout.ROW_MAJOR,
+    )
+    ttnn_dict["point_clouds"] = tt_inputs_host
+    height_dim = tt_inputs_host.shape[-2]
+
+    dram_input_mem_config = get_memory_config_for_persistent_dram_tensor(
+        tt_inputs_host.shape,
+        ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+        device.dram_grid_size(),
+    )
+
     l1_input_mem_config = ttnn.create_sharded_memory_config(
-        shape=(height_dim // input_l1_core_grid.num_cores, tt_inputs_host.shape[-1]),
+        shape=(shard_height, tt_inputs_host.shape[-1]),
         core_grid=input_l1_core_grid,
         strategy=ttnn.ShardStrategy.HEIGHT,
         orientation=ttnn.ShardOrientation.ROW_MAJOR,
@@ -88,6 +116,7 @@ def run_model_pipeline(device, test_infra, num_measurement_iterations):
 
     logger.info(f"Running DETR3D warmup with input shape {list(tt_inputs_host.shape)}")
     logger.info(f"Using core grid: {input_l1_core_grid.x}x{input_l1_core_grid.y}")
+
     profiler.start("compile")
     pipeline.compile(tt_inputs_host)
     profiler.end("compile")
@@ -96,8 +125,10 @@ def run_model_pipeline(device, test_infra, num_measurement_iterations):
     pipeline.preallocate_output_tensors_on_host(num_measurement_iterations)
 
     logger.info(
-        f"Starting DETR3D performance pipeline for {num_measurement_iterations} iterations with batch_size={test_infra.batch_size} and num_devices={test_infra.num_devices}"
+        f"Starting DETR3D performance pipeline for {num_measurement_iterations} iterations "
+        f"with batch_size={test_infra.batch_size} and num_devices={test_infra.num_devices}"
     )
+
     profiler.start("run_model_pipeline_2cqs")
     outputs = pipeline.enqueue(host_inputs).pop_all()
     profiler.end("run_model_pipeline_2cqs")

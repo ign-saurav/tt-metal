@@ -147,9 +147,9 @@ class TtnnModel3DETR(LightweightModule):
         return torch_xyz
 
     def _break_up_pc_ttnn(self, torch_pc):
-        # pc may contain color/normals.
+        # Safe host-side slice
+        torch_xyz = torch_pc[..., :3]
 
-        torch_xyz = torch_pc[..., 0:3]
         return torch_xyz
 
     def run_encoder(self, torch_point_clouds):

@@ -324,7 +324,7 @@ class TtnnFurthestPointSampling(LightweightModule):
             centroid_list.append(farthest)
 
             # Calculate squared distances to current centroid
-            diff = points - centroid
+            diff = points[..., :3] - centroid
             diff = ttnn.to_layout(diff, ttnn.TILE_LAYOUT)
             dist = ttnn.sum(ttnn.pow(diff, 2), dim=2)
 
@@ -421,6 +421,11 @@ class TtnnPointnetSAModuleVotes(LightweightModule):
                     dtype=ttnn.bfloat16,
                     device=self.device,
                 )
+
+            xyz = ttnn.to_memory_config(
+                xyz,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
             xyz_flipped = ttnn.permute(xyz, (0, 2, 1))
 
         if inds is None:
