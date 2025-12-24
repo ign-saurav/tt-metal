@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from models.experimental.retinanet.tt.tt_backbone import TTBackbone
-from models.experimental.retinanet.tt.tt_regression_head import TtnnRetinaNetRegressionHead
-from models.experimental.retinanet.tt.tt_classification_head import TtnnRetinaNetClassificationHead
+from models.experimental.retinanet.tt.tt_reg_head import TtnnRetinaNetRegressionHead
+from models.experimental.retinanet.tt.tt_cls_head import TtnnRetinaNetClassificationHead
 
 
 class TTRetinaNet:

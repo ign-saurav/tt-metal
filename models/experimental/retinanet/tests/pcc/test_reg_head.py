@@ -8,14 +8,14 @@ from loguru import logger
 from torchvision.models.detection import retinanet_resnet50_fpn_v2, RetinaNet_ResNet50_FPN_V2_Weights
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
-from models.experimental.retinanet.tt.tt_regression_head import TtnnRetinaNetRegressionHead
+from models.experimental.retinanet.tt.tt_reg_head import TtnnRetinaNetRegressionHead
 from models.experimental.retinanet.tt.custom_preprocessor import create_custom_mesh_preprocessor
 from ttnn.model_preprocessing import preprocess_model_parameters
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
 @pytest.mark.parametrize("pcc", [0.99])
-def test_retinanet_v2_regression_head_ttnn_5_fpn_with_real_features(device, pcc, reset_seeds):
+def test__regression_head(device, pcc, reset_seeds):
     torch.manual_seed(0)
 
     torch_model = retinanet_resnet50_fpn_v2(weights=RetinaNet_ResNet50_FPN_V2_Weights.DEFAULT)

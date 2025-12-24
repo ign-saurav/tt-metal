@@ -7,14 +7,14 @@ import ttnn
 from torchvision.models.detection import retinanet_resnet50_fpn_v2, RetinaNet_ResNet50_FPN_V2_Weights
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from loguru import logger
-from models.experimental.retinanet.tt.tt_classification_head import TtnnRetinaNetClassificationHead
+from models.experimental.retinanet.tt.tt_cls_head import TtnnRetinaNetClassificationHead
 from models.experimental.retinanet.tt.custom_preprocessor import create_custom_mesh_preprocessor
 from ttnn.model_preprocessing import preprocess_model_parameters
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
 @pytest.mark.parametrize("pcc", [0.99])
-def test_classification_head_full(device, pcc, reset_seeds):
+def test_classification_head(device, pcc, reset_seeds):
     """Test TTNN classification head implementation with 5 FPN levels using real or random features."""
     torch.manual_seed(0)
 
