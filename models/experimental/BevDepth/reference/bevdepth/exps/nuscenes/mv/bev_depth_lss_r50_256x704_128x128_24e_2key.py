@@ -45,7 +45,14 @@ class BEVDepthLightningModel(BaseBEVDepthLightningModel):
             checkpoint_path = os.path.join(file_dir, "checkpoints", "bev_depth_lss_r50_256x704_128x128_24e_2key.pth")
 
         if not os.path.exists(checkpoint_path):
-            raise FileNotFoundError(f"Checkpoint file not found at: {checkpoint_path}")
+            # Fallback to downloaded weights location if default path doesn't exist
+            downloaded_weights_path = "/tmp/bevdepth_weights.pth"
+            if os.path.exists(downloaded_weights_path):
+                checkpoint_path = downloaded_weights_path
+            else:
+                raise FileNotFoundError(
+                    f"Checkpoint file not found at: {checkpoint_path} (also checked {downloaded_weights_path})"
+                )
 
         # Load checkpoint
         checkpoint = torch.load(checkpoint_path, map_location=map_location)

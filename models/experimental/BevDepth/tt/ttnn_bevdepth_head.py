@@ -1,3 +1,4 @@
+import os
 import ttnn
 import torch
 import numpy as np
@@ -622,10 +623,38 @@ class TtBEVDepthHead:
         self.trunk = TtResNet(device, trunk_params, model_config)
 
         # Neck
-        checkpoint_path = (
-            checkpoint_path
-            or "models/experimental/BevDepth/reference/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth"
-        )
+        if checkpoint_path is None:
+            # Try to resolve relative to project root
+            # This file is at: models/experimental/BevDepth/tt/ttnn_bevdepth_head.py
+            # Need to go up to project root, then to checkpoints
+            file_dir = os.path.dirname(__file__)
+            # Go up: tt -> BevDepth -> experimental -> models -> (project root)
+            for _ in range(4):
+                file_dir = os.path.dirname(file_dir)
+            default_path = os.path.join(
+                file_dir,
+                "models",
+                "experimental",
+                "BevDepth",
+                "reference",
+                "checkpoints",
+                "bev_depth_lss_r50_256x704_128x128_24e_2key.pth",
+            )
+
+            # Check if default path exists, otherwise try downloaded weights
+            if os.path.exists(default_path):
+                checkpoint_path = default_path
+            else:
+                # Fallback to downloaded weights location
+                downloaded_path = "/tmp/bevdepth_weights.pth"
+                if os.path.exists(downloaded_path):
+                    checkpoint_path = downloaded_path
+                else:
+                    raise FileNotFoundError(f"Checkpoint file not found. Tried: {default_path} and {downloaded_path}")
+
+        if not os.path.exists(checkpoint_path):
+            raise FileNotFoundError(f"Checkpoint file not found at: {checkpoint_path}")
+
         state_dict = torch.load(checkpoint_path, map_location="cpu")
         if "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
