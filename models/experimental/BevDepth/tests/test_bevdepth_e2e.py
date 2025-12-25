@@ -319,12 +319,21 @@ def test_bevdepth_e2e(device):
             # Reference: ref_output[task_idx] is a list, [0] gets first batch
             ref_tensor = ref_output[task_idx][0][key]
             ttnn_tensor, _ = ttnn_output[task_idx][key]
-            ttnn_tensor_torch = ttnn.to_torch(ttnn_tensor)
+            ttnn_tensor_torch = ttnn.to_torch(ttnn_tensor, device=device)
 
             # Reshape from NHWC to NCHW for comparison
-            ttnn_tensor_torch = ttnn_tensor_torch.reshape(
-                ref_tensor.shape[0], ref_tensor.shape[2], ref_tensor.shape[3], ref_tensor.shape[1]
-            ).permute(0, 3, 1, 2)
+            # Use the same logic as test_bevdepth_head.py for consistency
+            # Expected shape is (N, C, H, W), TTNN output is (N, H, W, C)
+            expected_shape = ref_tensor.shape
+            ttnn_tensor_torch = torch.reshape(
+                ttnn_tensor_torch,
+                (expected_shape[0], expected_shape[2], expected_shape[3], expected_shape[1]),
+            )
+            ttnn_tensor_torch = torch.permute(ttnn_tensor_torch, (0, 3, 1, 2))
+
+            # Ensure same dtype for comparison (use float32 for highest precision)
+            ref_tensor = ref_tensor.float()
+            ttnn_tensor_torch = ttnn_tensor_torch.float()
 
             pcc_result = comp_pcc(ref_tensor, ttnn_tensor_torch)
             pcc_value = pcc_result[1] if isinstance(pcc_result, tuple) else pcc_result
@@ -333,7 +342,18 @@ def test_bevdepth_e2e(device):
             pcc_threshold = 0.97
             logger.info(f"  Head {task_idx}, key '{key}': PCC = {pcc_value:.10f}")
 
+            # Debug info for failing cases
             if pcc_value < pcc_threshold:
+                diff = ref_tensor - ttnn_tensor_torch
+                abs_diff = torch.abs(diff)
+                max_diff = abs_diff.max().item()
+                mean_diff = abs_diff.mean().item()
+                ref_range = ref_tensor.max().item() - ref_tensor.min().item()
+                logger.warning(
+                    f"  DEBUG task{task_idx}.{key}: max_abs_diff={max_diff:.6f}, "
+                    f"mean_abs_diff={mean_diff:.6f}, ref_range={ref_range:.6f}, "
+                    f"ref_shape={ref_tensor.shape}, tt_shape={ttnn_tensor_torch.shape}"
+                )
                 failed_outputs.append(f"task{task_idx}.{key}: {pcc_value:.6f}")
 
     if failed_outputs:
