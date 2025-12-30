@@ -25,6 +25,21 @@ run_qwen7b_func() {
 
 }
 
+run_minicpmo_func() {
+  # Install miniCPMo requirements
+  pip install -r models/experimental/miniCPMo/demo/requirements.txt
+
+  # Run demos with python3 directly
+  cd models/experimental/miniCPMo/demo/
+  python3 demo_audio_understanding.py || fail=1
+  python3 demo_image.py || fail=1
+  python3 demo_audio_mimick.py || fail=1
+
+  if [[ $fail -ne 0 ]]; then
+    exit 1
+  fi
+}
+
 run_qwen25_vl_perfunc() {
   fail=0
 
