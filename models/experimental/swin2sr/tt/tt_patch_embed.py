@@ -5,7 +5,6 @@
 import ttnn
 from models.tt_cnn.tt.builder import TtConv2d
 from models.tt_cnn.tt.builder import AutoShardedStrategyConfiguration
-from tt_lib.fallback_ops import fallback_ops
 from models.experimental.swin2sr.tt.utils import _create_conv_config_from_params
 
 
@@ -64,19 +63,8 @@ class TtSwin2SRPatchEmbed:
         self.conv = TtConv2d(conv_config, device)
 
         if self.has_norm:
-            norm_weight = self.parameters["norm"].get("weight", None)
-            norm_bias = self.parameters["norm"].get("bias", None)
-            if norm_weight is not None and norm_bias is not None:
-                self.norm = fallback_ops.LayerNorm(
-                    norm_weight,
-                    norm_bias,
-                    normalized_shape=self.embed_dim,
-                    eps=1e-5,
-                )
-            else:
-                self.norm = None
-        else:
-            self.norm = None
+            self.norm_weight = self.parameters["norm"].get("weight", None)
+            self.norm_bias = self.parameters["norm"].get("bias", None)
 
     def __call__(self, x):
         B, C, H, W = x.shape
@@ -92,9 +80,13 @@ class TtSwin2SRPatchEmbed:
 
         x = ttnn.reshape(x, (B, self.num_patches, self.embed_dim))
 
-        if self.norm is not None:
+        if self.has_norm:
             x = ttnn.reshape(x, (1, B, self.num_patches, self.embed_dim))
-            x = self.norm(x)
+            x = ttnn.layer_norm(
+                x,
+                weight=self.norm_weight,
+                bias=self.norm_bias,
+            )
             x = ttnn.reshape(x, (B, self.num_patches, self.embed_dim))
 
         return x
