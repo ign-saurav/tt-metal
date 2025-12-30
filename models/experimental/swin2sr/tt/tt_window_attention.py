@@ -64,7 +64,7 @@ class TtSwin2SRWindowAttention:
         attn_drop: float = 0.0,
         proj_drop: float = 0.0,
         pretrained_window_size: tuple[int, int] = (0, 0),
-        memory_config=ttnn.L1_MEMORY_CONFIG,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
     ):
         self.device = device
         self.parameters = parameters
@@ -75,6 +75,8 @@ class TtSwin2SRWindowAttention:
         head_dim = dim // num_heads
         self.scale = head_dim**-0.5
         self.memory_config = memory_config
+        self.l1 = ttnn.L1_MEMORY_CONFIG
+        self.dram = ttnn.DRAM_MEMORY_CONFIG
         self.compute_kernel_config = ttnn.WormholeComputeKernelConfig(
             math_fidelity=ttnn.MathFidelity.LoFi,
         )
@@ -133,8 +135,8 @@ class TtSwin2SRWindowAttention:
             zeros = ttnn.zeros_like(self.v_bias)
             qkv_bias_tt = ttnn.concat((self.q_bias, zeros, self.v_bias))
 
-        # QKV projection with conditional memory config for large tensors
-        qkv_memory_config = ttnn.L1_MEMORY_CONFIG if B_ * N * C < 1_100_000 else ttnn.DRAM_MEMORY_CONFIG
+        qkv_size = B_ * N * C * 3
+        qkv_memory_config = self.l1 if qkv_size < 1_000_000 else self.dram
         qkv = ttnn.linear(
             x,
             self.qkv_weight,
@@ -197,9 +199,11 @@ class TtSwin2SRWindowAttention:
         self._head_dim = head_dim
         self._padded_head_dim = padded_head_dim
 
-        # Cosine attention (SwinV2): normalize Q and K
-        q = _ttnn_normalize_l2(q, dim=-1, memory_config=self.memory_config)
-        k = _ttnn_normalize_l2(k, dim=-1, memory_config=self.memory_config)
+        q_size = B_ * self.num_heads * N * head_dim
+        qk_memory_config = self.l1 if q_size < 1_000_000 else self.dram
+
+        q = _ttnn_normalize_l2(q, dim=-1, memory_config=qk_memory_config)
+        k = _ttnn_normalize_l2(k, dim=-1, memory_config=qk_memory_config)
 
         # Compute attention scores: Q @ K^T
         # Handle padding: if head_dim was padded, we need to slice k before transpose
@@ -207,17 +211,18 @@ class TtSwin2SRWindowAttention:
             # Slice k to remove padding before transpose
             k = k[:, :, :, : self._head_dim]
 
-        k_transposed = ttnn.permute(k, (0, 1, 3, 2), memory_config=self.memory_config)  # (B_, num_heads, head_dim, N)
-        ttnn.deallocate(k)  # Deallocate k after transpose
+        k_transposed = ttnn.permute(k, (0, 1, 3, 2), memory_config=qk_memory_config)
+        ttnn.deallocate(k)
 
-        # For Q, we also need to slice if padded
         if hasattr(self, "_padded_head_dim") and self._padded_head_dim != self._head_dim:
-            q = q[:, :, :, : self._head_dim]  # Slice to actual head_dim
+            q = q[:, :, :, : self._head_dim]
 
+        attn_size = B_ * self.num_heads * N * N
+        attn_memory_config = self.l1 if attn_size < 1_000_000 else self.dram
         attn = ttnn.matmul(
-            q, k_transposed, memory_config=self.memory_config, compute_kernel_config=self.compute_kernel_config
+            q, k_transposed, memory_config=attn_memory_config, compute_kernel_config=self.compute_kernel_config
         )
-        ttnn.deallocate(q)  # Deallocate q after matmul
+        ttnn.deallocate(q)
         ttnn.deallocate(k_transposed)
 
         # Apply logit scale
@@ -226,35 +231,29 @@ class TtSwin2SRWindowAttention:
             logit_scale_tt = ttnn.exp(logit_scale)
             # Expand to match attn shape: (num_heads, 1, 1) -> (1, num_heads, 1, 1)
             # Reshape to (1, num_heads, 1, 1)
-            logit_scale_tt = ttnn.reshape(logit_scale_tt, (1, self.num_heads, 1, 1), memory_config=self.memory_config)
-            attn = ttnn.multiply(attn, logit_scale_tt, memory_config=self.memory_config)
+            logit_scale_tt = ttnn.reshape(logit_scale_tt, (1, self.num_heads, 1, 1), memory_config=attn_memory_config)
+            attn = ttnn.multiply(attn, logit_scale_tt, memory_config=attn_memory_config)
             ttnn.deallocate(logit_scale_tt)
 
-        # Add relative position bias (pre-computed during initialization)
         relative_position_bias_expanded = ttnn.unsqueeze(self.relative_position_bias, 0)
-        attn = ttnn.add(attn, relative_position_bias_expanded, memory_config=self.memory_config)
+        attn = ttnn.add(attn, relative_position_bias_expanded, memory_config=attn_memory_config)
         ttnn.deallocate(relative_position_bias_expanded)
 
-        # Apply mask if provided
         if mask is not None:
-            # mask shape: (nW, N, N), attn shape: (B_, num_heads, N, N)
-            # Need to reshape attn to (B_//nW, nW, num_heads, N, N) and add mask
             nW = mask.shape[0]
-            attn = ttnn.reshape(attn, (B_ // nW, nW, self.num_heads, N, N), memory_config=self.memory_config)
-            # Expand mask: (nW, N, N) -> (1, nW, 1, N, N)
-            mask_expanded = ttnn.unsqueeze(mask, 0)  # (1, nW, N, N)
-            mask_expanded = ttnn.unsqueeze(mask_expanded, 2)  # (1, nW, 1, N, N)
-            attn = ttnn.add(attn, mask_expanded, memory_config=self.memory_config)
+            attn = ttnn.reshape(attn, (B_ // nW, nW, self.num_heads, N, N), memory_config=attn_memory_config)
+            mask_expanded = ttnn.unsqueeze(mask, 0)
+            mask_expanded = ttnn.unsqueeze(mask_expanded, 2)
+            attn = ttnn.add(attn, mask_expanded, memory_config=attn_memory_config)
             ttnn.deallocate(mask_expanded)
-            attn = ttnn.reshape(attn, (B_, self.num_heads, N, N), memory_config=self.memory_config)
+            attn = ttnn.reshape(attn, (B_, self.num_heads, N, N), memory_config=attn_memory_config)
 
-        # Softmax
-        attn = ttnn.softmax(attn, dim=-1, memory_config=self.memory_config)
+        attn = ttnn.softmax(attn, dim=-1, memory_config=attn_memory_config)
 
-        # Attention output: attn @ V
-        # Keep v padded for matmul (don't slice yet - matmul works with padded dimensions)
+        v_size = B_ * self.num_heads * N * head_dim
+        v_memory_config = self.l1 if v_size < 1_000_000 else self.dram
         attn_v = ttnn.matmul(
-            attn, v, memory_config=self.memory_config, compute_kernel_config=self.compute_kernel_config
+            attn, v, memory_config=attn_memory_config, compute_kernel_config=self.compute_kernel_config
         )
         ttnn.deallocate(attn)
         ttnn.deallocate(v)
@@ -270,16 +269,16 @@ class TtSwin2SRWindowAttention:
             attn_v = ttnn.permute(attn_v, (0, 2, 1, 3))  # (B_, N, num_heads, head_dim)
             x = ttnn.reshape(attn_v, (B_, N, self.dim))  # (B_, N, C)
         else:
-            # Use ttnn concatenate_heads (head_dim is already multiple of 32)
             x = ttnn.transformer.concatenate_heads(attn_v, memory_config=self.memory_config)
             ttnn.deallocate(attn_v)
 
-        # Output projection
+        proj_size = B_ * N * self.dim
+        proj_memory_config = self.l1 if proj_size < 1_000_000 else self.dram
         x = ttnn.linear(
             x,
             self.proj_weight,
             bias=self.proj_bias,
-            memory_config=self.memory_config,
+            memory_config=proj_memory_config,
             compute_kernel_config=self.compute_kernel_config,
         )
 
