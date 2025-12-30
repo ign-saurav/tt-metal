@@ -2,11 +2,8 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import numpy as np
 import torch
 import ttnn
-
-from models.experimental.swin2sr.tt.tt_mlp import TtSwin2SRMLP
 
 
 def _ttnn_normalize_l2(x, dim=-1, memory_config=ttnn.L1_MEMORY_CONFIG):
@@ -51,8 +48,8 @@ class TtSwin2SRWindowAttention:
         window_size (tuple[int]): The height and width of the window.
         num_heads (int): Number of attention heads.
         qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
-        attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
-        proj_drop (float, optional): Dropout ratio of output. Default: 0.0
+        attn_drop (float, optional): Dropout ratio of attention weight (deprecated, not used). Default: 0.0
+        proj_drop (float, optional): Dropout ratio of output (deprecated, not used). Default: 0.0
         pretrained_window_size (tuple[int]): The height and width of the window in pre-training.
         memory_config: Memory configuration for TT operations.
     """
@@ -91,20 +88,20 @@ class TtSwin2SRWindowAttention:
                 self.logit_scale = ttnn.to_torch(self.logit_scale)
             self.logit_scale_max = torch.log(torch.tensor(1.0 / 0.01))
 
-        # MLP to generate continuous relative position bias
-        cpb_mlp_params = parameters.get("cpb_mlp", None)
-        if cpb_mlp_params is not None:
-            self.cpb_mlp = TtSwin2SRMLP(
-                device=device,
-                parameters=cpb_mlp_params,
-                activation="relu",
-                memory_config=memory_config,
+        # Relative position bias (pre-computed in preprocessor, like SwinV2)
+        self.relative_position_bias = parameters.get("relative_position_bias", None)
+        if self.relative_position_bias is None:
+            # Fallback: compute zeros if not provided
+            Wh, Ww = self.window_size
+            num_heads = self.num_heads
+            bias_shape = (num_heads, Wh * Ww, Wh * Ww)
+            self.relative_position_bias = ttnn.zeros(
+                bias_shape,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+                memory_config=self.memory_config,
             )
-        else:
-            self.cpb_mlp = None
-
-        # Pre-compute relative position bias table
-        self._precompute_relative_position_bias()
 
         # QKV projection parameters
         self.qkv_weight = parameters["qkv"].get("weight", None)
@@ -118,150 +115,6 @@ class TtSwin2SRWindowAttention:
 
         self.attn_drop = attn_drop
         self.proj_drop = proj_drop
-
-    def _precompute_relative_position_bias(self):
-        """Pre-compute relative position bias table."""
-        # Get relative_coords_table
-        relative_coords_h = torch.arange(-(self.window_size[0] - 1), self.window_size[0], dtype=torch.float32)
-        relative_coords_w = torch.arange(-(self.window_size[1] - 1), self.window_size[1], dtype=torch.float32)
-        relative_coords_table = (
-            torch.stack(torch.meshgrid([relative_coords_h, relative_coords_w], indexing="ij"))
-            .permute(1, 2, 0)
-            .contiguous()
-            .unsqueeze(0)
-        )  # 1, 2*Wh-1, 2*Ww-1, 2
-
-        if self.pretrained_window_size[0] > 0:
-            relative_coords_table[:, :, :, 0] /= self.pretrained_window_size[0] - 1
-            relative_coords_table[:, :, :, 1] /= self.pretrained_window_size[1] - 1
-        else:
-            relative_coords_table[:, :, :, 0] /= self.window_size[0] - 1
-            relative_coords_table[:, :, :, 1] /= self.window_size[1] - 1
-
-        # Normalize to -8, 8 and apply log spacing
-        relative_coords_table *= 8
-        relative_coords_table = (
-            torch.sign(relative_coords_table) * torch.log2(torch.abs(relative_coords_table) + 1.0) / np.log2(8)
-        )
-
-        self.relative_coords_table = relative_coords_table
-
-        # Get pair-wise relative position index for each token inside the window
-        coords_h = torch.arange(self.window_size[0])
-        coords_w = torch.arange(self.window_size[1])
-        coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))  # 2, Wh, Ww
-        coords_flatten = torch.flatten(coords, 1)  # 2, Wh*Ww
-        relative_coords = coords_flatten[:, :, None] - coords_flatten[:, None, :]  # 2, Wh*Ww, Wh*Ww
-        relative_coords = relative_coords.permute(1, 2, 0).contiguous()  # Wh*Ww, Wh*Ww, 2
-        relative_coords[:, :, 0] += self.window_size[0] - 1  # shift to start from 0
-        relative_coords[:, :, 1] += self.window_size[1] - 1
-        relative_coords[:, :, 0] *= 2 * self.window_size[1] - 1
-        relative_position_index = relative_coords.sum(-1)  # Wh*Ww, Wh*Ww
-
-        self.relative_position_index = relative_position_index
-
-    def _compute_relative_position_bias(self, x: ttnn.Tensor) -> ttnn.Tensor:
-        """Compute relative position bias using the CPB MLP.
-
-        Args:
-            x: Input tensor (used to get device and dtype).
-
-        Returns:
-            Relative position bias tensor of shape (num_heads, Wh*Ww, Wh*Ww).
-        """
-        if self.cpb_mlp is None:
-            # Return zeros if no CPB MLP
-            Wh, Ww = self.window_size
-            num_heads = self.num_heads
-            bias_shape = (num_heads, Wh * Ww, Wh * Ww)
-            return ttnn.zeros(
-                bias_shape,
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=self.device,
-                memory_config=self.memory_config,
-            )
-
-        # Compute on CPU first (more reliable for indexing operations)
-        # Reshape relative_coords_table for MLP input
-        Wh, Ww = self.window_size
-        table_shape = self.relative_coords_table.shape  # (1, 2*Wh-1, 2*Ww-1, 2)
-        relative_coords_table_reshaped = self.relative_coords_table.view(1, -1, 2)  # (1, (2*Wh-1)*(2*Ww-1), 2)
-
-        # Apply CPB MLP on CPU (convert MLP weights to torch)
-        cpb_mlp_torch = torch.nn.Sequential(
-            torch.nn.Linear(2, 512, bias=True),
-            torch.nn.ReLU(inplace=True),
-            torch.nn.Linear(512, self.num_heads, bias=False),
-        )
-
-        # Load weights from TT tensors
-        # TT linear weights are stored as (out_features, in_features), need to transpose for PyTorch
-        fc1_weight = ttnn.to_torch(self.cpb_mlp.parameters.fc1.weight)
-        fc1_bias = (
-            ttnn.to_torch(getattr(self.cpb_mlp.parameters.fc1, "bias", None))
-            if getattr(self.cpb_mlp.parameters.fc1, "bias", None) is not None
-            else None
-        )
-        fc2_weight = ttnn.to_torch(self.cpb_mlp.parameters.fc2.weight)
-        fc2_bias = getattr(self.cpb_mlp.parameters.fc2, "bias", None)  # Should be None for second layer
-
-        # PyTorch Linear expects (out_features, in_features)
-        # TT linear weights are stored as (out_features, in_features) - same as PyTorch
-        # But preprocessed weights might be transposed, check and fix
-        # fc1: should be (512, 2) for input 2 -> output 512
-        if len(fc1_weight.shape) == 2:
-            if fc1_weight.shape[1] == 2:  # (out, in) format, correct
-                pass  # Already correct
-            elif fc1_weight.shape[0] == 2:  # (in, out) format, need transpose
-                fc1_weight = fc1_weight.transpose(0, 1)
-
-        # fc2: should be (num_heads, 512) for input 512 -> output num_heads
-        if len(fc2_weight.shape) == 2:
-            if fc2_weight.shape[0] == self.num_heads:  # (out, in) format, correct
-                pass  # Already correct
-            elif fc2_weight.shape[1] == self.num_heads:  # (in, out) format, need transpose
-                fc2_weight = fc2_weight.transpose(0, 1)
-
-        cpb_mlp_torch[0].weight.data.copy_(fc1_weight)
-        if fc1_bias is not None:
-            # Reshape bias if needed (might be 1D or have extra dimensions)
-            fc1_bias_reshaped = fc1_bias.squeeze() if fc1_bias.dim() > 1 else fc1_bias
-            cpb_mlp_torch[0].bias.data.copy_(fc1_bias_reshaped)
-        cpb_mlp_torch[2].weight.data.copy_(fc2_weight)
-
-        # Run MLP on CPU
-        with torch.no_grad():
-            relative_position_bias_table_torch = cpb_mlp_torch(
-                relative_coords_table_reshaped.float()
-            )  # (1, (2*Wh-1)*(2*Ww-1), num_heads)
-            relative_position_bias_table_torch = relative_position_bias_table_torch.view(1, -1, self.num_heads)
-
-            # Index using relative_position_index
-            relative_position_index_torch = self.relative_position_index.view(-1)  # (Wh*Ww * Wh*Ww,)
-            relative_position_bias_torch = relative_position_bias_table_torch[
-                0, relative_position_index_torch, :
-            ]  # (Wh*Ww*Wh*Ww, num_heads)
-            relative_position_bias_torch = relative_position_bias_torch.view(
-                Wh * Ww, Wh * Ww, self.num_heads
-            )  # (Wh*Ww, Wh*Ww, num_heads)
-            relative_position_bias_torch = relative_position_bias_torch.permute(
-                2, 0, 1
-            ).contiguous()  # (num_heads, Wh*Ww, Wh*Ww)
-
-            # Apply sigmoid and scale
-            relative_position_bias_torch = 16 * torch.sigmoid(relative_position_bias_torch)
-
-        # Convert to TT tensor
-        relative_position_bias = ttnn.from_torch(
-            relative_position_bias_torch.to(torch.bfloat16),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device,
-            memory_config=self.memory_config,
-        )
-
-        return relative_position_bias
 
     def __call__(self, x: ttnn.Tensor, mask: ttnn.Tensor = None) -> ttnn.Tensor:
         """Forward pass.
@@ -431,12 +284,10 @@ class TtSwin2SRWindowAttention:
             attn = ttnn.multiply(attn, logit_scale_tt, memory_config=self.memory_config)
             ttnn.deallocate(logit_scale_tt)
 
-        # Add relative position bias
-        relative_position_bias = self._compute_relative_position_bias(x)
-        # Expand relative_position_bias: (num_heads, N, N) -> (1, num_heads, N, N)
-        relative_position_bias = ttnn.unsqueeze(relative_position_bias, 0)
-        attn = ttnn.add(attn, relative_position_bias, memory_config=self.memory_config)
-        ttnn.deallocate(relative_position_bias)
+        # Add relative position bias (pre-computed during initialization)
+        relative_position_bias_expanded = ttnn.unsqueeze(self.relative_position_bias, 0)
+        attn = ttnn.add(attn, relative_position_bias_expanded, memory_config=self.memory_config)
+        ttnn.deallocate(relative_position_bias_expanded)
 
         # Apply mask if provided
         if mask is not None:
@@ -453,11 +304,6 @@ class TtSwin2SRWindowAttention:
 
         # Softmax
         attn = ttnn.softmax(attn, dim=-1, memory_config=self.memory_config)
-
-        # Apply attention dropout (if training and attn_drop > 0)
-        # Note: Dropout is typically disabled during inference
-        if self.attn_drop > 0.0 and self.training if hasattr(self, "training") else False:
-            attn = ttnn.dropout(attn, p=self.attn_drop, memory_config=self.memory_config)
 
         # Attention output: attn @ V
         # Keep v padded for matmul (don't slice yet - matmul works with padded dimensions)
@@ -498,9 +344,5 @@ class TtSwin2SRWindowAttention:
             memory_config=self.memory_config,
             compute_kernel_config=self.compute_kernel_config,
         )
-
-        # Apply output dropout (if training and proj_drop > 0)
-        if self.proj_drop > 0.0 and self.training if hasattr(self, "training") else False:
-            x = ttnn.dropout(x, p=self.proj_drop, memory_config=self.memory_config)
 
         return x

@@ -26,8 +26,8 @@ class WindowAttention(nn.Module):
         window_size (tuple[int]): The height and width of the window.
         num_heads (int): Number of attention heads.
         qkv_bias (bool, optional): If True, add a learnable bias to query, key, value. Default: True
-        attn_drop (float, optional): Dropout ratio of attention weight. Default: 0.0
-        proj_drop (float, optional): Dropout ratio of output. Default: 0.0
+        attn_drop (float, optional): Dropout ratio of attention weight (deprecated, not used). Default: 0.0
+        proj_drop (float, optional): Dropout ratio of output (deprecated, not used). Default: 0.0
         pretrained_window_size (tuple[int]): The height and width of the window in pre-training.
     """
 
@@ -106,10 +106,27 @@ class WindowAttention(nn.Module):
             self.q_bias = None
             self.v_bias = None
 
-        self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
-        self.proj_drop = nn.Dropout(proj_drop)
         self.softmax = nn.Softmax(dim=-1)
+
+    def get_relative_position_bias(self) -> torch.Tensor:
+        """Get relative position bias (pre-computed).
+
+        This method computes the relative position bias once, similar to SwinV2.
+        The bias is computed using the CPB MLP and relative position indices.
+
+        Returns:
+            Relative position bias tensor of shape (num_heads, Wh*Ww, Wh*Ww).
+        """
+        relative_position_bias_table = self.cpb_mlp(self.relative_coords_table).view(-1, self.num_heads)
+        relative_position_bias = relative_position_bias_table[self.relative_position_index.view(-1)].view(
+            self.window_size[0] * self.window_size[1],
+            self.window_size[0] * self.window_size[1],
+            -1,
+        )  # Wh*Ww, Wh*Ww, nH
+        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
+        relative_position_bias = 16 * torch.sigmoid(relative_position_bias)
+        return relative_position_bias
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor = None) -> torch.Tensor:
         """Forward pass.
@@ -137,15 +154,8 @@ class WindowAttention(nn.Module):
         ).exp()
         attn = attn * logit_scale
 
-        # Relative position bias
-        relative_position_bias_table = self.cpb_mlp(self.relative_coords_table).view(-1, self.num_heads)
-        relative_position_bias = relative_position_bias_table[self.relative_position_index.view(-1)].view(
-            self.window_size[0] * self.window_size[1],
-            self.window_size[0] * self.window_size[1],
-            -1,
-        )  # Wh*Ww, Wh*Ww, nH
-        relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()  # nH, Wh*Ww, Wh*Ww
-        relative_position_bias = 16 * torch.sigmoid(relative_position_bias)
+        # Relative position bias (pre-computed)
+        relative_position_bias = self.get_relative_position_bias()
         attn = attn + relative_position_bias.unsqueeze(0)
 
         if mask is not None:
@@ -156,9 +166,6 @@ class WindowAttention(nn.Module):
         else:
             attn = self.softmax(attn)
 
-        attn = self.attn_drop(attn)
-
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
-        x = self.proj_drop(x)
         return x

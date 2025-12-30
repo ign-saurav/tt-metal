@@ -137,7 +137,7 @@ class Swin2SR(nn.Module):
             self.absolute_pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
             nn.init.trunc_normal_(self.absolute_pos_embed, std=0.02)
 
-        self.pos_drop = nn.Dropout(p=drop_rate)
+        # Position dropout removed for inference-only implementation
 
         # Stochastic depth
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, sum(depths))]  # stochastic depth decay rule
@@ -232,7 +232,7 @@ class Swin2SR(nn.Module):
         x = self.patch_embed(x)
         if self.ape:
             x = x + self.absolute_pos_embed
-        x = self.pos_drop(x)
+        # Position dropout removed for inference-only implementation
 
         for layer in self.layers:
             x = layer(x, x_size)

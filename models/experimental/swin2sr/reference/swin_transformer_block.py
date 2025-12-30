@@ -43,20 +43,15 @@ def window_reverse(windows: torch.Tensor, window_size: int, H: int, W: int) -> t
 
 
 class DropPath(nn.Module):
-    """Drop paths (Stochastic Depth) per sample (when applied in main path of residual blocks)."""
+    """Drop paths (Stochastic Depth) per sample - disabled for inference."""
 
     def __init__(self, drop_prob: float = 0.0):
         super().__init__()
         self.drop_prob = drop_prob
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.drop_prob == 0.0 or not self.training:
-            return x
-        keep_prob = 1 - self.drop_prob
-        random_tensor = keep_prob + torch.rand(x.shape[0], 1, 1, device=x.device, dtype=x.dtype)
-        random_tensor.floor_()  # binarize
-        output = x.div(keep_prob) * random_tensor
-        return output
+        # Always return identity for inference (no dropout)
+        return x
 
 
 class SwinTransformerBlock(nn.Module):

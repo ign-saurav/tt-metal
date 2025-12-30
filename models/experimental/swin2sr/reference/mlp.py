@@ -14,7 +14,7 @@ class MLP(nn.Module):
         hidden_features (int, optional): Number of hidden features. Defaults to in_features.
         out_features (int, optional): Number of output features. Defaults to in_features.
         act_layer (nn.Module, optional): Activation layer. Defaults to nn.GELU.
-        drop (float, optional): Dropout rate. Defaults to 0.0.
+        drop (float, optional): Dropout rate (deprecated, not used). Defaults to 0.0.
     """
 
     def __init__(
@@ -32,7 +32,6 @@ class MLP(nn.Module):
         self.fc1 = nn.Linear(in_features, hidden_features)
         self.act = act_layer()
         self.fc2 = nn.Linear(hidden_features, out_features)
-        self.drop = nn.Dropout(drop)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass.
@@ -45,7 +44,5 @@ class MLP(nn.Module):
         """
         x = self.fc1(x)
         x = self.act(x)
-        x = self.drop(x)
         x = self.fc2(x)
-        x = self.drop(x)
         return x

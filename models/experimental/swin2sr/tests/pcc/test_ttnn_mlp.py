@@ -13,7 +13,7 @@ from ttnn.model_preprocessing import (
     preprocess_linear_weight,
     preprocess_linear_bias,
 )
-from tests.ttnn.utils_for_testing import assert_with_pcc
+from tests.ttnn.utils_for_testing import assert_with_pcc, comp_pcc
 from models.experimental.swin2sr.reference.mlp import MLP as TorchSwin2SRMLP
 from models.experimental.swin2sr.tt.tt_mlp import TtSwin2SRMLP
 
@@ -139,6 +139,9 @@ def test_swin2sr_mlp_ttnn_vs_torch_with_checkpoint(device, layer_idx, block_idx,
     output_tensor = ttnn_model(input_tensor)
     output_tensor = ttnn.to_torch(output_tensor)
 
+    # Log PCC value
+    pcc_passed, pcc_message = comp_pcc(torch_output_tensor, output_tensor, pcc=0.99)
+    print(f"\n[CHECKPOINT - MLP Layer {layer_idx}, Block {block_idx}] PCC: {pcc_message}")
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)
 
 
@@ -196,4 +199,9 @@ def test_swin2sr_mlp_ttnn_vs_torch(device, in_features, hidden_features, out_fea
     output_tensor = ttnn_model(input_tensor)
     output_tensor = ttnn.to_torch(output_tensor)
 
+    # Log PCC value
+    pcc_passed, pcc_message = comp_pcc(torch_output_tensor, output_tensor, pcc=0.99)
+    print(
+        f"\n[SYNTHETIC - MLP in_features={in_features}, hidden_features={hidden_features}, out_features={out_features}] PCC: {pcc_message}"
+    )
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)

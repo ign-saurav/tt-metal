@@ -45,26 +45,10 @@ def create_window_attention_preprocessor(device):
                     torch_model.logit_scale, dtype=ttnn.bfloat16, device=device, layout=ttnn.TILE_LAYOUT
                 )
 
-            # CPB MLP for relative position bias
-            if torch_model.cpb_mlp is not None:
-                # Create namespace for CPB MLP (similar to how TtSwin2SRMLP expects parameters)
-                class CPBMLPNamespace:
-                    pass
-
-                cpb_mlp_ns = CPBMLPNamespace()
-
-                # CPB MLP has 2 layers: fc1 (2 -> 512) and fc2 (512 -> num_heads)
-                cpb_mlp_ns.fc1 = CPBMLPNamespace()
-                cpb_mlp_ns.fc1.weight = preprocess_linear_weight(torch_model.cpb_mlp[0].weight, dtype=ttnn.bfloat16)
-                if torch_model.cpb_mlp[0].bias is not None:
-                    cpb_mlp_ns.fc1.bias = preprocess_linear_bias(torch_model.cpb_mlp[0].bias, dtype=ttnn.bfloat16)
-
-                cpb_mlp_ns.fc2 = CPBMLPNamespace()
-                cpb_mlp_ns.fc2.weight = preprocess_linear_weight(torch_model.cpb_mlp[2].weight, dtype=ttnn.bfloat16)
-                if torch_model.cpb_mlp[2].bias is not None:
-                    cpb_mlp_ns.fc2.bias = preprocess_linear_bias(torch_model.cpb_mlp[2].bias, dtype=ttnn.bfloat16)
-
-                parameters["cpb_mlp"] = cpb_mlp_ns
+            # Pre-compute relative position bias (like SwinV2)
+            parameters["relative_position_bias"] = ttnn.from_torch(
+                torch_model.get_relative_position_bias(), dtype=ttnn.bfloat16, device=device, layout=ttnn.TILE_LAYOUT
+            )
 
             # Output projection
             parameters["proj"] = {
