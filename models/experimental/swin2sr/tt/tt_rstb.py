@@ -24,10 +24,12 @@ def _get_sharding_strategy(input_height, input_width, in_channels, out_channels)
     spatial_size = input_height * input_width
     channel_size = in_channels * out_channels
 
-    # Use height sharding for large spatial dimensions
     if spatial_size > channel_size and spatial_size > 256:
-        act_block_h = min(256, max(32, spatial_size // 32))
-        return HeightShardedStrategyConfiguration(act_block_h_override=act_block_h)
+        if spatial_size > channel_size * 4:
+            act_block_h = min(256, max(32, spatial_size // 32))
+            return HeightShardedStrategyConfiguration(act_block_h_override=act_block_h)
+        else:
+            return AutoShardedStrategyConfiguration()
     else:
         return AutoShardedStrategyConfiguration()
 
@@ -196,30 +198,30 @@ class TtRSTB:
         shortcut = ttnn.reallocate(x, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
         x = self.residual_group(x, x_size=x_size)
-        # Move to DRAM to free L1 before conv operations
         x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
         x = self.patch_unembed(x, x_size)
 
-        # Convert from (B, C, H, W) to (B, H, W, C) for TtConv2d (NHWC format)
         x = ttnn.permute(x, (0, 2, 3, 1), memory_config=self.memory_config)
         x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
 
         for i, conv_layer in enumerate(self.conv_layers):
             x = conv_layer(x)
-            # Convert from sharded to interleaved if needed, and ensure NHWC format
-            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
-            x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-            # Apply LeakyReLU for first two convs in 3conv case
-            if len(self.conv_layers) == 3 and i < 2:
-                # Convert to TILE layout for unary operations
+
+            is_last_conv = i == len(self.conv_layers) - 1
+            needs_leaky_relu = len(self.conv_layers) == 3 and i < 2
+
+            if needs_leaky_relu or is_last_conv:
+                x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+                x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
+
+            if needs_leaky_relu:
                 x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
                 x = ttnn.leaky_relu(x, negative_slope=0.2, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-                # Convert back to ROW_MAJOR for next conv
                 x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-            # Ensure output is in DRAM for next conv
-            x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
 
-        # Convert back from (B, H, W, C) to (B, C, H, W) for patch_embed
+            if not is_last_conv:
+                x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+
         x = ttnn.permute(x, (0, 3, 1, 2), memory_config=self.memory_config)
         x = self.patch_embed(x)
 

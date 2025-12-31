@@ -36,10 +36,18 @@ def _create_conv_config_from_params(
     math_fidelity=None,
     sharding_strategy=AutoShardedStrategyConfiguration(),
     config_tensors_in_dram=False,
+    enable_act_double_buffer=None,
+    enable_weights_double_buffer=None,
 ) -> Conv2dConfiguration:
-    """
-    Create Conv2dConfiguration from parameters dict.
-    """
+    """Create Conv2dConfiguration from parameters dict."""
+    if enable_act_double_buffer is None:
+        from models.tt_cnn.tt.builder import WidthShardedStrategyConfiguration
+
+        enable_act_double_buffer = not isinstance(sharding_strategy, WidthShardedStrategyConfiguration)
+
+    if enable_weights_double_buffer is None:
+        enable_weights_double_buffer = True
+
     return Conv2dConfiguration(
         input_height=input_height,
         input_width=input_width,
@@ -60,8 +68,8 @@ def _create_conv_config_from_params(
         math_fidelity=math_fidelity or conv_config["MATH_FIDELITY"],
         sharding_strategy=sharding_strategy,
         slice_strategy=L1FullSliceStrategyConfiguration(),
-        enable_act_double_buffer=True,
-        enable_weights_double_buffer=True,
+        enable_act_double_buffer=enable_act_double_buffer,
+        enable_weights_double_buffer=enable_weights_double_buffer,
         deallocate_activation=deallocate_activation,
         reallocate_halo_output=True,
         config_tensors_in_dram=config_tensors_in_dram,
