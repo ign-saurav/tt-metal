@@ -23,14 +23,18 @@ def create_custom_preprocessor(device):
         parameters = {}
         if isinstance(torch_model, TorchSwin2SRMLP):
             parameters.setdefault("fc1", {})
-            parameters["fc1"]["weight"] = preprocess_linear_weight(torch_model.fc1.weight, dtype=ttnn.bfloat16)
+            fc1_weight = preprocess_linear_weight(torch_model.fc1.weight, dtype=ttnn.bfloat16)
+            parameters["fc1"]["weight"] = ttnn.to_device(fc1_weight, device)
             if torch_model.fc1.bias is not None:
-                parameters["fc1"]["bias"] = preprocess_linear_bias(torch_model.fc1.bias, dtype=ttnn.bfloat16)
+                fc1_bias = preprocess_linear_bias(torch_model.fc1.bias, dtype=ttnn.bfloat16)
+                parameters["fc1"]["bias"] = ttnn.to_device(fc1_bias, device)
 
             parameters.setdefault("fc2", {})
-            parameters["fc2"]["weight"] = preprocess_linear_weight(torch_model.fc2.weight, dtype=ttnn.bfloat16)
+            fc2_weight = preprocess_linear_weight(torch_model.fc2.weight, dtype=ttnn.bfloat16)
+            parameters["fc2"]["weight"] = ttnn.to_device(fc2_weight, device)
             if torch_model.fc2.bias is not None:
-                parameters["fc2"]["bias"] = preprocess_linear_bias(torch_model.fc2.bias, dtype=ttnn.bfloat16)
+                fc2_bias = preprocess_linear_bias(torch_model.fc2.bias, dtype=ttnn.bfloat16)
+                parameters["fc2"]["bias"] = ttnn.to_device(fc2_bias, device)
         return parameters
 
     return custom_preprocessor

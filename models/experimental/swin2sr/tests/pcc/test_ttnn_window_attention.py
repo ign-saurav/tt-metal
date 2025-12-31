@@ -25,8 +25,9 @@ def create_window_attention_preprocessor(device):
         parameters = {}
         if isinstance(torch_model, TorchWindowAttention):
             # QKV projection
+            qkv_weight = preprocess_linear_weight(torch_model.qkv.weight, dtype=ttnn.bfloat16)
             parameters["qkv"] = {
-                "weight": preprocess_linear_weight(torch_model.qkv.weight, dtype=ttnn.bfloat16),
+                "weight": ttnn.to_device(qkv_weight, device),
             }
 
             # Q and V biases (no K bias in SwinV2)
@@ -51,11 +52,13 @@ def create_window_attention_preprocessor(device):
             )
 
             # Output projection
+            proj_weight = preprocess_linear_weight(torch_model.proj.weight, dtype=ttnn.bfloat16)
             parameters["proj"] = {
-                "weight": preprocess_linear_weight(torch_model.proj.weight, dtype=ttnn.bfloat16),
+                "weight": ttnn.to_device(proj_weight, device),
             }
             if torch_model.proj.bias is not None:
-                parameters["proj"]["bias"] = preprocess_linear_bias(torch_model.proj.bias, dtype=ttnn.bfloat16)
+                proj_bias = preprocess_linear_bias(torch_model.proj.bias, dtype=ttnn.bfloat16)
+                parameters["proj"]["bias"] = ttnn.to_device(proj_bias, device)
 
         return parameters
 
