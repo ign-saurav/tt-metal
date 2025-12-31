@@ -633,7 +633,7 @@ class UnifiedMiniCPMPipeline:
             logits = self.qwen_generator.decode_forward_text(
                 out_tok,
                 current_pos,
-                enable_trace=True,
+                enable_trace=False,
                 page_table=self.page_table,
                 kv_cache=self.tt_kv_cache,
                 sampling_params=device_sampling_params,
@@ -648,6 +648,8 @@ class UnifiedMiniCPMPipeline:
 
             current_pos += 1
 
+            if not hasattr(self.tokenizer, "stop_tokens"):
+                self.tokenizer.stop_tokens = [self.tokenizer.eos_token_id]
             # Save output token
             for user in range(global_batch_size):
                 user_tok = out_tok[user].item()

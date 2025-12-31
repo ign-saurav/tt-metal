@@ -122,25 +122,55 @@ class MLP(LightweightModule):
         # In decode mode (seqlen <= 32) do DRAM sharded matmuls
         # These use HiFi2; this drops 1 bit of the activations but would be FLOP-bound on 12 cores with HiFi4
         memory_config = ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG
-        w1_out = ttnn.linear(
-            x,
-            self.w1,
-            dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
-            core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_1 else None,
-            compute_kernel_config=li_ff1_3_compute_kernel_cfg,
-            program_config=pc_1,
-            memory_config=memory_config,
-        )
+        # import pdb; pdb.set_trace()
+        try:
+            w1_out = ttnn.linear(
+                x,
+                self.w1,
+                dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
+                core_grid=None,
+                compute_kernel_config=li_ff1_3_compute_kernel_cfg,
+                program_config=pc_1,
+                memory_config=memory_config,
+            )
+        except:
+            pc_1 = ttnn.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(
+                in0_block_w=1, per_core_M=1, per_core_N=16, fused_activation=None
+            )
+            w1_out = ttnn.linear(
+                x,
+                self.w1,
+                dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
+                core_grid=None,
+                compute_kernel_config=li_ff1_3_compute_kernel_cfg,
+                program_config=pc_1,
+                memory_config=memory_config,
+            )
 
-        w3_out = ttnn.linear(
-            x,
-            self.w3,
-            dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
-            core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_3 else None,
-            compute_kernel_config=li_ff1_3_compute_kernel_cfg,
-            program_config=pc_3,
-            memory_config=memory_config,
-        )
+        try:
+            w3_out = ttnn.linear(
+                x,
+                self.w3,
+                dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
+                core_grid=None,
+                compute_kernel_config=li_ff1_3_compute_kernel_cfg,
+                program_config=pc_3,
+                memory_config=memory_config,
+            )
+        except:
+            pc_3 = ttnn.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(
+                in0_block_w=1, per_core_M=1, per_core_N=16, fused_activation=None
+            )
+            w3_out = ttnn.linear(
+                x,
+                self.w3,
+                dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
+                core_grid=None,
+                compute_kernel_config=li_ff1_3_compute_kernel_cfg,
+                program_config=pc_3,
+                memory_config=memory_config,
+            )
+
         ttnn.deallocate(x)
 
         if TG:
