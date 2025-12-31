@@ -5,28 +5,34 @@
 import ttnn
 from models.experimental.swin2sr.tt.tt_basic_layer import TtBasicLayer
 from models.experimental.swin2sr.tt.tt_patch_embed import TtSwin2SRPatchEmbed, TtSwin2SRPatchUnEmbed
-from models.tt_cnn.tt.builder import TtConv2d, AutoShardedStrategyConfiguration
 from models.experimental.swin2sr.tt.utils import _create_conv_config_from_params
+from models.tt_cnn.tt.builder import (
+    TtConv2d,
+    AutoShardedStrategyConfiguration,
+    HeightShardedStrategyConfiguration,
+)
+
+
+def to_2tuple(x):
+    if isinstance(x, (int, float)):
+        return (x, x)
+    return x
+
+
+def _get_sharding_strategy(input_height, input_width, in_channels, out_channels):
+    """Determine optimal sharding strategy based on tensor dimensions."""
+    spatial_size = input_height * input_width
+    channel_size = in_channels * out_channels
+
+    # Use height sharding for large spatial dimensions
+    if spatial_size > channel_size and spatial_size > 256:
+        act_block_h = min(256, max(32, spatial_size // 32))
+        return HeightShardedStrategyConfiguration(act_block_h_override=act_block_h)
+    else:
+        return AutoShardedStrategyConfiguration()
 
 
 class TtRSTB:
-    """Residual Swin Transformer Block (RSTB).
-
-    Args:
-        device: TTNN device.
-        parameters: Model parameters dictionary.
-        dim (int): Number of input channels.
-        input_resolution (tuple[int]): Input resolution.
-        depth (int): Number of blocks.
-        num_heads (int): Number of attention heads.
-        window_size (int): Local window size.
-        mlp_ratio (float): Ratio of mlp hidden dim to embedding dim.
-        img_size: Input image size.
-        patch_size: Patch size.
-        resi_connection: The convolutional block before residual connection. '1conv' or '3conv'.
-        memory_config: Memory configuration for tensors.
-    """
-
     def __init__(
         self,
         device,
@@ -47,10 +53,7 @@ class TtRSTB:
         self.dim = dim
         self.input_resolution = input_resolution
         self.memory_config = memory_config
-        self.l1 = ttnn.L1_MEMORY_CONFIG
-        self.dram = ttnn.DRAM_MEMORY_CONFIG
 
-        # Residual group (BasicLayer)
         self.residual_group = TtBasicLayer(
             device=device,
             parameters=parameters["residual_group"],
@@ -63,12 +66,15 @@ class TtRSTB:
             memory_config=memory_config,
         )
 
-        # Convolutional block
+        img_size = to_2tuple(img_size)
+        H, W = input_resolution
+
         if resi_connection == "1conv":
             conv_params = parameters["conv"]
+            sharding_strategy = _get_sharding_strategy(H, W, dim, dim)
             conv_config = _create_conv_config_from_params(
-                input_height=input_resolution[0],
-                input_width=input_resolution[1],
+                input_height=H,
+                input_width=W,
                 in_channels=dim,
                 out_channels=dim,
                 batch_size=1,
@@ -79,20 +85,20 @@ class TtRSTB:
                 dilation=(1, 1),
                 groups=1,
                 activation=None,
-                sharding_strategy=AutoShardedStrategyConfiguration(),
+                deallocate_activation=True,
+                sharding_strategy=sharding_strategy,
                 config_tensors_in_dram=True,
             )
             self.conv = TtConv2d(conv_config, device)
+            self.conv_layers = [self.conv]
         elif resi_connection == "3conv":
-            # Sequential: Conv2d(dim, dim//4, 3, 1, 1) -> LeakyReLU -> Conv2d(dim//4, dim//4, 1, 1, 0) -> LeakyReLU -> Conv2d(dim//4, dim, 3, 1, 1)
-            conv1_params = parameters["conv"][0]
-            conv2_params = parameters["conv"][2]
-            conv3_params = parameters["conv"][4]
+            self.conv_layers = []
 
-            # First conv: dim -> dim//4
+            conv1_params = parameters["conv"][0]
+            sharding_strategy1 = _get_sharding_strategy(H, W, dim, dim // 4)
             conv1_config = _create_conv_config_from_params(
-                input_height=input_resolution[0],
-                input_width=input_resolution[1],
+                input_height=H,
+                input_width=W,
                 in_channels=dim,
                 out_channels=dim // 4,
                 batch_size=1,
@@ -103,14 +109,19 @@ class TtRSTB:
                 dilation=(1, 1),
                 groups=1,
                 activation=None,
-                sharding_strategy=AutoShardedStrategyConfiguration(),
+                activation_dtype=ttnn.bfloat16,
+                deallocate_activation=True,
+                sharding_strategy=sharding_strategy1,
+                config_tensors_in_dram=True,
             )
             self.conv1 = TtConv2d(conv1_config, device)
+            self.conv_layers.append(self.conv1)
 
-            # Second conv: dim//4 -> dim//4 (1x1 conv)
+            conv2_params = parameters["conv"][1]
+            sharding_strategy2 = _get_sharding_strategy(H, W, dim // 4, dim // 4)
             conv2_config = _create_conv_config_from_params(
-                input_height=input_resolution[0],
-                input_width=input_resolution[1],
+                input_height=H,
+                input_width=W,
                 in_channels=dim // 4,
                 out_channels=dim // 4,
                 batch_size=1,
@@ -121,14 +132,19 @@ class TtRSTB:
                 dilation=(1, 1),
                 groups=1,
                 activation=None,
-                sharding_strategy=AutoShardedStrategyConfiguration(),
+                activation_dtype=ttnn.bfloat16,
+                deallocate_activation=True,
+                sharding_strategy=sharding_strategy2,
+                config_tensors_in_dram=True,
             )
             self.conv2 = TtConv2d(conv2_config, device)
+            self.conv_layers.append(self.conv2)
 
-            # Third conv: dim//4 -> dim
+            conv3_params = parameters["conv"][2]
+            sharding_strategy3 = _get_sharding_strategy(H, W, dim // 4, dim)
             conv3_config = _create_conv_config_from_params(
-                input_height=input_resolution[0],
-                input_width=input_resolution[1],
+                input_height=H,
+                input_width=W,
                 in_channels=dim // 4,
                 out_channels=dim,
                 batch_size=1,
@@ -139,17 +155,15 @@ class TtRSTB:
                 dilation=(1, 1),
                 groups=1,
                 activation=None,
-                sharding_strategy=AutoShardedStrategyConfiguration(),
+                deallocate_activation=True,
+                sharding_strategy=sharding_strategy3,
+                config_tensors_in_dram=True,
             )
             self.conv3 = TtConv2d(conv3_config, device)
-            self.conv = None  # Mark that we're using 3conv
-            self.leaky_relu_negative_slope = 0.2  # Default negative slope for LeakyReLU
+            self.conv_layers.append(self.conv3)
         else:
             raise ValueError(f"Unknown resi_connection: {resi_connection}")
 
-        self.resi_connection = resi_connection
-
-        # Patch embed and unembed
         self.patch_embed = TtSwin2SRPatchEmbed(
             device=device,
             parameters=parameters["patch_embed"],
@@ -179,58 +193,37 @@ class TtRSTB:
         Returns:
             Output tensor of shape (B, H*W, C).
         """
-        shortcut = ttnn.reallocate(x, memory_config=self.dram)
+        shortcut = ttnn.reallocate(x, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-        # Residual group
-        x = self.residual_group(x, x_size)
-
-        # Patch unembed: (B, H*W, C) -> (B, C, H, W)
+        x = self.residual_group(x, x_size=x_size)
+        # Move to DRAM to free L1 before conv operations
+        x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
         x = self.patch_unembed(x, x_size)
 
-        # Convolution
-        if self.resi_connection == "1conv":
-            # Convert to (B, H, W, C) for conv2d
-            x = ttnn.permute(x, (0, 2, 3, 1), memory_config=self.dram)
-            x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=self.dram)
-            x, _ = self.conv(x, return_output_dim=True)
-            x = ttnn.sharded_to_interleaved(x, self.memory_config)
-            x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=self.dram)
-            # Reshape back to (B, H, W, C) then to (B, C, H, W)
-            B, H, W, C = x.shape
-            x = ttnn.permute(x, (0, 3, 1, 2), memory_config=self.dram)
-        else:  # 3conv
-            # Convert to (B, H, W, C) for conv2d
-            x = ttnn.permute(x, (0, 2, 3, 1), memory_config=self.dram)
-            x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=self.dram)
+        # Convert from (B, C, H, W) to (B, H, W, C) for TtConv2d (NHWC format)
+        x = ttnn.permute(x, (0, 2, 3, 1), memory_config=self.memory_config)
+        x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
 
-            # First conv
-            x, _ = self.conv1(x, return_output_dim=True)
-            x = ttnn.sharded_to_interleaved(x, self.memory_config)
-            x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=self.dram)
-            # Apply LeakyReLU
-            x = ttnn.leaky_relu(x, negative_slope=self.leaky_relu_negative_slope, memory_config=self.dram)
+        for i, conv_layer in enumerate(self.conv_layers):
+            x = conv_layer(x)
+            # Convert from sharded to interleaved if needed, and ensure NHWC format
+            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
+            x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
+            # Apply LeakyReLU for first two convs in 3conv case
+            if len(self.conv_layers) == 3 and i < 2:
+                # Convert to TILE layout for unary operations
+                x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+                x = ttnn.leaky_relu(x, negative_slope=0.2, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                # Convert back to ROW_MAJOR for next conv
+                x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
+            # Ensure output is in DRAM for next conv
+            x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
 
-            # Second conv (1x1)
-            x, _ = self.conv2(x, return_output_dim=True)
-            x = ttnn.sharded_to_interleaved(x, self.memory_config)
-            x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=self.dram)
-            # Apply LeakyReLU
-            x = ttnn.leaky_relu(x, negative_slope=self.leaky_relu_negative_slope, memory_config=self.dram)
-
-            # Third conv
-            x, _ = self.conv3(x, return_output_dim=True)
-            x = ttnn.sharded_to_interleaved(x, self.memory_config)
-            x = ttnn.to_layout(x, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=self.dram)
-
-            # Reshape back to (B, C, H, W)
-            B, H, W, C = x.shape
-            x = ttnn.permute(x, (0, 3, 1, 2), memory_config=self.dram)
-
-        # Patch embed: (B, C, H, W) -> (B, H*W, C)
+        # Convert back from (B, H, W, C) to (B, C, H, W) for patch_embed
+        x = ttnn.permute(x, (0, 3, 1, 2), memory_config=self.memory_config)
         x = self.patch_embed(x)
 
-        # Residual connection
-        x = ttnn.add(shortcut, x, memory_config=self.l1, dtype=ttnn.bfloat16)
+        x = ttnn.add(shortcut, x, memory_config=self.memory_config, dtype=ttnn.bfloat16)
         ttnn.deallocate(shortcut)
 
         return x

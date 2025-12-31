@@ -142,6 +142,11 @@ def test_rstb_ttnn_vs_torch_with_checkpoint(device, layer_idx, reset_seeds):
     """Test RSTB with weights from Swin2SR checkpoint."""
     checkpoint_path = os.path.join(
         os.path.dirname(__file__),
+        "..",
+        "..",
+        "swin2sr",
+        "model_zoo",
+        "swin2sr",
         "Swin2SR_ClassicalSR_X2_64.pth",
     )
 

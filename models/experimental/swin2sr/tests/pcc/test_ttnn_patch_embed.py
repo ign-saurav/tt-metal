@@ -183,6 +183,11 @@ def test_swin2sr_patch_unembed_ttnn_vs_torch(device, img_size, patch_size, in_ch
 def test_swin2sr_patch_unembed_ttnn_vs_torch_with_checkpoint(device, reset_seeds):
     checkpoint_path = os.path.join(
         os.path.dirname(__file__),
+        "..",
+        "..",
+        "swin2sr",
+        "model_zoo",
+        "swin2sr",
         "Swin2SR_ClassicalSR_X2_64.pth",
     )
 
