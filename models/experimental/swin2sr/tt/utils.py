@@ -35,6 +35,7 @@ def _create_conv_config_from_params(
     output_dtype=None,
     math_fidelity=None,
     sharding_strategy=AutoShardedStrategyConfiguration(),
+    config_tensors_in_dram=False,
 ) -> Conv2dConfiguration:
     """
     Create Conv2dConfiguration from parameters dict.
@@ -63,4 +64,5 @@ def _create_conv_config_from_params(
         enable_weights_double_buffer=True,
         deallocate_activation=deallocate_activation,
         reallocate_halo_output=True,
+        config_tensors_in_dram=config_tensors_in_dram,
     )

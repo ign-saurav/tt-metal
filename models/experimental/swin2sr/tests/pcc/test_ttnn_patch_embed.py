@@ -10,8 +10,14 @@ import pytest
 import ttnn
 from ttnn.model_preprocessing import preprocess_model_parameters
 from tests.ttnn.utils_for_testing import assert_with_pcc, comp_pcc
-from models.experimental.swin2sr.reference.patch_embed import PatchEmbed as TorchSwin2SRPatchEmbed
-from models.experimental.swin2sr.tt.tt_patch_embed import TtSwin2SRPatchEmbed
+from models.experimental.swin2sr.reference.patch_embed import (
+    PatchEmbed as TorchSwin2SRPatchEmbed,
+    PatchUnEmbed as TorchSwin2SRPatchUnEmbed,
+)
+from models.experimental.swin2sr.tt.tt_patch_embed import (
+    TtSwin2SRPatchEmbed,
+    TtSwin2SRPatchUnEmbed,
+)
 
 
 def create_custom_preprocessor(device):
@@ -121,6 +127,117 @@ def test_swin2sr_patch_embed_ttnn_vs_torch(device, img_size, patch_size, in_chan
     # Log PCC value
     pcc_passed, pcc_message = comp_pcc(torch_output_tensor, output_tensor, pcc=0.99)
     print(f"\n[CHECKPOINT - PatchEmbed] PCC: {pcc_message}")
+    assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)
+
+
+@pytest.mark.parametrize(
+    "img_size,patch_size,in_chans,embed_dim,x_size",
+    [
+        (64, 4, 3, 96, (64, 64)),
+        (64, 4, 3, 96, (32, 32)),
+        (128, 4, 3, 180, (128, 128)),
+        (128, 4, 3, 180, (64, 64)),
+    ],
+)
+def test_swin2sr_patch_unembed_ttnn_vs_torch(device, img_size, patch_size, in_chans, embed_dim, x_size, reset_seeds):
+    torch_model = TorchSwin2SRPatchUnEmbed(
+        img_size=img_size,
+        patch_size=patch_size,
+        in_chans=in_chans,
+        embed_dim=embed_dim,
+    )
+    torch_model.eval()
+
+    batch_size = 1
+    H, W = x_size
+    num_patches = H * W
+    torch_input_tensor = torch.randn(batch_size, num_patches, embed_dim)
+
+    with torch.no_grad():
+        torch_output_tensor = torch_model(torch_input_tensor, x_size)
+
+    ttnn_model = TtSwin2SRPatchUnEmbed(
+        img_size=img_size,
+        patch_size=patch_size,
+        in_chans=in_chans,
+        embed_dim=embed_dim,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+
+    input_tensor = ttnn.from_torch(
+        torch_input_tensor,
+        dtype=ttnn.bfloat16,
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+    )
+
+    output_tensor = ttnn_model(input_tensor, x_size)
+    output_tensor = ttnn.to_torch(output_tensor)
+
+    # Log PCC value
+    pcc_passed, pcc_message = comp_pcc(torch_output_tensor, output_tensor, pcc=0.99)
+    print(f"\n[PatchUnEmbed] PCC: {pcc_message}")
+    assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)
+
+
+def test_swin2sr_patch_unembed_ttnn_vs_torch_with_checkpoint(device, reset_seeds):
+    checkpoint_path = os.path.join(
+        os.path.dirname(__file__),
+        "Swin2SR_ClassicalSR_X2_64.pth",
+    )
+
+    if not os.path.exists(checkpoint_path):
+        pytest.skip(f"Checkpoint not found at {checkpoint_path}")
+
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+    params = checkpoint["params"] if "params" in checkpoint else checkpoint
+
+    proj_weight_shape = params["patch_embed.proj.weight"].shape
+    out_channels, in_channels, kernel_h, kernel_w = proj_weight_shape
+
+    img_size = 64
+    patch_size = kernel_h
+    in_chans = in_channels
+    embed_dim = out_channels
+    x_size = (img_size, img_size)
+
+    torch_model = TorchSwin2SRPatchUnEmbed(
+        img_size=img_size,
+        patch_size=patch_size,
+        in_chans=in_chans,
+        embed_dim=embed_dim,
+    )
+    torch_model.eval()
+
+    batch_size = 1
+    H, W = x_size
+    num_patches = H * W
+    torch_input_tensor = torch.randn(batch_size, num_patches, embed_dim)
+
+    with torch.no_grad():
+        torch_output_tensor = torch_model(torch_input_tensor, x_size)
+
+    ttnn_model = TtSwin2SRPatchUnEmbed(
+        img_size=img_size,
+        patch_size=patch_size,
+        in_chans=in_chans,
+        embed_dim=embed_dim,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+
+    input_tensor = ttnn.from_torch(
+        torch_input_tensor,
+        dtype=ttnn.bfloat16,
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+    )
+
+    output_tensor = ttnn_model(input_tensor, x_size)
+    output_tensor = ttnn.to_torch(output_tensor)
+
+    # Log PCC value
+    pcc_passed, pcc_message = comp_pcc(torch_output_tensor, output_tensor, pcc=0.99)
+    print(f"\n[CHECKPOINT - PatchUnEmbed] PCC: {pcc_message}")
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)
 
 

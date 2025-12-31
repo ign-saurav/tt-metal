@@ -78,15 +78,67 @@ class TtSwin2SRPatchEmbed:
         x = ttnn.reshape(x, (B, out_height, out_width, self.embed_dim))
         x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
 
-        x = ttnn.reshape(x, (B, self.num_patches, self.embed_dim))
+        # Use actual output dimensions, not self.num_patches (which is based on img_size)
+        num_patches = out_height * out_width
+        x = ttnn.reshape(x, (B, num_patches, self.embed_dim))
 
         if self.has_norm:
-            x = ttnn.reshape(x, (1, B, self.num_patches, self.embed_dim))
+            x = ttnn.reshape(x, (1, B, num_patches, self.embed_dim))
             x = ttnn.layer_norm(
                 x,
                 weight=self.norm_weight,
                 bias=self.norm_bias,
             )
-            x = ttnn.reshape(x, (B, self.num_patches, self.embed_dim))
+            x = ttnn.reshape(x, (B, num_patches, self.embed_dim))
+
+        return x
+
+
+class TtSwin2SRPatchUnEmbed:
+    """Patch to Image Unembedding.
+
+    Args:
+        img_size (int | tuple[int]): Image size. Default: 224.
+        patch_size (int | tuple[int]): Patch token size. Default: 4.
+        in_chans (int): Number of input image channels. Default: 3.
+        embed_dim (int): Number of linear projection output channels. Default: 96.
+    """
+
+    def __init__(
+        self,
+        img_size: int | tuple[int, int] = 224,
+        patch_size: int | tuple[int, int] = 4,
+        in_chans: int = 3,
+        embed_dim: int = 96,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    ):
+        img_size = to_2tuple(img_size)
+        patch_size = to_2tuple(patch_size)
+        patches_resolution = [img_size[0] // patch_size[0], img_size[1] // patch_size[1]]
+
+        self.img_size = img_size
+        self.patch_size = patch_size
+        self.patches_resolution = patches_resolution
+        self.num_patches = patches_resolution[0] * patches_resolution[1]
+        self.in_chans = in_chans
+        self.embed_dim = embed_dim
+        self.memory_config = memory_config
+
+    def __call__(self, x: ttnn.Tensor, x_size: tuple[int, int]) -> ttnn.Tensor:
+        """Forward pass.
+
+        Args:
+            x: Input tensor of shape (B, num_patches, embed_dim).
+            x_size: Spatial size (H, W) of the output.
+
+        Returns:
+            Output tensor of shape (B, embed_dim, H, W).
+        """
+        B, HW, C = x.shape
+        H, W = x_size
+
+        # Reshape from (B, H*W, C) to (B, C, H, W)
+        x = ttnn.reshape(x, (B, H, W, C), memory_config=self.memory_config)
+        x = ttnn.permute(x, (0, 3, 1, 2), memory_config=self.memory_config)
 
         return x
