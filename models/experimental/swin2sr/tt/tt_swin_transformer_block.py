@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 import ttnn
 from models.experimental.swin2sr.tt.tt_window_attention import TtSwin2SRWindowAttention
 from models.experimental.swin2sr.tt.tt_mlp import TtSwin2SRMLP
@@ -121,7 +120,11 @@ class TtSwinTransformerBlock:
             Hp = H
         if Wp is None:
             Wp = W
-        img_mask = torch.zeros((1, Hp, Wp, 1))
+
+        # Create initial mask tensor on device
+        img_mask = ttnn.zeros((1, Hp, Wp, 1), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
+
+        # Define slices
         h_slices = (
             slice(0, -self.window_size),
             slice(-self.window_size, -self.shift_size),
@@ -132,26 +135,83 @@ class TtSwinTransformerBlock:
             slice(-self.window_size, -self.shift_size),
             slice(-self.shift_size, None),
         )
+
+        # Fill mask regions with counters
         cnt = 0
         for h in h_slices:
             for w in w_slices:
-                img_mask[:, h, w, :] = cnt
+                # Create a tensor filled with the counter value
+                counter_tensor = ttnn.full(
+                    (1, Hp, Wp, 1), cnt, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
+                )
+                # Use where to conditionally fill the region
+                img_mask = ttnn.where(self._create_region_mask(Hp, Wp, h, w, self.device), counter_tensor, img_mask)
                 cnt += 1
 
-        mask_windows = img_mask.view(
-            1, Hp // self.window_size, self.window_size, Wp // self.window_size, self.window_size, 1
+        # Reshape and permute for window processing
+        mask_windows = ttnn.reshape(
+            img_mask, (1, Hp // self.window_size, self.window_size, Wp // self.window_size, self.window_size, 1)
         )
-        mask_windows = mask_windows.permute(0, 1, 3, 2, 4, 5).contiguous()
-        mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
-        attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
-        attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
-        return ttnn.from_torch(
-            attn_mask,
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
+        mask_windows = ttnn.permute(mask_windows, (0, 1, 3, 2, 4, 5))
+        mask_windows = ttnn.reshape(mask_windows, (-1, self.window_size * self.window_size))
+
+        # Compute attention mask
+        mask_windows_expanded1 = ttnn.unsqueeze(mask_windows, dim=1)
+        mask_windows_expanded2 = ttnn.unsqueeze(mask_windows, dim=2)
+        attn_mask = ttnn.subtract(mask_windows_expanded1, mask_windows_expanded2)
+
+        # Apply masked_fill equivalent using where
+        zero_tensor = ttnn.zeros_like(attn_mask)
+        neg_100_tensor = ttnn.full_like(attn_mask, -100.0)
+
+        attn_mask = ttnn.where(ttnn.eq(attn_mask, 0), zero_tensor, neg_100_tensor)
+
+        return attn_mask
+
+    def _create_region_mask(self, Hp, Wp, h_slice, w_slice, device):
+        """Helper to create a boolean mask for the specified region"""
+        region_mask = ttnn.zeros((1, Hp, Wp, 1), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+
+        # Convert slice indices to actual indices, handling negative indices correctly
+        def convert_slice_index(idx, size):
+            if idx is None:
+                return size
+            if idx < 0:
+                return size + idx
+            return idx
+
+        # Create indices for the region
+        h_start = convert_slice_index(h_slice.start, Hp)
+        h_end = convert_slice_index(h_slice.stop, Hp)
+        w_start = convert_slice_index(w_slice.start, Wp)
+        w_end = convert_slice_index(w_slice.stop, Wp)
+
+        # Clamp to valid range
+        h_start = max(0, min(h_start, Hp))
+        h_end = max(0, min(h_end, Hp))
+        w_start = max(0, min(w_start, Wp))
+        w_end = max(0, min(w_end, Wp))
+
+        if h_start < h_end and w_start < w_end:
+            # Use coordinate-based approach to fill the region with ones
+            # Create coordinate tensors to check if we're in the region
+            h_coords = ttnn.arange(0, Hp, 1, dtype=ttnn.bfloat16, device=device)
+            w_coords = ttnn.arange(0, Wp, 1, dtype=ttnn.bfloat16, device=device)
+            h_coords = ttnn.reshape(h_coords, (1, Hp, 1, 1))
+            w_coords = ttnn.reshape(w_coords, (1, 1, Wp, 1))
+
+            # Create condition: h_start <= h < h_end AND w_start <= w < w_end
+            h_cond = ttnn.logical_and(ttnn.ge(h_coords, h_start), ttnn.lt(h_coords, h_end))
+            w_cond = ttnn.logical_and(ttnn.ge(w_coords, w_start), ttnn.lt(w_coords, w_end))
+            in_region = ttnn.logical_and(h_cond, w_cond)
+            in_region = ttnn.to_layout(
+                in_region, layout=ttnn.TILE_LAYOUT, memory_config=self.memory_config, dtype=ttnn.bfloat16
+            )
+
+            ones_full = ttnn.ones_like(region_mask, layout=ttnn.TILE_LAYOUT)
+            region_mask = ttnn.where(in_region, ones_full, region_mask)
+
+        return region_mask
 
     def __call__(self, x: ttnn.Tensor, x_size: tuple[int, int]) -> ttnn.Tensor:
         H, W = x_size
