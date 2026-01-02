@@ -136,6 +136,8 @@ class TtSwin2SRPatchUnEmbed:
         B, HW, C = x.shape
         H, W = x_size
 
+        # Convert to ROW_MAJOR for proper reshaping (TTNN reshape requires ROW_MAJOR)
+        x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT, memory_config=self.memory_config)
         x = ttnn.reshape(x, (B, H, W, C), memory_config=self.memory_config)
         x = ttnn.permute(x, (0, 3, 1, 2), memory_config=self.memory_config)
 

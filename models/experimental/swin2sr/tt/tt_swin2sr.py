@@ -392,8 +392,11 @@ class TtSwin2SR:
             x = self.conv_first(x)
             x = ttnn.sharded_to_interleaved(x, self.memory_config)
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
-            x = ttnn.permute(x, (0, 3, 1, 2))
+            # Reshape to recover spatial dimensions (conv_first may flatten output)
+            x = ttnn.reshape(x, (B, H, W, self.embed_dim), memory_config=self.memory_config)
+            x = ttnn.permute(x, (0, 3, 1, 2))  # Now [B, C, H, W]
 
+            # Save shortcut AFTER reshape to ensure correct shape
             shortcut = ttnn.reallocate(x, memory_config=self.memory_config)
             x = self.forward_features(x)
 
@@ -408,6 +411,8 @@ class TtSwin2SR:
                         x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
                         x = ttnn.leaky_relu(x, negative_slope=0.2, memory_config=self.memory_config)
                         x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
+                # Reshape to recover spatial dimensions after 3conv
+                x = ttnn.reshape(x, (B, H, W, self.embed_dim), memory_config=self.memory_config)
                 x = ttnn.permute(x, (0, 3, 1, 2))
             else:
                 x = ttnn.permute(x, (0, 2, 3, 1))
@@ -415,6 +420,8 @@ class TtSwin2SR:
                 x = self.conv_after_body(x)
                 x = ttnn.sharded_to_interleaved(x, self.memory_config)
                 x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
+                # Reshape to recover spatial dimensions after 1conv
+                x = ttnn.reshape(x, (B, H, W, self.embed_dim), memory_config=self.memory_config)
                 x = ttnn.permute(x, (0, 3, 1, 2))
 
             x = ttnn.add(shortcut, x, memory_config=self.memory_config, dtype=ttnn.bfloat16)
@@ -426,7 +433,7 @@ class TtSwin2SR:
             x = ttnn.sharded_to_interleaved(x, self.memory_config)
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-            x = ttnn.leaky_relu(x, negative_slope=0.2, memory_config=self.memory_config)
+            x = ttnn.leaky_relu(x, negative_slope=0.01, memory_config=self.memory_config)
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
             x = self.upsample(x)
             x = ttnn.to_memory_config(x, self.memory_config)
