@@ -78,7 +78,6 @@ class TtSwin2SRPatchEmbed:
         x = ttnn.reshape(x, (B, out_height, out_width, self.embed_dim))
         x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
 
-        # Use actual output dimensions, not self.num_patches (which is based on img_size)
         num_patches = out_height * out_width
         x = ttnn.reshape(x, (B, num_patches, self.embed_dim))
 
@@ -137,7 +136,6 @@ class TtSwin2SRPatchUnEmbed:
         B, HW, C = x.shape
         H, W = x_size
 
-        # Reshape from (B, H*W, C) to (B, C, H, W)
         x = ttnn.reshape(x, (B, H, W, C), memory_config=self.memory_config)
         x = ttnn.permute(x, (0, 3, 1, 2), memory_config=self.memory_config)
 

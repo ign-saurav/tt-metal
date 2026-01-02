@@ -7,23 +7,14 @@ import ttnn
 
 def _ttnn_normalize_l2(x, dim=-1, memory_config=ttnn.L1_MEMORY_CONFIG):
     """Normalize tensor along specified dimension using L2 norm."""
-    # Square the tensor
     x_squared = ttnn.multiply(x, x, memory_config=memory_config)
-
-    # Sum along the specified dimension
     sum_squared = ttnn.sum(x_squared, dim=dim, keepdim=True, memory_config=memory_config)
     ttnn.deallocate(x_squared)
-
-    # Add small epsilon and calculate square root
-    # ttnn.add can accept a scalar directly
     sum_squared = ttnn.add(sum_squared, 1e-12, memory_config=memory_config)
     norm = ttnn.sqrt(sum_squared, memory_config=memory_config)
     ttnn.deallocate(sum_squared)
-
-    # Divide input by norm
     normalized = ttnn.divide(x, norm, memory_config=memory_config)
     ttnn.deallocate(norm)
-
     return normalized
 
 
@@ -81,17 +72,14 @@ class TtSwin2SRWindowAttention:
             math_fidelity=ttnn.MathFidelity.LoFi,
         )
 
-        # Logit scale for cosine attention (SwinV2)
         self.logit_scale = parameters.get("logit_scale", None)
         if self.logit_scale is not None:
             self.logit_scale_max = ttnn.log(
                 ttnn.full((1,), 1.0 / 0.01, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT)
             )
 
-        # Relative position bias (pre-computed in preprocessor, like SwinV2)
         self.relative_position_bias = parameters.get("relative_position_bias", None)
         if self.relative_position_bias is None:
-            # Fallback: compute zeros if not provided
             Wh, Ww = self.window_size
             num_heads = self.num_heads
             bias_shape = (num_heads, Wh * Ww, Wh * Ww)
@@ -103,13 +91,11 @@ class TtSwin2SRWindowAttention:
                 memory_config=self.memory_config,
             )
 
-        # QKV projection parameters
         self.qkv_weight = parameters["qkv"].get("weight", None)
         self.q_bias = parameters.get("q_bias", None)
         self.v_bias = parameters.get("v_bias", None)
         self.qkv_bias = qkv_bias
 
-        # Output projection parameters
         self.proj_weight = parameters["proj"].get("weight", None)
         self.proj_bias = parameters["proj"].get("bias", None)
 
@@ -128,10 +114,8 @@ class TtSwin2SRWindowAttention:
         """
         B_, N, C = x.shape
 
-        # Prepare QKV bias
         qkv_bias_tt = None
         if self.qkv_bias and self.q_bias is not None:
-            # Concatenate q_bias, zeros, v_bias
             zeros = ttnn.zeros_like(self.v_bias)
             qkv_bias_tt = ttnn.concat((self.q_bias, zeros, self.v_bias))
 
@@ -146,26 +130,15 @@ class TtSwin2SRWindowAttention:
         )
         ttnn.deallocate(x)
 
-        # Split into Q, K, V manually to support any head_dim (not just multiples of 32)
-        # QKV shape: (B_, N, 3*C) where C = dim
-        # We pad head_dim to nearest multiple of 32 for TTNN compatibility
-
         head_dim = self.dim // self.num_heads
-        padded_head_dim = ((head_dim + 31) // 32) * 32  # Round up to nearest multiple of 32
+        padded_head_dim = ((head_dim + 31) // 32) * 32
         needs_padding = padded_head_dim != head_dim
 
-        # Reshape: (B_, N, 3*C) -> (B_, N, 3, C)
         qkv_reshaped = ttnn.reshape(qkv, (B_, N, 3, self.dim))
-
-        # Split into Q, K, V: each (B_, N, C)
-        q, k, v = ttnn.chunk(qkv_reshaped, 3, dim=2)  # Split along dim=2
-
-        # Squeeze dimension 2 from each
-        q = ttnn.squeeze(q, dim=2)  # (B_, N, C)
-        k = ttnn.squeeze(k, dim=2)  # (B_, N, C)
-        v = ttnn.squeeze(v, dim=2)  # (B_, N, C)
-
-        # Reshape and permute to (B_, num_heads, N, head_dim)
+        q, k, v = ttnn.chunk(qkv_reshaped, 3, dim=2)
+        q = ttnn.squeeze(q, dim=2)
+        k = ttnn.squeeze(k, dim=2)
+        v = ttnn.squeeze(v, dim=2)
         q = ttnn.reshape(q, (B_, N, self.num_heads, head_dim))
         q = ttnn.permute(q, (0, 2, 1, 3))
 
@@ -175,27 +148,21 @@ class TtSwin2SRWindowAttention:
         v = ttnn.reshape(v, (B_, N, self.num_heads, head_dim))
         v = ttnn.permute(v, (0, 2, 1, 3))
 
-        # Pad head_dim dimension if needed for TTNN compatibility
         if needs_padding:
             padding_size = padded_head_dim - head_dim
-            # Pad on the last dimension (head_dim)
             padding = ((0, 0), (0, 0), (0, 0), (0, padding_size))
             q = ttnn.pad(q, padding, value=0)
             k = ttnn.pad(k, padding, value=0)
             v = ttnn.pad(v, padding, value=0)
-            # Store for later slicing
             self._head_dim = head_dim
             self._padded_head_dim = padded_head_dim
         else:
             self._head_dim = head_dim
             self._padded_head_dim = head_dim
-
-            # Verify padding: last dimension should be multiple of 32
             assert q.shape[-1] % 32 == 0, f"q last dim {q.shape[-1]} must be multiple of 32"
             assert k.shape[-1] % 32 == 0, f"k last dim {k.shape[-1]} must be multiple of 32"
             assert v.shape[-1] % 32 == 0, f"v last dim {v.shape[-1]} must be multiple of 32"
 
-        # Store padding info for later use in matmul operations
         self._head_dim = head_dim
         self._padded_head_dim = padded_head_dim
 
@@ -205,10 +172,7 @@ class TtSwin2SRWindowAttention:
         q = _ttnn_normalize_l2(q, dim=-1, memory_config=qk_memory_config)
         k = _ttnn_normalize_l2(k, dim=-1, memory_config=qk_memory_config)
 
-        # Compute attention scores: Q @ K^T
-        # Handle padding: if head_dim was padded, we need to slice k before transpose
         if hasattr(self, "_padded_head_dim") and self._padded_head_dim != self._head_dim:
-            # Slice k to remove padding before transpose
             k = k[:, :, :, : self._head_dim]
 
         k_transposed = ttnn.permute(k, (0, 1, 3, 2), memory_config=qk_memory_config)
@@ -225,12 +189,9 @@ class TtSwin2SRWindowAttention:
         ttnn.deallocate(q)
         ttnn.deallocate(k_transposed)
 
-        # Apply logit scale
         if self.logit_scale is not None:
             logit_scale = ttnn.clamp(self.logit_scale, max=self.logit_scale_max)
             logit_scale_tt = ttnn.exp(logit_scale)
-            # Expand to match attn shape: (num_heads, 1, 1) -> (1, num_heads, 1, 1)
-            # Reshape to (1, num_heads, 1, 1)
             logit_scale_tt = ttnn.reshape(logit_scale_tt, (1, self.num_heads, 1, 1), memory_config=attn_memory_config)
             attn = ttnn.multiply(attn, logit_scale_tt, memory_config=attn_memory_config)
             ttnn.deallocate(logit_scale_tt)
@@ -258,16 +219,10 @@ class TtSwin2SRWindowAttention:
         ttnn.deallocate(attn)
         ttnn.deallocate(v)
 
-        # Reshape and concatenate heads: (B_, num_heads, N, head_dim) -> (B_, N, C)
-        # Handle padding: if head_dim was padded, we need to slice before concatenating
         if hasattr(self, "_padded_head_dim") and self._padded_head_dim != self._head_dim:
-            # Slice to remove padding, then concatenate heads - all on device
-            # Slice to actual head_dim: (B_, num_heads, N, padded_head_dim) -> (B_, num_heads, N, head_dim)
             attn_v = attn_v[:, :, :, : self._head_dim]
-
-            # Reshape and concatenate: (B_, num_heads, N, head_dim) -> (B_, N, num_heads, head_dim) -> (B_, N, C)
-            attn_v = ttnn.permute(attn_v, (0, 2, 1, 3))  # (B_, N, num_heads, head_dim)
-            x = ttnn.reshape(attn_v, (B_, N, self.dim))  # (B_, N, C)
+            attn_v = ttnn.permute(attn_v, (0, 2, 1, 3))
+            x = ttnn.reshape(attn_v, (B_, N, self.dim))
         else:
             x = ttnn.transformer.concatenate_heads(attn_v, memory_config=self.memory_config)
             ttnn.deallocate(attn_v)

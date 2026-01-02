@@ -6,6 +6,7 @@ import ttnn
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
     AutoShardedStrategyConfiguration,
+    HeightShardedStrategyConfiguration,
     L1FullSliceStrategyConfiguration,
 )
 
@@ -74,3 +75,18 @@ def _create_conv_config_from_params(
         reallocate_halo_output=True,
         config_tensors_in_dram=config_tensors_in_dram,
     )
+
+
+def _get_sharding_strategy(input_height, input_width, in_channels, out_channels):
+    """Determine optimal sharding strategy based on tensor dimensions."""
+    spatial_size = input_height * input_width
+    channel_size = in_channels * out_channels
+
+    if spatial_size > channel_size and spatial_size > 256:
+        if spatial_size > channel_size * 4:
+            act_block_h = min(256, max(32, spatial_size // 32))
+            return HeightShardedStrategyConfiguration(act_block_h_override=act_block_h)
+        else:
+            return AutoShardedStrategyConfiguration()
+    else:
+        return AutoShardedStrategyConfiguration()

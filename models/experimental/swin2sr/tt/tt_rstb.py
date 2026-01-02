@@ -5,33 +5,14 @@
 import ttnn
 from models.experimental.swin2sr.tt.tt_basic_layer import TtBasicLayer
 from models.experimental.swin2sr.tt.tt_patch_embed import TtSwin2SRPatchEmbed, TtSwin2SRPatchUnEmbed
-from models.experimental.swin2sr.tt.utils import _create_conv_config_from_params
-from models.tt_cnn.tt.builder import (
-    TtConv2d,
-    AutoShardedStrategyConfiguration,
-    HeightShardedStrategyConfiguration,
-)
+from models.experimental.swin2sr.tt.utils import _create_conv_config_from_params, _get_sharding_strategy
+from models.tt_cnn.tt.builder import TtConv2d
 
 
 def to_2tuple(x):
     if isinstance(x, (int, float)):
         return (x, x)
     return x
-
-
-def _get_sharding_strategy(input_height, input_width, in_channels, out_channels):
-    """Determine optimal sharding strategy based on tensor dimensions."""
-    spatial_size = input_height * input_width
-    channel_size = in_channels * out_channels
-
-    if spatial_size > channel_size and spatial_size > 256:
-        if spatial_size > channel_size * 4:
-            act_block_h = min(256, max(32, spatial_size // 32))
-            return HeightShardedStrategyConfiguration(act_block_h_override=act_block_h)
-        else:
-            return AutoShardedStrategyConfiguration()
-    else:
-        return AutoShardedStrategyConfiguration()
 
 
 class TtRSTB:
