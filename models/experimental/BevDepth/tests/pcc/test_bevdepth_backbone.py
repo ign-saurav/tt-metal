@@ -384,7 +384,7 @@ def prepare_neck_parameters():
 def prepare_depthnet_parameters():
     """Prepare parameters for DepthNet."""
     logger.info("Preparing depthnet parameters...")
-    from models.experimental.BevDepth.tt.ttnn_depthnet import prepare_depthnet_parameters
+    from models.experimental.BevDepth.tt.custom_preprocessing import prepare_depthnet_parameters
 
     checkpoint_path = download_bevdepth_weights()
     depthnet_state = extract_depthnet_state_dict(checkpoint_path)

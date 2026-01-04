@@ -11,7 +11,9 @@ from models.experimental.BevDepth.tt.utils import (
     create_conv2d_config,
     post_process_conv_output,
 )
-from models.experimental.BevDepth.tt.deformable_conv import TtDeformConv2dPack
+from models.experimental.BevDepth.reference.bevdepth.layers.heads.deform_conv import (
+    DeformConv2dPack,
+)
 
 
 @dataclass
@@ -499,7 +501,7 @@ class ASPP_TTNN:
             channels=self.mid_channels,
             batch_size=batch_size,
             scale_factor=(height, width),
-            mode="bilinear",
+            mode="nearest",
             slice_strategy=ChannelSliceStrategyConfiguration(num_slices=num_slices),
         )
         upsample_layer = TtUpsample(upsample_config, self.device)
@@ -665,11 +667,10 @@ class DepthNet_TTNN:
         else:
             self.mlp_bn = None
 
-        # Initialize DCN (Deformable Conv) using wrapper
-        # TODO: Native TTNN implementation pending - https://github.com/tenstorrent/tt-metal/issues/#17076
+        # Initialize DCN (Deformable Conv) using reference implementation
+        # TODO: Native TTNN implementation pending - https://github.com/tenstorrent/tt-metal/issues/25526
         if hasattr(parameters, "dcn_weight"):
-            self.dcn = TtDeformConv2dPack(
-                device=device,
+            self.dcn = DeformConv2dPack(
                 in_channels=mid_channels,
                 out_channels=mid_channels,
                 kernel_size=3,
@@ -678,17 +679,17 @@ class DepthNet_TTNN:
                 dilation=1,
                 groups=1,
                 deform_groups=1,
-                conv_offset_weight=parameters.dcn_conv_offset.weight.data
-                if hasattr(parameters, "dcn_conv_offset")
-                else None,
-                conv_offset_bias=parameters.dcn_conv_offset.bias.data
-                if hasattr(parameters, "dcn_conv_offset")
-                else None,
-                dcn_weight=parameters.dcn_weight,
-                dcn_bias=parameters.dcn_bias,
+                bias=False,
             )
+            self.dcn.weight.data = parameters.dcn_weight.float()
+            if hasattr(parameters, "dcn_conv_offset"):
+                self.dcn.conv_offset.weight.data = parameters.dcn_conv_offset.weight.data.float()
+                self.dcn.conv_offset.bias.data = parameters.dcn_conv_offset.bias.data.float()
+            self.dcn_bias = parameters.dcn_bias.float() if parameters.dcn_bias is not None else None
+            self.dcn.eval()
         else:
             self.dcn = None
+            self.dcn_bias = None
 
         logger.info(f"DepthNet init: in={in_channels}, mid={mid_channels}, depth={depth_channels}")
 
@@ -1062,10 +1063,39 @@ class DepthNet_TTNN:
             if depth.is_sharded():
                 depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
 
-        # DCN (Deformable Conv) - using TtDeformConv2dPack wrapper
+        # DCN (Deformable Conv) - using reference DeformConv2dPack
         # TODO: Native TTNN implementation pending - https://github.com/tenstorrent/tt-metal/issues/25526
         if self.dcn is not None:
-            depth, _, _ = self.dcn(depth, batch_size, height, width)
+            x_torch = ttnn.to_torch(depth)
+
+            if len(x_torch.shape) == 4:
+                if x_torch.shape[1] == 1 and x_torch.shape[2] == height * width:
+                    x_torch = x_torch.reshape(batch_size, height, width, self.mid_channels)
+                elif x_torch.shape[0] == 1 and x_torch.shape[1] == 1:
+                    x_torch = x_torch.reshape(batch_size, height, width, self.mid_channels)
+                elif x_torch.shape[1] == height and x_torch.shape[2] == width:
+                    pass
+            elif len(x_torch.shape) == 3:
+                x_torch = x_torch.reshape(batch_size, height, width, self.mid_channels)
+
+            x_torch = x_torch.permute(0, 3, 1, 2).contiguous().float()
+
+            with torch.no_grad():
+                output = self.dcn(x_torch)
+
+            if self.dcn_bias is not None:
+                output = output + self.dcn_bias.view(1, -1, 1, 1)
+
+            out_h, out_w = output.shape[2], output.shape[3]
+            output = output.permute(0, 2, 3, 1).contiguous()
+
+            depth = ttnn.from_torch(
+                output,
+                device=self.device,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
         else:
             # Fallback to regular conv if DCN not initialized
             logger.warning("DCN not initialized, using regular Conv2d as approximation")
@@ -1109,557 +1139,3 @@ class DepthNet_TTNN:
         out = ttnn.concat([depth, context], dim=-1, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
         return out
-
-
-def fuse_conv_bn_weights_unified(conv_weight, conv_bias, bn_weight, bn_bias, bn_mean, bn_var, eps=1e-5):
-    """
-    Unified function to fuse BatchNorm into conv weights for inference.
-    Handles both conv with bias and conv without bias.
-
-    Formula verification:
-    - BN(x) = (x - mean) / sqrt(var + eps) * weight + bias
-    - For conv without bias: BN(conv(x)) = (conv(x) - mean) / sqrt(var + eps) * bn_weight + bn_bias
-      = conv(x) * (bn_weight / sqrt(var + eps)) - mean * (bn_weight / sqrt(var + eps)) + bn_bias
-      = conv(x) * scale + (bn_bias - mean * scale)
-    - For conv with bias: BN(conv(x) + conv_bias) = ((conv(x) + conv_bias) - mean) / sqrt(var + eps) * bn_weight + bn_bias
-      = (conv(x) + conv_bias - mean) / sqrt(var + eps) * bn_weight + bn_bias
-      = conv(x) * scale + (conv_bias - mean) * scale + bn_bias
-      = conv(x) * scale + bn_bias + (conv_bias - mean) * scale
-
-    Args:
-        conv_weight: [out_channels, in_channels, kH, kW]
-        conv_bias: [out_channels] or None
-        bn_weight: [out_channels] (gamma)
-        bn_bias: [out_channels] (beta)
-        bn_mean: [out_channels] (running_mean)
-        bn_var: [out_channels] (running_var)
-        eps: BN epsilon
-
-    Returns:
-        fused_weight, fused_bias
-    """
-    # Ensure all inputs are float32 for precision during fusion
-    conv_weight = conv_weight.float() if conv_weight.dtype != torch.float32 else conv_weight
-    bn_weight = (
-        bn_weight.float() if isinstance(bn_weight, torch.Tensor) and bn_weight.dtype != torch.float32 else bn_weight
-    )
-    bn_bias = bn_bias.float() if isinstance(bn_bias, torch.Tensor) and bn_bias.dtype != torch.float32 else bn_bias
-    bn_mean = bn_mean.float() if isinstance(bn_mean, torch.Tensor) and bn_mean.dtype != torch.float32 else bn_mean
-    bn_var = bn_var.float() if isinstance(bn_var, torch.Tensor) and bn_var.dtype != torch.float32 else bn_var
-
-    # Calculate scale factor from BN: scale = bn_weight / sqrt(bn_var + eps)
-    std = torch.sqrt(bn_var + eps)
-    scale = bn_weight / std
-
-    # Fuse into conv weight: multiply each output channel by its scale
-    # Shape: [out_channels, in_channels, kH, kW] * [out_channels, 1, 1, 1]
-    fused_weight = conv_weight * scale.view(-1, 1, 1, 1)
-
-    # Fuse into bias
-    # Handle conv_bias: if None, treat as zero
-    if conv_bias is not None:
-        conv_bias = conv_bias.float() if conv_bias.dtype != torch.float32 else conv_bias
-    else:
-        # Create zero bias tensor matching conv_weight device
-        conv_bias = torch.zeros(conv_weight.shape[0], dtype=torch.float32, device=conv_weight.device)
-
-    # Handle bn_bias: if None, treat as zero
-    if bn_bias is not None:
-        bn_bias_val = bn_bias
-    else:
-        bn_bias_val = torch.zeros_like(bn_mean)
-
-    # Fused bias formula: bn_bias + (conv_bias - bn_mean) * scale
-    # This works for both cases:
-    # - conv_bias = 0: fused_bias = bn_bias - bn_mean * scale (matches standard formula)
-    # - conv_bias != 0: fused_bias = bn_bias + (conv_bias - bn_mean) * scale
-    fused_bias = bn_bias_val + scale * (conv_bias - bn_mean)
-
-    return fused_weight, fused_bias
-
-
-def prepare_depthnet_parameters(state_dict, in_channels=512, mid_channels=256, depth_channels=112):
-    class Parameters:
-        pass
-
-    params = Parameters()
-
-    # Find the actual prefix used in this checkpoint
-    all_keys = list(state_dict.keys())
-    possible_prefixes = [
-        "model.backbone.depth_net.",
-        "img_backbone.depth_net.",
-        "backbone.depth_net.",
-        "depth_net.",
-    ]
-
-    prefix = None
-    for p in possible_prefixes:
-        if any(k.startswith(p) for k in all_keys):
-            prefix = p
-            break
-
-    if prefix is None:
-        # No depth_net found, return the full state dict for debugging
-        logger.error(f"Could not find depth_net prefix. Available keys: {all_keys[:10]}")
-        raise KeyError("No depth_net keys found in checkpoint")
-
-    logger.info(f"Using DepthNet prefix: {prefix}")
-
-    # Reduce conv: reduce_conv.0 (conv) -> reduce_conv.1 (BN) -> reduce_conv.2 (ReLU)
-    try:
-        reduce_conv_weight = state_dict[f"{prefix}reduce_conv.0.weight"].float()  # Keep in float32 for fusion
-        reduce_conv_bias = state_dict.get(f"{prefix}reduce_conv.0.bias", None)
-
-        # Load BN parameters (reduce_conv.1)
-        reduce_bn_weight = state_dict.get(f"{prefix}reduce_conv.1.weight", None)
-        reduce_bn_bias = state_dict.get(f"{prefix}reduce_conv.1.bias", None)
-        reduce_bn_mean = state_dict.get(f"{prefix}reduce_conv.1.running_mean", None)
-        reduce_bn_var = state_dict.get(f"{prefix}reduce_conv.1.running_var", None)
-
-        # Fuse BN into reduce_conv
-        if reduce_bn_weight is not None and reduce_bn_mean is not None and reduce_bn_var is not None:
-            # Get BN eps from state dict if available, otherwise use default
-            reduce_bn_eps = state_dict.get(f"{prefix}reduce_conv.1.eps", 1e-5)
-            if isinstance(reduce_bn_eps, torch.Tensor):
-                reduce_bn_eps = reduce_bn_eps.item()
-            # Use unified fusion function
-            fused_reduce_weight, fused_reduce_bias = fuse_conv_bn_weights_unified(
-                reduce_conv_weight,
-                reduce_conv_bias,
-                reduce_bn_weight,
-                reduce_bn_bias,
-                reduce_bn_mean,
-                reduce_bn_var,
-                eps=reduce_bn_eps,
-            )
-            params.reduce_weight = fused_reduce_weight.to(torch.bfloat16)
-            params.reduce_bias = fused_reduce_bias.to(torch.bfloat16)
-        else:
-            # No BN to fuse, use original weights
-            params.reduce_weight = reduce_conv_weight.to(torch.bfloat16)
-            params.reduce_bias = reduce_conv_bias.to(torch.bfloat16) if reduce_conv_bias is not None else None
-    except KeyError as e:
-        logger.error(f"Failed to load reduce_conv: {e}")
-        logger.info(f"Available depth_net keys: {[k for k in all_keys if prefix in k][:20]}")
-        raise
-
-    # MLP and SELayer for camera-aware features
-    # MLP: 27 -> mid_channels -> mid_channels
-    params.depth_mlp = Parameters()
-    params.depth_mlp.fc1_weight = state_dict[f"{prefix}depth_mlp.fc1.weight"].to(torch.bfloat16)
-    params.depth_mlp.fc1_bias = state_dict.get(f"{prefix}depth_mlp.fc1.bias", None)
-    if params.depth_mlp.fc1_bias is not None:
-        params.depth_mlp.fc1_bias = params.depth_mlp.fc1_bias.to(torch.bfloat16)
-    params.depth_mlp.fc2_weight = state_dict[f"{prefix}depth_mlp.fc2.weight"].to(torch.bfloat16)
-    params.depth_mlp.fc2_bias = state_dict.get(f"{prefix}depth_mlp.fc2.bias", None)
-    if params.depth_mlp.fc2_bias is not None:
-        params.depth_mlp.fc2_bias = params.depth_mlp.fc2_bias.to(torch.bfloat16)
-
-    params.context_mlp = Parameters()
-    params.context_mlp.fc1_weight = state_dict[f"{prefix}context_mlp.fc1.weight"].to(torch.bfloat16)
-    params.context_mlp.fc1_bias = state_dict.get(f"{prefix}context_mlp.fc1.bias", None)
-    if params.context_mlp.fc1_bias is not None:
-        params.context_mlp.fc1_bias = params.context_mlp.fc1_bias.to(torch.bfloat16)
-    params.context_mlp.fc2_weight = state_dict[f"{prefix}context_mlp.fc2.weight"].to(torch.bfloat16)
-    params.context_mlp.fc2_bias = state_dict.get(f"{prefix}context_mlp.fc2.bias", None)
-    if params.context_mlp.fc2_bias is not None:
-        params.context_mlp.fc2_bias = params.context_mlp.fc2_bias.to(torch.bfloat16)
-
-    # SELayer: conv_reduce, conv_expand
-    params.depth_se = Parameters()
-    params.depth_se.conv_reduce_weight = state_dict[f"{prefix}depth_se.conv_reduce.weight"].to(torch.bfloat16)
-    params.depth_se.conv_reduce_bias = state_dict.get(f"{prefix}depth_se.conv_reduce.bias", None)
-    if params.depth_se.conv_reduce_bias is not None:
-        params.depth_se.conv_reduce_bias = params.depth_se.conv_reduce_bias.to(torch.bfloat16)
-    params.depth_se.conv_expand_weight = state_dict[f"{prefix}depth_se.conv_expand.weight"].to(torch.bfloat16)
-    params.depth_se.conv_expand_bias = state_dict.get(f"{prefix}depth_se.conv_expand.bias", None)
-    if params.depth_se.conv_expand_bias is not None:
-        params.depth_se.conv_expand_bias = params.depth_se.conv_expand_bias.to(torch.bfloat16)
-
-    params.context_se = Parameters()
-    params.context_se.conv_reduce_weight = state_dict[f"{prefix}context_se.conv_reduce.weight"].to(torch.bfloat16)
-    params.context_se.conv_reduce_bias = state_dict.get(f"{prefix}context_se.conv_reduce.bias", None)
-    if params.context_se.conv_reduce_bias is not None:
-        params.context_se.conv_reduce_bias = params.context_se.conv_reduce_bias.to(torch.bfloat16)
-    params.context_se.conv_expand_weight = state_dict[f"{prefix}context_se.conv_expand.weight"].to(torch.bfloat16)
-    params.context_se.conv_expand_bias = state_dict.get(f"{prefix}context_se.conv_expand.bias", None)
-    if params.context_se.conv_expand_bias is not None:
-        params.context_se.conv_expand_bias = params.context_se.conv_expand_bias.to(torch.bfloat16)
-
-    # BN for MLP input (27 features)
-    params.mlp_bn = Parameters()
-    params.mlp_bn.weight = state_dict.get(f"{prefix}bn.weight", None)
-    params.mlp_bn.bias = state_dict.get(f"{prefix}bn.bias", None)
-    params.mlp_bn.running_mean = state_dict.get(f"{prefix}bn.running_mean", None)
-    params.mlp_bn.running_var = state_dict.get(f"{prefix}bn.running_var", None)
-    params.mlp_bn.eps = 1e-5  # Default BN eps
-
-    # Context conv
-    params.context_weight = state_dict[f"{prefix}context_conv.weight"].to(torch.bfloat16)
-    params.context_bias = state_dict.get(f"{prefix}context_conv.bias", None)
-    if params.context_bias is not None:
-        params.context_bias = params.context_bias.to(torch.bfloat16)
-
-    # BasicBlocks (depth_conv.0, depth_conv.1, depth_conv.2)
-    # BasicBlock structure: conv1 -> norm1 (BN) -> ReLU -> conv2 -> norm2 (BN) -> add -> ReLU
-    # Need to fuse BN layers into conv weights
-
-    for i in range(3):
-        block = Parameters()
-
-        # Load conv1 weight and BN1 parameters
-        conv1_weight = state_dict[f"{prefix}depth_conv.{i}.conv1.weight"].float()  # Keep in float32 for fusion
-        conv1_bias = state_dict.get(f"{prefix}depth_conv.{i}.conv1.bias", None)
-        if conv1_bias is not None:
-            conv1_bias = conv1_bias.float()
-
-        # Load BN1 parameters - checkpoint uses "bn1" not "norm1"
-        # Try both formats: "bn1" (checkpoint format) and "norm1" (PyTorch model format)
-        bn1_key_weight = f"{prefix}depth_conv.{i}.bn1.weight"
-        bn1_key_bias = f"{prefix}depth_conv.{i}.bn1.bias"
-        bn1_key_mean = f"{prefix}depth_conv.{i}.bn1.running_mean"
-        bn1_key_var = f"{prefix}depth_conv.{i}.bn1.running_var"
-
-        # If bn1 not found, try norm1 (for models that use norm1)
-        if bn1_key_weight not in state_dict:
-            bn1_key_weight = f"{prefix}depth_conv.{i}.norm1.weight"
-            bn1_key_bias = f"{prefix}depth_conv.{i}.norm1.bias"
-            bn1_key_mean = f"{prefix}depth_conv.{i}.norm1.running_mean"
-            bn1_key_var = f"{prefix}depth_conv.{i}.norm1.running_var"
-
-        bn1_weight = state_dict.get(bn1_key_weight, None)
-        bn1_bias = state_dict.get(bn1_key_bias, None)
-        bn1_mean = state_dict.get(bn1_key_mean, None)
-        bn1_var = state_dict.get(bn1_key_var, None)
-
-        # Debug: Check if BN parameters exist for first block
-        if i == 0:
-            logger.info(
-                f"Block {i} BN1 parameter keys: weight={bn1_key_weight} (exists={bn1_key_weight in state_dict}), "
-                f"bias={bn1_key_bias} (exists={bn1_key_bias in state_dict}), "
-                f"mean={bn1_key_mean} (exists={bn1_key_mean in state_dict}), "
-                f"var={bn1_key_var} (exists={bn1_key_var in state_dict})"
-            )
-            if bn1_key_weight not in state_dict:
-                # Try alternative key formats
-                alt_keys = [k for k in state_dict.keys() if f"depth_conv.{i}" in k and ("norm1" in k or "bn1" in k)]
-                logger.warning(f"Block {i} BN1 weight key not found! Alternative keys: {alt_keys[:10]}")
-
-        # Store unfused weights and BN parameters for PyTorch fallback
-        block.conv1_weight_unfused = conv1_weight.clone()
-        block.conv1_bias_unfused = conv1_bias.clone() if conv1_bias is not None else None
-        block.norm1_weight = bn1_weight.clone() if bn1_weight is not None else None
-        block.norm1_bias = bn1_bias.clone() if bn1_bias is not None else None
-        block.norm1_mean = bn1_mean.clone() if bn1_mean is not None else None
-        block.norm1_var = bn1_var.clone() if bn1_var is not None else None
-
-        # Debug: Log BN parameter loading for first block
-        if i == 0:
-            logger.info(
-                f"Block {i} loaded BN1: weight={bn1_weight is not None}, bias={bn1_bias is not None}, "
-                f"mean={bn1_mean is not None}, var={bn1_var is not None}"
-            )
-
-        # Fuse BN1 into conv1
-        if bn1_weight is not None and bn1_mean is not None and bn1_var is not None:
-            # Debug: Log BN parameters for first block
-            if i == 0:
-                bn1_weight_norm = bn1_weight.norm().item() if bn1_weight is not None else 0.0
-                bn1_bias_norm = bn1_bias.norm().item() if bn1_bias is not None else 0.0
-                bn1_mean_norm = bn1_mean.norm().item() if bn1_mean is not None else 0.0
-                bn1_var_norm = bn1_var.norm().item() if bn1_var is not None else 0.0
-                logger.info(
-                    f"Block {i} BN1 params: weight_norm={bn1_weight_norm:.6f}, "
-                    f"bias_norm={bn1_bias_norm:.6f}, "
-                    f"mean_norm={bn1_mean_norm:.6f}, "
-                    f"var_norm={bn1_var_norm:.6f}"
-                )
-            # Get BN eps from state dict if available, otherwise use default
-            # Try both bn1 and norm1 formats
-            bn1_eps = state_dict.get(f"{prefix}depth_conv.{i}.bn1.eps", None)
-            if bn1_eps is None:
-                bn1_eps = state_dict.get(f"{prefix}depth_conv.{i}.norm1.eps", 1e-5)
-            if isinstance(bn1_eps, torch.Tensor):
-                bn1_eps = bn1_eps.item()
-            # Use unified fusion function (handles conv with or without bias)
-            fused_conv1_weight, fused_conv1_bias = fuse_conv_bn_weights_unified(
-                conv1_weight,
-                conv1_bias,
-                bn1_weight,
-                bn1_bias,
-                bn1_mean,
-                bn1_var,
-                eps=bn1_eps,
-            )
-            # Debug: Verify fusion for first block
-            if i == 0:
-                logger.info(
-                    f"Block {i} conv1 fusion (float32): weight_norm={fused_conv1_weight.norm().item():.6f}, "
-                    f"bias_norm={fused_conv1_bias.norm().item():.6f}, bias_mean={fused_conv1_bias.mean().item():.6f}, "
-                    f"bias_min={fused_conv1_bias.min().item():.6f}, bias_max={fused_conv1_bias.max().item():.6f}"
-                )
-            block.conv1_weight = fused_conv1_weight.to(torch.bfloat16)
-            block.conv1_bias = fused_conv1_bias.to(torch.bfloat16)
-            # Debug: Check if bias is lost in conversion
-            if i == 0:
-                bias_after_convert = block.conv1_bias
-                logger.info(
-                    f"Block {i} conv1_bias immediately after assignment: type={type(bias_after_convert)}, "
-                    f"is_none={bias_after_convert is None}"
-                )
-                if isinstance(bias_after_convert, torch.Tensor):
-                    logger.info(
-                        f"Block {i} conv1 bias after bfloat16 conversion: norm={bias_after_convert.float().norm().item():.6f}, "
-                        f"mean={bias_after_convert.float().mean().item():.6f}, "
-                        f"min={bias_after_convert.float().min().item():.6f}, max={bias_after_convert.float().max().item():.6f}"
-                    )
-                else:
-                    logger.warning(f"Block {i} conv1_bias is not a tensor after conversion: {type(bias_after_convert)}")
-        else:
-            # No BN to fuse, use original weights
-            if i == 0:
-                logger.warning(
-                    f"Block {i} BN1 fusion skipped: bn1_weight={bn1_weight is not None}, "
-                    f"bn1_mean={bn1_mean is not None}, bn1_var={bn1_var is not None}"
-                )
-            block.conv1_weight = conv1_weight.to(torch.bfloat16)
-            block.conv1_bias = conv1_bias.to(torch.bfloat16) if conv1_bias is not None else None
-
-        # Load conv2 weight and BN2 parameters
-        conv2_weight = state_dict[f"{prefix}depth_conv.{i}.conv2.weight"].float()  # Keep in float32 for fusion
-        conv2_bias = state_dict.get(f"{prefix}depth_conv.{i}.conv2.bias", None)
-        if conv2_bias is not None:
-            conv2_bias = conv2_bias.float()
-
-        # Load BN2 parameters - checkpoint uses "bn2" not "norm2"
-        # Try both formats: "bn2" (checkpoint format) and "norm2" (PyTorch model format)
-        bn2_key_weight = f"{prefix}depth_conv.{i}.bn2.weight"
-        bn2_key_bias = f"{prefix}depth_conv.{i}.bn2.bias"
-        bn2_key_mean = f"{prefix}depth_conv.{i}.bn2.running_mean"
-        bn2_key_var = f"{prefix}depth_conv.{i}.bn2.running_var"
-
-        # If bn2 not found, try norm2 (for models that use norm2)
-        if bn2_key_weight not in state_dict:
-            bn2_key_weight = f"{prefix}depth_conv.{i}.norm2.weight"
-            bn2_key_bias = f"{prefix}depth_conv.{i}.norm2.bias"
-            bn2_key_mean = f"{prefix}depth_conv.{i}.norm2.running_mean"
-            bn2_key_var = f"{prefix}depth_conv.{i}.norm2.running_var"
-
-        bn2_weight = state_dict.get(bn2_key_weight, None)
-        bn2_bias = state_dict.get(bn2_key_bias, None)
-        bn2_mean = state_dict.get(bn2_key_mean, None)
-        bn2_var = state_dict.get(bn2_key_var, None)
-
-        # Store unfused weights and BN parameters for PyTorch fallback
-        block.conv2_weight_unfused = conv2_weight.clone()
-        block.conv2_bias_unfused = conv2_bias.clone() if conv2_bias is not None else None
-        block.norm2_weight = bn2_weight.clone() if bn2_weight is not None else None
-        block.norm2_bias = bn2_bias.clone() if bn2_bias is not None else None
-        block.norm2_mean = bn2_mean.clone() if bn2_mean is not None else None
-        block.norm2_var = bn2_var.clone() if bn2_var is not None else None
-
-        # Fuse BN2 into conv2
-        if bn2_weight is not None and bn2_mean is not None and bn2_var is not None:
-            # Get BN eps from state dict if available, otherwise use default
-            # Try both bn2 and norm2 formats
-            bn2_eps = state_dict.get(f"{prefix}depth_conv.{i}.bn2.eps", None)
-            if bn2_eps is None:
-                bn2_eps = state_dict.get(f"{prefix}depth_conv.{i}.norm2.eps", 1e-5)
-            if isinstance(bn2_eps, torch.Tensor):
-                bn2_eps = bn2_eps.item()
-            # Use unified fusion function (handles conv with or without bias)
-            fused_conv2_weight, fused_conv2_bias = fuse_conv_bn_weights_unified(
-                conv2_weight,
-                conv2_bias,
-                bn2_weight,
-                bn2_bias,
-                bn2_mean,
-                bn2_var,
-                eps=bn2_eps,
-            )
-            block.conv2_weight = fused_conv2_weight.to(torch.bfloat16)
-            block.conv2_bias = fused_conv2_bias.to(torch.bfloat16)
-        else:
-            # No BN to fuse, use original weights
-            block.conv2_weight = conv2_weight.to(torch.bfloat16)
-            block.conv2_bias = conv2_bias.to(torch.bfloat16) if conv2_bias is not None else None
-
-        setattr(params, f"block{i+1}", block)
-        # Debug: Verify block1 parameters are stored correctly
-        if i == 0:
-            stored_block = getattr(params, f"block{i+1}", None)
-            if stored_block is not None:
-                logger.info(
-                    f"Block {i} stored in params.block{i+1}: conv1_weight type={type(stored_block.conv1_weight)}, "
-                    f"conv1_bias type={type(stored_block.conv1_bias)}, conv1_bias is_none={stored_block.conv1_bias is None}"
-                )
-                if stored_block.conv1_bias is not None:
-                    if hasattr(stored_block.conv1_bias, "float"):
-                        bias_norm = stored_block.conv1_bias.float().norm().item()
-                        logger.info(f"Block {i} stored conv1_bias: norm={bias_norm:.6f}")
-                    else:
-                        logger.info(
-                            f"Block {i} stored conv1_bias: type={type(stored_block.conv1_bias)} (cannot compute norm)"
-                        )
-            else:
-                logger.warning(f"Block {i} not found in params.block{i+1}!")
-
-    # ASPP (depth_conv.3)
-    # ASPP structure: Each branch has atrous_conv -> bn -> relu, final conv1 -> bn1 -> relu
-    params.aspp = Parameters()
-
-    # Fuse BN for aspp1-aspp4 branches
-    for branch_idx, branch_name in enumerate(["aspp1", "aspp2", "aspp3", "aspp4"], 1):
-        atrous_weight = state_dict[f"{prefix}depth_conv.3.{branch_name}.atrous_conv.weight"].float()
-        # Load BN parameters - checkpoint uses "bn" format
-        bn_key_weight = f"{prefix}depth_conv.3.{branch_name}.bn.weight"
-        bn_key_bias = f"{prefix}depth_conv.3.{branch_name}.bn.bias"
-        bn_key_mean = f"{prefix}depth_conv.3.{branch_name}.bn.running_mean"
-        bn_key_var = f"{prefix}depth_conv.3.{branch_name}.bn.running_var"
-
-        bn_weight = state_dict.get(bn_key_weight, None)
-        bn_bias = state_dict.get(bn_key_bias, None)
-        bn_mean = state_dict.get(bn_key_mean, None)
-        bn_var = state_dict.get(bn_key_var, None)
-
-        # Debug: Check if BN parameters exist for first branch
-        if branch_idx == 1:
-            logger.info(
-                f"ASPP {branch_name} BN parameter keys: weight={bn_key_weight} (exists={bn_key_weight in state_dict}), "
-                f"bias={bn_key_bias} (exists={bn_key_bias in state_dict}), "
-                f"mean={bn_key_mean} (exists={bn_key_mean in state_dict}), "
-                f"var={bn_key_var} (exists={bn_key_var in state_dict})"
-            )
-            if bn_key_weight not in state_dict:
-                # Try alternative key formats
-                alt_keys = [
-                    k for k in state_dict.keys() if f"depth_conv.3.{branch_name}" in k and ("bn" in k or "norm" in k)
-                ]
-                logger.warning(f"ASPP {branch_name} BN weight key not found! Alternative keys: {alt_keys[:10]}")
-
-        if bn_weight is not None and bn_mean is not None and bn_var is not None:
-            # BN eps is not in state dict, use default 1e-5 for PyTorch BatchNorm2d
-            bn_eps = 1e-5
-            # Atrous conv has bias=False
-            fused_weight, fused_bias = fuse_conv_bn_weights_unified(
-                atrous_weight,
-                None,  # No conv bias
-                bn_weight,
-                bn_bias,
-                bn_mean,
-                bn_var,
-                eps=bn_eps,
-            )
-            setattr(params.aspp, f"{branch_name}_weight", fused_weight.to(torch.bfloat16))
-            setattr(params.aspp, f"{branch_name}_bias", fused_bias.to(torch.bfloat16))
-        else:
-            setattr(params.aspp, f"{branch_name}_weight", atrous_weight.to(torch.bfloat16))
-            setattr(params.aspp, f"{branch_name}_bias", None)
-
-    # Fuse BN for global_avg_pool (conv -> bn -> relu)
-    global_weight = state_dict[f"{prefix}depth_conv.3.global_avg_pool.1.weight"].float()
-    global_bn_weight = state_dict.get(f"{prefix}depth_conv.3.global_avg_pool.2.weight", None)
-    global_bn_bias = state_dict.get(f"{prefix}depth_conv.3.global_avg_pool.2.bias", None)
-    global_bn_mean = state_dict.get(f"{prefix}depth_conv.3.global_avg_pool.2.running_mean", None)
-    global_bn_var = state_dict.get(f"{prefix}depth_conv.3.global_avg_pool.2.running_var", None)
-
-    if global_bn_weight is not None and global_bn_mean is not None and global_bn_var is not None:
-        # BN eps is not in state dict, use default 1e-5 for PyTorch BatchNorm2d
-        global_bn_eps = 1e-5
-        # Global avg pool conv has bias=False
-        fused_global_weight, fused_global_bias = fuse_conv_bn_weights_unified(
-            global_weight,
-            None,  # No conv bias
-            global_bn_weight,
-            global_bn_bias,
-            global_bn_mean,
-            global_bn_var,
-            eps=global_bn_eps,
-        )
-        params.aspp.global_weight = fused_global_weight.to(torch.bfloat16)
-        params.aspp.global_bias = fused_global_bias.to(torch.bfloat16)
-    else:
-        params.aspp.global_weight = global_weight.to(torch.bfloat16)
-        params.aspp.global_bias = None
-
-    # Fuse BN for final conv1 (conv1 -> bn1 -> relu)
-    conv1_weight = state_dict[f"{prefix}depth_conv.3.conv1.weight"].float()
-    conv1_bn_weight = state_dict.get(f"{prefix}depth_conv.3.bn1.weight", None)
-    conv1_bn_bias = state_dict.get(f"{prefix}depth_conv.3.bn1.bias", None)
-    conv1_bn_mean = state_dict.get(f"{prefix}depth_conv.3.bn1.running_mean", None)
-    conv1_bn_var = state_dict.get(f"{prefix}depth_conv.3.bn1.running_var", None)
-
-    if conv1_bn_weight is not None and conv1_bn_mean is not None and conv1_bn_var is not None:
-        # BN eps is not in state dict, use default 1e-5 for PyTorch BatchNorm2d
-        conv1_bn_eps = 1e-5
-        # ASPP final conv1 has bias=False
-        fused_conv1_weight, fused_conv1_bias = fuse_conv_bn_weights_unified(
-            conv1_weight,
-            None,  # No conv bias
-            conv1_bn_weight,
-            conv1_bn_bias,
-            conv1_bn_mean,
-            conv1_bn_var,
-            eps=conv1_bn_eps,
-        )
-        params.aspp.conv1_weight = fused_conv1_weight.to(torch.bfloat16)
-        params.aspp.conv1_bias = fused_conv1_bias.to(torch.bfloat16)
-    else:
-        params.aspp.conv1_weight = conv1_weight.to(torch.bfloat16)
-        params.aspp.conv1_bias = None
-
-    # DCN layer (depth_conv.4) - DeformConv2dPack has both weight and conv_offset
-    params.dcn_weight = state_dict[f"{prefix}depth_conv.4.weight"].to(torch.bfloat16)
-    params.dcn_bias = state_dict.get(f"{prefix}depth_conv.4.bias", None)
-    if params.dcn_bias is not None:
-        params.dcn_bias = params.dcn_bias.to(torch.bfloat16)
-
-    # Load conv_offset layer (for DeformConv2dPack)
-    # Offset shape: (deform_groups * 2 * kernel_size[0] * kernel_size[1], in_channels, kernel_size[0], kernel_size[1])
-    # For DCN with groups=4, kernel=3: offset_channels = 1 * 2 * 3 * 3 = 18
-    # But DeformConv2dPack uses deform_groups=1 by default, so offset_channels = 1 * 2 * 3 * 3 = 18
-    try:
-        conv_offset_weight = state_dict[f"{prefix}depth_conv.4.conv_offset.weight"]
-        conv_offset_bias = state_dict.get(f"{prefix}depth_conv.4.conv_offset.bias", None)
-
-        # Create a PyTorch Conv2d layer for offset generation
-        # This will be used to generate offsets from input features
-        offset_channels = conv_offset_weight.shape[0]  # Should be 18 for kernel=3, deform_groups=1
-        params.dcn_conv_offset = torch.nn.Conv2d(
-            mid_channels,
-            offset_channels,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            bias=conv_offset_bias is not None,
-        )
-        params.dcn_conv_offset.weight.data = conv_offset_weight
-        if conv_offset_bias is not None:
-            params.dcn_conv_offset.bias.data = conv_offset_bias
-        params.dcn_conv_offset.eval()  # Set to eval mode
-        logger.info(f"Loaded DCN conv_offset layer: {offset_channels} offset channels")
-    except KeyError:
-        logger.warning(f"conv_offset not found for depth_conv.4, DCN will use zero offsets (may reduce accuracy)")
-        # Create a dummy conv_offset that outputs zeros
-        offset_channels = 18  # 2 * 3 * 3 for kernel=3
-        params.dcn_conv_offset = torch.nn.Conv2d(
-            mid_channels,
-            offset_channels,
-            kernel_size=3,
-            stride=1,
-            padding=1,
-            bias=True,
-        )
-        params.dcn_conv_offset.weight.data.zero_()
-        params.dcn_conv_offset.bias.data.zero_()
-        params.dcn_conv_offset.eval()
-
-    # Final conv (depth_conv.5)
-    params.final_weight = state_dict[f"{prefix}depth_conv.5.weight"].to(torch.bfloat16)
-    params.final_bias = state_dict.get(f"{prefix}depth_conv.5.bias", None)
-    if params.final_bias is not None:
-        params.final_bias = params.final_bias.to(torch.bfloat16)
-
-    logger.info("Successfully prepared DepthNet parameters")
-    return params

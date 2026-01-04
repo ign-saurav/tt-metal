@@ -8,8 +8,8 @@ import ttnn
 import pytest
 from loguru import logger
 from models.common.utility_functions import comp_pcc
-from models.experimental.BevDepth.tt.ttnn_depthnet import prepare_depthnet_parameters
-from models.experimental.BevDepth.tests.test_bevdepth_backbone import (
+from models.experimental.BevDepth.tt.custom_preprocessing import prepare_depthnet_parameters
+from models.experimental.BevDepth.tests.pcc.test_bevdepth_backbone import (
     download_bevdepth_weights,
     extract_depthnet_state_dict,
 )

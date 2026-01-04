@@ -14,8 +14,6 @@ from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_Head_TTNN, 
 
 @dataclass
 class HeadOptimizations:
-    """Optimization settings for head convolutions."""
-
     conv_transpose: dict
     conv2d: dict
 
@@ -32,7 +30,6 @@ head_optimizations = HeadOptimizations(
     },
 )
 
-# Alias for backward compatibility (British spelling)
 head_optimisations = head_optimizations
 
 

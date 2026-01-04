@@ -374,7 +374,7 @@ def run_torch_inference(model, imgs, mats_dict):
 def prepare_ttnn_parameters(device):
     from ttnn.model_preprocessing import preprocess_model_parameters
     from models.experimental.BevDepth.tt.custom_preprocessing import create_custom_mesh_preprocessor
-    from models.experimental.BevDepth.tests.test_bevdepth_backbone import (
+    from models.experimental.BevDepth.tests.pcc.test_bevdepth_backbone import (
         extract_backbone_state_dict,
         extract_neck_state_dict,
         extract_depthnet_state_dict,
@@ -382,7 +382,7 @@ def prepare_ttnn_parameters(device):
         prepare_ttnn_parameters as prep_backbone_params,
     )
     from models.experimental.BevDepth.tt.ttnn_secondfpn import prepare_secondfpn_parameters
-    from models.experimental.BevDepth.tt.ttnn_depthnet import prepare_depthnet_parameters as prep_depthnet
+    from models.experimental.BevDepth.tt.custom_preprocessing import prepare_depthnet_parameters as prep_depthnet
 
     logger.info("Preparing TTNN parameters...")
 

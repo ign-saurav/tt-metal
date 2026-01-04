@@ -28,7 +28,7 @@ def test_perf_device_bare_metal_bevdepth(batch_size, model_name, expected_perf):
     num_iterations = 1
     margin = 0.04
 
-    command = f"pytest models/experimental/BevDepth/tests/test_bevdepth_e2e.py"
+    command = f"pytest models/experimental/BevDepth/tests/pcc/test_bevdepth_e2e.py"
 
     cols = ["DEVICE FW", "DEVICE KERNEL", "DEVICE BRISC KERNEL"]
 

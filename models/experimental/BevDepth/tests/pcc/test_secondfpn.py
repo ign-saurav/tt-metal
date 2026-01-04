@@ -9,8 +9,10 @@ import pytest
 from loguru import logger
 from models.common.utility_functions import comp_pcc
 from models.experimental.BevDepth.tt.ttnn_secondfpn import prepare_secondfpn_parameters
-from models.experimental.BevDepth.tests.test_bevdepth_backbone import extract_neck_state_dict, fuse_conv_bn_weights
-from models.experimental.BevDepth.tests.test_bevdepth_backbone import download_bevdepth_weights
+from models.experimental.BevDepth.tests.pcc.test_bevdepth_backbone import extract_neck_state_dict, fuse_conv_bn_weights
+from models.experimental.BevDepth.tests.pcc.test_bevdepth_backbone import download_bevdepth_weights
+from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_TTNN
+from models.experimental.BevDepth.reference.bevdepth.layers.necks.second_fpn import SECONDFPN
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 98304}], indirect=True)
@@ -18,9 +20,6 @@ from models.experimental.BevDepth.tests.test_bevdepth_backbone import download_b
 @pytest.mark.parametrize("height, width", [(64, 160)])
 def test_secondfpn_pcc(device, batch_size, height, width):
     """Test TTNN SECONDFPN against reference"""
-    from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_TTNN
-
-    # Match reference model config from base_exp.py - uses all 4 ResNet layers
     in_channels = [256, 512, 1024, 2048]
     out_channels = [128, 128, 128, 128]
     upsample_strides = [0.25, 0.5, 1, 2]
@@ -33,8 +32,6 @@ def test_secondfpn_pcc(device, batch_size, height, width):
     torch_layer4 = torch.randn(batch_size, 2048, target_h // 2, target_w // 2)  # 8x22
 
     # Load reference model
-    from models.experimental.BevDepth.reference.bevdepth.layers.necks.second_fpn import SECONDFPN
-
     reference_fpn = SECONDFPN(
         in_channels=[256, 512, 1024, 2048],
         out_channels=[128, 128, 128, 128],
@@ -71,13 +68,10 @@ def test_secondfpn_pcc(device, batch_size, height, width):
 
                 if conv_out_channels != bn_channels:
                     if conv_out_channels > bn_channels:
-                        logger.info(
-                            f"Reference deblock {i}: truncating ConvTranspose2d weight output channels from {conv_out_channels} to {bn_channels} to match BN"
-                        )
                         conv_weight = conv_weight[:, :bn_channels, :, :].clone()
                     else:
                         raise ValueError(
-                            f"Reference deblock {i}: ConvTranspose2d has {conv_out_channels} output channels but BN has {bn_channels} channels"
+                            f"ConvTranspose2d has {conv_out_channels} output channels but BN has {bn_channels} channels"
                         )
 
                 conv_weight_for_fusion = conv_weight.permute(1, 0, 2, 3).contiguous()
@@ -97,13 +91,10 @@ def test_secondfpn_pcc(device, batch_size, height, width):
 
                 if conv_out_channels != bn_channels:
                     if conv_out_channels > bn_channels:
-                        logger.info(
-                            f"Reference deblock {i}: truncating Conv2d weight output channels from {conv_out_channels} to {bn_channels} to match BN"
-                        )
                         conv_weight = conv_weight[:bn_channels, :, :, :].clone()
                     else:
                         raise ValueError(
-                            f"Reference deblock {i}: Conv2d has {conv_out_channels} output channels but BN has {bn_channels} channels"
+                            f"Conv2d has {conv_out_channels} output channels but BN has {bn_channels} channels"
                         )
 
                 fused_weight, fused_bias = fuse_conv_bn_weights(
@@ -177,12 +168,11 @@ def test_secondfpn_pcc(device, batch_size, height, width):
 
     pcc_result = comp_pcc(ref_outputs[0], ttnn_out_torch)
     pcc_value = pcc_result[1] if isinstance(pcc_result, tuple) else pcc_result
+    PCC_THRESHOLD = 0.97
 
     logger.info(f"SECONDFPN: PCC = {pcc_value:.6f}")
-    logger.info(f"  Reference shape: {ref_outputs[0].shape}")
-    logger.info(f"  TTNN shape: {ttnn_out_torch.shape}")
 
-    assert pcc_value > 0.90, f"SECONDFPN PCC {pcc_value:.6f} is below threshold 0.90"
+    assert pcc_value > PCC_THRESHOLD, f"SECONDFPN PCC {pcc_value:.6f} is below threshold {PCC_THRESHOLD}"
 
     return pcc_value
 

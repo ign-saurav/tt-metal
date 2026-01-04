@@ -467,7 +467,7 @@ def prepare_secondfpn_parameters(
     out_channels=[128, 128, 128, 128],
     upsample_strides=[0.25, 0.5, 1, 2],
 ):
-    from models.experimental.BevDepth.tests.test_resnet50_backbone import fuse_conv_bn_weights
+    from models.experimental.BevDepth.tests.pcc.test_resnet50_backbone import fuse_conv_bn_weights
 
     class Parameters:
         pass
@@ -550,7 +550,7 @@ def prepare_secondfpn_head_parameters(
     out_channels=[64, 64, 64, 64],
     upsample_strides=[1, 2, 4, 8],
 ):
-    from models.experimental.BevDepth.tests.test_resnet50_backbone import fuse_conv_bn_weights
+    from models.experimental.BevDepth.tests.pcc.test_resnet50_backbone import fuse_conv_bn_weights
 
     class Parameters:
         pass

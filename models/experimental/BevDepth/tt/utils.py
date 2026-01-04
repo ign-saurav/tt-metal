@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
+from dataclasses import dataclass
 
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
@@ -11,6 +12,16 @@ from models.tt_cnn.tt.builder import (
     HeightShardedStrategyConfiguration,
     BlockShardedStrategyConfiguration,
 )
+
+
+@dataclass
+class ConvTransposeConfig:
+    in_channels: int
+    out_channels: int
+    kernel_size: tuple
+    stride: tuple
+    weight: ttnn.Tensor
+    bias: ttnn.Tensor
 
 
 def create_conv2d_config(
