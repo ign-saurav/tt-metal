@@ -68,7 +68,7 @@ class GraniteSpeechConformerFeedForwardTTNN:
             hidden_states,
             weight=self.pre_norm_weight,
             bias=self.pre_norm_bias,
-            epsilon=1e-12,
+            epsilon=1e-5,
             compute_kernel_config=self.compute_config,
         )
 
@@ -155,7 +155,7 @@ class GraniteSpeechConformerAttentionTTNN:
             hidden_states,
             weight=self.pre_norm_weight,
             bias=self.pre_norm_bias,
-            epsilon=1e-12,
+            epsilon=1e-5,
             compute_kernel_config=self.compute_config,
         )
         bsz, num_features, _ = hidden_states.shape
@@ -364,13 +364,13 @@ class GraniteSpeechConformerConvModuleTTNN:
             hidden_states,
             weight=self.norm_weight,
             bias=self.norm_bias,
-            epsilon=1e-12,
+            epsilon=1e-5,
             compute_kernel_config=self.compute_config,
         )
 
         # 2. Up Conv1d (permute to NLC format for TTNN)
         hidden_states_nlc = hidden_states
-        bsz, seq_len, hidden_dim = hidden_states_nlc.padded_shape
+        bsz, seq_len, hidden_dim = hidden_states_nlc.shape
 
         # Configure conv1d
         conv_config = ttnn.Conv1dConfig(
@@ -402,6 +402,7 @@ class GraniteSpeechConformerConvModuleTTNN:
 
         # 3. GLU activation (splits tensor in half along last dimension)
         glu_output = ttnn.glu(up_output, dim=-1)
+        glu_output = glu_output[:, :, :seq_len, :]
         glu_output = ttnn.reshape(glu_output, (bsz, out_length, self.inner_dim))
 
         # 4. Depthwise Convolution (using your class)
@@ -410,7 +411,7 @@ class GraniteSpeechConformerConvModuleTTNN:
 
         # 5. BatchNorm1d + SiLU
         # BatchNorm expects NCL format
-        batch_size, channels, seq_len = depth_output.padded_shape
+        batch_size, channels, seq_len = depth_output.shape
 
         # Reshape to 4D for batch_norm: [batch, channels, seq_len, 1]
         depth_output_4d = ttnn.reshape(depth_output, (batch_size, channels, seq_len, 1))
@@ -641,7 +642,7 @@ class GraniteSpeechConformerBlockTTNN:
         # Post norm
         if self.include_layernorm:
             hidden_states = ttnn.layer_norm(
-                hidden_states, weight=self.weight_tensor, bias=self.bias_tensor, epsilon=1e-12, compute_kernel_config=self.layernorm_compute_config, program_config=self.layernorm_config
+                hidden_states, weight=self.weight_tensor, bias=self.bias_tensor, epsilon=1e-5, compute_kernel_config=self.layernorm_compute_config, program_config=self.layernorm_config
             )
 
         return hidden_states
@@ -813,7 +814,6 @@ class GraniteSpeechCTCEncoderTTNN:
                 # Add residual connection  
                 tt_hidden_states = ttnn.add(tt_hidden_states, tt_mid_residual)  
           
-        # Convert output back to PyTorch  
-        output_tensor = ttnn.from_device(tt_hidden_states)  
+        output_tensor = tt_hidden_states  
           
         return output_tensor
