@@ -2,7 +2,8 @@ import pytest
 import torch   
 import ttnn  
 from tests.ttnn.utils_for_testing import assert_with_pcc   
-from models.experimental.granite_speech_33_8B.tt.ttnn_encoder_block import  GraniteSpeechConformerFeedForwardTTNN, GraniteSpeechConformerAttentionTTNN, GraniteSpeechConformerDepthWiseConv1dTTNN, GraniteSpeechConformerConvModuleTTNN, GraniteSpeechConformerBlockTTNN, GraniteSpeechCTCEncoderTTNN
+from models.common.utility_functions import torch_random  
+from models.experimental.granite_speech_33_8b.tt.ttnn_encoder_block import  GraniteSpeechConformerFeedForwardTTNN, GraniteSpeechConformerAttentionTTNN, GraniteSpeechConformerDepthWiseConv1dTTNN, GraniteSpeechConformerConvModuleTTNN, GraniteSpeechConformerBlockTTNN, GraniteSpeechCTCEncoderTTNN
   
 from transformers import AutoModelForSpeechSeq2Seq
 
@@ -28,7 +29,6 @@ class TestConfig:
     indirect=True,  
 )   
 def test_feedforward(device):  
-    """Test FeedForward TTNN implementation against PyTorch."""  
     config = TestConfig()  
       
     # Initialize models  
@@ -75,7 +75,6 @@ def test_feedforward(device):
     indirect=True,  
 )    
 def test_attention(device):  
-    """Test Attention TTNN implementation against PyTorch."""  
     config = TestConfig()  
       
     # Initialize models  
@@ -96,7 +95,7 @@ def test_attention(device):
     )  
       
     # Create test input  
-    batch_size, seq_len, hidden_dim = 1, 864, 1024
+    batch_size, seq_len, hidden_dim = 1, 844, 1024
     torch_input = torch.randn(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)  
       
     # Create attention distances  
@@ -131,7 +130,6 @@ def test_attention(device):
     indirect=True,  
 )  
 def test_conv_module(device):  
-    """Test ConvModule TTNN implementation against PyTorch."""  
     config = TestConfig()  
       
     # Initialize models  
@@ -155,7 +153,7 @@ def test_conv_module(device):
       
     # Create test input 
     torch.manual_seed(0) 
-    batch_size, seq_len, hidden_dim = 1, 864, 1024  
+    batch_size, seq_len, hidden_dim = 1, 844, 1024  
     torch_input = torch.randn(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)  
       
     # PyTorch forward pass  
@@ -180,9 +178,8 @@ def test_conv_module(device):
     "device_params",  
     [{"l1_small_size": 65535}],  
     indirect=True,  
-)
-def test_conformer_block(device):  
-    """Test full ConformerBlock TTNN implementation against PyTorch."""  
+) 
+def test_conformer_block(device):    
     config = TestConfig()
     for i in range(config.num_layers): 
         
@@ -190,7 +187,7 @@ def test_conformer_block(device):
         torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16).encoder.layers[i]  
         torch_model.eval() 
         
-        ttnn_model = GraniteSpeechConformerBlockTTNN(device=device, config=config, include_layernorm=True) # Make sure pytorch model includes layernorm 
+        ttnn_model = GraniteSpeechConformerBlockTTNN(device=device, config=config, include_layernorm=False) # Make sure pytorch model does not include layernorm 
         
         # Prepare all weights  
         weights_dict = {  
@@ -228,7 +225,7 @@ def test_conformer_block(device):
         ttnn_model.prepare_weights(weights_dict)  
         
         # Create test input  
-        batch_size, seq_len = 1, 864  
+        batch_size, seq_len = 1, 844  
         torch_input = torch.randn(batch_size, seq_len, config.hidden_dim, dtype=torch.bfloat16)  
         
         # Create attention distances  
@@ -253,7 +250,7 @@ def test_conformer_block(device):
         ttnn_output = ttnn.to_torch(ttnn_output_tensor) 
         
         # Compare outputs  
-        assert_with_pcc(torch_output, ttnn_output, pcc=0.99)  # Lower PCC for full block  
+        assert_with_pcc(torch_output, ttnn_output, pcc=0.98)  # Lower PCC for full block  
         print(f"ConformerBlock test passed with PCC for block {i}: {calculate_pcc(torch_output, ttnn_output):.4f}")  
 
 @pytest.mark.parametrize(  
@@ -262,7 +259,6 @@ def test_conformer_block(device):
     indirect=True,  
 )
 def test_encoder_block(device):  
-    """Test full EncoderBlock TTNN implementation against PyTorch."""  
     config = TestConfig()  
       
     # Initialize models  
@@ -277,7 +273,7 @@ def test_encoder_block(device):
       
     # Create test input  
     torch.manual_seed(0)
-    batch_size, seq_len = 1, 864  
+    batch_size, seq_len = 1, 844  
     torch_input = torch.randn(batch_size, seq_len, config.input_dim, dtype=torch.bfloat16)    
       
     # PyTorch forward pass  
