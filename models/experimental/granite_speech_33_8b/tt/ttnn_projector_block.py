@@ -862,7 +862,7 @@ class Blip2QFormerModelTTNN:
             query_length=query_length,  
         )  
           
-        sequence_output = encoder_outputs[0]  
+        sequence_output = encoder_outputs[0] 
           
         # Create pooled output (take first token)  
         pooled_output = ttnn.slice(  
@@ -883,3 +883,106 @@ class Blip2QFormerModelTTNN:
             attentions=encoder_outputs.attentions,  
             cross_attentions=encoder_outputs.cross_attentions,  
         )
+
+
+class GraniteSpeechEncoderProjectorTTNN:  
+    """TTNN implementation of GraniteSpeechEncoderProjector with high accuracy configuration."""  
+      
+    def __init__(self, device, config):  
+        self.device = device  
+        self.config = config  
+        self.hidden_size = config.projector_config_hidden_size  
+        self.downsample_rate = config.downsample_rate  
+        self.window_size = config.window_size  
+        self.num_queries = config.window_size // config.downsample_rate   
+          
+        # Initialize QFormer  
+        self.qformer = Blip2QFormerModelTTNN(device, config)   
+          
+        # Setup compute configuration for high accuracy  
+        self._setup_compute_config()  
+      
+    def _setup_compute_config(self):  
+        """Setup compute kernel configuration for 0.99 PCC accuracy."""  
+        self.compute_config = ttnn.init_device_compute_kernel_config(  
+            self.device.arch(),  
+            math_fidelity=ttnn.MathFidelity.HiFi4,  # High fidelity for 0.99 PCC  
+            math_approx_mode=False,  
+            fp32_dest_acc_en=True,  # Enable FP32 accumulation  
+            packer_l1_acc=False,  
+        )  
+      
+    def prepare_weights(self, model):  
+        """Prepare weights from PyTorch model."""  
+        # Prepare query embeddings  
+        self.query_tt = ttnn.from_torch(  
+            model.query,  
+            dtype=ttnn.bfloat16,  
+            layout=ttnn.TILE_LAYOUT,  
+            device=self.device  
+        )  
+          
+        # Prepare QFormer weights  
+        self.qformer.prepare_weights(model.qformer)  
+          
+        # Prepare linear layer weights  
+        self.linear_weight = ttnn.from_torch(  
+            model.linear.weight.transpose(-1, -2),  # Transpose for TTNN  
+            dtype=ttnn.bfloat16,  
+            layout=ttnn.TILE_LAYOUT,  
+            device=self.device  
+        )  
+        self.linear_bias = ttnn.from_torch(  
+            model.linear.bias,  
+            dtype=ttnn.bfloat16,  
+            layout=ttnn.TILE_LAYOUT,  
+            device=self.device  
+        )  
+      
+    def forward(self, hidden_states):  
+        """Forward pass through the encoder projector."""  
+        # Get input dimensions  
+        batch_size, seq_len, dim = hidden_states.shape  
+          
+        # Calculate padding and blocks  
+        nblocks = math.ceil(seq_len / self.window_size)  
+        pad = nblocks * self.window_size - seq_len 
+          
+        # Pad hidden_states if needed  
+        if pad > 0:  
+            hidden_states = ttnn.pad(  
+                hidden_states,  
+                [(0, 0), (0, pad), (0, 0)],  # Pad along sequence dimension  
+                0.0  
+            )  
+          
+        # Reshape for windowed processing  
+        hidden_states = ttnn.reshape(  
+            hidden_states,  
+            (batch_size * nblocks, self.window_size, dim)  
+        )  
+          
+        # Process through QFormer  
+        query_output = self.qformer.forward(  
+            query_embeds=self.query_tt,  
+            encoder_hidden_states=hidden_states,  
+            encoder_attention_mask=None,  
+            return_dict=True,  
+        )  
+          
+        # Get last hidden state and reshape  
+        last_hidden_state = query_output.last_hidden_state 
+        last_hidden_state = ttnn.reshape(  
+            last_hidden_state,  
+            (batch_size, nblocks * self.num_queries, -1)  
+        )  
+          
+        # Apply linear projection  
+        query_proj = ttnn.linear(  
+            last_hidden_state,  
+            self.linear_weight,  
+            bias=self.linear_bias,  
+            compute_kernel_config=self.compute_config  
+        )  
+          
+        return query_proj

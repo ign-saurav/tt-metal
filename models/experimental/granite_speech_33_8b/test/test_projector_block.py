@@ -4,7 +4,7 @@ import ttnn
 
 from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
 from tests.ttnn.utils_for_testing import assert_with_pcc
-from models.experimental.granite_speech_33_8b.tt.ttnn_projector_block import Blip2QFormerIntermediateTTNN, Blip2QFormerOutputTTNN, Blip2QFormerSelfOutputTTNN, Blip2QFormerMultiHeadAttentionTTNN, Blip2QFormerAttentionTTNN, Blip2QFormerLayerTTNN, Blip2QFormerEncoderTTNN, Blip2QFormerModelTTNN
+from models.experimental.granite_speech_33_8b.tt.ttnn_projector_block import Blip2QFormerIntermediateTTNN, Blip2QFormerOutputTTNN, Blip2QFormerSelfOutputTTNN, Blip2QFormerMultiHeadAttentionTTNN, Blip2QFormerAttentionTTNN, Blip2QFormerLayerTTNN, Blip2QFormerEncoderTTNN, Blip2QFormerModelTTNN, GraniteSpeechEncoderProjectorTTNN
 
 
 class TestConfig:  
@@ -31,7 +31,11 @@ class TestConfig:
         self.use_qformer_text_input = False
         self.num_hidden_layers = 2
         self.layer_norm_eps = 1e-12
-        self.hidden_dropout_prob=0.1
+        self.hidden_dropout_prob = 0.1
+        self.projector_config_hidden_size = 1024
+        self.downsample_rate = 5
+        self.window_size = 15
+        self.text_config_hidden_size = 4096
         self.optimized = False
 
 def calculate_pcc(tensor1: torch.Tensor, tensor2: torch.Tensor) -> float:  
@@ -671,8 +675,8 @@ def test_blip_model_output(device):
     # Create test input  
     torch.manual_seed(0)
     batch_size, seq_len, hidden_dim= 1, 3, 1024  
-    torch_hidden_input = torch.randn(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)  
-    torch_encoder_hidden_input = torch.randn(57, 15, hidden_dim, dtype=torch.bfloat16)
+    torch_hidden_input = torch.rand(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)  
+    torch_encoder_hidden_input = torch.rand(57, 15, hidden_dim, dtype=torch.bfloat16)
       
     # PyTorch forward pass  
     with torch.no_grad():  
@@ -692,12 +696,53 @@ def test_blip_model_output(device):
         device=device  
     )  
     ttnn_output = ttnn_model.forward(query_embeds=ttnn_hidden_input, encoder_hidden_states=ttnn_encoder_hidden_input)
-    # ttnn_output = ttnn.to_torch(ttnn_output.last_hidden_state)
+    ttnn_output = ttnn.to_torch(ttnn_output.last_hidden_state)
+      
+    # Compare outputs 
+    assert_with_pcc(torch_output.last_hidden_state, ttnn_output, pcc=0.99)  
+    print(f"BlipQFormerModel test passed with PCC: {calculate_pcc(torch_output.last_hidden_state, ttnn_output):.4f}")
+
+
+@pytest.mark.parametrize(  
+    "device_params",  
+    [{"l1_small_size": 32767}],  
+    indirect=True,  
+)   
+def test_projector_output(device):  
+    """Test FeedForward TTNN implementation against PyTorch."""  
+    config = TestConfig()
+      
+    # Initialize models  
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16).projector
+    torch_model.eval() 
+      
+    ttnn_model = GraniteSpeechEncoderProjectorTTNN(device=device, config=config) 
+      
+    # Prepare weights  
+    ttnn_model.prepare_weights(  
+        torch_model
+    )
+      
+    # Create test input  
+    torch.manual_seed(0)
+    batch_size, seq_len, hidden_dim= 1, 844, 1024  
+    torch_hidden_input = torch.rand(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)  
+      
+    # PyTorch forward pass  
+    with torch.no_grad():  
+        torch_output = torch_model(hidden_states=torch_hidden_input) 
+      
+    # TTNN forward pass  
+    ttnn_hidden_input = ttnn.from_torch(  
+        torch_hidden_input,
+        dtype=ttnn.bfloat16,  
+        layout=ttnn.TILE_LAYOUT,  
+        device=device  
+    )  
+
+    ttnn_output = ttnn_model.forward(hidden_states=ttnn_hidden_input)
     ttnn_output = ttnn.to_torch(ttnn_output)
       
     # Compare outputs 
-    # assert_with_pcc(torch_output.last_hidden_state, ttnn_output, pcc=0.99)  
-    # print(f"BlipEncoder test passed with PCC: {calculate_pcc(torch_output.last_hidden_state, ttnn_output):.4f}")
-
     assert_with_pcc(torch_output, ttnn_output, pcc=0.99)  
-    print(f"BlipModel test passed with PCC: {calculate_pcc(torch_output, ttnn_output):.4f}")
+    print(f"Projector test passed with PCC: {calculate_pcc(torch_output, ttnn_output):.4f}")
