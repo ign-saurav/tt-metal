@@ -356,8 +356,8 @@ def prepare_ttnn_parameters(device):
         fuse_batchnorm_into_conv,
         prepare_ttnn_parameters as prep_backbone_params,
         prepare_depthnet_parameters as prep_depthnet,
+        prepare_secondfpn_parameters,
     )
-    from models.experimental.BevDepth.tt.ttnn_secondfpn import prepare_secondfpn_parameters
 
     logger.info("Preparing TTNN parameters...")
 

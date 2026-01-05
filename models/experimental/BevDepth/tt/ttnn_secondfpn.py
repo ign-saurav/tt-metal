@@ -5,14 +5,12 @@ import ttnn
 import torch
 import numpy as np
 from dataclasses import dataclass
-from loguru import logger
 
 from models.tt_cnn.tt.builder import TtConv2d
 from models.experimental.BevDepth.tt.utils import (
     create_conv2d_config,
     post_process_conv_output,
 )
-from dataclasses import dataclass
 
 
 @dataclass
@@ -158,8 +156,12 @@ class SECONDFPN_TTNN:
             self._conv_cache[cache_key] = TtConv2d(conv_config, self.device)
         return self._conv_cache[cache_key]
 
-    def _create_conv_transpose_config(self):
-        return ttnn.Conv2dConfig(
+    def __call__(self, x, batch_size=1):
+        ups = []
+        target_height = None
+        target_width = None
+
+        conv_config = ttnn.Conv2dConfig(
             weights_dtype=self.model_config["WEIGHTS_DTYPE"],
             shard_layout=None,
             deallocate_activation=self.optimizations.conv_transpose.get("deallocate_activation", False),
@@ -168,23 +170,13 @@ class SECONDFPN_TTNN:
             enable_weights_double_buffer=self.optimizations.conv_transpose.get("enable_weights_double_buffer", False),
             output_layout=ttnn.TILE_LAYOUT,
         )
-
-    def _create_compute_config(self):
-        return ttnn.init_device_compute_kernel_config(
+        compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
             math_fidelity=self.model_config["MATH_FIDELITY"],
             math_approx_mode=False,
             fp32_dest_acc_en=True,
             packer_l1_acc=False,
         )
-
-    def __call__(self, x, batch_size=1):
-        ups = []
-        target_height = None
-        target_width = None
-
-        conv_config = self._create_conv_transpose_config()
-        compute_config = self._create_compute_config()
 
         for i in range(self.num_levels):
             feat = x[i]
@@ -356,32 +348,24 @@ class SECONDFPN_Head_TTNN:
             )
             self._conv_transpose_configs.append(config)
 
-        logger.info(f"SECONDFPN_Head_TTNN init: {self.num_levels} levels")
+    def __call__(self, x_list, batch_size=1):
+        ups = []
+        target_height = None
+        target_width = None
 
-    def _create_conv_transpose_config(self):
-        return ttnn.Conv2dConfig(
+        conv_config = ttnn.Conv2dConfig(
             weights_dtype=self.model_config["WEIGHTS_DTYPE"],
             shard_layout=None,
             deallocate_activation=self.optimizations.conv_transpose.get("deallocate_activation", False),
             output_layout=ttnn.TILE_LAYOUT,
         )
-
-    def _create_compute_config(self):
-        return ttnn.init_device_compute_kernel_config(
+        compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
             math_fidelity=self.model_config["MATH_FIDELITY"],
             math_approx_mode=False,
             fp32_dest_acc_en=True,
             packer_l1_acc=True,
         )
-
-    def __call__(self, x_list, batch_size=1):
-        ups = []
-        target_height = None
-        target_width = None
-
-        conv_config = self._create_conv_transpose_config()
-        compute_config = self._create_compute_config()
 
         for i in range(self.num_levels):
             feat = x_list[i]
@@ -459,165 +443,3 @@ class SECONDFPN_Head_TTNN:
             out = processed_ups[0]
 
         return [out]
-
-
-def prepare_secondfpn_parameters(
-    state_dict,
-    in_channels=[256, 512, 1024, 2048],
-    out_channels=[128, 128, 128, 128],
-    upsample_strides=[0.25, 0.5, 1, 2],
-):
-    from models.experimental.BevDepth.tt.custom_preprocessing import (
-        fuse_conv_bn_weights_unified as fuse_conv_bn_weights,
-    )
-
-    class Parameters:
-        pass
-
-    params = Parameters()
-    params.deblocks = []
-
-    all_keys = list(state_dict.keys())
-    possible_prefixes = [
-        "model.backbone.img_neck.",
-        "backbone.img_neck.",
-        "img_neck.",
-    ]
-
-    prefix = None
-    for p in possible_prefixes:
-        if any(k.startswith(p) for k in all_keys):
-            prefix = p
-            break
-
-    if prefix is None:
-        logger.error(f"Could not find SECONDFPN prefix. Available keys: {all_keys[:20]}")
-        raise KeyError("No img_neck keys found in checkpoint")
-
-    logger.info(f"Using SECONDFPN prefix: {prefix}")
-
-    for i in range(len(in_channels)):
-        deblock = Parameters()
-        weight = state_dict[f"{prefix}deblocks.{i}.0.weight"].clone()
-
-        kernel_h, kernel_w = weight.shape[2], weight.shape[3]
-        deblock.kernel_size = (kernel_h, kernel_w)
-
-        bn_weight = state_dict.get(f"{prefix}deblocks.{i}.1.weight", None)
-        bn_bias = state_dict.get(f"{prefix}deblocks.{i}.1.bias", None)
-        bn_mean = state_dict.get(f"{prefix}deblocks.{i}.1.running_mean", None)
-        bn_var = state_dict.get(f"{prefix}deblocks.{i}.1.running_var", None)
-
-        stride = upsample_strides[i]
-        is_transposed = stride >= 1
-
-        if bn_weight is not None and bn_mean is not None and bn_var is not None:
-            if is_transposed:
-                conv_weight_for_fusion = weight.permute(1, 0, 2, 3).contiguous().float()
-            else:
-                conv_weight_for_fusion = weight.float()
-
-            eps = 1e-3
-            fused_weight, fused_bias = fuse_conv_bn_weights(
-                conv_weight_for_fusion,
-                None,  # conv_bias
-                bn_weight.float(),
-                bn_bias.float() if bn_bias is not None else torch.zeros_like(bn_weight),
-                bn_mean.float(),
-                bn_var.float(),
-                eps=eps,
-            )
-
-            if is_transposed:
-                fused_weight = fused_weight.permute(1, 0, 2, 3).contiguous()
-
-            deblock.conv_weight = fused_weight.to(torch.bfloat16)
-            deblock.conv_bias = fused_bias.to(torch.bfloat16)
-        else:
-            deblock.conv_weight = weight.to(torch.bfloat16)
-            bias_key = f"{prefix}deblocks.{i}.0.bias"
-            if bias_key in state_dict:
-                deblock.conv_bias = state_dict[bias_key].to(torch.bfloat16)
-            else:
-                deblock.conv_bias = None
-
-        params.deblocks.append(deblock)
-
-    logger.info(f"Prepared SECONDFPN parameters for {len(in_channels)} levels")
-    return params
-
-
-def prepare_secondfpn_head_parameters(
-    state_dict,
-    in_channels=[160, 160, 320, 640],
-    out_channels=[64, 64, 64, 64],
-    upsample_strides=[1, 2, 4, 8],
-):
-    from models.experimental.BevDepth.tt.custom_preprocessing import (
-        fuse_conv_bn_weights_unified as fuse_conv_bn_weights,
-    )
-
-    class Parameters:
-        pass
-
-    params = Parameters()
-    params.deblocks = []
-
-    all_keys = list(state_dict.keys())
-    possible_prefixes = [
-        "model.head.neck.",
-        "head.neck.",
-        "neck.",
-    ]
-
-    prefix = None
-    for p in possible_prefixes:
-        if any(k.startswith(p) for k in all_keys):
-            prefix = p
-            break
-
-    if prefix is None:
-        logger.error(f"Could not find head neck prefix. Available keys: {all_keys[:20]}")
-        raise KeyError("No head neck keys found in checkpoint")
-
-    logger.info(f"Using head SECONDFPN prefix: {prefix}")
-
-    for i in range(len(in_channels)):
-        deblock = Parameters()
-        weight = state_dict[f"{prefix}deblocks.{i}.0.weight"].clone()
-
-        kernel_h, kernel_w = weight.shape[2], weight.shape[3]
-        deblock.kernel_size = (kernel_h, kernel_w)
-
-        bn_weight = state_dict.get(f"{prefix}deblocks.{i}.1.weight", None)
-        bn_bias = state_dict.get(f"{prefix}deblocks.{i}.1.bias", None)
-        bn_mean = state_dict.get(f"{prefix}deblocks.{i}.1.running_mean", None)
-        bn_var = state_dict.get(f"{prefix}deblocks.{i}.1.running_var", None)
-
-        if bn_weight is not None and bn_mean is not None and bn_var is not None:
-            conv_weight_for_fusion = weight.permute(1, 0, 2, 3).contiguous().float()
-            eps = 1e-3
-            fused_weight, fused_bias = fuse_conv_bn_weights(
-                conv_weight_for_fusion,
-                None,  # conv_bias
-                bn_weight.float(),
-                bn_bias.float() if bn_bias is not None else torch.zeros_like(bn_weight),
-                bn_mean.float(),
-                bn_var.float(),
-                eps=eps,
-            )
-            fused_weight = fused_weight.permute(1, 0, 2, 3).contiguous()
-            deblock.conv_weight = fused_weight.to(torch.bfloat16)
-            deblock.conv_bias = fused_bias.to(torch.bfloat16)
-        else:
-            deblock.conv_weight = weight.to(torch.bfloat16)
-            bias_key = f"{prefix}deblocks.{i}.0.bias"
-            if bias_key in state_dict:
-                deblock.conv_bias = state_dict[bias_key].to(torch.bfloat16)
-            else:
-                deblock.conv_bias = None
-
-        params.deblocks.append(deblock)
-
-    logger.info(f"Prepared head SECONDFPN parameters for {len(in_channels)} levels")
-    return params

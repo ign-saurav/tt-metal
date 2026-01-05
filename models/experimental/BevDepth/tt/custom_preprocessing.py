@@ -691,7 +691,6 @@ def prepare_backbone_parameters(checkpoint_path=None):
 
 def prepare_neck_parameters(checkpoint_path=None):
     """Prepare parameters for SECONDFPN neck."""
-    from models.experimental.BevDepth.tt.ttnn_secondfpn import prepare_secondfpn_parameters
     from models.experimental.BevDepth.common import download_bevdepth_weights
 
     if checkpoint_path is None:
@@ -730,11 +729,154 @@ def prepare_head_parameters(device, reference_model=None):
     return parameters
 
 
+def prepare_secondfpn_parameters(
+    state_dict,
+    in_channels=[256, 512, 1024, 2048],
+    out_channels=[128, 128, 128, 128],
+    upsample_strides=[0.25, 0.5, 1, 2],
+):
+    class Parameters:
+        pass
+
+    params = Parameters()
+    params.deblocks = []
+
+    all_keys = list(state_dict.keys())
+    possible_prefixes = [
+        "model.backbone.img_neck.",
+        "backbone.img_neck.",
+        "img_neck.",
+    ]
+
+    prefix = None
+    for p in possible_prefixes:
+        if any(k.startswith(p) for k in all_keys):
+            prefix = p
+            break
+
+    if prefix is None:
+        raise KeyError("No img_neck keys found in checkpoint")
+
+    for i in range(len(in_channels)):
+        deblock = Parameters()
+        weight = state_dict[f"{prefix}deblocks.{i}.0.weight"].clone()
+
+        kernel_h, kernel_w = weight.shape[2], weight.shape[3]
+        deblock.kernel_size = (kernel_h, kernel_w)
+
+        bn_weight = state_dict.get(f"{prefix}deblocks.{i}.1.weight", None)
+        bn_bias = state_dict.get(f"{prefix}deblocks.{i}.1.bias", None)
+        bn_mean = state_dict.get(f"{prefix}deblocks.{i}.1.running_mean", None)
+        bn_var = state_dict.get(f"{prefix}deblocks.{i}.1.running_var", None)
+
+        stride = upsample_strides[i]
+        is_transposed = stride >= 1
+
+        if bn_weight is not None and bn_mean is not None and bn_var is not None:
+            if is_transposed:
+                conv_weight_for_fusion = weight.permute(1, 0, 2, 3).contiguous().float()
+            else:
+                conv_weight_for_fusion = weight.float()
+
+            fused_weight, fused_bias = fuse_conv_bn_weights_unified(
+                conv_weight_for_fusion,
+                None,
+                bn_weight.float(),
+                bn_bias.float() if bn_bias is not None else torch.zeros_like(bn_weight),
+                bn_mean.float(),
+                bn_var.float(),
+                eps=1e-3,
+            )
+
+            if is_transposed:
+                fused_weight = fused_weight.permute(1, 0, 2, 3).contiguous()
+
+            deblock.conv_weight = fused_weight.to(torch.bfloat16)
+            deblock.conv_bias = fused_bias.to(torch.bfloat16)
+        else:
+            deblock.conv_weight = weight.to(torch.bfloat16)
+            bias_key = f"{prefix}deblocks.{i}.0.bias"
+            if bias_key in state_dict:
+                deblock.conv_bias = state_dict[bias_key].to(torch.bfloat16)
+            else:
+                deblock.conv_bias = None
+
+        params.deblocks.append(deblock)
+
+    return params
+
+
+def prepare_secondfpn_head_parameters(
+    state_dict,
+    in_channels=[160, 160, 320, 640],
+    out_channels=[64, 64, 64, 64],
+    upsample_strides=[1, 2, 4, 8],
+):
+    class Parameters:
+        pass
+
+    params = Parameters()
+    params.deblocks = []
+
+    all_keys = list(state_dict.keys())
+    possible_prefixes = [
+        "model.head.neck.",
+        "head.neck.",
+        "neck.",
+    ]
+
+    prefix = None
+    for p in possible_prefixes:
+        if any(k.startswith(p) for k in all_keys):
+            prefix = p
+            break
+
+    if prefix is None:
+        raise KeyError("No head neck keys found in checkpoint")
+
+    for i in range(len(in_channels)):
+        deblock = Parameters()
+        weight = state_dict[f"{prefix}deblocks.{i}.0.weight"].clone()
+
+        kernel_h, kernel_w = weight.shape[2], weight.shape[3]
+        deblock.kernel_size = (kernel_h, kernel_w)
+
+        bn_weight = state_dict.get(f"{prefix}deblocks.{i}.1.weight", None)
+        bn_bias = state_dict.get(f"{prefix}deblocks.{i}.1.bias", None)
+        bn_mean = state_dict.get(f"{prefix}deblocks.{i}.1.running_mean", None)
+        bn_var = state_dict.get(f"{prefix}deblocks.{i}.1.running_var", None)
+
+        if bn_weight is not None and bn_mean is not None and bn_var is not None:
+            conv_weight_for_fusion = weight.permute(1, 0, 2, 3).contiguous().float()
+            fused_weight, fused_bias = fuse_conv_bn_weights_unified(
+                conv_weight_for_fusion,
+                None,
+                bn_weight.float(),
+                bn_bias.float() if bn_bias is not None else torch.zeros_like(bn_weight),
+                bn_mean.float(),
+                bn_var.float(),
+                eps=1e-3,
+            )
+            fused_weight = fused_weight.permute(1, 0, 2, 3).contiguous()
+            deblock.conv_weight = fused_weight.to(torch.bfloat16)
+            deblock.conv_bias = fused_bias.to(torch.bfloat16)
+        else:
+            deblock.conv_weight = weight.to(torch.bfloat16)
+            bias_key = f"{prefix}deblocks.{i}.0.bias"
+            if bias_key in state_dict:
+                deblock.conv_bias = state_dict[bias_key].to(torch.bfloat16)
+            else:
+                deblock.conv_bias = None
+
+        params.deblocks.append(deblock)
+
+    return params
+
+
 def prepare_all_parameters_from_reference(device):
     """Load reference model once and prepare all parameters."""
     from ttnn.model_preprocessing import preprocess_model_parameters
     from models.experimental.BevDepth.common import load_reference_model, download_bevdepth_weights
-    from models.experimental.BevDepth.tt.ttnn_secondfpn import prepare_secondfpn_parameters
 
     reference_model = load_reference_model()
     if reference_model is None:

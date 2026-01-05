@@ -8,9 +8,9 @@ import ttnn
 import pytest
 from loguru import logger
 from models.common.utility_functions import comp_pcc
-from models.experimental.BevDepth.tt.ttnn_secondfpn import prepare_secondfpn_parameters
 from models.experimental.BevDepth.tt.custom_preprocessing import (
     extract_neck_state_dict,
+    prepare_secondfpn_parameters,
     fuse_conv_bn_weights_unified as fuse_conv_bn_weights,
 )
 from models.experimental.BevDepth.common import download_bevdepth_weights

@@ -9,7 +9,8 @@ from models.experimental.BevDepth.tt.utils import (
     create_conv2d_config,
     post_process_conv_output,
 )
-from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_Head_TTNN, prepare_secondfpn_head_parameters
+from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_Head_TTNN
+from models.experimental.BevDepth.tt.custom_preprocessing import prepare_secondfpn_head_parameters
 
 
 @dataclass
