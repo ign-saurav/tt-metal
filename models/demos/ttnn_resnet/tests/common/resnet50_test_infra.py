@@ -26,7 +26,7 @@ def load_resnet50_model(model_location_generator):
         model_path = model_location_generator(model_version, model_subdir="ResNet50")
         if os.path.exists(model_path):
             torch_resnet50 = torchvision.models.resnet50()
-            torch_resnet50.load_state_dict(torch.load(model_path))
+            torch_resnet50.load_state_dict(torch.load(model_path, weights_only=False))
     if torch_resnet50 is None:
         torch_resnet50 = torchvision.models.resnet50(weights=torchvision.models.ResNet50_Weights.IMAGENET1K_V1)
     return torch_resnet50
