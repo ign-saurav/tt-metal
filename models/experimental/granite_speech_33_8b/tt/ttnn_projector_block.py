@@ -950,12 +950,14 @@ class GraniteSpeechEncoderProjectorTTNN:
           
         # Pad hidden_states if needed  
         if pad > 0:  
+            hidden_states = ttnn.to_layout(hidden_states, ttnn.ROW_MAJOR_LAYOUT)
             hidden_states = ttnn.pad(  
                 hidden_states,  
                 [(0, 0), (0, pad), (0, 0)],  # Pad along sequence dimension  
                 0.0  
             )  
-          
+            hidden_states = ttnn.to_layout(hidden_states, ttnn.TILE_LAYOUT)
+
         # Reshape for windowed processing  
         hidden_states = ttnn.reshape(  
             hidden_states,  
