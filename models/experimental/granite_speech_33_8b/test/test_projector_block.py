@@ -4,7 +4,7 @@ import ttnn
 
 from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
 from tests.ttnn.utils_for_testing import assert_with_pcc
-from models.experimental.granite_speech_33_8B.tt.ttnn_projector_block import Blip2QFormerIntermediateTTNN, Blip2QFormerOutputTTNN, Blip2QFormerSelfOutputTTNN, Blip2QFormerMultiHeadAttentionTTNN, Blip2QFormerAttentionTTNN, Blip2QFormerLayerTTNN
+from models.experimental.granite_speech_33_8b.tt.ttnn_projector_block import Blip2QFormerIntermediateTTNN, Blip2QFormerOutputTTNN, Blip2QFormerSelfOutputTTNN, Blip2QFormerMultiHeadAttentionTTNN, Blip2QFormerAttentionTTNN, Blip2QFormerLayerTTNN, Blip2QFormerEncoderTTNN, Blip2QFormerModelTTNN
 
 
 class TestConfig:  
@@ -29,6 +29,9 @@ class TestConfig:
         self.chunk_size_feed_forward = 0
         self.cross_attention_frequency = 1
         self.use_qformer_text_input = False
+        self.num_hidden_layers = 2
+        self.layer_norm_eps = 1e-12
+        self.hidden_dropout_prob=0.1
         self.optimized = False
 
 def calculate_pcc(tensor1: torch.Tensor, tensor2: torch.Tensor) -> float:  
@@ -412,13 +415,13 @@ def test_blip_attention_output(device):
       
     # Compare outputs 
     assert_with_pcc(torch_output1, ttnn_output1, pcc=0.8)  
-    print(f"BlipMultiHeadAttn test passed with PCC: {calculate_pcc(torch_output1, ttnn_output1):.4f}")
+    print(f"BlipAttn test passed with PCC: {calculate_pcc(torch_output1, ttnn_output1):.4f}")
 
     assert_with_pcc(torch_output2, ttnn_output2, pcc=0.99)  
-    print(f"BlipMultiHeadAttn test passed with PCC: {calculate_pcc(torch_output2, ttnn_output2):.4f}")  
+    print(f"BlipAttn test passed with PCC: {calculate_pcc(torch_output2, ttnn_output2):.4f}")  
 
     assert_with_pcc(torch_output3, ttnn_output3, pcc=0.99)  
-    print(f"BlipMultiHeadAttn test passed with PCC: {calculate_pcc(torch_output3, ttnn_output3):.4f}")  
+    print(f"BlipAttn test passed with PCC: {calculate_pcc(torch_output3, ttnn_output3):.4f}")  
 
 
 @pytest.mark.parametrize(  
@@ -492,13 +495,13 @@ def test_blip_cross_attention_output(device):
       
     # Compare outputs 
     assert_with_pcc(torch_output1, ttnn_output1, pcc=0.98)  
-    print(f"BlipMultiHeadAttn test passed with PCC: {calculate_pcc(torch_output1, ttnn_output1):.4f}")
+    print(f"BlipCrossAttn test passed with PCC: {calculate_pcc(torch_output1, ttnn_output1):.4f}")
 
     assert_with_pcc(torch_output2, ttnn_output2, pcc=0.99)  
-    print(f"BlipMultiHeadAttn test passed with PCC: {calculate_pcc(torch_output2, ttnn_output2):.4f}")  
+    print(f"BlipCrossAttn test passed with PCC: {calculate_pcc(torch_output2, ttnn_output2):.4f}")  
 
     assert_with_pcc(torch_output3, ttnn_output3, pcc=0.99)  
-    print(f"BlipMultiHeadAttn test passed with PCC: {calculate_pcc(torch_output3, ttnn_output3):.4f}") 
+    print(f"BlipCrossAttn test passed with PCC: {calculate_pcc(torch_output3, ttnn_output3):.4f}") 
 
 
 @pytest.mark.parametrize(  
@@ -571,10 +574,130 @@ def test_blip_layer_output(device):
       
     # Compare outputs 
     assert_with_pcc(torch_output1, ttnn_output1, pcc=0.95)  
-    print(f"BlipMultiHeadAttn test passed with PCC: {calculate_pcc(torch_output1, ttnn_output1):.4f}")
+    print(f"BlipLayer test passed with PCC: {calculate_pcc(torch_output1, ttnn_output1):.4f}")
 
     assert_with_pcc(torch_output2, ttnn_output2, pcc=0.99)  
-    print(f"BlipMultiHeadAttn test passed with PCC: {calculate_pcc(torch_output2, ttnn_output2):.4f}")  
+    print(f"BlipLayer test passed with PCC: {calculate_pcc(torch_output2, ttnn_output2):.4f}")  
 
     assert_with_pcc(torch_output3, ttnn_output3, pcc=0.99)  
-    print(f"BlipMultiHeadAttn test passed with PCC: {calculate_pcc(torch_output3, ttnn_output3):.4f}") 
+    print(f"BlipLayer test passed with PCC: {calculate_pcc(torch_output3, ttnn_output3):.4f}") 
+
+
+@pytest.mark.parametrize(  
+    "device_params",  
+    [{"l1_small_size": 32767}],  
+    indirect=True,  
+)   
+def test_blip_encoder_output(device):  
+    """Test FeedForward TTNN implementation against PyTorch."""  
+    config = TestConfig()  
+      
+    # Initialize models  
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16).projector.qformer.encoder
+    torch_model.eval()  
+      
+    ttnn_model = Blip2QFormerEncoderTTNN(device=device, config=config) 
+      
+    # Prepare weights  
+    ttnn_model.prepare_weights(  
+        torch_model
+    )
+      
+    # Create test input  
+    torch.manual_seed(0)
+    batch_size, seq_len, hidden_dim= 1, 3, 1024  
+    torch_hidden_input = torch.randn(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)  
+    torch_attn_mask_input = torch.ones(1, 1, 1, 3, dtype=torch.bfloat16)
+    torch_encoder_hidden_input = torch.randn(57, 15, hidden_dim, dtype=torch.bfloat16)
+    torch_encoder_attn_mask_input =  torch.ones(57, 1, 1, 15, dtype=torch.bfloat16)
+      
+    # PyTorch forward pass  
+    with torch.no_grad():  
+        torch_output = torch_model(hidden_states=torch_hidden_input, attention_mask=torch_attn_mask_input, encoder_hidden_states=torch_encoder_hidden_input, encoder_attention_mask=torch_encoder_attn_mask_input, query_length=3) 
+      
+    # TTNN forward pass  
+    ttnn_hidden_input = ttnn.from_torch(  
+        torch_hidden_input,
+        dtype=ttnn.bfloat16,  
+        layout=ttnn.TILE_LAYOUT,  
+        device=device  
+    )  
+    ttnn_attn_mask_input = ttnn.from_torch(  
+        torch_attn_mask_input,
+        dtype=ttnn.bfloat16,  
+        layout=ttnn.TILE_LAYOUT,  
+        device=device  
+    )  
+    ttnn_encoder_hidden_input = ttnn.from_torch(  
+        torch_encoder_hidden_input,
+        dtype=ttnn.bfloat16,  
+        layout=ttnn.TILE_LAYOUT,  
+        device=device  
+    )  
+    ttnn_encoder_attn_mask_input = ttnn.from_torch(  
+        torch_encoder_attn_mask_input,
+        dtype=ttnn.bfloat16,  
+        layout=ttnn.TILE_LAYOUT,  
+        device=device  
+    )  
+    ttnn_output = ttnn_model.forward(hidden_states=ttnn_hidden_input, attention_mask=ttnn_attn_mask_input, encoder_hidden_states=ttnn_encoder_hidden_input, encoder_attention_mask=ttnn_encoder_attn_mask_input, query_length=3)
+    ttnn_output = ttnn.to_torch(ttnn_output.last_hidden_state)
+      
+    # Compare outputs 
+    assert_with_pcc(torch_output.last_hidden_state, ttnn_output, pcc=0.99)  
+    print(f"BlipEncoder test passed with PCC: {calculate_pcc(torch_output.last_hidden_state, ttnn_output):.4f}")
+
+
+@pytest.mark.parametrize(  
+    "device_params",  
+    [{"l1_small_size": 32767}],  
+    indirect=True,  
+)   
+def test_blip_model_output(device):  
+    """Test FeedForward TTNN implementation against PyTorch."""  
+    config = TestConfig()
+      
+    # Initialize models  
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16).projector.qformer
+    torch_model.eval()  
+      
+    ttnn_model = Blip2QFormerModelTTNN(device=device, config=config) 
+      
+    # Prepare weights  
+    ttnn_model.prepare_weights(  
+        torch_model
+    )
+      
+    # Create test input  
+    torch.manual_seed(0)
+    batch_size, seq_len, hidden_dim= 1, 3, 1024  
+    torch_hidden_input = torch.randn(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)  
+    torch_encoder_hidden_input = torch.randn(57, 15, hidden_dim, dtype=torch.bfloat16)
+      
+    # PyTorch forward pass  
+    with torch.no_grad():  
+        torch_output = torch_model(query_embeds=torch_hidden_input, encoder_hidden_states=torch_encoder_hidden_input) 
+      
+    # TTNN forward pass  
+    ttnn_hidden_input = ttnn.from_torch(  
+        torch_hidden_input,
+        dtype=ttnn.bfloat16,  
+        layout=ttnn.TILE_LAYOUT,  
+        device=device  
+    )  
+    ttnn_encoder_hidden_input = ttnn.from_torch(  
+        torch_encoder_hidden_input,
+        dtype=ttnn.bfloat16,  
+        layout=ttnn.TILE_LAYOUT,  
+        device=device  
+    )  
+    ttnn_output = ttnn_model.forward(query_embeds=ttnn_hidden_input, encoder_hidden_states=ttnn_encoder_hidden_input)
+    # ttnn_output = ttnn.to_torch(ttnn_output.last_hidden_state)
+    ttnn_output = ttnn.to_torch(ttnn_output)
+      
+    # Compare outputs 
+    # assert_with_pcc(torch_output.last_hidden_state, ttnn_output, pcc=0.99)  
+    # print(f"BlipEncoder test passed with PCC: {calculate_pcc(torch_output.last_hidden_state, ttnn_output):.4f}")
+
+    assert_with_pcc(torch_output, ttnn_output, pcc=0.99)  
+    print(f"BlipModel test passed with PCC: {calculate_pcc(torch_output, ttnn_output):.4f}")
