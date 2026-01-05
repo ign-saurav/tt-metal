@@ -338,7 +338,7 @@ class TtSwin2SR:
 
         if mod_pad_h > 0 or mod_pad_w > 0:
             padding = ((0, 0), (0, 0), (0, mod_pad_h), (0, mod_pad_w))
-            x = ttnn.pad(x, padding, mode="reflect", memory_config=self.memory_config)
+            x = ttnn.pad(x, padding, value=0.0, memory_config=self.memory_config)
 
         return x
 
