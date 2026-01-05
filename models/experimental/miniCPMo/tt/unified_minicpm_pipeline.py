@@ -1,20 +1,43 @@
-import pytest
+"""
+Unified MiniCPM Pipeline
+
+Single pipeline handling text-only, vision+text, audio+text, and full multimodal.
+Text-only is special case when image/audio not provided.
+
+Architecture:
+1. Multimodal encoders produce embeddings in Qwen's space (dim=3584)
+2. Replace text placeholder embeddings with multimodal embeddings
+3. Qwen LLM processes unified embedding sequence
+4. Optional TTS generation for speech output
+"""
+
+import torch
 import ttnn
-from typing import Optional, Dict, Any
+import numpy as np
+from typing import Optional, Dict, Any, List, Tuple
+from PIL import Image
 from loguru import logger
+from pathlib import Path
+import sys
 import os
 
-from models.experimental.miniCPMo.tt.unified_minicpm_pipeline import UnifiedMiniCPMPipeline
+# Add paths
+sys.path.insert(0, str(Path(__file__).parent.parent / "reference_pytorch"))
 
 # Import components
-from models.experimental.miniCPMo.tt.minicpm_weight_bridge import MiniCPMWeightBridge
+from .minicpm_weight_bridge import MiniCPMWeightBridge
+from .ttnn_siglip_vision import TtnnSigLIPEncoder
+from .ttnn_resampler import TtnnVisionResampler
+from .ttnn_whisper_encoder import TtnnWhisperEncoder
+from .ttnn_audio_projector import TtnnAudioProjector
+from .ttnn_dvae import TtnnDVAE
 
 # Import tt_transformers
 from models.experimental.miniCPMo.tt_transformers.common import create_tt_model
 from models.experimental.miniCPMo.tt_transformers.model_config import ModelArgs
 
 
-class QwenMiniCPMPipeline:
+class UnifiedMiniCPMPipeline:
     """
     Unified pipeline for MiniCPM-o-2_6 with all modalities.
 
@@ -76,7 +99,7 @@ class QwenMiniCPMPipeline:
         ) = self._init_qwen_llm()
 
         # Create generator
-        from models.experimental.miniCPMo.tt_transformers.generator import Generator
+        from models.tt_transformers.tt.generator import Generator
 
         self.qwen_generator = Generator(
             self.model, self.model_args, self.mesh_device, processor=self.processor, tokenizer=self.tokenizer
@@ -91,6 +114,32 @@ class QwenMiniCPMPipeline:
         self.vocos = None
 
         logger.info("✅ UnifiedMiniCPMPipeline initialized")
+
+    def _setup_paged_attention(self):
+        """Set up paged attention configuration"""
+        from models.tt_transformers.tt.common import PagedAttentionConfig
+
+        # Use same config as simple_text_demo.py
+        page_params = {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024}
+        return PagedAttentionConfig(
+            block_size=page_params["page_block_size"],
+            max_num_blocks=page_params["page_max_num_blocks_per_dp"],
+        )
+
+    def _create_page_table(self, global_batch_size, data_parallel):
+        """Create page table for paged attention"""
+        import torch
+
+        page_table = None
+        if self.paged_attention_config:
+            # Implied shuffling of blocks
+            permutation = torch.randperm(self.paged_attention_config.max_num_blocks)
+            # Page table which maps virtual blocks to physical
+            reverse_permutation = torch.argsort(permutation).repeat(data_parallel)
+            page_table = reverse_permutation.reshape(
+                global_batch_size, self.paged_attention_config.max_num_blocks // (global_batch_size // data_parallel)
+            )
+        return page_table
 
     def _default_config(self) -> Dict[str, Any]:
         """Default configuration matching MiniCPM-o-2_6"""
@@ -111,17 +160,6 @@ class QwenMiniCPMPipeline:
             # TTS
             "enable_tts": True,
         }
-
-    def _setup_paged_attention(self):
-        """Set up paged attention configuration"""
-        from models.experimental.miniCPMo.tt_transformers.common import PagedAttentionConfig
-
-        # Use same config as simple_text_demo.py
-        page_params = {"page_block_size": 32, "page_max_num_blocks_per_dp": 1024}
-        return PagedAttentionConfig(
-            block_size=page_params["page_block_size"],
-            max_num_blocks=page_params["page_max_num_blocks_per_dp"],
-        )
 
     def _init_qwen_llm(self):
         """
@@ -167,7 +205,7 @@ class QwenMiniCPMPipeline:
         page_table = self._create_page_table(global_batch_size, data_parallel)
 
         # Create TTNN model with paged attention
-        from models.experimental.miniCPMo.tt_transformers.generator import create_submeshes
+        from models.tt_transformers.tt.generator import create_submeshes
 
         submesh_devices = create_submeshes(self.mesh_device, data_parallel)
         model_args_i, model_i, tt_kv_cache_i, _ = create_tt_model(
@@ -206,27 +244,234 @@ class QwenMiniCPMPipeline:
         logger.info("✅ Qwen LLM initialized with MiniCPM weights")
         return model_args, model, page_table, tt_kv_cache, tokenizer, processor
 
-    def _create_page_table(self, global_batch_size, data_parallel):
-        """Create page table for paged attention"""
-        import torch
-
-        page_table = None
-        if self.paged_attention_config:
-            # Implied shuffling of blocks
-            permutation = torch.randperm(self.paged_attention_config.max_num_blocks)
-            # Page table which maps virtual blocks to physical
-            reverse_permutation = torch.argsort(permutation).repeat(data_parallel)
-            page_table = reverse_permutation.reshape(
-                global_batch_size, self.paged_attention_config.max_num_blocks // (global_batch_size // data_parallel)
-            )
-        return page_table
-
     def _init_tokenizer(self):
         """Initialize Qwen tokenizer"""
         from transformers import AutoTokenizer
 
         tokenizer = AutoTokenizer.from_pretrained("openbmb/MiniCPM-o-2_6", trust_remote_code=True)
         return tokenizer
+
+    def _init_vision_components(self):
+        """Lazy load vision encoder + resampler"""
+        if self.vision_encoder is not None:
+            return  # Already loaded
+
+        logger.info("Loading vision components (SigLIP + Resampler)...")
+
+        # Load weights
+        vision_enc_weights = self.weight_bridge.get_vision_encoder_weights()
+        vision_res_weights = self.weight_bridge.get_vision_resampler_weights()
+
+        # Create components
+        self.vision_encoder = TtnnSigLIPEncoder(
+            mesh_device=self.mesh_device,
+            weights=vision_enc_weights,
+        )
+
+        self.vision_resampler = TtnnVisionResampler(
+            mesh_device=self.mesh_device,
+            weights=vision_res_weights,
+            num_queries=self.config["vision_num_queries"],
+            embed_dim=self.config["hidden_size"],  # 3584
+            kv_dim=self.config["vision_hidden_size"],  # 1152
+        )
+
+        logger.info("✅ Vision components loaded")
+
+    def _init_audio_components(self):
+        """Lazy load audio encoder + projector"""
+        if self.audio_encoder is not None:
+            return  # Already loaded
+
+        logger.info("Loading audio components (Whisper + AudioProjector)...")
+
+        # Load weights
+        audio_enc_weights = self.weight_bridge.get_audio_encoder_weights()
+        audio_proj_weights = self.weight_bridge.get_audio_projector_weights()
+
+        # Create components
+        self.audio_encoder = TtnnWhisperEncoder(
+            mesh_device=self.mesh_device,
+            weights=audio_enc_weights,
+        )
+
+        self.audio_projector = TtnnAudioProjector(
+            mesh_device=self.mesh_device,
+            weights=audio_proj_weights,
+            output_dim=self.config["hidden_size"],  # 3584
+        )
+
+        logger.info("✅ Audio components loaded")
+
+    def _init_tts_components(self):
+        """Lazy load TTS decoder (DVAE + Vocos)"""
+        if self.tts_decoder is not None:
+            return  # Already loaded
+
+        logger.info("Loading TTS components (DVAE + Vocos)...")
+
+        # Load weights
+        tts_weights = self.weight_bridge.get_tts_weights()
+
+        # Create DVAE
+        self.tts_decoder = TtnnDVAE(
+            mesh_device=self.mesh_device,
+            weights=tts_weights,
+        )
+
+        # Load Vocos vocoder (CPU-based, lightweight)
+        try:
+            from vocos import Vocos
+
+            self.vocos = Vocos.from_pretrained("charactr/vocos-mel-24khz")
+        except Exception as e:
+            logger.warning(f"Could not load Vocos: {e}")
+            self.vocos = None
+
+        logger.info("✅ TTS components loaded")
+
+    def _process_vision(self, image: Image.Image) -> torch.Tensor:
+        """
+        Process image through vision pipeline.
+
+        Args:
+            image: PIL Image
+
+        Returns:
+            vision_tokens: (batch=1, 32, 3584) - ready to merge with text
+        """
+        self._init_vision_components()
+
+        # Preprocess image
+        pixel_values = self._preprocess_image(image)
+
+        # SigLIP encoding
+        vision_features = self.vision_encoder(pixel_values)  # (1, 4901, 1152)
+
+        # Resampler (compresses to 32 tokens in Qwen space)
+        vision_tokens = self.vision_resampler(vision_features)  # (1, 32, 3584)
+
+        return vision_tokens
+
+    def _process_audio(self, audio: np.ndarray, sr: int = 16000) -> torch.Tensor:
+        """
+        Process audio through audio pipeline.
+
+        Args:
+            audio: Audio waveform (numpy array)
+            sr: Sampling rate (default 16kHz for Whisper)
+
+        Returns:
+            audio_tokens: (batch=1, seq_len, 3584) - ready to merge with text
+        """
+        self._init_audio_components()
+
+        # Extract mel features
+        mel_features = self._extract_mel_features(audio, sr)
+
+        # Whisper encoding
+        audio_features = self.audio_encoder(mel_features)  # (1, seq_len, 1024)
+
+        # Audio projection (to Qwen space with pooling)
+        audio_tokens = self.audio_projector(audio_features)  # (1, pooled_len, 3584)
+
+        return audio_tokens
+
+    def _merge_embeddings(
+        self,
+        text: str,
+        vision_tokens: Optional[torch.Tensor] = None,
+        audio_tokens: Optional[torch.Tensor] = None,
+    ) -> torch.Tensor:
+        """
+        Merge multimodal embeddings by replacing text placeholders.
+
+        This implements MiniCPM's embedding merge strategy:
+        1. Tokenize text with special placeholders (<image>, <audio>)
+        2. Get text embeddings from Qwen model
+        3. Replace embeddings at placeholder positions with multimodal tokens
+        4. Return unified embedding sequence
+
+        Args:
+            text: Input text (may contain <image> and <audio> placeholders)
+            vision_tokens: Optional (batch, 32, 3584)
+            audio_tokens: Optional (batch, seq, 3584)
+
+        Returns:
+            unified_embeds: (batch, total_seq_len, 3584)
+        """
+        import torch
+
+        # Tokenize text (handles special tokens)
+        input_ids = self.tokenizer(text, return_tensors="pt")["input_ids"]
+        batch_size = input_ids.shape[0]
+
+        # Get text embeddings from Qwen model's embedding layer
+        # Access the embedding layer from the first model in the generator
+        text_embeds = self.qwen_generator.model[0].embd.weights.to(torch.float32)[input_ids]
+
+        # If no multimodal inputs, return text embeddings as-is
+        if vision_tokens is None and audio_tokens is None:
+            return text_embeds
+
+        # Find placeholder positions
+        image_bounds = self._find_placeholder_bounds(text, "image")
+        audio_bounds = self._find_placeholder_bounds(text, "audio")
+
+        # If no placeholders found, return text embeddings
+        if not image_bounds and not audio_bounds:
+            logger.warning("No multimodal placeholders found in text - returning text embeddings only")
+            return text_embeds
+
+        # Build the merged embedding sequence
+        merged_embeddings = []
+        current_token_idx = 0
+
+        # Sort all bounds by start position
+        all_bounds = []
+        for start_tok, end_tok in image_bounds:
+            all_bounds.append((start_tok, end_tok, "image", vision_tokens))
+        for start_tok, end_tok in audio_bounds:
+            all_bounds.append((start_tok, end_tok, "audio", audio_tokens))
+
+        all_bounds.sort(key=lambda x: x[0])  # Sort by start token position
+
+        for start_tok, end_tok, modality, modality_tokens in all_bounds:
+            # Add text embeddings before this placeholder
+            if start_tok > current_token_idx:
+                merged_embeddings.append(text_embeds[:, current_token_idx:start_tok, :])
+
+            # Add multimodal tokens (ensure batch dimension matches)
+            if modality_tokens is not None:
+                # modality_tokens shape: (batch, seq_len, hidden_size)
+                # Make sure batch dimension is compatible
+                if modality_tokens.shape[0] == 1 and batch_size > 1:
+                    modality_tokens = modality_tokens.repeat(batch_size, 1, 1)
+                elif modality_tokens.shape[0] != batch_size:
+                    logger.warning(
+                        f"Batch size mismatch: modality_tokens has {modality_tokens.shape[0]}, expected {batch_size}"
+                    )
+                    continue
+
+                merged_embeddings.append(modality_tokens)
+
+            # Update current position
+            current_token_idx = end_tok
+
+        # Add any remaining text embeddings after the last placeholder
+        if current_token_idx < text_embeds.shape[1]:
+            merged_embeddings.append(text_embeds[:, current_token_idx:, :])
+
+        # Concatenate all embeddings
+        if merged_embeddings:
+            unified_embeds = torch.cat(merged_embeddings, dim=1)
+        else:
+            unified_embeds = text_embeds
+
+        logger.info(
+            f"Merged embeddings: text tokens {text_embeds.shape[1]} -> unified tokens {unified_embeds.shape[1]}"
+        )
+        return unified_embeds
 
     def generate(
         self,
@@ -297,8 +542,8 @@ class QwenMiniCPMPipeline:
 
         # Prepare input for generation (text-only for now)
         import torch
-        from models.experimental.miniCPMo.tt_transformers.common import preprocess_inputs_prefill
-        from models.experimental.miniCPMo.tt_transformers.generator import SamplingParams
+        from models.tt_transformers.tt.common import preprocess_inputs_prefill
+        from models.tt_transformers.tt.generator import SamplingParams
 
         # Tokenize input text
         input_prompts = [text]
@@ -335,7 +580,9 @@ class QwenMiniCPMPipeline:
         logger.info(f"Calling prefill_forward_text for warmup at {warmup_start:.3f}")
 
         logits = self.qwen_generator.prefill_forward_text(
-            input_tokens_prefill_pt,  # Prefill warmup for all users, in case some users have different seqlens than others
+            input_tokens_prefill_pt[0].unsqueeze(
+                0
+            ),  # Prefill warmup for all users, in case some users have different seqlens than others
             page_table=self.page_table,
             kv_cache=self.tt_kv_cache,
             prompt_lens=decoding_pos,
@@ -350,7 +597,7 @@ class QwenMiniCPMPipeline:
         logger.info("Starting prefill...")
         print("Starting main prefill...")
         logits = self.qwen_generator.prefill_forward_text(
-            input_tokens_prefill_pt,
+            input_tokens_prefill_pt[0].unsqueeze(0),
             page_table=self.page_table,
             kv_cache=self.tt_kv_cache,
             prompt_lens=decoding_pos,
@@ -386,7 +633,7 @@ class QwenMiniCPMPipeline:
             logits = self.qwen_generator.decode_forward_text(
                 out_tok,
                 current_pos,
-                enable_trace=True,
+                enable_trace=False,
                 page_table=self.page_table,
                 kv_cache=self.tt_kv_cache,
                 sampling_params=device_sampling_params,
@@ -401,6 +648,8 @@ class QwenMiniCPMPipeline:
 
             current_pos += 1
 
+            if not hasattr(self.tokenizer, "stop_tokens"):
+                self.tokenizer.stop_tokens = [self.tokenizer.eos_token_id]
             # Save output token
             for user in range(global_batch_size):
                 user_tok = out_tok[user].item()
@@ -432,18 +681,70 @@ class QwenMiniCPMPipeline:
 
         return result
 
+    def _preprocess_image(self, image: Image.Image) -> torch.Tensor:
+        """Preprocess PIL image for SigLIP (980x980)"""
+        # TODO: Implement proper preprocessing
+        # This should resize, normalize, and convert to tensor format expected by SigLIP
+        # For now, return a placeholder tensor
+        import torchvision.transforms as transforms
 
-# @pytest.mark.parametrize("mesh_device", [(1, 2)], indirect=True)
-@pytest.mark.parametrize("mesh_device", [1], indirect=True)
-def test_qwen_llm(mesh_device):
-    """PCC Test 1: Qwen LLM with MiniCPM weights"""
+        transform = transforms.Compose(
+            [
+                transforms.Resize((980, 980)),
+                transforms.ToTensor(),
+                transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            ]
+        )
+        return transform(image).unsqueeze(0)  # Add batch dimension
 
-    pipeline = UnifiedMiniCPMPipeline(mesh_device)
+    def _extract_mel_features(self, audio: np.ndarray, sr: int) -> torch.Tensor:
+        """Extract mel spectrogram features for Whisper"""
+        # TODO: Implement mel feature extraction
+        # This should use WhisperFeatureExtractor or similar
+        # For now, return a placeholder tensor
+        try:
+            from transformers import WhisperFeatureExtractor
 
-    # Test basic text generation
-    result = pipeline.generate("Hello world", max_tokens=5)
-    print(result["text"])
-    assert result["text"] is not None
-    assert len(result["text"]) > 0
+            feature_extractor = WhisperFeatureExtractor.from_pretrained("openai/whisper-tiny")
+            features = feature_extractor(audio, sampling_rate=sr, return_tensors="pt")
+            return features.input_features
+        except Exception as e:
+            logger.warning(f"Could not extract mel features: {e}")
+            # Return placeholder
+            return torch.randn(1, 80, 3000)  # Typical Whisper input shape
 
-    print("✅ Qwen LLM PCC test passed (basic functionality)")
+    def _find_placeholder_bounds(self, text: str, placeholder: str) -> List[Tuple[int, int]]:
+        """Find token positions of placeholders in tokenized text"""
+        # MiniCPM uses special tags: (<image>./</image>) and (<audio>./</audio>)
+        if "image" in placeholder:
+            pattern = r"\(<image>\./</image>\)"
+        elif "audio" in placeholder:
+            pattern = r"\(<audio>\./</audio>\)"
+        else:
+            return []
+
+        import re
+
+        # Find character positions in text
+        matches = [(m.start(), m.end()) for m in re.finditer(pattern, text)]
+
+        # Convert to token positions
+        token_bounds = []
+        for start_char, end_char in matches:
+            # Tokenize prefix to find token position
+            prefix_tokens = self.tokenizer.encode(text[:start_char], add_special_tokens=False)
+            placeholder_tokens = self.tokenizer.encode(text[start_char:end_char], add_special_tokens=False)
+
+            start_tok = len(prefix_tokens)
+            end_tok = start_tok + len(placeholder_tokens)
+            token_bounds.append((start_tok, end_tok))
+
+        return token_bounds
+
+    def _generate_speech(self, text: str) -> np.ndarray:
+        """Generate speech audio from text via TTS"""
+        # TODO: Implement TTS generation
+        # This should use DVAE decoder + Vocos to generate audio
+        # For now, return a placeholder array
+        logger.warning("TTS generation not implemented")
+        return np.array([])  # Empty array placeholder
