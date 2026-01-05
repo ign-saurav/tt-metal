@@ -497,8 +497,8 @@ class BaseLSSFPN(nn.Module):
         self.img_neck = build_neck(img_neck_conf)
         self.depth_net = self._configure_depth_net(depth_net_conf)
 
-        self.img_neck.init_weights()
-        self.img_backbone.init_weights()
+        # self.img_neck.init_weights()
+        # self.img_backbone.init_weights()
         self.use_da = use_da
         if self.use_da:
             self.depth_aggregation_net = self._configure_depth_aggregation_net()

@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
+
 # Adapted from https://github.com/open-mmlab/mmdetection3d/blob/v1.0.0rc4/mmdet3d/models/dense_heads/centerpoint_head.py
 # Copyright (c) OpenMMLab. All rights reserved.
 import copy
@@ -58,7 +59,6 @@ def multi_apply(func, *args, **kwargs):
     return tuple(map(list, zip(*map_results)))
 
 
-# @numba.jit(nopython=True)
 def circle_nms(dets: Tensor, thresh: float, post_max_size: int = 83) -> Tensor:
     """Circular NMS.
 

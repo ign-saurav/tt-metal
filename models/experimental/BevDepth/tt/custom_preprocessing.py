@@ -160,6 +160,78 @@ def fuse_conv_bn_weights_unified(conv_weight, conv_bias, bn_weight, bn_bias, bn_
     return fused_weight, fused_bias
 
 
+def fuse_batchnorm_into_conv(state_dict):
+    """Fuse all BatchNorm layers into their corresponding conv layers for ResNet50 backbone."""
+    fused_state = {}
+
+    # Fuse bn1 into conv1
+    if "conv1.weight" in state_dict and "bn1.weight" in state_dict:
+        fused_weight, fused_bias = fuse_conv_bn_weights_unified(
+            state_dict["conv1.weight"],
+            None,  # conv1 typically has no bias
+            state_dict["bn1.weight"],
+            state_dict["bn1.bias"],
+            state_dict["bn1.running_mean"],
+            state_dict["bn1.running_var"],
+        )
+        fused_state["conv1.weight"] = fused_weight
+        fused_state["conv1.bias"] = fused_bias
+
+    # Fuse BN in each bottleneck block
+    for layer_idx in range(1, 5):
+        layer_name = f"layer{layer_idx}"
+        block_idx = 0
+        while True:
+            block_prefix = f"{layer_name}.{block_idx}."
+
+            # Check if this block exists
+            if f"{block_prefix}conv1.weight" not in state_dict:
+                break
+
+            # Fuse bn1, bn2, bn3 for each conv in the block
+            for conv_idx in range(1, 4):
+                conv_key = f"{block_prefix}conv{conv_idx}.weight"
+                bn_key = f"{block_prefix}bn{conv_idx}.weight"
+
+                if conv_key in state_dict and bn_key in state_dict:
+                    conv_bias = state_dict.get(f"{block_prefix}conv{conv_idx}.bias", None)
+                    fused_weight, fused_bias = fuse_conv_bn_weights_unified(
+                        state_dict[conv_key],
+                        conv_bias,
+                        state_dict[bn_key],
+                        state_dict[f"{block_prefix}bn{conv_idx}.bias"],
+                        state_dict[f"{block_prefix}bn{conv_idx}.running_mean"],
+                        state_dict[f"{block_prefix}bn{conv_idx}.running_var"],
+                    )
+                    fused_state[conv_key] = fused_weight
+                    fused_state[f"{block_prefix}conv{conv_idx}.bias"] = fused_bias
+
+            # Fuse downsample BN if exists
+            if f"{block_prefix}downsample.0.weight" in state_dict:
+                if f"{block_prefix}downsample.1.weight" in state_dict:
+                    downsample_bias = state_dict.get(f"{block_prefix}downsample.0.bias", None)
+                    fused_weight, fused_bias = fuse_conv_bn_weights_unified(
+                        state_dict[f"{block_prefix}downsample.0.weight"],
+                        downsample_bias,
+                        state_dict[f"{block_prefix}downsample.1.weight"],
+                        state_dict[f"{block_prefix}downsample.1.bias"],
+                        state_dict[f"{block_prefix}downsample.1.running_mean"],
+                        state_dict[f"{block_prefix}downsample.1.running_var"],
+                    )
+                    fused_state[f"{block_prefix}downsample.0.weight"] = fused_weight
+                    fused_state[f"{block_prefix}downsample.0.bias"] = fused_bias
+
+            block_idx += 1
+
+    # Copy all other weights that don't need fusion
+    for key, value in state_dict.items():
+        if key not in fused_state and not key.startswith("bn") and "downsample.1" not in key:
+            fused_state[key] = value
+
+    logger.info(f"Fused BatchNorm into conv weights. Original keys: {len(state_dict)}, Fused keys: {len(fused_state)}")
+    return fused_state
+
+
 def prepare_depthnet_parameters(state_dict, in_channels=512, mid_channels=256, depth_channels=112):
     class Parameters:
         pass
@@ -428,3 +500,281 @@ def prepare_depthnet_parameters(state_dict, in_channels=512, mid_channels=256, d
         params.final_bias = params.final_bias.to(torch.bfloat16)
 
     return params
+
+
+def extract_backbone_state_dict(checkpoint_path):
+    """Extract backbone weights from BEVDepth checkpoint"""
+    import gc
+
+    logger.info(f"Loading checkpoint from {checkpoint_path}...")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+    if "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+        del checkpoint
+        gc.collect()
+    else:
+        state_dict = checkpoint
+
+    # Extract only img_backbone weights
+    backbone_state = {}
+    for key, value in state_dict.items():
+        if key.startswith("model.backbone.img_backbone."):
+            new_key = key.replace("model.backbone.img_backbone.", "")
+            backbone_state[new_key] = value
+
+    # Free the full state_dict to save memory
+    del state_dict
+    gc.collect()
+
+    logger.info(f"Extracted {len(backbone_state)} backbone parameters")
+    return backbone_state
+
+
+def extract_neck_state_dict(checkpoint_path):
+    """Extract neck (SECONDFPN) weights from BEVDepth checkpoint"""
+    import gc
+
+    logger.info(f"Loading checkpoint from {checkpoint_path}...")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+    if "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+        del checkpoint
+        gc.collect()
+    else:
+        state_dict = checkpoint
+
+    # Extract only img_neck weights - keep the full prefix for prepare_secondfpn_parameters
+    neck_state = {}
+    # Try different prefix patterns
+    patterns = [
+        "model.backbone.img_neck.",
+        "img_backbone.img_neck.",
+        "backbone.img_neck.",
+        "img_neck.",
+    ]
+
+    for pattern in patterns:
+        for key, value in state_dict.items():
+            if key.startswith(pattern):
+                neck_state[key] = value
+
+    # Free the full state_dict to save memory
+    del state_dict
+    gc.collect()
+
+    logger.info(f"Extracted {len(neck_state)} neck parameters")
+    return neck_state
+
+
+def extract_depthnet_state_dict(checkpoint_path):
+    """Extract depthnet weights from BEVDepth checkpoint"""
+    import gc
+
+    logger.info(f"Loading checkpoint from {checkpoint_path}...")
+    checkpoint = torch.load(checkpoint_path, map_location="cpu")
+
+    if "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+        del checkpoint
+        gc.collect()
+    else:
+        state_dict = checkpoint
+
+    # Extract only depth_net weights - keep the full prefix for prepare_depthnet_parameters
+    depthnet_state = {}
+    # Try different prefix patterns
+    patterns = [
+        "model.backbone.depth_net.",
+        "img_backbone.depth_net.",
+        "backbone.depth_net.",
+        "depth_net.",
+    ]
+
+    for pattern in patterns:
+        for key, value in state_dict.items():
+            if key.startswith(pattern):
+                depthnet_state[key] = value
+
+    # Free the full state_dict to save memory
+    del state_dict
+    gc.collect()
+
+    logger.info(f"Extracted {len(depthnet_state)} depthnet parameters")
+    return depthnet_state
+
+
+def prepare_ttnn_parameters(state_dict):
+    """Convert flat state_dict to hierarchical Parameters object for TTNN ResNet50 backbone."""
+
+    class Parameters:
+        pass
+
+    params = Parameters()
+
+    params.conv1 = Parameters()
+    params.conv1.weight = state_dict["conv1.weight"].to(torch.bfloat16)
+    params.conv1.bias = state_dict.get("conv1.bias", None)
+    if params.conv1.bias is not None:
+        params.conv1.bias = params.conv1.bias.to(torch.bfloat16)
+
+    # Layers - keep as PyTorch tensors
+    for layer_idx in range(1, 5):
+        layer_name = f"layer{layer_idx}"
+        layer_params = []
+
+        block_idx = 0
+        while True:
+            block_prefix = f"{layer_name}.{block_idx}."
+            if not any(k.startswith(block_prefix) for k in state_dict.keys()):
+                break
+
+            block_params = Parameters()
+
+            # All weights as PyTorch tensors - load fused biases from state_dict
+            block_params.conv1 = Parameters()
+            block_params.conv1.weight = state_dict[f"{block_prefix}conv1.weight"].to(torch.bfloat16)
+            # Load fused bias if it exists (from batch norm fusion)
+            conv1_bias_key = f"{block_prefix}conv1.bias"
+            if conv1_bias_key in state_dict:
+                block_params.conv1.bias = state_dict[conv1_bias_key].to(torch.bfloat16)
+            else:
+                block_params.conv1.bias = None
+
+            block_params.conv2 = Parameters()
+            block_params.conv2.weight = state_dict[f"{block_prefix}conv2.weight"].to(torch.bfloat16)
+            # Load fused bias if it exists
+            conv2_bias_key = f"{block_prefix}conv2.bias"
+            if conv2_bias_key in state_dict:
+                block_params.conv2.bias = state_dict[conv2_bias_key].to(torch.bfloat16)
+            else:
+                block_params.conv2.bias = None
+
+            block_params.conv3 = Parameters()
+            block_params.conv3.weight = state_dict[f"{block_prefix}conv3.weight"].to(torch.bfloat16)
+            # Load fused bias if it exists
+            conv3_bias_key = f"{block_prefix}conv3.bias"
+            if conv3_bias_key in state_dict:
+                block_params.conv3.bias = state_dict[conv3_bias_key].to(torch.bfloat16)
+            else:
+                block_params.conv3.bias = None
+
+            if f"{block_prefix}downsample.0.weight" in state_dict:
+                block_params.downsample = [Parameters()]
+                block_params.downsample[0].weight = state_dict[f"{block_prefix}downsample.0.weight"].to(torch.bfloat16)
+                # Load fused bias if it exists
+                downsample_bias_key = f"{block_prefix}downsample.0.bias"
+                if downsample_bias_key in state_dict:
+                    block_params.downsample[0].bias = state_dict[downsample_bias_key].to(torch.bfloat16)
+                else:
+                    block_params.downsample[0].bias = None
+
+            layer_params.append(block_params)
+            block_idx += 1
+
+        setattr(params, layer_name, layer_params)
+
+    return params
+
+
+def prepare_backbone_parameters(checkpoint_path=None):
+    """Prepare parameters for ResNet50 backbone."""
+    from models.experimental.BevDepth.common import download_bevdepth_weights
+
+    if checkpoint_path is None:
+        checkpoint_path = download_bevdepth_weights()
+    backbone_state = extract_backbone_state_dict(checkpoint_path)
+    backbone_state = fuse_batchnorm_into_conv(backbone_state)
+    return prepare_ttnn_parameters(backbone_state)
+
+
+def prepare_neck_parameters(checkpoint_path=None):
+    """Prepare parameters for SECONDFPN neck."""
+    from models.experimental.BevDepth.tt.ttnn_secondfpn import prepare_secondfpn_parameters
+    from models.experimental.BevDepth.common import download_bevdepth_weights
+
+    if checkpoint_path is None:
+        checkpoint_path = download_bevdepth_weights()
+    neck_state = extract_neck_state_dict(checkpoint_path)
+
+    in_channels = [256, 512, 1024, 2048]
+    out_channels = [128, 128, 128, 128]
+    upsample_strides = [0.25, 0.5, 1, 2]
+    return prepare_secondfpn_parameters(
+        neck_state,
+        in_channels=in_channels,
+        out_channels=out_channels,
+        upsample_strides=upsample_strides,
+    )
+
+
+def prepare_head_parameters(device, reference_model=None):
+    """Prepare parameters for BEVDepthHead."""
+    from ttnn.model_preprocessing import preprocess_model_parameters
+    from models.experimental.BevDepth.common import load_reference_model
+
+    if reference_model is None:
+        reference_model = load_reference_model()
+    if reference_model is None:
+        return None
+
+    torch_head = reference_model.model.head
+    torch_head.eval()
+
+    parameters = preprocess_model_parameters(
+        initialize_model=lambda: torch_head,
+        custom_preprocessor=create_custom_mesh_preprocessor(None),
+        device=None,
+    )
+    return parameters
+
+
+def prepare_all_parameters_from_reference(device):
+    """Load reference model once and prepare all parameters."""
+    from ttnn.model_preprocessing import preprocess_model_parameters
+    from models.experimental.BevDepth.common import load_reference_model, download_bevdepth_weights
+    from models.experimental.BevDepth.tt.ttnn_secondfpn import prepare_secondfpn_parameters
+
+    reference_model = load_reference_model()
+    if reference_model is None:
+        return None, None
+
+    checkpoint_path = download_bevdepth_weights()
+
+    backbone_state = extract_backbone_state_dict(checkpoint_path)
+    backbone_state = fuse_batchnorm_into_conv(backbone_state)
+    backbone_params = prepare_ttnn_parameters(backbone_state)
+
+    neck_state = extract_neck_state_dict(checkpoint_path)
+    neck_params = prepare_secondfpn_parameters(
+        neck_state,
+        in_channels=[256, 512, 1024, 2048],
+        out_channels=[128, 128, 128, 128],
+        upsample_strides=[0.25, 0.5, 1, 2],
+    )
+
+    depthnet_state = extract_depthnet_state_dict(checkpoint_path)
+    depthnet_params = prepare_depthnet_parameters(
+        depthnet_state,
+        in_channels=512,
+        mid_channels=512,
+        depth_channels=112,
+    )
+
+    torch_head = reference_model.model.head
+    torch_head.eval()
+    head_params = preprocess_model_parameters(
+        initialize_model=lambda: torch_head,
+        custom_preprocessor=create_custom_mesh_preprocessor(None),
+        device=None,
+    )
+
+    params = {
+        "backbone": backbone_params,
+        "neck": neck_params,
+        "depthnet": depthnet_params,
+        "head": head_params,
+    }
+
+    return params, reference_model

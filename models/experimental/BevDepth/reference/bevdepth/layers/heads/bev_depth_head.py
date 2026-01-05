@@ -1,5 +1,6 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
+
 # Adapted from https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/layers/heads/bev_depth_head.py
 
 from models.experimental.BevDepth.reference.bevdepth.layers.heads.centerpoint_head import CenterHead
@@ -68,9 +69,9 @@ class BEVDepthHead(CenterHead):
             separate_head=separate_head,
         )
         self.trunk = build_backbone(bev_backbone_conf)
-        self.trunk.init_weights()
+        # self.trunk.init_weights()
         self.neck = build_neck(bev_neck_conf)
-        self.neck.init_weights()
+        # self.neck.init_weights()
         del self.trunk.maxpool
         self.gaussian_overlap = gaussian_overlap
         self.min_radius = min_radius

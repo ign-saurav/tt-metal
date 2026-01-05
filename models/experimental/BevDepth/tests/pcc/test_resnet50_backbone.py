@@ -8,21 +8,8 @@ from loguru import logger
 from models.common.utility_functions import comp_pcc
 from models.experimental.BevDepth.tt.ttnn_resnet50_backbone import ResNet50_BEVDepth
 
-
-def download_bevdepth_weights():
-    """Download BEVDepth pretrained weights"""
-    import urllib.request
-    import os
-
-    url = "https://github.com/Megvii-BaseDetection/BEVDepth/releases/download/v0.0.2/bev_depth_lss_r50_256x704_128x128_24e_2key.pth"
-    weights_path = "/tmp/bevdepth_weights.pth"
-
-    if not os.path.exists(weights_path):
-        logger.info(f"Downloading weights from {url}")
-        urllib.request.urlretrieve(url, weights_path)
-        logger.info(f"Downloaded weights to {weights_path}")
-
-    return weights_path
+# Import common utilities
+from models.experimental.BevDepth.common import download_bevdepth_weights
 
 
 def load_reference_backbone():

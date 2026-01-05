@@ -9,8 +9,11 @@ import pytest
 from loguru import logger
 from models.common.utility_functions import comp_pcc
 from models.experimental.BevDepth.tt.ttnn_secondfpn import prepare_secondfpn_parameters
-from models.experimental.BevDepth.tests.pcc.test_bevdepth_backbone import extract_neck_state_dict, fuse_conv_bn_weights
-from models.experimental.BevDepth.tests.pcc.test_bevdepth_backbone import download_bevdepth_weights
+from models.experimental.BevDepth.tt.custom_preprocessing import (
+    extract_neck_state_dict,
+    fuse_conv_bn_weights_unified as fuse_conv_bn_weights,
+)
+from models.experimental.BevDepth.common import download_bevdepth_weights
 from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_TTNN
 from models.experimental.BevDepth.reference.bevdepth.layers.necks.second_fpn import SECONDFPN
 
@@ -78,6 +81,7 @@ def test_secondfpn_pcc(device, batch_size, height, width):
 
                 fused_weight, fused_bias = fuse_conv_bn_weights(
                     conv_weight_for_fusion,
+                    None,  # conv_bias
                     bn_layer.weight.data,
                     bn_layer.bias.data,
                     bn_layer.running_mean,
@@ -99,6 +103,7 @@ def test_secondfpn_pcc(device, batch_size, height, width):
 
                 fused_weight, fused_bias = fuse_conv_bn_weights(
                     conv_weight,
+                    None,  # conv_bias
                     bn_layer.weight.data,
                     bn_layer.bias.data,
                     bn_layer.running_mean,

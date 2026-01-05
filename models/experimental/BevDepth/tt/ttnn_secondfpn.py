@@ -467,7 +467,9 @@ def prepare_secondfpn_parameters(
     out_channels=[128, 128, 128, 128],
     upsample_strides=[0.25, 0.5, 1, 2],
 ):
-    from models.experimental.BevDepth.tests.pcc.test_resnet50_backbone import fuse_conv_bn_weights
+    from models.experimental.BevDepth.tt.custom_preprocessing import (
+        fuse_conv_bn_weights_unified as fuse_conv_bn_weights,
+    )
 
     class Parameters:
         pass
@@ -518,6 +520,7 @@ def prepare_secondfpn_parameters(
             eps = 1e-3
             fused_weight, fused_bias = fuse_conv_bn_weights(
                 conv_weight_for_fusion,
+                None,  # conv_bias
                 bn_weight.float(),
                 bn_bias.float() if bn_bias is not None else torch.zeros_like(bn_weight),
                 bn_mean.float(),
@@ -550,7 +553,9 @@ def prepare_secondfpn_head_parameters(
     out_channels=[64, 64, 64, 64],
     upsample_strides=[1, 2, 4, 8],
 ):
-    from models.experimental.BevDepth.tests.pcc.test_resnet50_backbone import fuse_conv_bn_weights
+    from models.experimental.BevDepth.tt.custom_preprocessing import (
+        fuse_conv_bn_weights_unified as fuse_conv_bn_weights,
+    )
 
     class Parameters:
         pass
@@ -594,6 +599,7 @@ def prepare_secondfpn_head_parameters(
             eps = 1e-3
             fused_weight, fused_bias = fuse_conv_bn_weights(
                 conv_weight_for_fusion,
+                None,  # conv_bias
                 bn_weight.float(),
                 bn_bias.float() if bn_bias is not None else torch.zeros_like(bn_weight),
                 bn_mean.float(),

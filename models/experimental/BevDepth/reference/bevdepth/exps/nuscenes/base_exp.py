@@ -3,11 +3,15 @@
 # Adapted from https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/exps/nuscenes/base_exp.py
 # Copyright (c) Megvii Inc. All rights reserved.
 
-import torchvision.models as models
+import logging
+
 from pytorch_lightning.core import LightningModule
 
 # from bevdepth.evaluators.det_evaluators import DetNuscEvaluator
 from models.experimental.BevDepth.reference.bevdepth.models.base_bev_depth import BaseBEVDepth
+
+# Suppress mmengine INFO logging messages
+logging.getLogger("mmengine").setLevel(logging.ERROR)
 
 H = 900
 W = 1600
@@ -146,11 +150,11 @@ head_conf = {
 
 
 class BEVDepthLightningModel(LightningModule):
-    MODEL_NAMES = sorted(
-        name
-        for name in models.__dict__
-        if name.islower() and not name.startswith("__") and callable(models.__dict__[name])
-    )
+    # MODEL_NAMES = sorted(
+    #     name
+    #     for name in models.__dict__
+    #     if name.islower() and not name.startswith("__") and callable(models.__dict__[name])
+    # )
 
     def __init__(
         self,

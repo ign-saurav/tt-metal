@@ -69,18 +69,8 @@ def parse_args():
     return parser.parse_args()
 
 
-def download_bevdepth_weights():
-    import urllib.request
-
-    url = "https://github.com/Megvii-BaseDetection/BEVDepth/releases/download/v0.0.2/bev_depth_lss_r50_256x704_128x128_24e_2key.pth"
-    weights_path = "/tmp/bevdepth_weights.pth"
-
-    if not os.path.exists(weights_path):
-        logger.info(f"Downloading weights from {url}")
-        urllib.request.urlretrieve(url, weights_path)
-        logger.info(f"Downloaded weights to {weights_path}")
-
-    return weights_path
+# Import common utilities
+from models.experimental.BevDepth.common import download_bevdepth_weights, load_reference_model
 
 
 def load_infos():
@@ -278,22 +268,7 @@ def get_cam_corners(corners, translation, rotation, cam_intrinsics):
     return cam_corners
 
 
-def load_reference_model():
-    from models.experimental.BevDepth.reference.bevdepth.exps.nuscenes.mv.bev_depth_lss_r50_256x704_128x128_24e_2key import (
-        BEVDepthLightningModel,
-    )
-
-    logger.info("Loading reference BEVDepth model...")
-    lightning_model = BEVDepthLightningModel()
-    checkpoint_path = download_bevdepth_weights()
-
-    if not os.path.exists(checkpoint_path):
-        logger.warning(f"Checkpoint not found at {checkpoint_path}")
-        return None
-
-    lightning_model.load_checkpoint(checkpoint_path, verbose=False)
-    lightning_model.model.eval()
-    return lightning_model
+# load_reference_model is now imported from test_utils
 
 
 def decode_predictions(preds, class_names, score_threshold=0.3):
@@ -373,16 +348,16 @@ def run_torch_inference(model, imgs, mats_dict):
 
 def prepare_ttnn_parameters(device):
     from ttnn.model_preprocessing import preprocess_model_parameters
-    from models.experimental.BevDepth.tt.custom_preprocessing import create_custom_mesh_preprocessor
-    from models.experimental.BevDepth.tests.pcc.test_bevdepth_backbone import (
+    from models.experimental.BevDepth.tt.custom_preprocessing import (
+        create_custom_mesh_preprocessor,
         extract_backbone_state_dict,
         extract_neck_state_dict,
         extract_depthnet_state_dict,
         fuse_batchnorm_into_conv,
         prepare_ttnn_parameters as prep_backbone_params,
+        prepare_depthnet_parameters as prep_depthnet,
     )
     from models.experimental.BevDepth.tt.ttnn_secondfpn import prepare_secondfpn_parameters
-    from models.experimental.BevDepth.tt.custom_preprocessing import prepare_depthnet_parameters as prep_depthnet
 
     logger.info("Preparing TTNN parameters...")
 
