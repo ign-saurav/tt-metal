@@ -76,9 +76,8 @@ def test_swin2sr_mlp_ttnn_vs_torch_with_checkpoint(device, layer_idx, block_idx,
         os.path.dirname(__file__),
         "..",
         "..",
-        "swin2sr",
-        "model_zoo",
-        "swin2sr",
+        "resources",
+        "checkpoints",
         "Swin2SR_ClassicalSR_X2_64.pth",
     )
 

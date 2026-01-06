@@ -252,9 +252,8 @@ def test_swin2sr_checkpoint(device, reset_seeds):
         os.path.dirname(__file__),
         "..",
         "..",
-        "swin2sr",
-        "model_zoo",
-        "swin2sr",
+        "resources",
+        "checkpoints",
         "Swin2SR_ClassicalSR_X2_64.pth",
     )
 

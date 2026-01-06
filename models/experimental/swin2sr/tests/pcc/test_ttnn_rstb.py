@@ -144,9 +144,8 @@ def test_rstb_ttnn_vs_torch_with_checkpoint(device, layer_idx, reset_seeds):
         os.path.dirname(__file__),
         "..",
         "..",
-        "swin2sr",
-        "model_zoo",
-        "swin2sr",
+        "resources",
+        "checkpoints",
         "Swin2SR_ClassicalSR_X2_64.pth",
     )
 

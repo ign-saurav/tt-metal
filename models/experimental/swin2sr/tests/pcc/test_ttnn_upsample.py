@@ -127,9 +127,8 @@ def test_upsample_checkpoint(device, scale, num_feat, input_height, input_width,
         os.path.dirname(__file__),
         "..",
         "..",
-        "swin2sr",
-        "model_zoo",
-        "swin2sr",
+        "resources",
+        "checkpoints",
         "Swin2SR_ClassicalSR_X2_64.pth",
     )
 

@@ -274,9 +274,8 @@ def test_swin2sr_window_attention_ttnn_vs_torch_with_checkpoint(device, layer_id
         os.path.dirname(__file__),
         "..",
         "..",
-        "swin2sr",
-        "model_zoo",
-        "swin2sr",
+        "resources",
+        "checkpoints",
         "Swin2SR_ClassicalSR_X2_64.pth",
     )
 

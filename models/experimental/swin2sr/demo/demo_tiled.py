@@ -291,8 +291,8 @@ def main():
 
     if args.checkpoint is None:
         checkpoint_map = {
-            2: "models/experimental/swin2sr/swin2sr/model_zoo/swin2sr/Swin2SR_ClassicalSR_X2_64.pth",
-            4: "models/experimental/swin2sr/swin2sr/model_zoo/swin2sr/Swin2SR_ClassicalSR_X4_64.pth",
+            2: "models/experimental/swin2sr/resources/checkpoints/Swin2SR_ClassicalSR_X2_64.pth",
+            4: "models/experimental/swin2sr/resources/checkpoints/Swin2SR_ClassicalSR_X4_64.pth",
         }
         if args.scale in checkpoint_map:
             args.checkpoint = checkpoint_map[args.scale]
