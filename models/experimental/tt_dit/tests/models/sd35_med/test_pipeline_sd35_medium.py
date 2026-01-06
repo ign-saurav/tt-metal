@@ -63,9 +63,8 @@ def test_sd35_medium_pipeline_functional(
     )
 
     # Test with a simple prompt
-    # prompt = "A capybara wearing a suit holding a sign that reads hello world"
-    prompt = "a snowman wearing red scarf and sunglasses"
-    seed = 123
+    prompt = "A capybara wearing a suit holding a sign that reads hello world"
+    seed = 23
     num_steps = 40
 
     images = tt_pipe.run_single_prompt(
