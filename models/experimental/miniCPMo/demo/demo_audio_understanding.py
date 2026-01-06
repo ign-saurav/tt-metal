@@ -53,7 +53,7 @@ def main():
 
         # This replaces model.apm with TT-accelerated DropInAudioEncoder
         logger.info("Enabling TT acceleration for audio encoder...")
-        model = enable_tt_acceleration(model, device, components=["audio"])
+        model = enable_tt_acceleration(model, device, components=["audio", "llm"])
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 

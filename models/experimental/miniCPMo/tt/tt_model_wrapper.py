@@ -69,17 +69,15 @@ def enable_tt_acceleration(
     if "llm" in components or "qwen" in components:
         logger.info("Replacing LLM (Qwen) with TT implementation...")
 
-        # Initialize our new DropInQwenModel
-        tt_qwen_model = DropInQwenModel(device=device, config=model.config)
+        # FIX: Pass 'model' as 'reference_model'
+        tt_qwen_model = DropInQwenModel(
+            device=device, config=model.config, reference_model=model  # <--- CRITICAL UPDATE
+        )
 
-        # Monkey-patch the model.chat method
-        # This redirects the high-level chat call to our TT implementation
         def tt_chat_wrapper(self, msgs, tokenizer, **kwargs):
             return tt_qwen_model.chat(msgs, tokenizer, **kwargs)
 
         model.chat = types.MethodType(tt_chat_wrapper, model)
-
-        # Keep a reference to the TT object on the model just in case
         model.tt_llm = tt_qwen_model
 
     logger.info(f"✅ TT acceleration enabled for components: {components}")

@@ -26,6 +26,8 @@ import os
 import torch
 import torch.nn as nn
 import ttnn
+import copy
+import torch.nn.functional as F
 from typing import Optional, List, Tuple, Union, Any, Dict
 from loguru import logger
 
@@ -33,7 +35,7 @@ from loguru import logger
 from models.experimental.miniCPMo.tt.ttnn_chattts_decoder import TtnnChatTTSDecoder
 from models.experimental.miniCPMo.tt.ttnn_whisper_encoder import TtnnWhisperEncoder
 from models.experimental.miniCPMo.tt.minicpm_weight_bridge import MiniCPMWeightBridge
-from models.experimental.miniCPMo.tt_transformers.common import create_tt_model, preprocess_inputs_prefill
+from models.experimental.miniCPMo.tt_transformers.common import create_tt_model
 from models.experimental.miniCPMo.tt_transformers.model_config import ModelArgs
 from models.experimental.miniCPMo.tt_transformers.generator import Generator, create_submeshes
 from models.experimental.miniCPMo.tt_transformers.common import PagedAttentionConfig
@@ -481,8 +483,13 @@ class DropInVisionEncoder(nn.Module):
 
 class DropInQwenModel:
     """
-    A Drop-in replacement for the MiniCPM-o LLM (Qwen) that uses TT-Metal for generation.
-    It takes over the 'chat' functionality of the model.
+    A Drop-in replacement for the MiniCPM-o LLM (Qwen) that handles Text + Vision.
+
+    Implementation Details:
+    - Inputs: Reference Model Processor
+    - Embeddings: Reference Model VLLM Embedding
+    - Execution: TTNN Prefill/Decode with Padding
+    - Sampling: CPU-based Top-K/Top-P (Fixed implementation)
     """
 
     def __init__(
@@ -490,63 +497,53 @@ class DropInQwenModel:
         device: ttnn.Device,
         config: Any,
         weight_bridge: Optional[MiniCPMWeightBridge] = None,
+        reference_model=None,
     ):
         self.device = device
-        # Use the HF config to set up our parameters
         self.config = config
+        self.reference_model = reference_model
 
-        # Initialize Weight Bridge
         self.weight_bridge = weight_bridge if weight_bridge else MiniCPMWeightBridge()
 
-        # Initialize internal state
         self.model_args = None
         self.model = None
         self.page_table = None
         self.tt_kv_cache = None
-        self.tokenizer = None  # Will use the one passed in chat usually, but we load one for internal checks
 
-        # Initialize the Qwen LLM on TT
         self._init_qwen_llm()
 
     def _init_qwen_llm(self):
         logger.info("Initializing TT Qwen Model...")
 
-        # 1. Load Weights
-        qwen_weights = self.weight_bridge.get_qwen_weights()
-
         if "HF_MODEL" not in os.environ:
             os.environ["HF_MODEL"] = "openbmb/MiniCPM-o-2_6"
-        # 2. Setup Model Args
-        # We infer defaults from the HF config or use standard MiniCPM-2.6 defaults
+
+        qwen_weights = self.weight_bridge.get_qwen_weights()
+
         self.model_args = ModelArgs(
             mesh_device=self.device,
             instruct=False,
             max_batch_size=1,
-            max_seq_len=1024,  # Can be configurable
+            max_seq_len=4096,
             dummy_weights=False,
         )
-        self.model_args.max_prefill_chunk_size = 2048  # Default chunk
+        self.model_args.max_prefill_chunk_size = 4096
 
-        # 3. Setup Paged Attention
         self.paged_attention_config = PagedAttentionConfig(
             block_size=32,
             max_num_blocks=1024,
         )
 
-        # 4. Create Page Table (Single user, Batch=1)
         data_parallel = 1
         global_batch_size = 1
 
-        # Implied shuffling of blocks (Simplified for 1 user)
         permutation = torch.randperm(self.paged_attention_config.max_num_blocks)
         reverse_permutation = torch.argsort(permutation).repeat(data_parallel)
         self.page_table = reverse_permutation.reshape(
             global_batch_size, self.paged_attention_config.max_num_blocks // (global_batch_size // data_parallel)
         )
 
-        # 5. Create TT Model
         submesh_devices = create_submeshes(self.device, data_parallel)
-
         model_args_i, model_i, tt_kv_cache_i, _ = create_tt_model(
             submesh_devices[0],
             instruct=False,
@@ -559,101 +556,184 @@ class DropInQwenModel:
             dummy_weights=False,
         )
 
-        # Wrap in lists for Generator compatibility
         self.model = [model_i]
         self.tt_kv_cache = [tt_kv_cache_i]
         self.model_args = [model_args_i]
 
-        # 6. Initialize Generator
-        # We load a local tokenizer just for the generator's internal needs/decoding
-        from transformers import AutoTokenizer
+        if self.reference_model and hasattr(self.reference_model, "processor"):
+            self.tokenizer = self.reference_model.processor.tokenizer
+        else:
+            from transformers import AutoTokenizer
 
-        self.internal_tokenizer = AutoTokenizer.from_pretrained("openbmb/MiniCPM-o-2_6", trust_remote_code=True)
+            self.tokenizer = AutoTokenizer.from_pretrained("openbmb/MiniCPM-o-2_6", trust_remote_code=True)
 
-        self.generator = Generator(self.model, self.model_args, self.device, tokenizer=self.internal_tokenizer)
+        self.generator = Generator(self.model, self.model_args, self.device, tokenizer=self.tokenizer)
         logger.info("✅ TT Qwen Model Initialized")
 
     def chat(
         self, msgs: List[Dict[str, Any]], tokenizer: Any, sampling: bool = True, max_new_tokens: int = 128, **kwargs
     ):
-        """
-        Replaces the standard Model.chat() method.
-        """
         logger.info("TT Qwen Chat Triggered")
 
-        # 1. Parse Input
-        # msgs example: [{'role': 'user', 'content': [PIL_Image, "describe this"]}]
-        # For this step, we focus on extracting text.
-        # TODO: If you want to use the TT Vision encoder, you would extract the image here,
-        # run it through self.model.vpm (if accessible) and pass embeddings.
+        msgs_processed = copy.deepcopy(msgs)
+        images = []
 
-        content = msgs[0]["content"]
-        prompt_text = ""
+        for msg in msgs_processed:
+            content = msg["content"]
+            if isinstance(content, list):
+                new_content_parts = []
+                for item in content:
+                    if isinstance(item, str):
+                        new_content_parts.append(item)
+                    elif hasattr(item, "mode"):
+                        images.append(item)
+                        new_content_parts.append("(<image>./</image>)")
+                msg["content"] = "\n".join(new_content_parts)
 
-        if isinstance(content, str):
-            prompt_text = content
-        elif isinstance(content, list):
-            for item in content:
-                if isinstance(item, str):
-                    prompt_text += item
-                # Handle Image items here if integrating vision
+        prompt = tokenizer.apply_chat_template(msgs_processed, tokenize=False, add_generation_prompt=True)
 
-        logger.info(f"Processing Text Prompt: '{prompt_text}'")
+        try:
+            model_inputs = self.reference_model.processor(
+                [prompt],
+                [images] if images else None,
+                max_slice_nums=None,
+                use_image_id=False,
+                chunk_input=True,
+                return_tensors="pt",
+                max_length=4096,
+            ).to("cuda" if torch.cuda.is_available() else "cpu")
 
-        # 2. Prepare Generation
-        # Use the tokenizer passed from the demo
-        input_prompts = [prompt_text]
+            logger.info("Generating Multimodal Embeddings via Reference Model...")
+            inputs_embeds, _ = self.reference_model.get_vllm_embedding(model_inputs)
+            logger.info(f"Embeddings Generated. Shape: {inputs_embeds.shape}")
 
-        (
-            input_tokens_prefill_pt,
-            encoded_prompts,
-            decoding_pos,
-            prefill_lens,
-        ) = preprocess_inputs_prefill(
-            input_prompts, tokenizer, self.model_args, False, max_new_tokens, max_prefill_len=1024
+        except Exception as e:
+            logger.error(f"Failed to generate embeddings: {e}")
+            raise e
+
+        # Use MiniCPM-o Default Sampling Parameters
+        return self._generate_with_embeds(
+            inputs_embeds, max_new_tokens, self.tokenizer, temperature=0.7, top_k=50, top_p=0.8
         )
 
-        input_tokens_prefill_pt = torch.stack(input_tokens_prefill_pt).view(1, -1)
+    def _generate_with_embeds(self, inputs_embeds, max_new_tokens, tokenizer, temperature=0.7, top_k=50, top_p=0.8):
+        inputs_embeds = inputs_embeds.to(torch.bfloat16)
+        batch_size, seq_len, hidden_dim = inputs_embeds.shape
 
-        # 3. Prefill
-        logger.info("Running Prefill...")
-        logits = self.generator.prefill_forward_text(
-            input_tokens_prefill_pt,
-            page_table=self.page_table,
-            kv_cache=self.tt_kv_cache,
-            prompt_lens=decoding_pos,
-            enable_trace=False,
+        # --- Pad Sequence Length ---
+        original_seq_len = seq_len
+        padding_needed = 0
+        if seq_len % 128 != 0:
+            padding_needed = 128 - (seq_len % 128)
+            inputs_embeds = F.pad(inputs_embeds, (0, 0, 0, padding_needed))
+
+        padded_seq_len = inputs_embeds.shape[1]
+        logger.info(f"Running Prefill on TT. Original Len: {original_seq_len}, Padded: {padded_seq_len}")
+
+        tt_embeds = ttnn.from_torch(
+            inputs_embeds.view(1, 1, padded_seq_len, hidden_dim),
+            dtype=ttnn.bfloat16,
+            device=self.device,
+            layout=ttnn.TILE_LAYOUT,
         )
 
-        # Greedy decode first token
-        prefilled_token = torch.argmax(logits, dim=-1)
+        transformer_model = self.model[0]
 
-        # 4. Decode Loop
-        out_tok = prefilled_token
-        current_pos = torch.tensor([decoding_pos[0]])
-        generated_ids = []
+        tt_rot_mats_prefill_global = [
+            transformer_model.rope_setup.cos_matrix[:, :, :padded_seq_len, :],
+            transformer_model.rope_setup.sin_matrix[:, :, :padded_seq_len, :],
+        ]
 
-        logger.info(f"Running Decode for {max_new_tokens} tokens...")
-        for i in range(max_new_tokens):
-            logits = self.generator.decode_forward_text(
-                out_tok,
-                current_pos,
-                enable_trace=False,  # Enable trace for speed
-                page_table=self.page_table,
-                kv_cache=self.tt_kv_cache,
+        tt_page_table = None
+        if self.page_table is not None:
+            tt_page_table = ttnn.from_torch(
+                self.page_table,
+                device=self.device,
+                dtype=ttnn.int32,
+                layout=ttnn.ROW_MAJOR_LAYOUT,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(self.device),
             )
 
-            # Simple Greedy (Argmax)
-            out_tok = torch.argmax(logits, dim=-1).unsqueeze(-1)
+        # Run Prefill
+        logits = transformer_model.ttnn_prefill_forward(
+            x=tt_embeds,
+            rot_mats_global=tt_rot_mats_prefill_global,
+            page_table=tt_page_table,
+            kv_cache=self.tt_kv_cache[0],
+            user_id=0,
+            get_last_token=(original_seq_len - 1) // 32 * 32,
+        )
+
+        # Extract Initial Token Logits
+        offset_in_chunk = (original_seq_len - 1) - ((original_seq_len - 1) // 32 * 32)
+        logits_torch = ttnn.to_torch(logits)
+        last_token_logits = logits_torch[0, 0, offset_in_chunk, :]
+
+        # Sample First Token
+        prefilled_token = self._manual_hf_sampling(last_token_logits.unsqueeze(0), temperature, top_k, top_p)
+        logger.info(f"Prefilled Token ID: {prefilled_token.item()}")
+
+        logger.info("Running Decode on TT (CPU Sampling)...")
+
+        out_tok = prefilled_token
+        current_pos = torch.tensor([original_seq_len])
+        generated_ids = []
+
+        for i in range(max_new_tokens):
+            logits = self.generator.decode_forward_text(
+                out_tok, current_pos, enable_trace=False, page_table=self.page_table, kv_cache=self.tt_kv_cache
+            )
+
+            # Extract next token logits
+            next_token_logits = logits[0, 0, :].unsqueeze(0)
+
+            # Sample next token
+            out_tok = self._manual_hf_sampling(next_token_logits, temperature, top_k, top_p)
             token_id = out_tok.item()
 
-            # Stop conditions
             if token_id in tokenizer.all_special_ids or token_id == tokenizer.eos_token_id:
                 break
 
             generated_ids.append(token_id)
             current_pos += 1
 
-        # 5. Decode to Text
         res_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
         return res_text
+
+    def _manual_hf_sampling(self, logits, temperature=0.7, top_k=50, top_p=0.8):
+        """
+        Robust Polyfill for HF Sampling.
+        Supports: Temperature, Top-K, and Top-P (Nucleus).
+        Repetition penalty is removed to prevent grammar breakage.
+        """
+        # 1. Temperature
+        if temperature > 0:
+            logits = logits / temperature
+
+        # 2. Top-K Filtering
+        if top_k > 0:
+            top_k = min(top_k, logits.size(-1))
+            v, _ = torch.topk(logits, top_k)
+            # v[:, -1] is the k-th largest value. Mask anything smaller.
+            logits[logits < v[:, [-1]]] = float("-inf")
+
+        # 3. Top-P (Nucleus) Filtering
+        if top_p < 1.0:
+            sorted_logits, sorted_indices = torch.sort(logits, descending=True)
+            cumulative_probs = torch.cumsum(torch.softmax(sorted_logits, dim=-1), dim=-1)
+
+            # Remove tokens with cumulative probability above the threshold
+            sorted_indices_to_remove = cumulative_probs > top_p
+            # Shift to keep first token
+            sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+            sorted_indices_to_remove[..., 0] = 0
+
+            # Restore order and mask
+            # FIX: Use correct dim=1 for vocabulary dimension
+            indices_to_remove = sorted_indices_to_remove.scatter(1, sorted_indices, sorted_indices_to_remove)
+            logits[indices_to_remove] = float("-inf")
+
+        # 4. Sample
+        probs = torch.softmax(logits, dim=-1)
+        next_token = torch.multinomial(probs, num_samples=1)
+        return next_token.unsqueeze(0)
