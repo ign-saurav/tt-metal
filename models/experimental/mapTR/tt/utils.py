@@ -12,18 +12,7 @@ def multi_scale_deformable_attn(
     attention_weights: torch.Tensor,
     device,
 ) -> torch.Tensor:
-    """TT implementation of multi-scale deformable attention.
-
-    Args:
-        value: (bs, num_value, num_heads, embed_dims//num_heads)
-        spatial_shapes: (num_levels, 2) - (h, w) for each level
-        sampling_locations: (bs, num_query, num_heads, num_levels, num_points, 2)
-        attention_weights: (bs, num_query, num_heads, num_levels, num_points)
-        device: TT device
-
-    Returns:
-        output: (bs, num_query, embed_dims)
-    """
+    """TT implementation of multi-scale deformable attention."""
     bs, _, num_heads, embed_dims = value.shape
     _, num_query, _, num_levels, num_points, _ = sampling_locations.shape
 
@@ -43,6 +32,8 @@ def multi_scale_deformable_attn(
         sampling_grid_l = (
             sampling_grids[:, :, :, level_idx].permute(0, 2, 1, 3, 4).reshape(bs * num_heads, num_query, num_points, 2)
         )
+        # FIX: Convert grid to match input dtype
+        sampling_grid_l = sampling_grid_l.to(value_l.dtype)
         sampling_value_l = torch.nn.functional.grid_sample(
             value_l, sampling_grid_l, mode="bilinear", padding_mode="zeros", align_corners=False
         )

@@ -7,7 +7,7 @@ import ttnn
 from loguru import logger
 
 from models.experimental.mapTR.reference.pytorch_temporal_self_attention import TemporalSelfAttention
-from models.experimental.mapTR.tt.temporal_sel_attention import TtTemporalSelfAttention
+from models.experimental.mapTR.tt.temporal_self_attention import TtTemporalSelfAttention
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (
     preprocess_model_parameters,
@@ -64,7 +64,7 @@ def create_temporal_self_attention_preprocessor(device, weight_dtype=ttnn.bfloat
 def test_temporal_self_attention_fp16(
     device, embed_dims, num_heads, num_levels, num_points, batch_size, num_query, input_dtype, weight_dtype
 ):
-    """Test TemporalSelfAttention TT implementation against PyTorch reference with FP16."""
+    """Test TemporalSelfAttention TT implementation against PyTorch reference."""
     torch.manual_seed(42)
 
     # Create reference PyTorch model and convert to FP16
@@ -121,7 +121,7 @@ def test_temporal_self_attention_fp16(
     # Convert TT output back to torch
     tt_torch_output = ttnn.to_torch(tt_output)
 
-    # Check accuracy with PCC (slightly lower threshold for FP16)
+    # Check accuracy with PCC
     does_pass, pcc_message = assert_with_pcc(ref_output, tt_torch_output, 0.98)
 
     logger.info(f"PCC: {pcc_message}")
