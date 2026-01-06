@@ -7,21 +7,21 @@ import torch
 import torch.nn.functional as F
 
 # from mmcv.cnn import build_conv_layer
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.conv import build_conv_layer
+from models.experimental.BevDepth.reference.conv import build_conv_layer
 
 # from mmdet3d.models import build_neck
 # from mmdet.models import build_backbone
 # from mmdet.models.backbones.resnet import BasicBlock
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.resnet import BasicBlock
+from models.experimental.BevDepth.reference.resnet import BasicBlock
 from torch import nn
 
 # from torch.cuda.amp.autocast_mode import autocast
 
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.builder import build_backbone, build_neck
+from models.experimental.BevDepth.reference.builder import build_backbone, build_neck
 
 try:
-    from models.experimental.BevDepth.reference.bevdepth.ops.voxel_pooling_inference import voxel_pooling_inference
-    from models.experimental.BevDepth.reference.bevdepth.ops.voxel_pooling_train import voxel_pooling_train
+    from models.experimental.BevDepth.reference.voxel_pooling_inference import voxel_pooling_inference
+    from models.experimental.BevDepth.reference.voxel_pooling_train import voxel_pooling_train
 
     _VOXEL_POOLING_AVAILABLE = True
 except ImportError:
@@ -207,10 +207,10 @@ def _voxel_pooling_train_fallback(
 __all__ = ["BaseLSSFPN"]
 
 # At the top, after imports
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.builder import BACKBONES, MODELS, NECKS
+from models.experimental.BevDepth.reference.builder import BACKBONES, MODELS, NECKS
 
 # Import necks to ensure they are registered
-from models.experimental.BevDepth.reference.bevdepth.layers.necks.second_fpn import SECONDFPN  # noqa: F401
+from models.experimental.BevDepth.reference.second_fpn import SECONDFPN  # noqa: F401
 
 
 # Register the class

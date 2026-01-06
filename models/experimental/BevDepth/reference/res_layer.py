@@ -4,8 +4,8 @@
 from typing import Optional
 
 # from mmcv.cnn import build_conv_layer, build_norm_layer
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.conv import build_conv_layer
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.norm import build_norm_layer
+from models.experimental.BevDepth.reference.conv import build_conv_layer
+from models.experimental.BevDepth.reference.norm import build_norm_layer
 from mmengine.model import BaseModule, Sequential
 from torch import Tensor
 from torch import nn as nn

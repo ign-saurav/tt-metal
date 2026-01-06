@@ -8,7 +8,7 @@ import logging
 from pytorch_lightning.core import LightningModule
 
 # from bevdepth.evaluators.det_evaluators import DetNuscEvaluator
-from models.experimental.BevDepth.reference.bevdepth.models.base_bev_depth import BaseBEVDepth
+from models.experimental.BevDepth.reference.base_bev_depth import BaseBEVDepth
 
 # Suppress mmengine INFO logging messages
 logging.getLogger("mmengine").setLevel(logging.ERROR)

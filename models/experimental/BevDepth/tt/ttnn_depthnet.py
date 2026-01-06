@@ -11,7 +11,7 @@ from models.experimental.BevDepth.tt.utils import (
     create_conv2d_config,
     post_process_conv_output,
 )
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.deform_conv import (
+from models.experimental.BevDepth.reference.deform_conv import (
     DeformConv2dPack,
 )
 

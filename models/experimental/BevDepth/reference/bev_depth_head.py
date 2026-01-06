@@ -3,8 +3,8 @@
 
 # Adapted from https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/layers/heads/bev_depth_head.py
 
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.centerpoint_head import CenterHead
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.builder import build_backbone, build_neck
+from models.experimental.BevDepth.reference.centerpoint_head import CenterHead
+from models.experimental.BevDepth.reference.builder import build_backbone, build_neck
 
 __all__ = ["BEVDepthHead"]
 

@@ -4,8 +4,8 @@
 
 from torch import nn
 
-from models.experimental.BevDepth.reference.bevdepth.layers.backbones.base_lss_fpn import BaseLSSFPN
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.bev_depth_head import BEVDepthHead
+from models.experimental.BevDepth.reference.base_lss_fpn import BaseLSSFPN
+from models.experimental.BevDepth.reference.bev_depth_head import BEVDepthHead
 
 
 __all__ = ["BaseBEVDepth"]

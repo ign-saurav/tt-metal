@@ -8,7 +8,7 @@ import ttnn
 
 from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_module_args
 from tests.ttnn.utils_for_testing import check_with_pcc
-from models.experimental.BevDepth.reference.bevdepth.exps.nuscenes.mv.bev_depth_lss_r50_256x704_128x128_24e_2key import (
+from models.experimental.BevDepth.reference.bev_depth_lss_r50_256x704_128x128_24e_2key import (
     BEVDepthLightningModel,
 )
 from models.experimental.BevDepth.tt.ttnn_bevdepth_head import TtBEVDepthHead, head_optimisations

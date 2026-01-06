@@ -27,7 +27,7 @@ def download_bevdepth_weights():
 
 def load_reference_model():
     """Load the reference BEVDepth model."""
-    from models.experimental.BevDepth.reference.bevdepth.exps.nuscenes.mv.bev_depth_lss_r50_256x704_128x128_24e_2key import (
+    from models.experimental.BevDepth.reference.bev_depth_lss_r50_256x704_128x128_24e_2key import (
         BEVDepthLightningModel,
     )
 

@@ -150,14 +150,14 @@ class TtBaseLSSFPN:
     def _init_voxel_pooling(self):
         """Initialize voxel pooling functions."""
         try:
-            from models.experimental.BevDepth.reference.bevdepth.ops.voxel_pooling_inference import (
+            from models.experimental.BevDepth.reference.voxel_pooling_inference import (
                 voxel_pooling_inference,
             )
 
             self.voxel_pooling_inference = voxel_pooling_inference
             self._voxel_pooling_available = True
         except ImportError:
-            from models.experimental.BevDepth.reference.bevdepth.layers.backbones.base_lss_fpn import (
+            from models.experimental.BevDepth.reference.base_lss_fpn import (
                 _voxel_pooling_inference_fallback,
             )
 

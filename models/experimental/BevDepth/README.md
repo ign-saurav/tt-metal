@@ -104,7 +104,7 @@ BEVDepth pretrained weights are automatically downloaded when running the model.
 
 - **Model:** `bev_depth_lss_r50_256x704_128x128_24e_2key`
 - **Download URL:** <https://github.com/Megvii-BaseDetection/BEVDepth/releases/download/v0.0.2/bev_depth_lss_r50_256x704_128x128_24e_2key.pth>
-- **Checkpoint Location:** `/tmp/bevdepth_weights.pth` (auto-downloaded) or `reference/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth`
+- **Checkpoint Location:** `/tmp/bevdepth_weights.pth` (auto-downloaded) or `resources/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth`
 
 The weights are trained on the nuScenes dataset.
 

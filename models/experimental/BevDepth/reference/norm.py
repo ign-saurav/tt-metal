@@ -15,7 +15,7 @@ from torch.nn.modules.instancenorm import _InstanceNorm
 # from torch.nn.modules.sync_batchnorm import SyncBatchNorm
 
 import abc
-from .registry import NORM_LAYERS
+from models.experimental.BevDepth.reference.registry import NORM_LAYERS
 
 NORM_LAYERS.register_module("BN", module=nn.BatchNorm2d)
 NORM_LAYERS.register_module("BN1d", module=nn.BatchNorm1d)

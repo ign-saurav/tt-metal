@@ -595,14 +595,10 @@ class TtBEVDepthHead:
         # Neck
         if checkpoint_path is None:
             file_dir = os.path.dirname(__file__)
-            for _ in range(4):
-                file_dir = os.path.dirname(file_dir)
+            file_dir = os.path.dirname(file_dir)
             default_path = os.path.join(
                 file_dir,
-                "models",
-                "experimental",
-                "BevDepth",
-                "reference",
+                "resources",
                 "checkpoints",
                 "bev_depth_lss_r50_256x704_128x128_24e_2key.pth",
             )

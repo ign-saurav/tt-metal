@@ -20,7 +20,7 @@ from models.experimental.BevDepth.common import download_bevdepth_weights
 @pytest.mark.parametrize("height, width", [(64, 160)])
 @pytest.mark.parametrize("depth_channels", [112])
 def test_depthnet_pcc(device, batch_size, height, width, depth_channels):
-    from models.experimental.BevDepth.reference.bevdepth.layers.backbones.base_lss_fpn import DepthNet
+    from models.experimental.BevDepth.reference.base_lss_fpn import DepthNet
 
     torch.manual_seed(42)
 

@@ -7,7 +7,7 @@ import torch
 
 from mmengine.structures import InstanceData
 
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.point_data import PointData
+from models.experimental.BevDepth.reference.point_data import PointData
 from typing import List, Optional
 
 from mmengine.structures import BaseDataElement, InstanceData, PixelData

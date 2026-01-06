@@ -3,7 +3,7 @@
 # Copyright (c) OpenMMLab. All rights reserved.
 from torch import nn
 
-from .registry import CONV_LAYERS
+from models.experimental.BevDepth.reference.registry import CONV_LAYERS
 
 CONV_LAYERS.register_module("Conv1d", module=nn.Conv1d)
 CONV_LAYERS.register_module("Conv2d", module=nn.Conv2d)
@@ -23,7 +23,7 @@ mmcv_build_conv_layer = None
 # Try torchvision first (no compiled extensions needed, works like uniad/vadv2)
 try:
     # Import our standalone DCN implementation that uses torchvision
-    from .deform_conv import DeformConv2dPack
+    from models.experimental.BevDepth.reference.deform_conv import DeformConv2dPack
 
     _TORCHVISION_DCN_AVAILABLE = True
 except (ImportError, ModuleNotFoundError):

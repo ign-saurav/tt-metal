@@ -14,7 +14,7 @@ from models.experimental.BevDepth.tt.custom_preprocessing import (
 )
 from models.experimental.BevDepth.common import download_bevdepth_weights
 from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_TTNN
-from models.experimental.BevDepth.reference.bevdepth.layers.necks.second_fpn import SECONDFPN
+from models.experimental.BevDepth.reference.second_fpn import SECONDFPN
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 98304}], indirect=True)

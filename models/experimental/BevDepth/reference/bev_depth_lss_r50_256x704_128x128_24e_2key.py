@@ -8,14 +8,14 @@ import os
 
 import torch
 
-from models.experimental.BevDepth.reference.bevdepth.exps.nuscenes.base_exp import (
+from models.experimental.BevDepth.reference.base_exp import (
     BEVDepthLightningModel as BaseBEVDepthLightningModel,
 )
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.conv import (
+from models.experimental.BevDepth.reference.conv import (
     _MMCV_DCN_AVAILABLE,
     _TORCHVISION_DCN_AVAILABLE,
 )
-from models.experimental.BevDepth.reference.bevdepth.models.base_bev_depth import BaseBEVDepth
+from models.experimental.BevDepth.reference.base_bev_depth import BaseBEVDepth
 
 
 class BEVDepthLightningModel(BaseBEVDepthLightningModel):
@@ -35,14 +35,11 @@ class BEVDepthLightningModel(BaseBEVDepthLightningModel):
 
         # If checkpoint_path not provided, construct default path
         if checkpoint_path is None:
-            # Checkpoint is at: .../BevDepth/reference/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth
-            # File is at: .../BevDepth/reference/bevdepth/exps/nuscenes/mv/
-            # Need to go up 4 levels to reach 'reference' directory
             file_dir = os.path.dirname(__file__)
-            # Go up: mv -> nuscenes -> exps -> bevdepth -> reference
-            for _ in range(4):
-                file_dir = os.path.dirname(file_dir)
-            checkpoint_path = os.path.join(file_dir, "checkpoints", "bev_depth_lss_r50_256x704_128x128_24e_2key.pth")
+            file_dir = os.path.dirname(file_dir)
+            checkpoint_path = os.path.join(
+                file_dir, "resources", "checkpoints", "bev_depth_lss_r50_256x704_128x128_24e_2key.pth"
+            )
 
         if not os.path.exists(checkpoint_path):
             # Fallback to downloaded weights location if default path doesn't exist

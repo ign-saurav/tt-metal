@@ -13,9 +13,9 @@ from mmengine.model import BaseModule
 from mmengine.structures import InstanceData
 from torch import Tensor, nn
 
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.gaussian import draw_heatmap_gaussian, gaussian_radius
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.builder import MODELS
-from models.experimental.BevDepth.reference.bevdepth.layers.heads.det3d_data_sample import Det3DDataSample
+from models.experimental.BevDepth.reference.gaussian import draw_heatmap_gaussian, gaussian_radius
+from models.experimental.BevDepth.reference.builder import MODELS
+from models.experimental.BevDepth.reference.det3d_data_sample import Det3DDataSample
 from functools import partial
 
 import torch
