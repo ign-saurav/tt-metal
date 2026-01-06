@@ -55,8 +55,6 @@ def create_conv2d_config(
     packer_l1_acc=False,
     config_tensors_in_dram=True,
 ) -> Conv2dConfiguration:
-    """Create a Conv2dConfiguration for use with TtConv2d builder API."""
-    # Extract from model_config if provided
     if model_config is not None:
         math_fidelity = math_fidelity or model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4)
         weights_dtype = weights_dtype or model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16)
@@ -68,7 +66,6 @@ def create_conv2d_config(
         activation_dtype = activation_dtype or ttnn.bfloat16
         output_dtype = output_dtype or ttnn.bfloat16
 
-    # Extract from conv_config if provided
     if conv_config is not None:
         activation = activation if activation is not None else conv_config.get("activation")
         shard_layout = shard_layout if shard_layout is not None else conv_config.get("shard_layout")
@@ -78,7 +75,6 @@ def create_conv2d_config(
         enable_weights_double_buffer = conv_config.get("enable_weights_double_buffer", enable_weights_double_buffer)
         packer_l1_acc = conv_config.get("packer_l1_acc", packer_l1_acc)
 
-    # Normalize to tuples
     if isinstance(kernel_size, int):
         kernel_size = (kernel_size, kernel_size)
     if isinstance(stride, int):
@@ -90,7 +86,6 @@ def create_conv2d_config(
     if isinstance(dilation, int):
         dilation = (dilation, dilation)
 
-    # Handle weights - convert to TTNN format if needed
     if isinstance(weight, ttnn.Tensor):
         weight = ttnn.to_torch(weight)
     if bias is not None and isinstance(bias, ttnn.Tensor):
@@ -100,7 +95,6 @@ def create_conv2d_config(
 
     ttnn_weight, ttnn_bias = Conv2dConfiguration.convert_torch_weight_and_bias_to_ttnn(weight, bias)
 
-    # Create sharding strategy
     sharding_strategy = AutoShardedStrategyConfiguration()
     if shard_layout == ttnn.TensorMemoryLayout.HEIGHT_SHARDED:
         sharding_strategy = HeightShardedStrategyConfiguration(
@@ -154,7 +148,6 @@ def create_maxpool_config(
     ceil_mode: bool = False,
     dtype=ttnn.bfloat16,
 ) -> MaxPool2dConfiguration:
-    """Create a MaxPool2dConfiguration for use with TtMaxPool2d builder API."""
     if isinstance(kernel_size, int):
         kernel_size = (kernel_size, kernel_size)
     if isinstance(stride, int):
@@ -187,7 +180,6 @@ def post_process_conv_output(
     to_dram: bool = True,
     reshape_4d: bool = True,
 ):
-    """Post-process conv2d output tensor - handle sharding and reshape."""
     if output_tensor.is_sharded():
         memory_config = ttnn.DRAM_MEMORY_CONFIG if to_dram else ttnn.L1_MEMORY_CONFIG
         output_tensor = ttnn.sharded_to_interleaved(output_tensor, memory_config)
@@ -235,7 +227,6 @@ def run_conv2d_with_builder(
     cache_key=None,
     post_process=True,
 ):
-    """Run conv2d using the TtConv2d builder API with caching and post-processing."""
     if model_config is None:
         model_config = {
             "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
@@ -297,17 +288,6 @@ def run_conv2d_with_builder(
 
 
 def ensure_memory_config(tensor, target_memory_config=None, reference_tensor=None):
-    """
-    Ensure tensor has the specified memory config or matches reference tensor.
-
-    Args:
-        tensor: Tensor to check/convert
-        target_memory_config: Target memory config (if specified)
-        reference_tensor: Reference tensor to match memory config (if target not specified)
-
-    Returns:
-        Tensor with correct memory config
-    """
     if target_memory_config is not None:
         if tensor.memory_config() != target_memory_config:
             tensor = ttnn.to_memory_config(tensor, target_memory_config)

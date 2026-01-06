@@ -30,6 +30,7 @@ class TtBaseLSSFPN:
         depthnet_parameters,
         lss_conf=None,
         model_config=None,
+        use_torch_fallback=False,
     ):
         """
         Initialize TTNN BaseLSSFPN backbone.

@@ -35,8 +35,6 @@ head_optimisations = head_optimizations
 
 
 class TtBasicBlock:
-    """BasicBlock using TtConv2d builder API."""
-
     expansion = 1
 
     def __init__(self, device, in_channels, out_channels, stride, parameters, model_config):
@@ -68,7 +66,6 @@ class TtBasicBlock:
         self._downsample_cache = {}
 
     def _get_conv1(self, batch_size, height, width):
-        """Get cached TtConv2d for conv1."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._conv1_cache:
             config = create_conv2d_config(
@@ -92,7 +89,6 @@ class TtBasicBlock:
         return self._conv1_cache[cache_key]
 
     def _get_conv2(self, batch_size, height, width):
-        """Get cached TtConv2d for conv2."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._conv2_cache:
             config = create_conv2d_config(
@@ -116,7 +112,6 @@ class TtBasicBlock:
         return self._conv2_cache[cache_key]
 
     def _get_downsample(self, batch_size, height, width):
-        """Get cached TtConv2d for downsample."""
         if not self.has_downsample:
             return None
         cache_key = (batch_size, height, width)
@@ -173,8 +168,6 @@ class TtBasicBlock:
 
 
 class TtResLayer:
-    """ResLayer using TtConv2d builder API."""
-
     def __init__(self, device, in_channels, out_channels, blocks, stride, parameters, model_config):
         self.device = device
         self.blocks = []
@@ -218,8 +211,6 @@ class TtResLayer:
 
 
 class TtResNet:
-    """ResNet trunk using TtConv2d builder API."""
-
     def __init__(self, device, parameters, model_config):
         self.device = device
         self.model_config = model_config
@@ -232,7 +223,6 @@ class TtResNet:
 
         self._conv1_cache = {}
 
-        # ResLayers
         layer1_params = parameters.get("layer1", {})
         self.layer1 = TtResLayer(
             device=device,
@@ -267,7 +257,6 @@ class TtResNet:
         )
 
     def _get_conv1(self, batch_size, height, width):
-        """Get cached TtConv2d for conv1."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._conv1_cache:
             in_channels = self.conv1_weight.shape[1] if self.conv1_weight is not None else 160
@@ -308,17 +297,10 @@ class TtResNet:
         # Layer3 (quarter resolution)
         x3, (h3, w3) = self.layer3(x2, batch_size, h2, w2)
 
-        # Return 4 outputs for neck:
-        # x0: original input at full resolution (128x128)
-        # x1: after layer1 at half resolution (64x64)
-        # x2: after layer2 at quarter resolution (32x32)
-        # x3: after layer3 at eighth resolution (16x16)
         return (x, x1, x2, x3)
 
 
 class TtDeblock:
-    """Deblock using direct ttnn.conv_transpose2d."""
-
     def __init__(self, device, in_channels, out_channels, kernel_size, stride, parameters, model_config):
         self.device = device
         self.in_channels = in_channels
@@ -418,8 +400,6 @@ class TtDeblock:
 
 
 class TtSECONDFPN:
-    """SECONDFPN for head using direct ttnn.conv_transpose2d."""
-
     def __init__(self, device, parameters, model_config):
         self.device = device
         self.model_config = model_config
@@ -491,8 +471,6 @@ class TtSECONDFPN:
 
 
 class TtTaskHead:
-    """Task head using TtConv2d builder API."""
-
     def __init__(self, device, in_channels, out_channels, parameters, model_config):
         self.device = device
         self.in_channels = in_channels
@@ -513,7 +491,6 @@ class TtTaskHead:
         self._conv2_cache = {}
 
     def _get_conv1(self, batch_size, height, width):
-        """Get cached TtConv2d for conv1."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._conv1_cache:
             config = create_conv2d_config(
@@ -537,7 +514,6 @@ class TtTaskHead:
         return self._conv1_cache[cache_key]
 
     def _get_conv2(self, batch_size, height, width):
-        """Get cached TtConv2d for conv2."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._conv2_cache:
             config = create_conv2d_config(
@@ -575,8 +551,6 @@ class TtTaskHead:
 
 
 class TtSeparateHead:
-    """Separate head with multiple task heads."""
-
     def __init__(self, device, in_channels, heatmap_out, parameters, model_config):
         self.device = device
 
@@ -600,8 +574,6 @@ class TtSeparateHead:
 
 
 class TtBEVDepthHead:
-    """BEVDepth head using TtConv2d builder API."""
-
     def __init__(
         self,
         parameters,
@@ -622,11 +594,7 @@ class TtBEVDepthHead:
 
         # Neck
         if checkpoint_path is None:
-            # Try to resolve relative to project root
-            # This file is at: models/experimental/BevDepth/tt/ttnn_bevdepth_head.py
-            # Need to go up to project root, then to checkpoints
             file_dir = os.path.dirname(__file__)
-            # Go up: tt -> BevDepth -> experimental -> models -> (project root)
             for _ in range(4):
                 file_dir = os.path.dirname(file_dir)
             default_path = os.path.join(
@@ -689,7 +657,6 @@ class TtBEVDepthHead:
         ]
 
     def _get_shared_conv(self, batch_size, height, width):
-        """Get cached TtConv2d for shared_conv."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._shared_conv_cache:
             config = create_conv2d_config(
@@ -713,7 +680,6 @@ class TtBEVDepthHead:
         return self._shared_conv_cache[cache_key]
 
     def __call__(self, x, device=None, batch_size=1):
-        # device parameter accepted for backward compatibility but we use self.device
         # Trunk
         trunk_outputs = self.trunk(x, batch_size=batch_size)
         x0, x1, x2, x3 = trunk_outputs
@@ -724,16 +690,13 @@ class TtBEVDepthHead:
         if isinstance(x, list):
             x = x[0]
 
-        # Ensure on device
         if not ttnn.is_tensor_storage_on_device(x):
             x = ttnn.to_device(x, self.device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-        # Get dimensions
         if x.is_sharded():
             x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
         height, width = x.shape[1], x.shape[2]
 
-        # Shared conv + ReLU
         shared_conv = self._get_shared_conv(batch_size, height, width)
         x, (out_h, out_w) = shared_conv(x, return_output_dim=True)
         x = post_process_conv_output(x, batch_size, out_h, out_w, self.shared_conv_out_channels)

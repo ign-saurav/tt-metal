@@ -8,43 +8,32 @@ import ttnn
 
 from models.common.utility_functions import comp_pcc
 import tracy
-
-# Import common utilities
 from models.experimental.BevDepth.common import (
-    create_dummy_inputs,
+    create_reference_inputs,
 )
-
-# Import parameter preparation functions from custom_preprocessing
 from models.experimental.BevDepth.tt.custom_preprocessing import (
     prepare_all_parameters_from_reference,
 )
+from models.experimental.BevDepth.tt.ttnn_bevdepth_backbone import TtBaseLSSFPN
+from models.experimental.BevDepth.tt.ttnn_bevdepth_head import TtBEVDepthHead, head_optimisations
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-def test_bevdepth_e2e(device):
+def test_bevdepth(device):
     """
-    Full BEVDepth E2E test: backbone → head with single weight loading.
-    Reports only the final output PCC (TTNN vs Reference).
+    Full BEVDepth Model End-to-End test
     """
-    from models.experimental.BevDepth.tt.ttnn_bevdepth_backbone import TtBaseLSSFPN
-    from models.experimental.BevDepth.tt.ttnn_bevdepth_head import TtBEVDepthHead, head_optimisations
 
     # Set seeds for reproducibility
     torch.manual_seed(42)
-    # torch.cuda.manual_seed_all(42)
-    # torch.backends.cudnn.deterministic = True
-
-    logger.info("=== BEVDepth E2E Test ===")
 
     params, reference_model = prepare_all_parameters_from_reference(device)
-    if params is None:
-        pytest.skip("Reference model not available")
-        return
-
     torch_model = reference_model.model
     torch_model.eval()
 
-    torch_input_imgs, mats_dict = create_dummy_inputs(batch_size=1, num_sweeps=2, num_cameras=6, img_h=256, img_w=704)
+    torch_input_imgs, mats_dict = create_reference_inputs(
+        batch_size=1, num_sweeps=2, num_cameras=6, img_h=256, img_w=704
+    )
 
     lss_conf = {
         "x_bound": [-51.2, 51.2, 0.8],
@@ -71,7 +60,7 @@ def test_bevdepth_e2e(device):
         "use_torch_fallback": True,
     }
 
-    logger.info("Initializing TTNN model...")
+    # Initialize BEVDepth Backbone
     ttnn_backbone = TtBaseLSSFPN(
         device=device,
         backbone_parameters=params["backbone"],
@@ -86,6 +75,7 @@ def test_bevdepth_e2e(device):
         "ACTIVATIONS_DTYPE": ttnn.bfloat16,
         "WEIGHTS_DTYPE": ttnn.bfloat16,
     }
+    # Initialize BEVDepth Head
     ttnn_head = TtBEVDepthHead(
         parameters=params["head"],
         model_config=head_model_config,
@@ -93,18 +83,14 @@ def test_bevdepth_e2e(device):
         device=device,
     )
 
-    logger.info("Running reference model...")
+    # Run reference model
     with torch.no_grad():
-        # Get BEV feature from reference model for comparison
         ref_bev_feature = torch_model.backbone(torch_input_imgs, mats_dict, is_return_depth=False)
         ref_output = torch_model.head(ref_bev_feature)
 
-    logger.info("Running TTNN model...")
+    # Run TTNN model
     ttnn_bev_feature = ttnn_backbone(torch_input_imgs, mats_dict, is_return_depth=False)
 
-    # bev_pcc_result = comp_pcc(ref_bev_feature, ttnn_bev_feature)
-    # bev_pcc_value = bev_pcc_result[1] if isinstance(bev_pcc_result, tuple) else bev_pcc_result
-    # logger.info(f"BEV feature PCC: {bev_pcc_value:.10f}")
     ref_bev_input = ttnn.from_torch(
         ref_bev_feature.permute(0, 2, 3, 1),
         dtype=ttnn.bfloat16,
@@ -125,12 +111,7 @@ def test_bevdepth_e2e(device):
     output_keys = ["heatmap", "reg", "height", "dim", "rot", "vel"]
     num_task_groups = len(ref_output)
 
-    logger.info("\n" + "=" * 60)
-    logger.info("BEVDepth E2E PCC Results - Per Head Task Output")
-    logger.info("=" * 60)
-
     for task_idx in range(num_task_groups):
-        logger.info(f"\nHead {task_idx}:")
         for key in output_keys:
             ref_tensor = ref_output[task_idx][0][key]
             ttnn_tensor, _ = ttnn_output[task_idx][key]

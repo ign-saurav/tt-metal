@@ -9,14 +9,6 @@ from models.experimental.BevDepth.tt.ttnn_bevdepth_head import TtBEVDepthHead, h
 
 
 class TtBEVDepth:
-    """
-    TTNN implementation of BEVDepth model.
-
-    This class combines:
-    - TtBaseLSSFPN: Backbone that processes images to BEV features
-    - TtBEVDepthHead: BEV head for object detection predictions
-    """
-
     def __init__(
         self,
         device,
@@ -27,25 +19,6 @@ class TtBEVDepth:
         lss_conf=None,
         model_config=None,
     ):
-        """
-        Initialize TTNN BEVDepth model for inference.
-
-        Args:
-            device: TTNN device
-            backbone_parameters: Parameters for ResNet50 backbone
-            neck_parameters: Parameters for SECONDFPN neck
-            depthnet_parameters: Parameters for DepthNet
-            head_parameters: Parameters for BEVDepthHead
-            lss_conf: LSS configuration dict with:
-                - x_bound: [min, max, step]
-                - y_bound: [min, max, step]
-                - z_bound: [min, max, step]
-                - d_bound: [min, max, step]
-                - final_dim: [H, W]
-                - downsample_factor: int
-                - output_channels: int
-            model_config: Model configuration dict (dtype, math fidelity, etc.)
-        """
         self.device = device
 
         self.model_config = model_config or {
@@ -76,22 +49,6 @@ class TtBEVDepth:
         )
 
     def __call__(self, x, mats_dict, timestamps=None):
-        """
-        Forward function for BEVDepth inference.
-
-        Args:
-            x (Tensor): Input images with shape (B, num_sweeps, num_cameras, 3, H, W).
-            mats_dict (dict): Dictionary containing transformation matrices:
-                - sensor2ego_mats: (B, num_sweeps, num_cameras, 4, 4)
-                - intrin_mats: (B, num_sweeps, num_cameras, 4, 4)
-                - ida_mats: (B, num_sweeps, num_cameras, 4, 4)
-                - sensor2sensor_mats: (B, num_sweeps, num_cameras, 4, 4)
-                - bda_mat: (B, 4, 4)
-            timestamps (Tensor, optional): Timestamps with shape (B, num_sweeps, num_cameras).
-
-        Returns:
-            preds: Detection predictions
-        """
         bev_feature = self.backbone(x, mats_dict, timestamps, is_return_depth=False)
 
         if isinstance(bev_feature, torch.Tensor):

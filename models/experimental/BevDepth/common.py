@@ -44,8 +44,8 @@ def load_reference_model():
     return lightning_model
 
 
-def create_dummy_inputs(batch_size=1, num_sweeps=2, num_cameras=6, img_h=256, img_w=704):
-    """Create dummy input images and transformation matrices."""
+def create_reference_inputs(batch_size=1, num_sweeps=2, num_cameras=6, img_h=256, img_w=704):
+    """Create reference input images and transformation matrices."""
     imgs = torch.randn((batch_size, num_sweeps, num_cameras, 3, img_h, img_w), dtype=torch.float32, requires_grad=False)
 
     mats_dict = {

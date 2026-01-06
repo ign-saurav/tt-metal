@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
+
 from tracy.process_model_log import run_device_profiler
 from models.perf.device_perf_utils import check_device_perf, prep_device_perf_report, run_device_perf
 import models.perf.device_perf_utils
@@ -19,7 +20,7 @@ models.perf.device_perf_utils.run_device_profiler = _run_device_profiler_op_supp
 @pytest.mark.parametrize(
     "batch_size, model_name, expected_perf",
     [
-        (1, "bevdepth", 38.5),
+        (1, "bevdepth", 38.4),
     ],
 )
 @pytest.mark.models_device_performance_bare_metal

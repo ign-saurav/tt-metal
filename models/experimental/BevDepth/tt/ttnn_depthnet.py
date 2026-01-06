@@ -106,8 +106,6 @@ class MLP_TTNN:
 
 
 class SELayer_TTNN:
-    """Squeeze-and-Excitation Layer using TtConv2d builder API."""
-
     def __init__(self, device, parameters, channels, model_config):
         self.device = device
         self.channels = channels
@@ -228,8 +226,6 @@ class SELayer_TTNN:
 
 
 class BasicBlock_TTNN:
-    """BasicBlock using TtConv2d builder API."""
-
     def __init__(self, device, parameters, in_channels, out_channels, model_config):
         self.device = device
         self.in_channels = in_channels
@@ -320,8 +316,6 @@ class BasicBlock_TTNN:
 
 
 class ASPP_TTNN:
-    """ASPP module using TtConv2d builder API."""
-
     def __init__(self, device, parameters, in_channels, mid_channels, model_config):
         self.device = device
         self.in_channels = in_channels
@@ -337,7 +331,6 @@ class ASPP_TTNN:
         self._final_slice_caches = [{}, {}, {}, {}]
 
     def _get_aspp1(self, batch_size, height, width):
-        """Branch 1: 1x1 conv with ReLU."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._aspp1_cache:
             config = create_conv2d_config(
@@ -360,7 +353,6 @@ class ASPP_TTNN:
         return self._aspp1_cache[cache_key]
 
     def _get_dilated_conv(self, cache, batch_size, height, width, dilation, weight, bias):
-        """Get dilated conv for ASPP branches 2-4."""
         cache_key = (batch_size, height, width)
         if cache_key not in cache:
             config = create_conv2d_config(
@@ -384,7 +376,6 @@ class ASPP_TTNN:
         return cache[cache_key]
 
     def _get_global_conv(self, batch_size):
-        """Global pooling branch: 1x1 conv."""
         cache_key = (batch_size, 1, 1)
         if cache_key not in self._global_cache:
             config = create_conv2d_config(
@@ -602,8 +593,6 @@ class ASPP_TTNN:
 
 
 class DepthNet_TTNN:
-    """DepthNet using TtConv2d builder API."""
-
     def __init__(
         self,
         device,
@@ -691,10 +680,7 @@ class DepthNet_TTNN:
             self.dcn = None
             self.dcn_bias = None
 
-        logger.info(f"DepthNet init: in={in_channels}, mid={mid_channels}, depth={depth_channels}")
-
     def _get_reduce_conv_slice(self, slice_idx, batch_size, height, width, weight_slice):
-        """Get cached TtConv2d for reduce_conv slice."""
         cache_key = (batch_size, height, width)
         channels_per_slice = self.in_channels // 2
         if cache_key not in self._reduce_slice_caches[slice_idx]:
@@ -718,7 +704,6 @@ class DepthNet_TTNN:
         return self._reduce_slice_caches[slice_idx][cache_key]
 
     def _get_context_conv(self, batch_size, height, width):
-        """Get cached TtConv2d for context_conv."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._context_conv_cache:
             config = create_conv2d_config(
@@ -741,7 +726,6 @@ class DepthNet_TTNN:
         return self._context_conv_cache[cache_key]
 
     def _get_dcn_fallback_conv(self, batch_size, height, width):
-        """Get cached TtConv2d for DCN fallback."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._dcn_fallback_cache:
             config = create_conv2d_config(
@@ -764,7 +748,6 @@ class DepthNet_TTNN:
         return self._dcn_fallback_cache[cache_key]
 
     def _get_final_conv(self, batch_size, height, width):
-        """Get cached TtConv2d for final depth conv."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._final_conv_cache:
             config = create_conv2d_config(

@@ -156,7 +156,7 @@ def _voxel_pooling_inference_fallback(
     flat_index = batch_indices * (num_voxel_y * num_voxel_x) + y * num_voxel_x + x
 
     bev = torch.zeros(B * num_voxel_y * num_voxel_x, channels, device=device, dtype=context_features.dtype)
-    bev.index_add_(0, flat_index.view(-1).long(), contributions.view(-1, channels))
+    bev.index_add_(0, flat_index.reshape(-1).long(), contributions.reshape(-1, channels))
     bev = bev.view(B, num_voxel_y, num_voxel_x, channels).permute(0, 3, 1, 2).contiguous()
     return bev
 

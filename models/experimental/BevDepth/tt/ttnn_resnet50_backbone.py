@@ -110,7 +110,6 @@ class Bottleneck:
         self._downsample_cache = {}
 
     def _get_conv1(self, device, batch_size, height, width):
-        """Get or create TtConv2d for conv1 (1x1, ReLU)."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._conv1_cache:
             conv_config = create_conv2d_config(
@@ -129,7 +128,6 @@ class Bottleneck:
         return self._conv1_cache[cache_key]
 
     def _get_conv2(self, device, batch_size, height, width):
-        """Get or create TtConv2d for conv2 (3x3, ReLU, possibly strided)."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._conv2_cache:
             conv_config = create_conv2d_config(
@@ -150,7 +148,6 @@ class Bottleneck:
         return self._conv2_cache[cache_key]
 
     def _get_conv3(self, device, batch_size, height, width):
-        """Get or create TtConv2d for conv3 (1x1, no activation)."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._conv3_cache:
             conv_config = create_conv2d_config(
@@ -169,7 +166,6 @@ class Bottleneck:
         return self._conv3_cache[cache_key]
 
     def _get_downsample(self, device, batch_size, height, width):
-        """Get or create TtConv2d for downsample (1x1, strided, no activation)."""
         if not self.has_downsample:
             return None
         cache_key = (batch_size, height, width)
@@ -265,7 +261,6 @@ class ResNet50_BEVDepth:
         self.layer4 = self._make_layer(parameters.layer4, 512, 3, stride=2)
 
     def _get_conv1(self, device, batch_size, height, width):
-        """Get or create TtConv2d for conv1 (7x7, stride 2, ReLU)."""
         cache_key = (batch_size, height, width)
         if cache_key not in self._conv1_cache:
             conv_config = create_conv2d_config(
@@ -286,7 +281,6 @@ class ResNet50_BEVDepth:
         return self._conv1_cache[cache_key]
 
     def _get_maxpool(self, height, width, batch_size):
-        """Get or create TtMaxPool2d for maxpool (3x3, stride 2)."""
         cache_key = (height, width, batch_size)
         if cache_key not in self._maxpool_cache:
             config = create_maxpool_config(
