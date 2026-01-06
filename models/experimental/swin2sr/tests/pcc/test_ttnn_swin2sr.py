@@ -167,8 +167,8 @@ def create_swin2sr_preprocessor(device):
 @pytest.mark.parametrize(
     "img_size,embed_dim,depths,num_heads,window_size,upscale,resi_connection",
     [
-        (56, 96, (6, 6, 6, 6), (6, 6, 6, 6), 7, 2, "1conv"),
-        (56, 96, (6, 6, 6, 6), (6, 6, 6, 6), 7, 2, "3conv"),
+        (64, 180, (6, 6, 6, 6, 6, 6), (6, 6, 6, 6, 6, 6), 8, 2, "1conv"),
+        (64, 180, (6, 6, 6, 6, 6, 6), (6, 6, 6, 6, 6, 6), 8, 2, "3conv"),
     ],
 )
 def test_swin2sr_ttnn_vs_torch(
@@ -182,7 +182,7 @@ def test_swin2sr_ttnn_vs_torch(
         depths=depths,
         num_heads=num_heads,
         window_size=window_size,
-        mlp_ratio=4.0,
+        mlp_ratio=2.0,
         upscale=upscale,
         img_range=1.0,
         upsampler="pixelshuffle",
@@ -212,7 +212,7 @@ def test_swin2sr_ttnn_vs_torch(
         depths=depths,
         num_heads=num_heads,
         window_size=window_size,
-        mlp_ratio=4.0,
+        mlp_ratio=2.0,
         upscale=upscale,
         img_range=1.0,
         upsampler="pixelshuffle",
@@ -239,9 +239,9 @@ def test_swin2sr_ttnn_vs_torch(
                 f"tt shape={tt_output_tensor.shape} (size={tt_output_tensor.numel()})"
             )
 
-    # PCC threshold of 0.98 for full model with 24 transformer blocks (6 blocks × 4 layers)
+    # PCC threshold of 0.99 for full model with 36 transformer blocks (6 blocks × 6 layers)
     # Individual components achieve >0.99 PCC; accumulated precision loss is expected in deep bfloat16 models
-    pcc_required = 0.98
+    pcc_required = 0.99
     passed, pcc = comp_pcc(torch_output_tensor, tt_output_tensor, pcc_required)
     assert passed, f"PCC value {pcc} is lower than required {pcc_required}"
 
@@ -332,7 +332,7 @@ def test_swin2sr_checkpoint(device, reset_seeds):
     tt_output_tensor = tt_model.forward(tt_input_tensor)
     tt_output_tensor = ttnn.to_torch(tt_output_tensor)
 
-    # PCC threshold of 0.98 for full model with 36 transformer blocks (6 layers × 6 blocks)
-    pcc_required = 0.98
+    # PCC threshold of 0.99 for full model with 36 transformer blocks (6 layers × 6 blocks)
+    pcc_required = 0.99
     passed, pcc = comp_pcc(torch_output_tensor, tt_output_tensor, pcc_required)
     assert passed, f"PCC value {pcc} is lower than required {pcc_required}"
