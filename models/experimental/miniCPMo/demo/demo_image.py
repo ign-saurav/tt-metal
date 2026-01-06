@@ -53,7 +53,7 @@ def main():
 
         # This replaces model.vpm with TT-accelerated DropInVisionEncoder
         logger.info("Enabling TT acceleration for vision encoder...")
-        model = enable_tt_acceleration(model, device, components=["vision"])
+        model = enable_tt_acceleration(model, device, components=["vision", "llm"])
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 

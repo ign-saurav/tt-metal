@@ -22,15 +22,21 @@ Usage:
     model.apm = DropInAudioEncoder(model.apm, device, model.config.audio_config)
 """
 
+import os
 import torch
 import torch.nn as nn
 import ttnn
-from typing import Optional, List, Tuple, Union
+from typing import Optional, List, Tuple, Union, Any, Dict
 from loguru import logger
 
 # Import TT implementations
 from models.experimental.miniCPMo.tt.ttnn_chattts_decoder import TtnnChatTTSDecoder
 from models.experimental.miniCPMo.tt.ttnn_whisper_encoder import TtnnWhisperEncoder
+from models.experimental.miniCPMo.tt.minicpm_weight_bridge import MiniCPMWeightBridge
+from models.experimental.miniCPMo.tt_transformers.common import create_tt_model, preprocess_inputs_prefill
+from models.experimental.miniCPMo.tt_transformers.model_config import ModelArgs
+from models.experimental.miniCPMo.tt_transformers.generator import Generator, create_submeshes
+from models.experimental.miniCPMo.tt_transformers.common import PagedAttentionConfig
 
 
 class DropInChatTTSDecoder(nn.Module):
@@ -471,3 +477,183 @@ class DropInVisionEncoder(nn.Module):
             except AttributeError:
                 pass
         raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
+
+
+class DropInQwenModel:
+    """
+    A Drop-in replacement for the MiniCPM-o LLM (Qwen) that uses TT-Metal for generation.
+    It takes over the 'chat' functionality of the model.
+    """
+
+    def __init__(
+        self,
+        device: ttnn.Device,
+        config: Any,
+        weight_bridge: Optional[MiniCPMWeightBridge] = None,
+    ):
+        self.device = device
+        # Use the HF config to set up our parameters
+        self.config = config
+
+        # Initialize Weight Bridge
+        self.weight_bridge = weight_bridge if weight_bridge else MiniCPMWeightBridge()
+
+        # Initialize internal state
+        self.model_args = None
+        self.model = None
+        self.page_table = None
+        self.tt_kv_cache = None
+        self.tokenizer = None  # Will use the one passed in chat usually, but we load one for internal checks
+
+        # Initialize the Qwen LLM on TT
+        self._init_qwen_llm()
+
+    def _init_qwen_llm(self):
+        logger.info("Initializing TT Qwen Model...")
+
+        # 1. Load Weights
+        qwen_weights = self.weight_bridge.get_qwen_weights()
+
+        if "HF_MODEL" not in os.environ:
+            os.environ["HF_MODEL"] = "openbmb/MiniCPM-o-2_6"
+        # 2. Setup Model Args
+        # We infer defaults from the HF config or use standard MiniCPM-2.6 defaults
+        self.model_args = ModelArgs(
+            mesh_device=self.device,
+            instruct=False,
+            max_batch_size=1,
+            max_seq_len=1024,  # Can be configurable
+            dummy_weights=False,
+        )
+        self.model_args.max_prefill_chunk_size = 2048  # Default chunk
+
+        # 3. Setup Paged Attention
+        self.paged_attention_config = PagedAttentionConfig(
+            block_size=32,
+            max_num_blocks=1024,
+        )
+
+        # 4. Create Page Table (Single user, Batch=1)
+        data_parallel = 1
+        global_batch_size = 1
+
+        # Implied shuffling of blocks (Simplified for 1 user)
+        permutation = torch.randperm(self.paged_attention_config.max_num_blocks)
+        reverse_permutation = torch.argsort(permutation).repeat(data_parallel)
+        self.page_table = reverse_permutation.reshape(
+            global_batch_size, self.paged_attention_config.max_num_blocks // (global_batch_size // data_parallel)
+        )
+
+        # 5. Create TT Model
+        submesh_devices = create_submeshes(self.device, data_parallel)
+
+        model_args_i, model_i, tt_kv_cache_i, _ = create_tt_model(
+            submesh_devices[0],
+            instruct=False,
+            max_batch_size=global_batch_size,
+            optimizations=None,
+            max_seq_len=self.model_args.max_seq_len,
+            paged_attention_config=self.paged_attention_config,
+            dtype=ttnn.bfloat8_b,
+            state_dict=qwen_weights,
+            dummy_weights=False,
+        )
+
+        # Wrap in lists for Generator compatibility
+        self.model = [model_i]
+        self.tt_kv_cache = [tt_kv_cache_i]
+        self.model_args = [model_args_i]
+
+        # 6. Initialize Generator
+        # We load a local tokenizer just for the generator's internal needs/decoding
+        from transformers import AutoTokenizer
+
+        self.internal_tokenizer = AutoTokenizer.from_pretrained("openbmb/MiniCPM-o-2_6", trust_remote_code=True)
+
+        self.generator = Generator(self.model, self.model_args, self.device, tokenizer=self.internal_tokenizer)
+        logger.info("✅ TT Qwen Model Initialized")
+
+    def chat(
+        self, msgs: List[Dict[str, Any]], tokenizer: Any, sampling: bool = True, max_new_tokens: int = 128, **kwargs
+    ):
+        """
+        Replaces the standard Model.chat() method.
+        """
+        logger.info("TT Qwen Chat Triggered")
+
+        # 1. Parse Input
+        # msgs example: [{'role': 'user', 'content': [PIL_Image, "describe this"]}]
+        # For this step, we focus on extracting text.
+        # TODO: If you want to use the TT Vision encoder, you would extract the image here,
+        # run it through self.model.vpm (if accessible) and pass embeddings.
+
+        content = msgs[0]["content"]
+        prompt_text = ""
+
+        if isinstance(content, str):
+            prompt_text = content
+        elif isinstance(content, list):
+            for item in content:
+                if isinstance(item, str):
+                    prompt_text += item
+                # Handle Image items here if integrating vision
+
+        logger.info(f"Processing Text Prompt: '{prompt_text}'")
+
+        # 2. Prepare Generation
+        # Use the tokenizer passed from the demo
+        input_prompts = [prompt_text]
+
+        (
+            input_tokens_prefill_pt,
+            encoded_prompts,
+            decoding_pos,
+            prefill_lens,
+        ) = preprocess_inputs_prefill(
+            input_prompts, tokenizer, self.model_args, False, max_new_tokens, max_prefill_len=1024
+        )
+
+        input_tokens_prefill_pt = torch.stack(input_tokens_prefill_pt).view(1, -1)
+
+        # 3. Prefill
+        logger.info("Running Prefill...")
+        logits = self.generator.prefill_forward_text(
+            input_tokens_prefill_pt,
+            page_table=self.page_table,
+            kv_cache=self.tt_kv_cache,
+            prompt_lens=decoding_pos,
+            enable_trace=False,
+        )
+
+        # Greedy decode first token
+        prefilled_token = torch.argmax(logits, dim=-1)
+
+        # 4. Decode Loop
+        out_tok = prefilled_token
+        current_pos = torch.tensor([decoding_pos[0]])
+        generated_ids = []
+
+        logger.info(f"Running Decode for {max_new_tokens} tokens...")
+        for i in range(max_new_tokens):
+            logits = self.generator.decode_forward_text(
+                out_tok,
+                current_pos,
+                enable_trace=False,  # Enable trace for speed
+                page_table=self.page_table,
+                kv_cache=self.tt_kv_cache,
+            )
+
+            # Simple Greedy (Argmax)
+            out_tok = torch.argmax(logits, dim=-1).unsqueeze(-1)
+            token_id = out_tok.item()
+
+            # Stop conditions
+            if token_id in tokenizer.all_special_ids or token_id == tokenizer.eos_token_id:
+                break
+
+            generated_ids.append(token_id)
+            current_pos += 1
+
+        # 5. Decode to Text
+        res_text = tokenizer.decode(generated_ids, skip_special_tokens=True)
+        return res_text
