@@ -73,3 +73,28 @@ def create_reference_inputs(batch_size=1, num_sweeps=2, num_cameras=6, img_h=256
     }
 
     return imgs, mats_dict
+
+
+def run_torch_inference(model=None, imgs=None, mats_dict=None):
+    """
+    Run Torch inference on BEVDepth model.
+    Can optionally load the model if not provided.
+
+    Args:
+        model: Optional BEVDepth model. If None, will load the reference model automatically.
+        imgs: Input images tensor. Required.
+        mats_dict: Transformation matrices dictionary. Required.
+
+    Returns:
+        preds: Model predictions, or None if model loading failed
+    """
+    if model is None:
+        model = load_reference_model()
+        if model is None:
+            logger.error("Failed to load reference model")
+            return None
+
+    logger.info("Running Torch inference...")
+    with torch.no_grad():
+        preds = model.model(imgs, mats_dict)
+    return preds

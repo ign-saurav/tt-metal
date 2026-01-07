@@ -296,3 +296,102 @@ def ensure_memory_config(tensor, target_memory_config=None, reference_tensor=Non
             tensor = ttnn.to_memory_config(tensor, reference_tensor.memory_config())
 
     return tensor
+
+
+def run_ttnn_inference(device, params, imgs, mats_dict):
+    """
+    Run TTNN inference on BEVDepth model.
+
+    Args:
+        device: TTNN device
+        params: Model parameters dictionary
+        imgs: Input images tensor
+        mats_dict: Transformation matrices dictionary
+
+    Returns:
+        torch_preds: Predictions in torch format
+    """
+    from loguru import logger
+    from models.experimental.BevDepth.tt.ttnn_bevdepth_backbone import TtBaseLSSFPN
+    from models.experimental.BevDepth.tt.ttnn_bevdepth_head import TtBEVDepthHead, head_optimisations
+
+    logger.info("Running TTNN inference...")
+
+    # Get actual image dimensions from input
+    _, _, _, _, img_h, img_w = imgs.shape
+    logger.info(f"TTNN input image size: {img_h}x{img_w}")
+
+    # LSS configuration matching BEVDepth official config (256x704)
+    lss_conf = {
+        "x_bound": [-51.2, 51.2, 0.8],
+        "y_bound": [-51.2, 51.2, 0.8],
+        "z_bound": [-5.0, 3.0, 0.2],
+        "d_bound": [2.0, 58.0, 0.5],
+        "final_dim": [img_h, img_w],
+        "downsample_factor": 16,
+        "output_channels": 80,
+    }
+
+    model_config = {
+        "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
+        "WEIGHTS_DTYPE": ttnn.bfloat16,
+        "ACTIVATIONS_DTYPE": ttnn.bfloat16,
+        "batch_size": 1,
+        "neck_in_channels": [256, 512, 1024, 2048],
+        "neck_out_channels": [128, 128, 128, 128],
+        "neck_upsample_strides": [0.25, 0.5, 1, 2],
+        "depthnet_in_channels": 512,
+        "depthnet_mid_channels": 512,
+        "depthnet_context_channels": 80,
+        "depthnet_depth_channels": 112,
+        "use_torch_fallback": True,
+    }
+
+    ttnn_backbone = TtBaseLSSFPN(
+        device=device,
+        backbone_parameters=params["backbone"],
+        neck_parameters=params["neck"],
+        depthnet_parameters=params["depthnet"],
+        lss_conf=lss_conf,
+        model_config=model_config,
+    )
+
+    head_model_config = {
+        "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
+        "ACTIVATIONS_DTYPE": ttnn.bfloat16,
+        "WEIGHTS_DTYPE": ttnn.bfloat16,
+    }
+    ttnn_head = TtBEVDepthHead(
+        parameters=params["head"],
+        model_config=head_model_config,
+        layer_optimisations=head_optimisations,
+        device=device,
+    )
+
+    ttnn_bev_feature = ttnn_backbone(imgs, mats_dict, is_return_depth=False)
+
+    ttnn_bev_input = ttnn.from_torch(
+        ttnn_bev_feature.permute(0, 2, 3, 1),
+        dtype=ttnn.bfloat16,
+        device=device,
+    )
+    ttnn_bev_input = ttnn.to_device(ttnn_bev_input, device, memory_config=ttnn.L1_MEMORY_CONFIG)
+    ttnn_output = ttnn_head(ttnn_bev_input, device=device)
+
+    # Convert TTNN output to torch format
+    output_keys = ["heatmap", "reg", "height", "dim", "rot", "vel"]
+    torch_preds = []
+
+    for task_idx in range(len(ttnn_output)):
+        task_dict = {}
+        for key in output_keys:
+            ttnn_tensor, shape = ttnn_output[task_idx][key]
+            tensor_torch = ttnn.to_torch(ttnn_tensor)
+            # TTNN output is [N, H, W, C] format - permute to [N, C, H, W]
+            if len(tensor_torch.shape) == 4:
+                # shape is (out_h, out_w) from the new builder API
+                tensor_torch = tensor_torch.permute(0, 3, 1, 2).contiguous()
+            task_dict[key] = tensor_torch
+        torch_preds.append([task_dict])
+
+    return torch_preds
