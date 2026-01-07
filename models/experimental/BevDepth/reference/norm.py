@@ -1,19 +1,15 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
-# Adapted from https://github.com/open-mmlab/mmdetection3d/blob/v1.0.0rc4/mmdet3d/ops/norm.py
+
+########################################################
+# Adapted from https://github.com/open-mmlab/mmcv/blob/v1.7.1/mmcv/cnn/bricks/norm.py
 # Copyright (c) OpenMMLab. All rights reserved.
+########################################################
+
 import inspect
-
 import torch.nn as nn
-
-# from mmcv.utils import is_tuple_of
-# import collections.abc
-# from mmcv.utils.parrots_wrapper import SyncBatchNorm, _BatchNorm, _InstanceNorm
 from torch.nn.modules.batchnorm import _BatchNorm
 from torch.nn.modules.instancenorm import _InstanceNorm
-
-# from torch.nn.modules.sync_batchnorm import SyncBatchNorm
-
 import abc
 from models.experimental.BevDepth.reference.registry import NORM_LAYERS
 
@@ -129,6 +125,10 @@ def build_norm_layer(cfg, num_features, postfix=""):
     return name, layer
 
 
+########################################################
+# Adapted from: https://github.com/open-mmlab/mmcv/blob/v1.7.1/mmcv/utils/misc.py
+# Copyright (c) OpenMMLab. All rights reserved.
+########################################################
 def is_seq_of(seq, expected_type, seq_type=None):
     """Check whether it is a sequence of some type.
 
@@ -159,28 +159,3 @@ def is_tuple_of(seq, expected_type):
     A partial method of :func:`is_seq_of`.
     """
     return is_seq_of(seq, expected_type, seq_type=tuple)
-
-
-def is_norm(layer, exclude=None):
-    """Check if a layer is a normalization layer.
-
-    Args:
-        layer (nn.Module): The layer to be checked.
-        exclude (type | tuple[type]): Types to be excluded.
-
-    Returns:
-        bool: Whether the layer is a norm layer.
-    """
-    if exclude is not None:
-        if not isinstance(exclude, tuple):
-            exclude = (exclude,)
-        if not is_tuple_of(exclude, type):
-            raise TypeError(
-                f'"exclude" must be either None or type or a tuple of types, ' f"but got {type(exclude)}: {exclude}"
-            )
-
-    if exclude and isinstance(layer, exclude):
-        return False
-
-    all_norm_bases = (_BatchNorm, _InstanceNorm, nn.GroupNorm, nn.LayerNorm)
-    return isinstance(layer, all_norm_bases)

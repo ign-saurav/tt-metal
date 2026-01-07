@@ -1,34 +1,19 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
+
+########################################################
 # Adapted from https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/layers/backbones/base_lss_fpn.py
 # Copyright (c) Megvii Inc. All rights reserved.
+########################################################
 
 import torch
 import torch.nn.functional as F
-
-# from mmcv.cnn import build_conv_layer
 from models.experimental.BevDepth.reference.conv import build_conv_layer
-
-# from mmdet3d.models import build_neck
-# from mmdet.models import build_backbone
-# from mmdet.models.backbones.resnet import BasicBlock
 from models.experimental.BevDepth.reference.resnet import BasicBlock
 from torch import nn
-
-# from torch.cuda.amp.autocast_mode import autocast
-
 from models.experimental.BevDepth.reference.builder import build_backbone, build_neck
-
-try:
-    from models.experimental.BevDepth.reference.voxel_pooling_inference import voxel_pooling_inference
-    from models.experimental.BevDepth.reference.voxel_pooling_train import voxel_pooling_train
-
-    _VOXEL_POOLING_AVAILABLE = True
-except ImportError:
-    print("Import VoxelPooling fail. Using PyTorch fallback.")
-    _VOXEL_POOLING_AVAILABLE = False
-    voxel_pooling_inference = None
-    voxel_pooling_train = None
+from models.experimental.BevDepth.reference.builder import BACKBONES, MODELS, NECKS
+from models.experimental.BevDepth.reference.second_fpn import SECONDFPN  # noqa: F401
 
 
 def _voxel_pooling_inference_fallback(
@@ -37,7 +22,7 @@ def _voxel_pooling_inference_fallback(
     context_features: torch.Tensor,
     voxel_num: torch.Tensor,
 ) -> torch.Tensor:
-    """Pure PyTorch replacement for the CUDA voxel pooling op.
+    """PyTorch fallback for the CUDA voxel pooling op.
 
     This function handles flexible input sizes by inferring spatial dimensions
     from the actual tensor shapes rather than assuming they match geom_xyz.
@@ -53,45 +38,31 @@ def _voxel_pooling_inference_fallback(
     channels = context_features.shape[1]
     depth_channels = depth.shape[1]
 
-    # depth and context_features come in as (B*num_cams, C, H, W)
-    # Infer actual spatial dimensions from tensor shapes (flexible for different input sizes)
     if len(depth.shape) == 4:
-        # depth: (B*num_cams, depth_channels, H, W)
         _, _, actual_height, actual_width = depth.shape
     else:
-        # Fallback: infer from total elements
         depth_total_elements = depth.numel()
         spatial_size = depth_total_elements // (B * num_cams * depth_channels)
-        # Try to match geom_xyz aspect ratio, then adjust
         if spatial_size == num_height * num_width:
             actual_height, actual_width = num_height, num_width
         else:
-            # Infer from spatial size - try to maintain aspect ratio
             aspect_ratio = num_width / num_height if num_height > 0 else 1.0
             actual_width = int((spatial_size * aspect_ratio) ** 0.5)
             actual_height = spatial_size // actual_width
-            # Ensure valid dimensions
             while actual_height * actual_width != spatial_size and actual_width > 0:
                 actual_width -= 1
                 actual_height = spatial_size // actual_width if actual_width > 0 else 1
 
-    # Reshape depth and context_features from (B*num_cams, ...) to (B, num_cams, ...)
-    # Use actual spatial dimensions from tensor shapes
     depth = depth.view(B, num_cams, depth_channels, actual_height, actual_width)
-    # Extract first num_depth channels (depth_channels should be >= num_depth)
     if depth_channels >= num_depth:
         depth = depth[:, :, :num_depth, :, :]
     else:
-        # If fewer channels, pad or handle gracefully
         raise ValueError(f"depth_channels ({depth_channels}) < num_depth ({num_depth})")
 
-    # context_features: (B*num_cams, channels, H, W)
     if len(context_features.shape) == 4:
         _, _, ctx_height, ctx_width = context_features.shape
         if ctx_height != actual_height or ctx_width != actual_width:
-            # Reshape to match depth spatial dimensions if needed
             context_features = context_features.view(B, num_cams, channels, ctx_height, ctx_width)
-            # Interpolate if dimensions don't match
             if ctx_height != actual_height or ctx_width != actual_width:
                 context_features = torch.nn.functional.interpolate(
                     context_features.view(B * num_cams, channels, ctx_height, ctx_width),
@@ -106,21 +77,12 @@ def _voxel_pooling_inference_fallback(
 
     context = context_features.permute(0, 1, 3, 4, 2).contiguous().unsqueeze(2).expand(-1, -1, num_depth, -1, -1, -1)
 
-    # Reshape geom_xyz to match actual feature map dimensions if they differ
     if num_height != actual_height or num_width != actual_width:
-        # Reshape geom_xyz from (B, num_cams, num_depth, num_height, num_width, 3)
-        # to (B, num_cams, num_depth, actual_height, actual_width, 3)
-        # First flatten spatial dimensions, then reshape
         geom_xyz_flat = geom_xyz.view(B, num_cams, num_depth, num_height * num_width, 3)
-        # If total elements match, we can reshape directly
         if num_height * num_width == actual_height * actual_width:
             geom_xyz = geom_xyz_flat.view(B, num_cams, num_depth, actual_height, actual_width, 3)
         else:
-            # If dimensions don't match, we need to interpolate the coordinates
-            # Interpolate each coordinate channel separately
-            # Convert to float for interpolation (interpolate requires float)
             geom_xyz_reshaped = geom_xyz.view(B, num_cams, num_depth, num_height, num_width, 3).float()
-            # Permute to (B, num_cams, num_depth, 3, num_height, num_width) for interpolation
             geom_xyz_perm = geom_xyz_reshaped.permute(0, 1, 2, 5, 3, 4).contiguous()
             geom_xyz_interp = F.interpolate(
                 geom_xyz_perm.view(B * num_cams * num_depth, 3, num_height, num_width),
@@ -128,8 +90,6 @@ def _voxel_pooling_inference_fallback(
                 mode="bilinear",
                 align_corners=False,
             )
-            # Reshape back to (B, num_cams, num_depth, actual_height, actual_width, 3)
-            # Keep as float for now, will convert to long when extracting coordinates
             geom_xyz = (
                 geom_xyz_interp.view(B, num_cams, num_depth, 3, actual_height, actual_width)
                 .permute(0, 1, 2, 4, 5, 3)
@@ -166,7 +126,7 @@ def _voxel_pooling_train_fallback(
     img_feat_with_depth: torch.Tensor,
     voxel_num: torch.Tensor,
 ) -> torch.Tensor:
-    """Pure PyTorch replacement for the CUDA voxel pooling train op."""
+    """PyTorch fallback for the CUDA voxel pooling train op."""
     device = img_feat_with_depth.device
     if isinstance(voxel_num, torch.Tensor):
         voxel_sizes = voxel_num.detach().cpu().tolist()
@@ -174,10 +134,8 @@ def _voxel_pooling_train_fallback(
         voxel_sizes = voxel_num if isinstance(voxel_num, (list, tuple)) else [voxel_num]
     num_voxel_x, num_voxel_y, num_voxel_z = [int(v) for v in voxel_sizes]
 
-    # img_feat_with_depth shape: (B, num_cams, num_depth, H, W, channels)
     B, num_cams, num_depth, num_height, num_width, channels = img_feat_with_depth.shape
 
-    # Reshape to match expected format: (B, N, C) where N = num_cams * num_depth * H * W
     img_feat_flat = img_feat_with_depth.reshape(B, -1, channels)
     geom_flat = geom_xyz.reshape(B, -1, 3)
 
@@ -206,14 +164,7 @@ def _voxel_pooling_train_fallback(
 
 __all__ = ["BaseLSSFPN"]
 
-# At the top, after imports
-from models.experimental.BevDepth.reference.builder import BACKBONES, MODELS, NECKS
 
-# Import necks to ensure they are registered
-from models.experimental.BevDepth.reference.second_fpn import SECONDFPN  # noqa: F401
-
-
-# Register the class
 @BACKBONES.register_module()
 @NECKS.register_module()
 @MODELS.register_module()
@@ -437,7 +388,6 @@ class DepthAggregation(nn.Module):
             # nn.ReLU(inplace=True),
         )
 
-    # @autocast(False)
     def forward(self, x):
         x = self.reduce_conv(x)
         x = self.conv(x) + x
@@ -559,7 +509,6 @@ class BaseLSSFPN(nn.Module):
         """
         batch_size, num_cams, _, _ = sensor2ego_mat.shape
 
-        # undo post-transformation
         # B x N x D x H x W x 3
         points = self.frustum
         ida_mat = ida_mat.view(batch_size, num_cams, 1, 1, 1, 4, 4)
@@ -650,35 +599,18 @@ class BaseLSSFPN(nn.Module):
 
             img_feat_with_depth = img_feat_with_depth.permute(0, 1, 3, 4, 5, 2)
 
-            # Use fallback if CUDA ops not available
-            if _VOXEL_POOLING_AVAILABLE:
-                voxel_num_device = self.voxel_num.to(img_feat_with_depth.device)
-                feature_map = voxel_pooling_train(geom_xyz, img_feat_with_depth.contiguous(), voxel_num_device)
-            else:
-                feature_map = _voxel_pooling_train_fallback(geom_xyz, img_feat_with_depth.contiguous(), self.voxel_num)
+            feature_map = _voxel_pooling_train_fallback(geom_xyz, img_feat_with_depth.contiguous(), self.voxel_num)
         else:
             context_features = depth_feature[
                 :, self.depth_channels : (self.depth_channels + self.output_channels)
             ].contiguous()
-            # Use fallback if CUDA ops not available
-            if _VOXEL_POOLING_AVAILABLE:
-                voxel_num_device = self.voxel_num.to(context_features.device)
-                feature_map = voxel_pooling_inference(
-                    geom_xyz,
-                    depth,
-                    context_features,
-                    voxel_num_device,
-                )
-            else:
-                feature_map = _voxel_pooling_inference_fallback(
-                    geom_xyz,
-                    depth,
-                    context_features,
-                    self.voxel_num,
-                )
+            feature_map = _voxel_pooling_inference_fallback(
+                geom_xyz,
+                depth,
+                context_features,
+                self.voxel_num,
+            )
         if is_return_depth:
-            # final_depth has to be fp32, otherwise the depth
-            # loss will colapse during the traing process.
             return feature_map.contiguous(), depth_feature[:, : self.depth_channels].softmax(dim=1)
         return feature_map.contiguous()
 

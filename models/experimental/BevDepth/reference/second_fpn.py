@@ -1,14 +1,15 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
+
+########################################################
 # Adapted from https://github.com/open-mmlab/mmdetection3d/blob/master/mmdet3d/models/necks/second_fpn.py
 # Copyright (c) OpenMMLab. All rights reserved.
+########################################################
+
 import numpy as np
 import torch
 from mmcv.cnn import build_conv_layer, build_norm_layer, build_upsample_layer
 from mmengine.model import BaseModule
-from torch import nn as nn
-
-# from mmdet3d.registry import MODELS
 from models.experimental.BevDepth.reference.builder import NECKS, MODELS
 
 
@@ -69,10 +70,12 @@ class SECONDFPN(BaseModule):
                 upsample_layer = build_conv_layer(
                     conv_cfg, in_channels=in_channels[i], out_channels=out_channel, kernel_size=stride, stride=stride
                 )
-            deblock = nn.Sequential(upsample_layer, build_norm_layer(norm_cfg, out_channel)[1], nn.ReLU(inplace=True))
+            deblock = torch.nn.Sequential(
+                upsample_layer, build_norm_layer(norm_cfg, out_channel)[1], torch.nn.ReLU(inplace=True)
+            )
 
             deblocks.append(deblock)
-        self.deblocks = nn.ModuleList(deblocks)
+        self.deblocks = torch.nn.ModuleList(deblocks)
 
     def forward(self, x):
         """Forward function.

@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
+
+########################################################
+# Adapted from: https://github.com/open-mmlab/mmdetection/blob/main/mmdet/models/backbones/resnet.py
 # Copyright (c) OpenMMLab. All rights reserved.
+########################################################
+
 import warnings
 
 import torch.nn as nn
@@ -8,14 +13,8 @@ import torch.utils.checkpoint as cp
 from mmcv.cnn import build_conv_layer, build_norm_layer, build_plugin_layer
 from mmengine.model import BaseModule
 from torch.nn.modules.batchnorm import _BatchNorm
-
-# from mmdet.registry import MODELS
 from models.experimental.BevDepth.reference.registry import MODELS
-
-# from ..layers import ResLayer
 from models.experimental.BevDepth.reference.res_layer import ResLayer
-
-
 from models.experimental.BevDepth.reference.builder import BACKBONES, MODELS
 
 

@@ -1,6 +1,11 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
+
+########################################################
+# Adapted from: https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/structures/point_data.py
 # Copyright (c) OpenMMLab. All rights reserved.
+########################################################
+
 from collections.abc import Sized
 from typing import Union
 

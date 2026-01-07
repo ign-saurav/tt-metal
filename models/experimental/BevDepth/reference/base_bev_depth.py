@@ -1,9 +1,11 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
+
+########################################################
 # Adapted from https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/models/base_bev_depth.py
+########################################################
 
 from torch import nn
-
 from models.experimental.BevDepth.reference.base_lss_fpn import BaseLSSFPN
 from models.experimental.BevDepth.reference.bev_depth_head import BEVDepthHead
 
@@ -21,7 +23,6 @@ class BaseBEVDepth(nn.Module):
             Default: False.
     """
 
-    # TODO: Reduce grid_conf and data_aug_conf
     def __init__(self, backbone_conf, head_conf, is_train_depth=False):
         super(BaseBEVDepth, self).__init__()
         self.backbone = BaseLSSFPN(**backbone_conf)

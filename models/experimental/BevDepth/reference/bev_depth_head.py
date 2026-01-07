@@ -1,7 +1,9 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
 
+########################################################
 # Adapted from https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/layers/heads/bev_depth_head.py
+########################################################
 
 from models.experimental.BevDepth.reference.centerpoint_head import CenterHead
 from models.experimental.BevDepth.reference.builder import build_backbone, build_neck

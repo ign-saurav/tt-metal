@@ -1,36 +1,29 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) OpenMMLab. All rights reserved.
-from typing import Optional
 
-# from mmcv.cnn import build_conv_layer, build_norm_layer
+########################################################
+# Adapted from: https://github.com/open-mmlab/mmdetection/blob/main/mmdet/models/layers/res_layer.py
+# Copyright (c) OpenMMLab. All rights reserved.
+########################################################
+
 from models.experimental.BevDepth.reference.conv import build_conv_layer
 from models.experimental.BevDepth.reference.norm import build_norm_layer
 from mmengine.model import BaseModule, Sequential
 from torch import Tensor
 from torch import nn as nn
-
-# from mmdet.utils import ConfigType, OptConfigType, OptMultiConfig
-"""Collecting some commonly used type hint in mmdetection."""
 from typing import List, Optional, Sequence, Tuple, Union
-
 from mmengine.config import ConfigDict
 from mmengine.structures import InstanceData, PixelData
 
-# TODO: Need to avoid circular import with assigner and sampler
 # Type hint of config data
 ConfigType = Union[ConfigDict, dict]
 OptConfigType = Optional[ConfigType]
-# Type hint of one or more config data
 MultiConfig = Union[ConfigType, List[ConfigType]]
 OptMultiConfig = Optional[MultiConfig]
-
 InstanceList = List[InstanceData]
 OptInstanceList = Optional[InstanceList]
-
 PixelList = List[PixelData]
 OptPixelList = Optional[PixelList]
-
 RangeType = Sequence[Tuple[int, int]]
 
 

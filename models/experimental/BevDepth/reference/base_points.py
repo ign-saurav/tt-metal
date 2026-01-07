@@ -1,12 +1,17 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
+# SPDX-License-Identifier: Apache-2.0
+
+########################################################
+# Adapted from https://github.com/open-mmlab/mmdetection3d/blob/main/mmdet3d/structures/points/base_points.py
 # Copyright (c) OpenMMLab. All rights reserved.
+########################################################
+
 import warnings
 from abc import abstractmethod
 from typing import Iterator, Optional, Sequence, Union
-
 import numpy as np
 import torch
 from torch import Tensor
-
 from models.experimental.BevDepth.reference.bbox_3d import rotation_3d_in_axis
 
 

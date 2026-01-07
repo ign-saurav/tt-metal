@@ -1,19 +1,15 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
+
+########################################################
 # Adapted from https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/exps/nuscenes/mv/bev_depth_lss_r50_256x704_128x128_24e_2key.py
 # Copyright (c) Megvii Inc. All rights reserved.
-
+########################################################
 
 import os
-
 import torch
-
 from models.experimental.BevDepth.reference.base_exp import (
     BEVDepthLightningModel as BaseBEVDepthLightningModel,
-)
-from models.experimental.BevDepth.reference.conv import (
-    _MMCV_DCN_AVAILABLE,
-    _TORCHVISION_DCN_AVAILABLE,
 )
 from models.experimental.BevDepth.reference.base_bev_depth import BaseBEVDepth
 
@@ -33,7 +29,6 @@ class BEVDepthLightningModel(BaseBEVDepthLightningModel):
         """
         model = self.model
 
-        # If checkpoint_path not provided, construct default path
         if checkpoint_path is None:
             file_dir = os.path.dirname(__file__)
             file_dir = os.path.dirname(file_dir)
@@ -42,7 +37,6 @@ class BEVDepthLightningModel(BaseBEVDepthLightningModel):
             )
 
         if not os.path.exists(checkpoint_path):
-            # Fallback to downloaded weights location if default path doesn't exist
             downloaded_weights_path = "/tmp/bevdepth_weights.pth"
             if os.path.exists(downloaded_weights_path):
                 checkpoint_path = downloaded_weights_path
@@ -58,7 +52,6 @@ class BEVDepthLightningModel(BaseBEVDepthLightningModel):
         if isinstance(checkpoint, dict):
             if "state_dict" in checkpoint:
                 state_dict = checkpoint["state_dict"]
-                # Remove 'model.' prefix if present (from Lightning checkpoints)
                 if any(k.startswith("model.") for k in state_dict.keys()):
                     state_dict = {k.replace("model.", ""): v for k, v in state_dict.items()}
             elif "model" in checkpoint:
@@ -68,16 +61,7 @@ class BEVDepthLightningModel(BaseBEVDepthLightningModel):
         else:
             state_dict = checkpoint
 
-        # Determine if we have proper DCN support (torchvision or MMCV)
-        has_dcn_support = _TORCHVISION_DCN_AVAILABLE or _MMCV_DCN_AVAILABLE
-
-        # Only filter out conv_offset keys if we're using Conv2d fallback (no DCN at all)
-        if not has_dcn_support:
-            filtered_state_dict = {key: value for key, value in state_dict.items() if "conv_offset" not in key}
-            state_dict_to_load = filtered_state_dict
-        else:
-            # We have DCN support (torchvision or MMCV), so keep all keys including conv_offset
-            state_dict_to_load = state_dict
+        state_dict_to_load = state_dict
 
         # Load weights into model
         model.load_state_dict(state_dict_to_load, strict=False)

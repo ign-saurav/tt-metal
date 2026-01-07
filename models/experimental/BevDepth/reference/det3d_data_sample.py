@@ -1,18 +1,18 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
-# Copyright (c) OpenMMLab. All rights reserved.
+
 from typing import Dict, List, Optional, Tuple, Union
-
 import torch
-
 from mmengine.structures import InstanceData
-
 from models.experimental.BevDepth.reference.point_data import PointData
 from typing import List, Optional
-
 from mmengine.structures import BaseDataElement, InstanceData, PixelData
 
 
+########################################################
+# Adapted from: https://github.com/open-mmlab/mmdetection/blob/main/mmdet/structures/det_data_sample.py
+# Copyright (c) OpenMMLab. All rights reserved.
+########################################################
 class DetDataSample(BaseDataElement):
     """A data structure interface of MMDetection. They are used as interfaces
     between different components.
@@ -246,6 +246,10 @@ SampleList = List[DetDataSample]
 OptSampleList = Optional[SampleList]
 
 
+########################################################
+# Adapted from: https://github.com/open-mmlab/mmdetection3d/blob/fe25f7a51d36e3702f961e198894580d83c4387b/mmdet3d/structures/det3d_data_sample.py
+# Copyright (c) OpenMMLab. All rights reserved.
+########################################################
 class Det3DDataSample(DetDataSample):
     """A data structure interface of MMDetection3D. They are used as interfaces
     between different components.
