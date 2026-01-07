@@ -103,88 +103,70 @@ class Bottleneck:
             self.downsample_weight = None
             self.downsample_bias = None
 
-        # Cache for TtConv2d instances (keyed by input dimensions)
-        self._conv1_cache = {}
-        self._conv2_cache = {}
-        self._conv3_cache = {}
-        self._downsample_cache = {}
-
     def _get_conv1(self, device, batch_size, height, width):
-        cache_key = (batch_size, height, width)
-        if cache_key not in self._conv1_cache:
-            conv_config = create_conv2d_config(
-                input_height=height,
-                input_width=width,
-                in_channels=self.conv1_weight.shape[1],
-                out_channels=self.conv1_weight.shape[0],
-                batch_size=batch_size,
-                kernel_size=(1, 1),
-                weight=self.conv1_weight,
-                bias=self.conv1_bias,
-                model_config=self.model_config,
-                conv_config=self.optimizations.bottleneck_1x1_first,
-            )
-            self._conv1_cache[cache_key] = TtConv2d(conv_config, device)
-        return self._conv1_cache[cache_key]
+        conv_config = create_conv2d_config(
+            input_height=height,
+            input_width=width,
+            in_channels=self.conv1_weight.shape[1],
+            out_channels=self.conv1_weight.shape[0],
+            batch_size=batch_size,
+            kernel_size=(1, 1),
+            weight=self.conv1_weight,
+            bias=self.conv1_bias,
+            model_config=self.model_config,
+            conv_config=self.optimizations.bottleneck_1x1_first,
+        )
+        return TtConv2d(conv_config, device)
 
     def _get_conv2(self, device, batch_size, height, width):
-        cache_key = (batch_size, height, width)
-        if cache_key not in self._conv2_cache:
-            conv_config = create_conv2d_config(
-                input_height=height,
-                input_width=width,
-                in_channels=self.conv2_weight.shape[1],
-                out_channels=self.conv2_weight.shape[0],
-                batch_size=batch_size,
-                kernel_size=(3, 3),
-                weight=self.conv2_weight,
-                bias=self.conv2_bias,
-                stride=(self.stride, self.stride),
-                padding=(1, 1),
-                model_config=self.model_config,
-                conv_config=self.optimizations.bottleneck_3x3,
-            )
-            self._conv2_cache[cache_key] = TtConv2d(conv_config, device)
-        return self._conv2_cache[cache_key]
+        conv_config = create_conv2d_config(
+            input_height=height,
+            input_width=width,
+            in_channels=self.conv2_weight.shape[1],
+            out_channels=self.conv2_weight.shape[0],
+            batch_size=batch_size,
+            kernel_size=(3, 3),
+            weight=self.conv2_weight,
+            bias=self.conv2_bias,
+            stride=(self.stride, self.stride),
+            padding=(1, 1),
+            model_config=self.model_config,
+            conv_config=self.optimizations.bottleneck_3x3,
+        )
+        return TtConv2d(conv_config, device)
 
     def _get_conv3(self, device, batch_size, height, width):
-        cache_key = (batch_size, height, width)
-        if cache_key not in self._conv3_cache:
-            conv_config = create_conv2d_config(
-                input_height=height,
-                input_width=width,
-                in_channels=self.conv3_weight.shape[1],
-                out_channels=self.conv3_weight.shape[0],
-                batch_size=batch_size,
-                kernel_size=(1, 1),
-                weight=self.conv3_weight,
-                bias=self.conv3_bias,
-                model_config=self.model_config,
-                conv_config=self.optimizations.bottleneck_1x1_last,
-            )
-            self._conv3_cache[cache_key] = TtConv2d(conv_config, device)
-        return self._conv3_cache[cache_key]
+        conv_config = create_conv2d_config(
+            input_height=height,
+            input_width=width,
+            in_channels=self.conv3_weight.shape[1],
+            out_channels=self.conv3_weight.shape[0],
+            batch_size=batch_size,
+            kernel_size=(1, 1),
+            weight=self.conv3_weight,
+            bias=self.conv3_bias,
+            model_config=self.model_config,
+            conv_config=self.optimizations.bottleneck_1x1_last,
+        )
+        return TtConv2d(conv_config, device)
 
     def _get_downsample(self, device, batch_size, height, width):
         if not self.has_downsample:
             return None
-        cache_key = (batch_size, height, width)
-        if cache_key not in self._downsample_cache:
-            conv_config = create_conv2d_config(
-                input_height=height,
-                input_width=width,
-                in_channels=self.downsample_weight.shape[1],
-                out_channels=self.downsample_weight.shape[0],
-                batch_size=batch_size,
-                kernel_size=(1, 1),
-                weight=self.downsample_weight,
-                bias=self.downsample_bias,
-                stride=(self.stride, self.stride),
-                model_config=self.model_config,
-                conv_config=self.optimizations.downsample_1x1,
-            )
-            self._downsample_cache[cache_key] = TtConv2d(conv_config, device)
-        return self._downsample_cache[cache_key]
+        conv_config = create_conv2d_config(
+            input_height=height,
+            input_width=width,
+            in_channels=self.downsample_weight.shape[1],
+            out_channels=self.downsample_weight.shape[0],
+            batch_size=batch_size,
+            kernel_size=(1, 1),
+            weight=self.downsample_weight,
+            bias=self.downsample_bias,
+            stride=(self.stride, self.stride),
+            model_config=self.model_config,
+            conv_config=self.optimizations.downsample_1x1,
+        )
+        return TtConv2d(conv_config, device)
 
     def __call__(self, x, device, batch_size, height, width):
         identity = x
@@ -249,10 +231,6 @@ class ResNet50_BEVDepth:
         self.conv1_weight = parameters.conv1.weight
         self.conv1_bias = parameters.conv1.bias if hasattr(parameters.conv1, "bias") else None
 
-        # Cache for TtConv2d instance
-        self._conv1_cache = {}
-        self._maxpool_cache = {}
-
         # Build layers
         self.in_channels = 64
         self.layer1 = self._make_layer(parameters.layer1, 64, 3, stride=1)
@@ -261,40 +239,34 @@ class ResNet50_BEVDepth:
         self.layer4 = self._make_layer(parameters.layer4, 512, 3, stride=2)
 
     def _get_conv1(self, device, batch_size, height, width):
-        cache_key = (batch_size, height, width)
-        if cache_key not in self._conv1_cache:
-            conv_config = create_conv2d_config(
-                input_height=height,
-                input_width=width,
-                in_channels=3,
-                out_channels=64,
-                batch_size=batch_size,
-                kernel_size=(7, 7),
-                weight=self.conv1_weight,
-                bias=self.conv1_bias,
-                stride=(2, 2),
-                padding=(3, 3),
-                model_config=self.model_config,
-                conv_config=self.optimizations.conv1_7x7,
-            )
-            self._conv1_cache[cache_key] = TtConv2d(conv_config, device)
-        return self._conv1_cache[cache_key]
+        conv_config = create_conv2d_config(
+            input_height=height,
+            input_width=width,
+            in_channels=3,
+            out_channels=64,
+            batch_size=batch_size,
+            kernel_size=(7, 7),
+            weight=self.conv1_weight,
+            bias=self.conv1_bias,
+            stride=(2, 2),
+            padding=(3, 3),
+            model_config=self.model_config,
+            conv_config=self.optimizations.conv1_7x7,
+        )
+        return TtConv2d(conv_config, device)
 
     def _get_maxpool(self, height, width, batch_size):
-        cache_key = (height, width, batch_size)
-        if cache_key not in self._maxpool_cache:
-            config = create_maxpool_config(
-                input_height=height,
-                input_width=width,
-                channels=64,
-                batch_size=batch_size,
-                kernel_size=(3, 3),
-                stride=(2, 2),
-                padding=(1, 1),
-                dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-            )
-            self._maxpool_cache[cache_key] = TtMaxPool2d(config, self.device)
-        return self._maxpool_cache[cache_key]
+        config = create_maxpool_config(
+            input_height=height,
+            input_width=width,
+            channels=64,
+            batch_size=batch_size,
+            kernel_size=(3, 3),
+            stride=(2, 2),
+            padding=(1, 1),
+            dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+        )
+        return TtMaxPool2d(config, self.device)
 
     def _make_layer(self, layer_params, planes, blocks, stride=1):
         layers = []

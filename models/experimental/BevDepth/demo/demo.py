@@ -15,8 +15,7 @@ from models.experimental.BevDepth.demo.processing import (
     get_gt_corners,
     visualize_results,
 )
-from models.experimental.BevDepth.common import run_torch_inference
-from models.experimental.BevDepth.tt.utils import run_ttnn_inference
+from models.experimental.BevDepth.common import run_torch_inference, run_ttnn_inference
 from models.experimental.BevDepth.tt.custom_preprocessing import prepare_all_parameters_from_reference
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -85,7 +84,12 @@ def main():
             if params is not None:
                 ttnn_preds = run_ttnn_inference(device, params, imgs, mats_dict)
                 boxes_ttnn, classes_ttnn, scores_ttnn = decode_predictions(ttnn_preds, class_names, args.threshold)
-                pred_corners_ttnn, pred_classes_ttnn = boxes_to_corners(boxes_ttnn, classes_ttnn, args.show_range)
+                logger.info(f"TTNN detections: {len(boxes_ttnn)} boxes found")
+                if len(boxes_ttnn) > 0:
+                    pred_corners_ttnn, pred_classes_ttnn = boxes_to_corners(boxes_ttnn, classes_ttnn, args.show_range)
+                else:
+                    logger.warning("No TTNN detections found, check threshold or model output")
+                    pred_corners_ttnn, pred_classes_ttnn = [], []
         finally:
             ttnn.close_device(device)
 

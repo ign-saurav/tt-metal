@@ -52,7 +52,6 @@ def test_backbone(device):
         "depthnet_mid_channels": 512,
         "depthnet_context_channels": 80,
         "depthnet_depth_channels": 112,
-        "use_torch_fallback": True,
     }
 
     backbone_params = prepare_backbone_parameters()

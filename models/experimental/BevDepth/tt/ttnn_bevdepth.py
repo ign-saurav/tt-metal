@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
@@ -52,9 +52,18 @@ class TtBEVDepth:
         bev_feature = self.backbone(x, mats_dict, timestamps, is_return_depth=False)
 
         if isinstance(bev_feature, torch.Tensor):
+            if len(bev_feature.shape) == 5:
+                B, num_sweeps, C, H, W = bev_feature.shape
+                bev_feature = bev_feature.reshape(B, num_sweeps * C, H, W)
+            elif len(bev_feature.shape) == 4:
+                pass
+            else:
+                raise ValueError(f"Unexpected bev_feature shape: {bev_feature.shape}")
+
             bev_feature_ttnn = ttnn.from_torch(
                 bev_feature.permute(0, 2, 3, 1),
                 dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+                device=self.device,
             )
             bev_feature_ttnn = ttnn.to_device(bev_feature_ttnn, self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
         else:

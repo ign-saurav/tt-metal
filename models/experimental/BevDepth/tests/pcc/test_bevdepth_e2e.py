@@ -14,17 +14,11 @@ from models.experimental.BevDepth.common import (
 from models.experimental.BevDepth.tt.custom_preprocessing import (
     prepare_all_parameters_from_reference,
 )
-from models.experimental.BevDepth.tt.ttnn_bevdepth_backbone import TtBaseLSSFPN
-from models.experimental.BevDepth.tt.ttnn_bevdepth_head import TtBEVDepthHead, head_optimisations
+from models.experimental.BevDepth.tt.ttnn_bevdepth import TtBEVDepth
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
 def test_bevdepth(device):
-    """
-    Full BEVDepth Model End-to-End test
-    """
-
-    # Set seeds for reproducibility
     torch.manual_seed(42)
 
     params, reference_model = prepare_all_parameters_from_reference(device)
@@ -57,55 +51,23 @@ def test_bevdepth(device):
         "depthnet_mid_channels": 512,
         "depthnet_context_channels": 80,
         "depthnet_depth_channels": 112,
-        "use_torch_fallback": True,
     }
 
-    # Initialize BEVDepth Backbone
-    ttnn_backbone = TtBaseLSSFPN(
+    ttnn_model = TtBEVDepth(
         device=device,
         backbone_parameters=params["backbone"],
         neck_parameters=params["neck"],
         depthnet_parameters=params["depthnet"],
+        head_parameters=params["head"],
         lss_conf=lss_conf,
         model_config=model_config,
     )
 
-    head_model_config = {
-        "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
-        "ACTIVATIONS_DTYPE": ttnn.bfloat16,
-        "WEIGHTS_DTYPE": ttnn.bfloat16,
-    }
-    # Initialize BEVDepth Head
-    ttnn_head = TtBEVDepthHead(
-        parameters=params["head"],
-        model_config=head_model_config,
-        layer_optimisations=head_optimisations,
-        device=device,
-    )
-
-    # Run reference model
     with torch.no_grad():
-        ref_bev_feature = torch_model.backbone(torch_input_imgs, mats_dict, is_return_depth=False)
-        ref_output = torch_model.head(ref_bev_feature)
-
-    # Run TTNN model
-    ttnn_bev_feature = ttnn_backbone(torch_input_imgs, mats_dict, is_return_depth=False)
-
-    ref_bev_input = ttnn.from_torch(
-        ref_bev_feature.permute(0, 2, 3, 1),
-        dtype=ttnn.bfloat16,
-        device=device,
-    )
-    ref_bev_input = ttnn.to_device(ref_bev_input, device, memory_config=ttnn.L1_MEMORY_CONFIG)
-    ttnn_bev_input = ttnn.from_torch(
-        ttnn_bev_feature.permute(0, 2, 3, 1),
-        dtype=ttnn.bfloat16,
-        device=device,
-    )
-    ttnn_bev_input = ttnn.to_device(ttnn_bev_input, device, memory_config=ttnn.L1_MEMORY_CONFIG)
+        ref_output = torch_model(torch_input_imgs, mats_dict)
 
     tracy.signpost("start")
-    ttnn_output = ttnn_head(ttnn_bev_input, device=device)
+    ttnn_output = ttnn_model(torch_input_imgs, mats_dict)
     tracy.signpost("stop")
 
     output_keys = ["heatmap", "reg", "height", "dim", "rot", "vel"]
@@ -131,3 +93,4 @@ def test_bevdepth(device):
             pcc_value = pcc_result[1] if isinstance(pcc_result, tuple) else pcc_result
 
             logger.info(f"  Head {task_idx}, key '{key}': PCC = {pcc_value:.10f}")
+            assert pcc_value > 0.97, f"PCC value {pcc_value} is less than 0.97"

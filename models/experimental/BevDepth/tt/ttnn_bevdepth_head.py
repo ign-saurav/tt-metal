@@ -60,81 +60,67 @@ class TtBasicBlock:
             self.downsample_weight = ds_params.get("weight")
             self.downsample_bias = ds_params.get("bias")
 
-        # Conv caches
-        self._conv1_cache = {}
-        self._conv2_cache = {}
-        self._downsample_cache = {}
-
     def _get_conv1(self, batch_size, height, width):
-        cache_key = (batch_size, height, width)
-        if cache_key not in self._conv1_cache:
-            config = create_conv2d_config(
-                input_height=height,
-                input_width=width,
-                in_channels=self.in_channels,
-                out_channels=self.out_channels,
-                batch_size=batch_size,
-                kernel_size=(3, 3),
-                weight=self.conv1_weight,
-                bias=self.conv1_bias,
-                stride=(self.stride, self.stride),
-                padding=(1, 1),
-                model_config=self.model_config,
-                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-                shard_layout=None,
-                fp32_dest_acc_en=True,
-                packer_l1_acc=False,
-            )
-            self._conv1_cache[cache_key] = TtConv2d(config, self.device)
-        return self._conv1_cache[cache_key]
+        config = create_conv2d_config(
+            input_height=height,
+            input_width=width,
+            in_channels=self.in_channels,
+            out_channels=self.out_channels,
+            batch_size=batch_size,
+            kernel_size=(3, 3),
+            weight=self.conv1_weight,
+            bias=self.conv1_bias,
+            stride=(self.stride, self.stride),
+            padding=(1, 1),
+            model_config=self.model_config,
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+            shard_layout=None,
+            fp32_dest_acc_en=True,
+            packer_l1_acc=False,
+        )
+        return TtConv2d(config, self.device)
 
     def _get_conv2(self, batch_size, height, width):
-        cache_key = (batch_size, height, width)
-        if cache_key not in self._conv2_cache:
-            config = create_conv2d_config(
-                input_height=height,
-                input_width=width,
-                in_channels=self.out_channels,
-                out_channels=self.out_channels,
-                batch_size=batch_size,
-                kernel_size=(3, 3),
-                weight=self.conv2_weight,
-                bias=self.conv2_bias,
-                stride=(1, 1),
-                padding=(1, 1),
-                model_config=self.model_config,
-                activation=None,
-                shard_layout=None,
-                fp32_dest_acc_en=True,
-                packer_l1_acc=False,
-            )
-            self._conv2_cache[cache_key] = TtConv2d(config, self.device)
-        return self._conv2_cache[cache_key]
+        config = create_conv2d_config(
+            input_height=height,
+            input_width=width,
+            in_channels=self.out_channels,
+            out_channels=self.out_channels,
+            batch_size=batch_size,
+            kernel_size=(3, 3),
+            weight=self.conv2_weight,
+            bias=self.conv2_bias,
+            stride=(1, 1),
+            padding=(1, 1),
+            model_config=self.model_config,
+            activation=None,
+            shard_layout=None,
+            fp32_dest_acc_en=True,
+            packer_l1_acc=False,
+        )
+        return TtConv2d(config, self.device)
 
     def _get_downsample(self, batch_size, height, width):
         if not self.has_downsample:
             return None
-        cache_key = (batch_size, height, width)
-        if cache_key not in self._downsample_cache:
-            config = create_conv2d_config(
-                input_height=height,
-                input_width=width,
-                in_channels=self.in_channels,
-                out_channels=self.out_channels,
-                batch_size=batch_size,
-                kernel_size=(1, 1),
-                weight=self.downsample_weight,
-                bias=self.downsample_bias,
-                stride=(self.stride, self.stride),
-                padding=(0, 0),
-                model_config=self.model_config,
-                activation=None,
-                shard_layout=None,
-                fp32_dest_acc_en=True,
-                packer_l1_acc=False,
-            )
-            self._downsample_cache[cache_key] = TtConv2d(config, self.device)
-        return self._downsample_cache[cache_key]
+        config = create_conv2d_config(
+            input_height=height,
+            input_width=width,
+            in_channels=self.in_channels,
+            out_channels=self.out_channels,
+            batch_size=batch_size,
+            kernel_size=(1, 1),
+            weight=self.downsample_weight,
+            bias=self.downsample_bias,
+            stride=(self.stride, self.stride),
+            padding=(0, 0),
+            model_config=self.model_config,
+            activation=None,
+            shard_layout=None,
+            fp32_dest_acc_en=True,
+            packer_l1_acc=False,
+        )
+        return TtConv2d(config, self.device)
 
     def __call__(self, x, batch_size, height, width):
         identity = x
@@ -221,8 +207,6 @@ class TtResNet:
         self.conv1_bias = conv1_params.get("bias")
         self.conv1_out_channels = self.conv1_weight.shape[0] if self.conv1_weight is not None else 160
 
-        self._conv1_cache = {}
-
         layer1_params = parameters.get("layer1", {})
         self.layer1 = TtResLayer(
             device=device,
@@ -257,28 +241,25 @@ class TtResNet:
         )
 
     def _get_conv1(self, batch_size, height, width):
-        cache_key = (batch_size, height, width)
-        if cache_key not in self._conv1_cache:
-            in_channels = self.conv1_weight.shape[1] if self.conv1_weight is not None else 160
-            config = create_conv2d_config(
-                input_height=height,
-                input_width=width,
-                in_channels=in_channels,
-                out_channels=self.conv1_out_channels,
-                batch_size=batch_size,
-                kernel_size=(7, 7),
-                weight=self.conv1_weight,
-                bias=self.conv1_bias,
-                stride=(2, 2),
-                padding=(3, 3),
-                model_config=self.model_config,
-                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-                shard_layout=None,
-                fp32_dest_acc_en=True,
-                packer_l1_acc=False,
-            )
-            self._conv1_cache[cache_key] = TtConv2d(config, self.device)
-        return self._conv1_cache[cache_key]
+        in_channels = self.conv1_weight.shape[1] if self.conv1_weight is not None else 160
+        config = create_conv2d_config(
+            input_height=height,
+            input_width=width,
+            in_channels=in_channels,
+            out_channels=self.conv1_out_channels,
+            batch_size=batch_size,
+            kernel_size=(7, 7),
+            weight=self.conv1_weight,
+            bias=self.conv1_bias,
+            stride=(2, 2),
+            padding=(3, 3),
+            model_config=self.model_config,
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+            shard_layout=None,
+            fp32_dest_acc_en=True,
+            packer_l1_acc=False,
+        )
+        return TtConv2d(config, self.device)
 
     def __call__(self, x, batch_size=1):
         height, width = x.shape[1], x.shape[2]
@@ -487,54 +468,45 @@ class TtTaskHead:
         self.conv2_weight = conv2_params.get("weight")
         self.conv2_bias = conv2_params.get("bias")
 
-        self._conv1_cache = {}
-        self._conv2_cache = {}
-
     def _get_conv1(self, batch_size, height, width):
-        cache_key = (batch_size, height, width)
-        if cache_key not in self._conv1_cache:
-            config = create_conv2d_config(
-                input_height=height,
-                input_width=width,
-                in_channels=self.in_channels,
-                out_channels=self.in_channels,
-                batch_size=batch_size,
-                kernel_size=(3, 3),
-                weight=self.conv1_weight,
-                bias=self.conv1_bias,
-                stride=(1, 1),
-                padding=(1, 1),
-                model_config=self.model_config,
-                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-                shard_layout=None,
-                fp32_dest_acc_en=True,
-                packer_l1_acc=False,
-            )
-            self._conv1_cache[cache_key] = TtConv2d(config, self.device)
-        return self._conv1_cache[cache_key]
+        config = create_conv2d_config(
+            input_height=height,
+            input_width=width,
+            in_channels=self.in_channels,
+            out_channels=self.in_channels,
+            batch_size=batch_size,
+            kernel_size=(3, 3),
+            weight=self.conv1_weight,
+            bias=self.conv1_bias,
+            stride=(1, 1),
+            padding=(1, 1),
+            model_config=self.model_config,
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+            shard_layout=None,
+            fp32_dest_acc_en=True,
+            packer_l1_acc=False,
+        )
+        return TtConv2d(config, self.device)
 
     def _get_conv2(self, batch_size, height, width):
-        cache_key = (batch_size, height, width)
-        if cache_key not in self._conv2_cache:
-            config = create_conv2d_config(
-                input_height=height,
-                input_width=width,
-                in_channels=self.in_channels,
-                out_channels=self.out_channels,
-                batch_size=batch_size,
-                kernel_size=(3, 3),
-                weight=self.conv2_weight,
-                bias=self.conv2_bias,
-                stride=(1, 1),
-                padding=(1, 1),
-                model_config=self.model_config,
-                activation=None,
-                shard_layout=None,
-                fp32_dest_acc_en=True,
-                packer_l1_acc=False,
-            )
-            self._conv2_cache[cache_key] = TtConv2d(config, self.device)
-        return self._conv2_cache[cache_key]
+        config = create_conv2d_config(
+            input_height=height,
+            input_width=width,
+            in_channels=self.in_channels,
+            out_channels=self.out_channels,
+            batch_size=batch_size,
+            kernel_size=(3, 3),
+            weight=self.conv2_weight,
+            bias=self.conv2_bias,
+            stride=(1, 1),
+            padding=(1, 1),
+            model_config=self.model_config,
+            activation=None,
+            shard_layout=None,
+            fp32_dest_acc_en=True,
+            packer_l1_acc=False,
+        )
+        return TtConv2d(config, self.device)
 
     def __call__(self, x, batch_size, height, width):
         # Conv1 + ReLU
@@ -636,7 +608,6 @@ class TtBEVDepthHead:
         self.shared_conv_bias = shared_conv_params.get("bias")
         self.shared_conv_in_channels = self.shared_conv_weight.shape[1] if self.shared_conv_weight is not None else 256
         self.shared_conv_out_channels = self.shared_conv_weight.shape[0] if self.shared_conv_weight is not None else 64
-        self._shared_conv_cache = {}
 
         # Task heads
         heatmap_channels = [1, 2, 2, 1, 2, 2]
@@ -653,27 +624,24 @@ class TtBEVDepthHead:
         ]
 
     def _get_shared_conv(self, batch_size, height, width):
-        cache_key = (batch_size, height, width)
-        if cache_key not in self._shared_conv_cache:
-            config = create_conv2d_config(
-                input_height=height,
-                input_width=width,
-                in_channels=self.shared_conv_in_channels,
-                out_channels=self.shared_conv_out_channels,
-                batch_size=batch_size,
-                kernel_size=(3, 3),
-                weight=self.shared_conv_weight,
-                bias=self.shared_conv_bias,
-                stride=(1, 1),
-                padding=(1, 1),
-                model_config=self.model_config,
-                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-                shard_layout=None,
-                fp32_dest_acc_en=True,
-                packer_l1_acc=False,
-            )
-            self._shared_conv_cache[cache_key] = TtConv2d(config, self.device)
-        return self._shared_conv_cache[cache_key]
+        config = create_conv2d_config(
+            input_height=height,
+            input_width=width,
+            in_channels=self.shared_conv_in_channels,
+            out_channels=self.shared_conv_out_channels,
+            batch_size=batch_size,
+            kernel_size=(3, 3),
+            weight=self.shared_conv_weight,
+            bias=self.shared_conv_bias,
+            stride=(1, 1),
+            padding=(1, 1),
+            model_config=self.model_config,
+            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+            shard_layout=None,
+            fp32_dest_acc_en=True,
+            packer_l1_acc=False,
+        )
+        return TtConv2d(config, self.device)
 
     def __call__(self, x, device=None, batch_size=1):
         # Trunk

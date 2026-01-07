@@ -1,26 +1,19 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import ttnn
 import torch
 
 from models.experimental.BevDepth.tt.ttnn_resnet50_backbone import ResNet50_BEVDepth
 from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_TTNN
 from models.experimental.BevDepth.tt.ttnn_depthnet import DepthNet_TTNN
+from models.experimental.BevDepth.reference.base_lss_fpn import _voxel_pooling_inference_fallback
 
 
 class TtBaseLSSFPN:
     """
-    TTNN implementation of BaseLSSFPN backbone.
-
-    This class combines:
-    - ResNet50_BEVDepth: Image backbone for feature extraction
-    - SECONDFPN_TTNN: Feature pyramid network (neck)
-    - DepthNet_TTNN: Depth estimation network
-
-    The LSS (Lift-Splat-Shoot) transformation from camera features to BEV
-    is handled using PyTorch for complex geometric operations.
-    """
+    TTNN implementation of BaseLSSFPN backbone."""
 
     def __init__(
         self,
@@ -30,30 +23,14 @@ class TtBaseLSSFPN:
         depthnet_parameters,
         lss_conf=None,
         model_config=None,
-        use_torch_fallback=False,
     ):
         """
         Initialize TTNN BaseLSSFPN backbone.
-
-        Args:
-            device: TTNN device
-            backbone_parameters: Parameters for ResNet50 backbone
-            neck_parameters: Parameters for SECONDFPN neck
-            depthnet_parameters: Parameters for DepthNet
-            lss_conf: LSS configuration dict with:
-                - x_bound: [min, max, step]
-                - y_bound: [min, max, step]
-                - z_bound: [min, max, step]
-                - d_bound: [min, max, step]
-                - final_dim: [H, W]
-                - downsample_factor: int
-                - output_channels: int
-            model_config: Model configuration dict (dtype, math fidelity, etc.)
         """
         self.device = device
         self.model_config = model_config
+        self.use_torch_fallback_secondfpn = os.environ.get("FALLBACK_ON_SECONDFPN", "1") == "1"
 
-        # Store LSS configuration
         self.lss_conf = lss_conf or {}
         self._init_lss_config()
 
@@ -87,7 +64,7 @@ class TtBaseLSSFPN:
             model_config=self.model_config,
             input_shapes=neck_input_shapes,
             batch_size=self.model_config.get("batch_size", 1),
-            use_torch_fallback=self.model_config.get("use_torch_fallback", False),
+            use_torch_fallback=self.use_torch_fallback_secondfpn,
         )
 
         # DepthNet: Depth estimation network
@@ -101,11 +78,9 @@ class TtBaseLSSFPN:
             model_config=self.model_config,
         )
 
-        # Store depth_channels for later use
         self.depth_channels = self.depth_net.depth_channels
 
-        # Initialize voxel pooling functions
-        self._init_voxel_pooling()
+        self.voxel_pooling_inference = _voxel_pooling_inference_fallback
 
     def _init_lss_config(self):
         """Initialize LSS configuration buffers."""
@@ -120,7 +95,6 @@ class TtBaseLSSFPN:
         downsample_factor = lss_conf.get("downsample_factor", 16)
         output_channels = lss_conf.get("output_channels", 80)
 
-        # Register buffers (as tensors, not nn.Module buffers since we're not a nn.Module)
         self.voxel_size = torch.Tensor([row[2] for row in [x_bound, y_bound, z_bound]])
         self.voxel_coord = torch.Tensor([row[0] + row[2] / 2.0 for row in [x_bound, y_bound, z_bound]])
         self.voxel_num = torch.LongTensor([(row[1] - row[0]) / row[2] for row in [x_bound, y_bound, z_bound]])
@@ -146,23 +120,6 @@ class TtBaseLSSFPN:
         # D x H x W x 4
         frustum = torch.stack((x_coords, y_coords, d_coords, paddings), -1)
         return frustum
-
-    def _init_voxel_pooling(self):
-        """Initialize voxel pooling functions."""
-        try:
-            from models.experimental.BevDepth.reference.voxel_pooling_inference import (
-                voxel_pooling_inference,
-            )
-
-            self.voxel_pooling_inference = voxel_pooling_inference
-            self._voxel_pooling_available = True
-        except ImportError:
-            from models.experimental.BevDepth.reference.base_lss_fpn import (
-                _voxel_pooling_inference_fallback,
-            )
-
-            self.voxel_pooling_inference = _voxel_pooling_inference_fallback
-            self._voxel_pooling_available = False
 
     def _get_geometry(self, sensor2ego_mat, intrin_mat, ida_mat, bda_mat):
         """Transfer points from camera coord to ego coord."""
@@ -191,15 +148,12 @@ class TtBaseLSSFPN:
         """Get camera features using TTNN components."""
         batch_size, num_sweeps, num_cams, num_channels, imH, imW = imgs.shape
 
-        # Flatten for processing: [B*num_sweeps*num_cams, 3, H, W]
-        imgs_flat = imgs.flatten(0, 2)  # [B*num_sweeps*num_cams, 3, H, W]
+        imgs_flat = imgs.flatten(0, 2)
 
-        # Process each image through backbone and neck
         img_feats_list = []
         for i in range(imgs_flat.shape[0]):
-            img = imgs_flat[i]  # [3, H, W]
-            # Convert to NHWC: [1, H, W, 3]
-            img_nhwc = img.permute(1, 2, 0).unsqueeze(0)  # [1, H, W, 3]
+            img = imgs_flat[i]
+            img_nhwc = img.permute(1, 2, 0).unsqueeze(0)
             img_ttnn = ttnn.from_torch(
                 img_nhwc,
                 dtype=self.model_config["ACTIVATIONS_DTYPE"],
@@ -207,21 +161,16 @@ class TtBaseLSSFPN:
             )
             img_ttnn = ttnn.to_device(img_ttnn, self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
 
-            # Get backbone features
             features = self.img_backbone(img_ttnn, input_height=imH, input_width=imW)
 
-            # Convert features to TTNN format for neck, deallocating each immediately
             layer_names = ["layer1", "layer2", "layer3", "layer4"]
             neck_inputs_ttnn = []
             for layer_name in layer_names:
                 feat = features.get(layer_name)
                 if feat is not None:
-                    # Convert to PyTorch (copies data off device)
                     feat_torch = ttnn.to_torch(feat)
-                    # Deallocate original immediately to free memory
                     ttnn.deallocate(feat, force=True)
 
-                    # Features are in NHWC, convert to TTNN for neck
                     feat_ttnn = ttnn.from_torch(
                         feat_torch,
                         dtype=self.model_config["ACTIVATIONS_DTYPE"],
@@ -249,41 +198,47 @@ class TtBaseLSSFPN:
                     model_config=self.model_config,
                     input_shapes=neck_input_shapes,
                     batch_size=1,
-                    use_torch_fallback=self.model_config.get("use_torch_fallback", False),
+                    use_torch_fallback=self.use_torch_fallback_secondfpn,
                 )
                 neck_output = fresh_neck(neck_inputs_ttnn, batch_size=1)
 
-                # Convert back to PyTorch
                 if isinstance(neck_output, list):
                     neck_feat = neck_output[0]
                 else:
                     neck_feat = neck_output
 
-                neck_feat_torch = ttnn.to_torch(neck_feat)
-                # Convert from NHWC to NCHW
-                if len(neck_feat_torch.shape) == 4:
-                    neck_feat_torch = neck_feat_torch.permute(0, 3, 1, 2)
+                img_feats_list.append(neck_feat)
 
-                img_feats_list.append(neck_feat_torch)
-
-        # Reshape back to [B, num_sweeps, num_cams, C, H, W]
         if img_feats_list:
-            img_feats = torch.cat(img_feats_list, dim=0)
-            _, C, H, W = img_feats.shape
-            img_feats = img_feats.reshape(batch_size, num_sweeps, num_cams, C, H, W)
+            for i, feat in enumerate(img_feats_list):
+                if feat.is_sharded():
+                    img_feats_list[i] = ttnn.sharded_to_interleaved(feat, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+                img_feats_list[i] = ttnn.to_memory_config(img_feats_list[i], memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+            img_feats_ttnn = ttnn.concat(img_feats_list, dim=0, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            img_feats_torch = ttnn.to_torch(img_feats_ttnn)
+
+            if len(img_feats_torch.shape) == 4:
+                img_feats_torch = img_feats_torch.permute(0, 3, 1, 2)
+
+            _, C, H, W = img_feats_torch.shape
+            img_feats = img_feats_torch.reshape(batch_size, num_sweeps, num_cams, C, H, W)
+
+            ttnn.deallocate(img_feats_ttnn)
+            for feat in img_feats_list:
+                ttnn.deallocate(feat)
+
             return img_feats
         else:
             raise RuntimeError("Failed to process images through backbone and neck")
 
-    def _forward_depth_net(self, feat, mats_dict):
+    def _forward_depth_net(self, feat, mats_dict, return_ttnn=False):
         """Forward through depth net."""
         batch_size, num_cams, C, H, W = feat.shape
 
-        # Flatten for depth net: [B*num_cams, C, H, W]
         feat_flat = feat.reshape(batch_size * num_cams, C, H, W)
 
-        # Convert to TTNN format
-        feat_nhwc = feat_flat.permute(0, 2, 3, 1)  # NCHW -> NHWC
+        feat_nhwc = feat_flat.permute(0, 2, 3, 1)
         feat_ttnn = ttnn.from_torch(
             feat_nhwc,
             dtype=self.model_config["ACTIVATIONS_DTYPE"],
@@ -291,13 +246,12 @@ class TtBaseLSSFPN:
         )
         feat_ttnn = ttnn.to_device(feat_ttnn, self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
 
-        # Process through depth net
-        # DepthNet returns concatenated [depth_channels + context_channels] in NHWC format
         depth_feature = self.depth_net(feat_ttnn, batch_size=batch_size * num_cams, mats_dict=mats_dict)
 
-        # Convert back to PyTorch
+        if return_ttnn:
+            return depth_feature
+
         depth_feature_torch = ttnn.to_torch(depth_feature)
-        # Convert from NHWC to NCHW: [B*num_cams, H, W, depth_channels + context_channels] -> [B*num_cams, depth_channels + context_channels, H, W]
         if len(depth_feature_torch.shape) == 4:
             depth_feature_torch = depth_feature_torch.permute(0, 3, 1, 2)
 
@@ -307,19 +261,43 @@ class TtBaseLSSFPN:
         """Forward function for single sweep."""
         batch_size, num_sweeps, num_cams, num_channels, img_height, img_width = sweep_imgs.shape
 
-        # Get camera features
         img_feats = self._get_cam_feats(sweep_imgs)
         source_features = img_feats[:, 0, ...]  # [B, num_cams, C, H, W]
 
-        # Forward through depth net
-        depth_feature = self._forward_depth_net(source_features, mats_dict)
+        depth_feature_ttnn = self._forward_depth_net(source_features, mats_dict, return_ttnn=True)
 
-        # Extract depth and context features
         depth_channels = self.depth_net.depth_channels
-        depth = depth_feature[:, :depth_channels].softmax(dim=1, dtype=depth_feature.dtype)
-        context_features = depth_feature[:, depth_channels : (depth_channels + self.output_channels)].contiguous()
+        total_channels = depth_feature_ttnn.shape[-1]
 
-        # Get geometry
+        depth_ttnn = ttnn.slice(
+            depth_feature_ttnn,
+            [0, 0, 0, 0],
+            [depth_feature_ttnn.shape[0], depth_feature_ttnn.shape[1], depth_feature_ttnn.shape[2], depth_channels],
+        )
+        depth_ttnn = ttnn.softmax(depth_ttnn, dim=-1)
+
+        context_start = depth_channels
+        context_end = depth_channels + self.output_channels
+        context_features_ttnn = ttnn.slice(
+            depth_feature_ttnn,
+            [0, 0, 0, context_start],
+            [depth_feature_ttnn.shape[0], depth_feature_ttnn.shape[1], depth_feature_ttnn.shape[2], context_end],
+        )
+
+        depth_torch = ttnn.to_torch(depth_ttnn)
+        if len(depth_torch.shape) == 4:
+            depth_torch = depth_torch.permute(0, 3, 1, 2)
+        depth = depth_torch
+
+        context_features_torch = ttnn.to_torch(context_features_ttnn)
+        if len(context_features_torch.shape) == 4:
+            context_features_torch = context_features_torch.permute(0, 3, 1, 2)
+        context_features = context_features_torch.contiguous()
+
+        ttnn.deallocate(depth_ttnn)
+        ttnn.deallocate(context_features_ttnn)
+        ttnn.deallocate(depth_feature_ttnn)
+
         geom_xyz = self._get_geometry(
             mats_dict["sensor2ego_mats"][:, sweep_index, ...],
             mats_dict["intrin_mats"][:, sweep_index, ...],
@@ -327,61 +305,26 @@ class TtBaseLSSFPN:
             mats_dict.get("bda_mat", None),
         )
 
-        # Convert geometry to voxel coordinates
         geom_xyz = (
             (geom_xyz - (self.voxel_coord.to(geom_xyz.device) - self.voxel_size.to(geom_xyz.device) / 2.0))
             / self.voxel_size.to(geom_xyz.device)
         ).int()
 
-        # Voxel pooling (inference mode)
-        if self._voxel_pooling_available:
-            voxel_num_device = self.voxel_num.to(context_features.device)
-            feature_map = self.voxel_pooling_inference(
-                geom_xyz,
-                depth,
-                context_features,
-                voxel_num_device,
-            )
-        else:
-            feature_map = self.voxel_pooling_inference(
-                geom_xyz,
-                depth,
-                context_features,
-                self.voxel_num,
-            )
+        feature_map = self.voxel_pooling_inference(
+            geom_xyz,
+            depth,
+            context_features,
+            self.voxel_num,
+        )
 
         if is_return_depth:
-            return feature_map.contiguous(), depth_feature[:, :depth_channels].softmax(dim=1)
+            return feature_map.contiguous(), depth
         return feature_map.contiguous()
 
     def __call__(self, sweep_imgs, mats_dict, timestamps=None, is_return_depth=False):
-        """
-        Forward function.
-
-        Args:
-            sweep_imgs(Tensor): Input images with shape of (B, num_sweeps, num_cameras, 3, H, W).
-            mats_dict(dict):
-                sensor2ego_mats(Tensor): Transformation matrix from
-                    camera to ego with shape of (B, num_sweeps,
-                    num_cameras, 4, 4).
-                intrin_mats(Tensor): Intrinsic matrix with shape
-                    of (B, num_sweeps, num_cameras, 4, 4).
-                ida_mats(Tensor): Transformation matrix for ida with
-                    shape of (B, num_sweeps, num_cameras, 4, 4).
-                sensor2sensor_mats(Tensor): Transformation matrix
-                    from key frame camera to sweep frame camera with
-                    shape of (B, num_sweeps, num_cameras, 4, 4).
-                bda_mat(Tensor): Rotation matrix for bda with shape
-                    of (B, 4, 4).
-            timestamps(Tensor, optional): Timestamps with shape of (B, num_sweeps, num_cameras).
-            is_return_depth(bool, optional): Whether to return depth. Default: False.
-
-        Returns:
-            Tensor: BEV feature map, or tuple (feature_map, depth) if is_return_depth=True.
-        """
+        """Forward function for BEVDepth backbone."""
         batch_size, num_sweeps, num_cams, num_channels, img_height, img_width = sweep_imgs.shape
 
-        # Process key frame (sweep_index=0)
         key_frame_res = self._forward_single_sweep(
             0, sweep_imgs[:, 0:1, ...], mats_dict, is_return_depth=is_return_depth
         )
@@ -399,9 +342,32 @@ class TtBaseLSSFPN:
                 )
                 ret_feature_list.append(feature_map)
 
-        if is_return_depth:
-            # Concatenate features from all sweeps along channel dimension (matching reference)
-            return torch.cat(ret_feature_list, 1), key_frame_res[1]
+        if len(ret_feature_list) > 1:
+            ret_feature_list_ttnn = []
+            for feat in ret_feature_list:
+                feat_nhwc = feat.permute(0, 2, 3, 1) if len(feat.shape) == 4 else feat
+                feat_ttnn = ttnn.from_torch(
+                    feat_nhwc,
+                    dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
+                    layout=ttnn.TILE_LAYOUT,
+                    device=self.device,
+                )
+                ret_feature_list_ttnn.append(ttnn.to_memory_config(feat_ttnn, memory_config=ttnn.DRAM_MEMORY_CONFIG))
 
-        # Concatenate features from all sweeps along channel dimension (matching reference)
-        return torch.cat(ret_feature_list, 1)
+            ret_feature_ttnn = ttnn.concat(ret_feature_list_ttnn, dim=3, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            ret_feature_torch = ttnn.to_torch(ret_feature_ttnn)
+
+            if len(ret_feature_torch.shape) == 4:
+                ret_feature_torch = ret_feature_torch.permute(0, 3, 1, 2)
+
+            for feat in ret_feature_list_ttnn:
+                ttnn.deallocate(feat)
+            ttnn.deallocate(ret_feature_ttnn)
+
+            if is_return_depth:
+                return ret_feature_torch.contiguous(), key_frame_res[1]
+            return ret_feature_torch.contiguous()
+
+        if is_return_depth:
+            return key_frame_feature.contiguous(), key_frame_res[1]
+        return key_frame_feature.contiguous()

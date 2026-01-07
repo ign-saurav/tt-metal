@@ -32,11 +32,6 @@ def fold_batch_norm2d_into_conv_transpose2d(conv_transpose, bn, mesh_mapper=None
     return weight, bias
 
 
-def preprocess_conv_parameter(parameter, *, dtype):
-    parameter = ttnn.from_torch(parameter, dtype=dtype, layout=ttnn.TILE_LAYOUT)
-    return parameter
-
-
 def custom_preprocessor(
     model, name, ttnn_module_args, convert_to_ttnn, custom_preprocessor_func=None, mesh_mapper=None
 ):

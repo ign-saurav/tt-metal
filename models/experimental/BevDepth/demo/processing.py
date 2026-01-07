@@ -703,9 +703,10 @@ def decode_predictions(preds, class_names, score_threshold=0.3):
         vel = pred_dict.get("vel", None)
 
         batch_size, num_classes, H, W = heatmap.shape
+        num_task_classes = len(class_names[task_idx])
 
         for b in range(batch_size):
-            for c in range(num_classes):
+            for c in range(min(num_classes, num_task_classes)):
                 heat = heatmap[b, c]
                 mask = heat > score_threshold
 

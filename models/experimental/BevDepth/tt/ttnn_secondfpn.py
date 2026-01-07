@@ -88,7 +88,6 @@ class SECONDFPN_TTNN:
 
         self._torch_weights = []
         self._conv_transpose_configs = []
-        self._conv_cache = {}
 
         for i in range(self.num_levels):
             kernel_size = self.deblocks[i].kernel_size
@@ -130,31 +129,28 @@ class SECONDFPN_TTNN:
                 self._conv_transpose_configs.append(None)
 
     def _get_conv(self, level_idx, batch_size, height, width):
-        cache_key = (level_idx, batch_size, height, width)
-        if cache_key not in self._conv_cache:
-            stride = self.upsample_strides[level_idx]
-            conv_stride = int(np.round(1 / stride))
-            kernel_size = self.deblocks[level_idx].kernel_size
-            weight, bias = self._torch_weights[level_idx]
+        stride = self.upsample_strides[level_idx]
+        conv_stride = int(np.round(1 / stride))
+        kernel_size = self.deblocks[level_idx].kernel_size
+        weight, bias = self._torch_weights[level_idx]
 
-            conv_config = create_conv2d_config(
-                input_height=height,
-                input_width=width,
-                in_channels=self.in_channels[level_idx],
-                out_channels=self.out_channels[level_idx],
-                batch_size=batch_size,
-                kernel_size=kernel_size,
-                weight=weight,
-                bias=bias,
-                stride=(conv_stride, conv_stride),
-                padding=(0, 0),
-                model_config=self.model_config,
-                conv_config=self.optimizations.conv2d,
-                fp32_dest_acc_en=True,
-                packer_l1_acc=False,
-            )
-            self._conv_cache[cache_key] = TtConv2d(conv_config, self.device)
-        return self._conv_cache[cache_key]
+        conv_config = create_conv2d_config(
+            input_height=height,
+            input_width=width,
+            in_channels=self.in_channels[level_idx],
+            out_channels=self.out_channels[level_idx],
+            batch_size=batch_size,
+            kernel_size=kernel_size,
+            weight=weight,
+            bias=bias,
+            stride=(conv_stride, conv_stride),
+            padding=(0, 0),
+            model_config=self.model_config,
+            conv_config=self.optimizations.conv2d,
+            fp32_dest_acc_en=True,
+            packer_l1_acc=False,
+        )
+        return TtConv2d(conv_config, self.device)
 
     def __call__(self, x, batch_size=1):
         ups = []

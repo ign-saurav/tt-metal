@@ -10,14 +10,6 @@ BEVDepth is a multi-view 3D object detection model that acquires reliable depth 
 
 This implementation adapts **BEVDepth** for Tenstorrent hardware using the TT-NN and TT-Metalium stack, optimized for throughput and low-latency inference on Wormhole devices. The implementation supports the [bev_depth_lss_r50_256x704_128x128_24e_2key](https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/exps/nuscenes/mv/bev_depth_lss_r50_256x704_128x128_24e_2key.py) configuration with 6-camera inputs.
 
-**Key Features:**
-- Multi-view camera input processing (6 cameras)
-- Depth estimation via LSS (Lift-Splat-Shoot)
-- ResNet-50 backbone for feature extraction
-- SECONDFPN neck for multi-scale feature fusion
-- BEV detection head for 3D object detection
-- Optimized for nuScenes dataset format
-
 This repository provides:
 - A **reference PyTorch model** (from [Megvii-BaseDetection/BEVDepth](https://github.com/Megvii-BaseDetection/BEVDepth)) for correctness validation.
 - A **TT-NN implementation** for Tenstorrent hardware (Wormhole).
@@ -41,7 +33,7 @@ This repository provides:
   Follow the official instructions: <https://github.com/tenstorrent/tt-metal/blob/main/INSTALLING.md>
 - Install additional dependencies:
   ```bash
-  pip3 install -r models/experimental/BevDepth/reference/bevdepth/requirements.txt
+  pip3 install -r models/experimental/BevDepth/reference/requirements.txt
   pip3 install pytorch-lightning
   pip3 install pyquaternion
   pip3 install nuscenes-devkit
@@ -53,49 +45,67 @@ models/
 └── experimental/
     └── BevDepth/
         ├── resources/
-        │   └── nuScenes/              # Sample nuScenes data
-        │       ├── infos.pkl
-        │       ├── results.json
-        │       └── samples/            # Sample camera images
+        │   ├── checkpoints/
+        │   │   └── bevdepth_weights.pth      # Model checkpoint (auto-downloaded)
+        │   └── nuScenes/
+        │       └── samples/                   # Sample camera images (6 cameras)
+        │           ├── CAM_BACK/
+        │           ├── CAM_BACK_LEFT/
+        │           ├── CAM_BACK_RIGHT/
+        │           ├── CAM_FRONT/
+        │           ├── CAM_FRONT_LEFT/
+        │           ├── CAM_FRONT_RIGHT/
+        │           └── LIDAR_TOP/
         │
         ├── reference/
-        │   └── bevdepth/               # Reference PyTorch implementation
-        │       ├── exps/
-        │       │   └── nuscenes/
-        │       │       └── mv/
-        │       │           └── bev_depth_lss_r50_256x704_128x128_24e_2key.py
-        │       ├── layers/
-        │       │   ├── backbones/       # ResNet backbone
-        │       │   ├── heads/           # Detection heads
-        │       │   └── necks/           # SECONDFPN neck
-        │       └── models/
-        │           └── base_bev_depth.py
+        │   ├── base_bev_depth.py              # Base BEVDepth model
+        │   ├── base_exp.py                    # Experiment base class
+        │   ├── base_lss_fpn.py                # LSS FPN base
+        │   ├── base_points.py                 # Point cloud utilities
+        │   ├── bbox_3d.py                     # 3D bounding box utilities
+        │   ├── bev_depth_head.py              # Detection head
+        │   ├── bev_depth_lss_r50_256x704_128x128_24e_2key.py  # Model config
+        │   ├── builder.py                     # Model builder
+        │   ├── centerpoint_head.py            # CenterPoint head
+        │   ├── conv.py                        # Convolution utilities
+        │   ├── deform_conv.py                 # Deformable convolution
+        │   ├── det3d_data_sample.py           # 3D detection data sample
+        │   ├── gaussian.py                    # Gaussian utilities
+        │   ├── norm.py                        # Normalization layers
+        │   ├── point_data.py                  # Point data utilities
+        │   ├── registry.py                    # Model registry
+        │   ├── res_layer.py                   # ResNet layers
+        │   ├── resnet.py                      # ResNet backbone
+        │   ├── second_fpn.py                  # SECONDFPN neck
+        │   └── requirements.txt               # Reference model dependencies
         │
         ├── tt/
-        │   ├── custom_preprocessing.py      # Model preprocessing utilities
-        │   ├── ttnn_bevdepth.py             # Main TTNN model wrapper
-        │   ├── ttnn_bevdepth_backbone.py    # Backbone (ResNet + LSS)
-        │   ├── ttnn_bevdepth_head.py        # Detection head
-        │   ├── ttnn_depthnet.py             # Depth estimation network
-        │   ├── ttnn_resnet50_backbone.py    # ResNet-50 backbone
-        │   ├── ttnn_secondfpn.py            # SECONDFPN neck
-        │   └── utils.py                     # Utility functions
+        │   ├── custom_preprocessing.py        # Model preprocessing utilities
+        │   ├── ttnn_bevdepth.py               # Main TTNN model wrapper (TtBEVDepth)
+        │   ├── ttnn_bevdepth_backbone.py      # Backbone (ResNet + LSS FPN)
+        │   ├── ttnn_bevdepth_head.py          # Detection head
+        │   ├── ttnn_depthnet.py               # Depth estimation network
+        │   ├── ttnn_resnet50_backbone.py      # ResNet-50 backbone
+        │   ├── ttnn_secondfpn.py              # SECONDFPN neck
+        │   └── utils.py                       # Utility functions (config creation, etc.)
         │
         ├── demo/
-        │   └── demo.py                      # Demo script with visualization
+        │   ├── demo.py                        # Demo script with visualization
+        │   └── processing.py                  # Post-processing utilities (decoding, NMS)
         │
-        ├── tests/pcc/
-        │   ├── test_bevdepth_e2e.py         # End-to-end test
-        │   ├── test_bevdepth_backbone.py    # Backbone test
-        │   ├── test_bevdepth_head.py        # Head test
-        │   ├── test_depthnet.py             # DepthNet test
-        │   ├── test_resnet50_backbone.py    # ResNet-50 test
-        │   └── test_secondfpn.py            # SECONDFPN test
-        ├── tests/perf/
-        │   ├── test_bevdepth_perf.py        # Device perf test
+        ├── tests/
+        │   ├── pcc/                           # Pearson Correlation Coefficient tests
+        │   │   ├── test_bevdepth_e2e.py       # End-to-end test
+        │   │   ├── test_bevdepth_backbone.py  # Backbone test
+        │   │   ├── test_bevdepth_head.py      # Head test
+        │   │   ├── test_depthnet.py           # DepthNet test
+        │   │   ├── test_resnet50_backbone.py  # ResNet-50 test
+        │   │   └── test_secondfpn.py          # SECONDFPN test
+        │   └── perf/                          # Performance tests
+        │       └── test_bevdepth_perf.py      # Device performance test
         │
-        ├── common.py
-        └── README.md
+        ├── common.py                          # Common utilities (inference, weight loading)
+        └── README.md                          # This file
 ```
 
 ## Weights
@@ -114,7 +124,7 @@ The weights are trained on the nuScenes dataset.
 
 #### End-to-End Test
 ```bash
-pytest models/experimental/BevDepth/tests/test_bevdepth_e2e.py
+pytest models/experimental/BevDepth/tests/pcc/test_bevdepth_e2e.py
 ```
 This runs a full end-to-end flow that:
 - Loads the BEVDepth reference model from PyTorch
@@ -125,19 +135,19 @@ This runs a full end-to-end flow that:
 #### Component Tests
 ```bash
 # Test ResNet-50 backbone
-pytest models/experimental/BevDepth/tests/test_resnet50_backbone.py
+pytest models/experimental/BevDepth/tests/pcc/test_resnet50_backbone.py
 
 # Test SECONDFPN neck
-pytest models/experimental/BevDepth/tests/test_secondfpn.py
+pytest models/experimental/BevDepth/tests/pcc/test_secondfpn.py
 
 # Test DepthNet
-pytest models/experimental/BevDepth/tests/test_depthnet.py
+pytest models/experimental/BevDepth/tests/pcc/test_depthnet.py
 
 # Test BEVDepth head
-pytest models/experimental/BevDepth/tests/test_bevdepth_head.py
+pytest models/experimental/BevDepth/tests/pcc/test_bevdepth_head.py
 
 # Test full backbone (ResNet + LSS)
-pytest models/experimental/BevDepth/tests/test_bevdepth_backbone.py
+pytest models/experimental/BevDepth/tests/pcc/test_bevdepth_backbone.py
 ```
 
 ### Run the Demo
@@ -162,7 +172,7 @@ The demo will:
 
 ## Performance
 ### Single Device (BS=1)(n150):
-- Device perf is `38.4` FPS
+- Device perf is `3.8` FPS
 
 To run perf test:
 ```
@@ -181,7 +191,6 @@ pytest models/experimental/BevDepth/tests/perf/test_bevdepth_perf.py -s
 - **Batch Size**: Tests are written for BS=1. For larger batch sizes, verify memory layouts and tile alignment
 
 ## References
-
 ### Paper
 - **BEVDepth: Acquisition of Reliable Depth for Multi-view 3D Object Detection**
   - Authors: Yinhao Li, Zheng Ge, Guanyi Yu, et al.
