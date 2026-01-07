@@ -6,14 +6,14 @@ import pytest
 import torch
 import ttnn
 from loguru import logger
-from ttnn.model_preprocessing import preprocess_model_parameters
-
+from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_module_args
+from models.demos.utils.common_demo_utils import get_mesh_mappers
 from models.common.utility_functions import run_for_wormhole_b0, comp_pcc, tt2torch_tensor
 from models.experimental.centernet.reference.network.dlav0 import DLA, BasicBlock
 from models.experimental.centernet.tt.basic_block import TtBasicBlock
-from models.experimental.centernet.tt.custom_preprocessor import create_basic_block_preprocessor
+from models.experimental.centernet.tt.custom_preprocessor import create_custom_mesh_preprocessor
 
-WEIGHTS_PATH = "ctdet_coco_dlav0_1x.pth"
+WEIGHTS_PATH = "models/experimental/centernet/ctdet_coco_dlav0_1x.pth"
 
 
 @run_for_wormhole_b0()
@@ -62,10 +62,18 @@ def test_basic_block(device):
     with torch.no_grad():
         pytorch_output = pytorch_basic_block(torch_input, residual=torch_residual)
 
+    inputs_mesh_mapper, weights_mesh_mapper, output_mesh_composer = get_mesh_mappers(device)
+
     parameters = preprocess_model_parameters(
         initialize_model=lambda: pytorch_basic_block,
-        custom_preprocessor=create_basic_block_preprocessor(),
-        device=None,
+        custom_preprocessor=create_custom_mesh_preprocessor(weights_mesh_mapper),
+        device=device,
+    )
+    parameters.layer_args = {}
+    parameters.layer_args = infer_ttnn_module_args(
+        model=pytorch_basic_block,
+        run_model=lambda model: pytorch_basic_block(torch_input, residual=torch_residual),
+        device=device,
     )
 
     tt_model = TtBasicBlock(
@@ -73,11 +81,9 @@ def test_basic_block(device):
         planes=planes,
         stride=stride,
         dilation=dilation,
-        parameters=parameters,
+        parameters=parameters.basic_block,
         device=device,
-        batch_size=batch_size,
-        input_height=input_height,
-        input_width=input_width,
+        layer_args=parameters.layer_args,
     )
 
     tt_input = ttnn.from_torch(torch_input.permute(0, 2, 3, 1), dtype=ttnn.bfloat16)

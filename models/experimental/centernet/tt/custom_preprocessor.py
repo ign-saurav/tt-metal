@@ -1,258 +1,83 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
 
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-import torch
 
-from ttnn.model_preprocessing import ModuleArgs, fold_batch_norm2d_into_conv2d
-import torch
+from ttnn.model_preprocessing import fold_batch_norm2d_into_conv2d
 import ttnn
 from models.experimental.centernet.reference.network.dlav0 import (
     BasicBlock,
+    Root,
+    Tree,
 )
-from ttnn.dot_access import make_dot_access_dict
-
-
-def fold_bn_into_conv(conv, bn):
-    """
-    Fold BatchNorm parameters into Conv2d weights.
-
-    Args:
-        conv: nn.Conv2d layer
-        bn: nn.BatchNorm2d layer
-
-    Returns:
-        folded_weight: Tensor (out_channels, in_channels, kH, kW)
-        folded_bias: Tensor (out_channels,)
-    """
-    gamma = bn.weight.data
-    beta = bn.bias.data
-    mean = bn.running_mean
-    var = bn.running_var
-    eps = bn.eps
-
-    std = torch.sqrt(var + eps)
-    scale = gamma / std
-
-    folded_weight = conv.weight.data * scale.view(-1, 1, 1, 1)
-    folded_bias = beta - mean * scale
-
-    return folded_weight, folded_bias
-
-
-def create_basic_block_preprocessor():
-    """
-    Creates a custom preprocessor for BasicBlock that folds BatchNorm into Conv weights.
-    """
-
-    def preprocessor(model, name, ttnn_module_args):
-        parameters = {}
-
-        if hasattr(model, "conv1") and hasattr(model, "bn1"):
-            weight, bias = fold_bn_into_conv(model.conv1, model.bn1)
-            parameters["conv1"] = {
-                "weight": ttnn.from_torch(weight, dtype=ttnn.bfloat16),
-                "bias": ttnn.from_torch(bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16),
-            }
-
-        if hasattr(model, "conv2") and hasattr(model, "bn2"):
-            weight, bias = fold_bn_into_conv(model.conv2, model.bn2)
-            parameters["conv2"] = {
-                "weight": ttnn.from_torch(weight, dtype=ttnn.bfloat16),
-                "bias": ttnn.from_torch(bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16),
-            }
-
-        return parameters
-
-    return preprocessor
-
-
-class ConvArgs(ModuleArgs):
-    __getattr__ = dict.__getitem__
-    __delattr__ = dict.__delitem__
-
-    def __repr__(self):
-        return super().__repr__()
-
-
-def infer_module_args(model):
-    if isinstance(
-        model,
-        (
-            torch.nn.Conv2d,
-            torch.nn.ConvTranspose2d,
-        ),
-    ):
-        if (model, torch.nn.ConvTranspose2d):
-            return ConvArgs(
-                in_channels=model.in_channels,
-                out_channels=model.out_channels,
-                kernel_size=model.kernel_size,
-                stride=model.stride,
-                padding=model.padding,
-                dilation=model.dilation,
-                groups=model.groups,
-                padding_mode=model.padding_mode,
-                output_padding=model.output_padding,
-            )
-        return ConvArgs(
-            in_channels=model.in_channels,
-            out_channels=model.out_channels,
-            kernel_size=model.kernel_size,
-            stride=model.stride,
-            padding=model.padding,
-            dilation=model.dilation,
-            groups=model.groups,
-            padding_mode=model.padding_mode,
-        )
-    else:
-        module_args = {}
-        for child_name, child in model.named_children():
-            module_args[child_name] = infer_module_args(child)
-
-    return make_dot_access_dict(module_args, ignore_types=(ModuleArgs,))
-
-
-def fold_batch_norm2d_into_conv_transpose2d(conv_transpose, bn):
-    """Fold BatchNorm2d into ConvTranspose2d weights."""
-    if not bn.track_running_stats:
-        raise RuntimeError("BatchNorm2d must have track_running_stats=True to be folded into ConvTranspose2d")
-
-    weight = conv_transpose.weight
-    bias = conv_transpose.bias
-    running_mean = bn.running_mean
-    running_var = bn.running_var
-    eps = bn.eps
-    scale = bn.weight
-    shift = bn.bias
-
-    weight = weight * (scale / torch.sqrt(running_var + eps))[None, :, None, None]
-
-    if bias is not None:
-        bias = (bias - running_mean) * (scale / torch.sqrt(running_var + eps)) + shift
-    else:
-        bias = shift - running_mean * (scale / torch.sqrt(running_var + eps))
-
-    return weight, bias
-
-
-def _extract_backbone(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
-    """Extract and preprocess Backbone parameters with fused BatchNorm."""
-    assert isinstance(model, Backbone)
-
-    for i in range(len(model.multi_blocks)):
-        block = model.multi_blocks[i]
-        parameters[f"block_{i}"] = {}
-
-        conv_idx = 0
-        for j in range(0, len(block), 3):
-            conv_layer = block[j]
-            bn_layer = block[j + 1]
-
-            weight, bias = fold_batch_norm2d_into_conv2d(conv_layer, bn_layer)
-
-            parameters[f"block_{i}"][f"conv_{conv_idx}"] = {}
-            parameters[f"block_{i}"][f"conv_{conv_idx}"]["weight"] = ttnn.from_torch(
-                weight, dtype=dtype, mesh_mapper=mesh_mapper
-            )
-            bias = bias.reshape((1, 1, 1, -1))
-            parameters[f"block_{i}"][f"conv_{conv_idx}"]["bias"] = ttnn.from_torch(
-                bias, dtype=dtype, mesh_mapper=mesh_mapper
-            )
-            parameters[f"block_{i}"][f"conv_{conv_idx}"]["conv_args"] = infer_module_args(conv_layer)
-
-            conv_idx += 1
-
-    return parameters
 
 
 def _extract_basic_block(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
     """Extract and preprocess BasicBlock parameters with fused BatchNorm."""
     assert isinstance(model, BasicBlock)
-    parameters["conv"] = {}
-
-    weight, bias = fold_batch_norm2d_into_conv2d(model.conv, model.bn)
-    parameters["conv"]["weight"] = ttnn.from_torch(weight, mesh_mapper=mesh_mapper)
-    parameters["conv"]["bias"] = ttnn.from_torch(bias, mesh_mapper=mesh_mapper)
-    parameters["conv_args"] = infer_module_args(model)
+    parameters["conv1"] = {}
+    parameters["conv2"] = {}
+    weight, bias = fold_batch_norm2d_into_conv2d(model.conv1, model.bn1)
+    bias = bias.reshape((1, 1, 1, -1))
+    parameters["conv1"]["weight"] = ttnn.from_torch(weight, dtype=dtype, mesh_mapper=mesh_mapper)
+    parameters["conv1"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
+    weight, bias = fold_batch_norm2d_into_conv2d(model.conv2, model.bn2)
+    bias = bias.reshape((1, 1, 1, -1))
+    parameters["conv2"]["weight"] = ttnn.from_torch(weight, dtype=dtype, mesh_mapper=mesh_mapper)
+    parameters["conv2"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
 
     return parameters
 
 
-# def _extract_neck(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
-#     """Extract and preprocess Neck parameters with fused BatchNorm."""
-#     assert isinstance(model, Neck)
+def _extract_root(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
+    """Extract and preprocess Root parameters with fused BatchNorm."""
+    assert isinstance(model, Root)
+    parameters["conv"] = {}
+    weight, bias = fold_batch_norm2d_into_conv2d(model.conv, model.bn)
+    bias = bias.reshape((1, 1, 1, -1))
+    parameters["conv"]["weight"] = ttnn.from_torch(weight, dtype=dtype, mesh_mapper=mesh_mapper)
+    parameters["conv"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
 
-#     for i in range(len(model.decoder_blocks)):
-#         block = model.decoder_blocks[i]
-#         parameters[f"decoder_{i}"] = {}
-
-#         conv_transpose_layer = block[0]
-#         bn_layer = block[1]
-
-#         if i == 0:
-#             weight, bias = fold_batch_norm2d_into_conv_transpose2d(conv_transpose_layer, bn_layer)
-#             parameters[f"decoder_{i}"]["weight"] = ttnn.from_torch(weight, dtype=dtype, mesh_mapper=mesh_mapper)
-#             bias = bias.reshape((1, 1, 1, -1))
-#             parameters[f"decoder_{i}"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
-#             parameters[f"decoder_{i}"]["conv_args"] = infer_module_args(conv_transpose_layer)
-#         else:
-#             weight = conv_transpose_layer.weight
-#             parameters[f"decoder_{i}"]["weight"] = weight
-#             parameters[f"decoder_{i}"]["conv_args"] = infer_module_args(conv_transpose_layer)
-#             bias = conv_transpose_layer.bias
-
-#             if bias is not None:
-#                 bias = bias.reshape((1, 1, 1, -1))
-#                 parameters[f"decoder_{i}"]["bias"] = bias, dtype = dtype, mesh_mapper = mesh_mapper
-#             else:
-#                 out_channels = conv_transpose_layer.out_channels
-#                 zero_bias = torch.zeros(1, 1, 1, out_channels)
-#                 parameters[f"decoder_{i}"]["bias"] = zero_bias
-
-#             parameters[f"decoder_{i}"]["bn_weight"] = ttnn.from_torch(
-#                 bn_layer.weight.view(1, -1, 1, 1), dtype=dtype, mesh_mapper=mesh_mapper, layout=ttnn.TILE_LAYOUT
-#             )
-#             parameters[f"decoder_{i}"]["bn_bias"] = ttnn.from_torch(
-#                 bn_layer.bias.view(1, -1, 1, 1), dtype=dtype, mesh_mapper=mesh_mapper, layout=ttnn.TILE_LAYOUT
-#             )
-#             parameters[f"decoder_{i}"]["bn_running_mean"] = ttnn.from_torch(
-#                 bn_layer.running_mean.view(1, -1, 1, 1), dtype=dtype, mesh_mapper=mesh_mapper, layout=ttnn.TILE_LAYOUT
-#             )
-#             parameters[f"decoder_{i}"]["bn_running_var"] = ttnn.from_torch(
-#                 bn_layer.running_var.view(1, -1, 1, 1), dtype=dtype, mesh_mapper=mesh_mapper, layout=ttnn.TILE_LAYOUT
-#             )
-
-#     return parameters
+    return parameters
 
 
-# def _extract_head(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
-#     """Extract and preprocess Head parameters."""
-#     assert isinstance(model, Head)
+def _extract_tree(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
+    """Extract and preprocess Tree parameters with recursive structure."""
+    assert isinstance(model, Tree)
 
-#     # Process conv_cls
-#     parameters["conv_cls"] = {}
-#     parameters["conv_cls"]["weight"] = ttnn.from_torch(model.conv_cls.weight, dtype=dtype)
-#     bias = model.conv_cls.bias.reshape((1, 1, 1, -1))
-#     parameters["conv_cls"]["bias"] = ttnn.from_torch(bias, dtype=dtype)
-#     parameters["conv_cls"]["conv_args"] = infer_module_args(model.conv_cls)
+    # Extract tree1 (either BasicBlock or Tree)
+    if hasattr(model, "tree1"):
+        if isinstance(model.tree1, BasicBlock):
+            parameters["tree1"] = {}
+            _extract_basic_block(model.tree1, parameters["tree1"], dtype=dtype, mesh_mapper=mesh_mapper)
+        elif isinstance(model.tree1, Tree):
+            parameters["tree1"] = {}
+            _extract_tree(model.tree1, parameters["tree1"], dtype=dtype, mesh_mapper=mesh_mapper)
 
-#     # Process conv_reg
-#     parameters["conv_reg"] = {}
-#     parameters["conv_reg"]["weight"] = ttnn.from_torch(model.conv_reg.weight, dtype=dtype)
-#     bias = model.conv_reg.bias.reshape((1, 1, 1, -1))
-#     parameters["conv_reg"]["bias"] = ttnn.from_torch(bias, dtype=dtype)
-#     parameters["conv_reg"]["conv_args"] = infer_module_args(model.conv_reg)
+    # Extract tree2 (either BasicBlock or Tree)
+    if hasattr(model, "tree2"):
+        if isinstance(model.tree2, BasicBlock):
+            parameters["tree2"] = {}
+            _extract_basic_block(model.tree2, parameters["tree2"], dtype=dtype, mesh_mapper=mesh_mapper)
+        elif isinstance(model.tree2, Tree):
+            parameters["tree2"] = {}
+            _extract_tree(model.tree2, parameters["tree2"], dtype=dtype, mesh_mapper=mesh_mapper)
 
-#     # Process conv_dir_cls
-#     parameters["conv_dir_cls"] = {}
-#     parameters["conv_dir_cls"]["weight"] = ttnn.from_torch(model.conv_dir_cls.weight, dtype=dtype)
-#     bias = model.conv_dir_cls.bias.reshape((1, 1, 1, -1))
-#     parameters["conv_dir_cls"]["bias"] = ttnn.from_torch(bias, dtype=dtype)
-#     parameters["conv_dir_cls"]["conv_args"] = infer_module_args(model.conv_dir_cls)
+    # Extract root if present (only at leaf levels)
+    if hasattr(model, "root") and model.root is not None:
+        parameters["root"] = {}
+        _extract_root(model.root, parameters["root"], dtype=dtype, mesh_mapper=mesh_mapper)
 
-#     return parameters
+    # Extract project if present (1x1 conv + BatchNorm)
+    if hasattr(model, "project") and model.project is not None:
+        parameters["project"] = {}
+        weight, bias = fold_batch_norm2d_into_conv2d(model.project[0], model.project[1])
+        bias = bias.reshape((1, 1, 1, -1))
+        parameters["project"]["weight"] = ttnn.from_torch(weight, dtype=dtype, mesh_mapper=mesh_mapper)
+        parameters["project"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
+
+    return parameters
 
 
 def custom_preprocessor(
@@ -262,44 +87,22 @@ def custom_preprocessor(
     parameters = {}
     weight_dtype = ttnn.bfloat16
 
-    if isinstance(model, PointPillars):
-        parameters["pillar_encoder"] = {}
-        parameters["pillar_encoder"] = _extract_pillar_encoder(
-            model.pillar_encoder, parameters["pillar_encoder"], dtype=weight_dtype, mesh_mapper=mesh_mapper
+    if isinstance(model, BasicBlock):
+        parameters["basic_block"] = {}
+        parameters["basic_block"] = _extract_basic_block(
+            model, parameters["basic_block"], dtype=weight_dtype, mesh_mapper=mesh_mapper
         )
-
-        parameters["backbone"] = {}
-        parameters["backbone"] = _extract_backbone(
-            model.backbone, parameters["backbone"], dtype=weight_dtype, mesh_mapper=mesh_mapper
-        )
-
-        parameters["neck"] = {}
-        parameters["neck"] = _extract_neck(model.neck, parameters["neck"], dtype=weight_dtype, mesh_mapper=mesh_mapper)
-
-        parameters["head"] = {}
-        parameters["head"] = _extract_head(model.head, parameters["head"], dtype=weight_dtype, mesh_mapper=mesh_mapper)
-
-    if isinstance(model, PillarEncoder):
-        parameters["pillar_encoder"] = {}
-        parameters["pillar_encoder"] = _extract_pillar_encoder(
-            model, parameters["pillar_encoder"], dtype=weight_dtype, mesh_mapper=mesh_mapper
-        )
-
-    elif isinstance(model, Backbone):
-        parameters["backbone"] = {}
-        parameters["backbone"] = _extract_backbone(
-            model, parameters["backbone"], dtype=weight_dtype, mesh_mapper=mesh_mapper
-        )
-
-    elif isinstance(model, Neck):
-        parameters["neck"] = {}
-        parameters["neck"] = _extract_neck(model, parameters["neck"], dtype=weight_dtype, mesh_mapper=mesh_mapper)
-
-    elif isinstance(model, Head):
-        parameters["head"] = {}
-        parameters["head"] = _extract_head(model, parameters["head"], dtype=weight_dtype, mesh_mapper=mesh_mapper)
-
-    return parameters
+        return parameters
+    elif isinstance(model, Root):
+        parameters["root"] = {}
+        parameters["root"] = _extract_root(model, parameters["root"], dtype=weight_dtype, mesh_mapper=mesh_mapper)
+        return parameters
+    elif isinstance(model, Tree):
+        parameters["tree"] = {}
+        parameters["tree"] = _extract_tree(model, parameters["tree"], dtype=weight_dtype, mesh_mapper=mesh_mapper)
+        return parameters
+    else:
+        return parameters
 
 
 def create_custom_mesh_preprocessor(mesh_mapper=None):

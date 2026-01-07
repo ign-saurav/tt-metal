@@ -8,9 +8,10 @@ from models.tt_cnn.tt.builder import (
     TtConv2d,
     HeightShardedStrategyConfiguration,
 )
+from models.common.lightweightmodule import LightweightModule
 
 
-class TtBasicBlock:
+class TtBasicBlock(LightweightModule):
     def __init__(
         self,
         inplanes: int,
@@ -19,23 +20,19 @@ class TtBasicBlock:
         dilation: int,
         parameters,
         device,
-        batch_size: int = 1,
-        input_height: int = 512,
-        input_width: int = 512,
+        layer_args,
     ):
+        super(TtBasicBlock, self).__init__()
         self.device = device
-        self.batch_size = batch_size
+        self.batch_size = layer_args.conv1.batch_size
         self.planes = planes
-
-        self.out_h = (input_height - 1) // stride + 1
-        self.out_w = (input_width - 1) // stride + 1
 
         self.conv1 = TtConv2d(
             self._make_config(
                 parameters.conv1,
-                batch_size,
-                input_height,
-                input_width,
+                layer_args.conv1.batch_size,
+                layer_args.conv1.input_height,
+                layer_args.conv1.input_width,
                 inplanes,
                 planes,
                 stride,
@@ -48,9 +45,9 @@ class TtBasicBlock:
         self.conv2 = TtConv2d(
             self._make_config(
                 parameters.conv2,
-                batch_size,
-                self.out_h,
-                self.out_w,
+                layer_args.conv2.batch_size,
+                layer_args.conv2.input_height,
+                layer_args.conv2.input_width,
                 planes,
                 planes,
                 1,
@@ -97,7 +94,7 @@ class TtBasicBlock:
 
         out = self.conv1(x)
         out = self.conv2(out)
-        out = ttnn.reshape(out, (self.batch_size, self.out_h, self.out_w, self.planes))
+        out = ttnn.reshape(out, residual.shape)
         out = ttnn.add(out, residual)
         out = ttnn.relu(out)
 

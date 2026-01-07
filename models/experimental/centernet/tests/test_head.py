@@ -7,11 +7,11 @@ import torch
 import ttnn
 from loguru import logger
 from ttnn.model_preprocessing import preprocess_model_parameters
-
+from models.demos.utils.common_demo_utils import get_mesh_mappers
 from models.common.utility_functions import run_for_wormhole_b0, comp_pcc, tt2torch_tensor
 from models.experimental.centernet.reference.network.dlav0 import get_pose_net
-from models.experimental.centernet.tt.tt_head_devin import TtCenterNetHead
-from models.experimental.centernet.tt.custom_preprocessor import create_centernet_head_preprocessor
+from models.experimental.centernet.tt.tt_head import TtCenterNetHead
+from models.experimental.centernet.tt.custom_preprocessor import create_custom_mesh_preprocessor
 
 WEIGHTS_PATH = "models/experimental/centernet/ctdet_coco_dlav0_1x.pth"
 
@@ -51,6 +51,9 @@ def test_centernet_heads(device):
     tt_input = ttnn.from_torch(torch_input.permute(0, 2, 3, 1), dtype=ttnn.bfloat16)
     tt_input = ttnn.to_device(tt_input, device)
 
+    import pdb
+
+    pdb.set_trace()
     for head_name, num_classes in heads.items():
         logger.info(f"Testing {head_name} head with {num_classes} classes")
 
@@ -59,10 +62,11 @@ def test_centernet_heads(device):
         with torch.no_grad():
             pytorch_output = pytorch_head(torch_input)
 
+        inputs_mesh_mapper, weights_mesh_mapper, output_mesh_composer = get_mesh_mappers(device)
         parameters = preprocess_model_parameters(
             initialize_model=lambda: pytorch_head,
-            custom_preprocessor=create_centernet_head_preprocessor(),
-            device=None,
+            custom_preprocessor=create_custom_mesh_preprocessor(weights_mesh_mapper),
+            device=device,
         )
 
         tt_model = TtCenterNetHead(
