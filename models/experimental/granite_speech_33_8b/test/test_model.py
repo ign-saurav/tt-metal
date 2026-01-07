@@ -5,8 +5,8 @@ import torchaudio
 from huggingface_hub import hf_hub_download
 from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
 from tests.ttnn.utils_for_testing import assert_with_pcc
-from models.experimental.granite_speech_33_8b.tt.ttnn_model import GraniteEncoderAndProjector
-
+from models.experimental.granite_speech_33_8b.tt.ttnn_model import GraniteEncoderAndProjector, GraniteSpeech
+import os
 
 class TestConfig:  
     """Test configuration for Conformer modules."""  
@@ -37,6 +37,10 @@ class TestConfig:
         self.downsample_rate = 5
         self.window_size = 15
         self.text_config_hidden_size = 4096
+        self.audio_token_id = 49159
+        self.vocab_size = 49160
+        self.text_config_hidden_size = 4096
+        self.pad_token_id = 0
         self.optimized = False
 
 
@@ -116,4 +120,104 @@ def test_encoder_and_projector_output(device):
       
     # Compare outputs  
     assert_with_pcc(torch_output, ttnn_output, pcc=0.96)  
-    print(f"BlipIntermediate test passed with PCC: {calculate_pcc(torch_output, ttnn_output):.4f}") 
+    print(f"Encoder+Projector test passed with PCC: {calculate_pcc(torch_output, ttnn_output):.4f}") 
+
+
+@pytest.mark.parametrize(  
+    "device_params",  
+    [{"l1_small_size": 65535}],  
+    indirect=True,  
+)   
+@pytest.mark.parametrize(
+    "mesh_device",
+    [
+        {
+            "N150": (1, 1),
+            "N300": (1, 2),
+            "N150x4": (1, 4),
+            "T3K": (1, 8),
+            "TG": (8, 4),
+            "P150": (1, 1),
+            "P300": (1, 2),
+            "P150x4": (1, 4),
+            "P150x8": (1, 8),
+            "BHGLX": (8, 4),
+        }.get(os.environ.get("MESH_DEVICE"), len(ttnn.get_device_ids()))
+    ],
+    indirect=True,
+)
+def test_model_output(device, mesh_device):
+    device = mesh_device  
+    import pdb
+    pdb.set_trace()
+    config = TestConfig()  
+      
+    # Initialize models  
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
+    torch_model.eval()  
+
+    processor = AutoProcessor.from_pretrained("ibm-granite/granite-speech-3.3-8b")
+    tokenizer = processor.tokenizer
+      
+    ttnn_model = GraniteSpeech(device=device, config=config, tokenizer=tokenizer, torch_ref=torch_model) 
+      
+    # Prepare weights  
+    ttnn_model.prepare_weights(  
+        torch_model
+    )
+      
+    # Create test input 
+    torch.manual_seed(0) 
+    batch_size, seq_len, hidden_dim = 1, 844, 160  
+    torch_input = torch.randn(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)
+    torch_input_ids = torch.randint(0, 100, (batch_size, seq_len, hidden_dim), dtype=torch.int32)  
+
+    # load audio
+    audio_path = hf_hub_download(repo_id="ibm-granite/granite-speech-3.3-8b", filename="10226_10111_000000.wav")
+    wav, sr = torchaudio.load(audio_path, normalize=True)
+    assert wav.shape[0] == 1 and sr == 16000  # mono, 16khz
+
+    # create text prompt
+    system_prompt = "Knowledge Cutoff Date: April 2024.\nToday's Date: April 9, 2025.\nYou are Granite, developed by IBM. You are a helpful AI assistant"
+    user_prompt = "<|audio|>can you transcribe the speech into a written format?"
+    chat = [
+        dict(role="system", content=system_prompt),
+        dict(role="user", content=user_prompt),
+    ]
+    prompt = tokenizer.apply_chat_template(chat, tokenize=False, add_generation_prompt=True)
+
+    # run the processor+model
+    model_inputs = processor(prompt, wav, device='cpu', return_tensors="pt").to('cpu')
+      
+    # PyTorch forward pass  
+    with torch.no_grad():  
+        # torch_output = torch_model(input_ids=torch_input_ids,input_features=torch_input)
+        # torch_output = torch_model(input_ids=model_inputs['input_ids'],input_features=model_inputs['input_features'],input_features_mask=model_inputs['input_features_mask'])  
+        torch_output = torch_model(**model_inputs, max_new_tokens=200, do_sample=False, num_beams=1)
+      
+    # TTNN forward pass  
+    ttnn_input_feat = ttnn.from_torch(  
+        model_inputs['input_features'],
+        dtype=ttnn.bfloat16,  
+        layout=ttnn.TILE_LAYOUT,  
+        device=device  
+    )  
+    ttnn_input_ids = ttnn.from_torch(  
+        model_inputs['input_ids'],
+        dtype=ttnn.bfloat16,  
+        layout=ttnn.TILE_LAYOUT,  
+        device=device  
+    )  
+    ttnn_input_feat_mask = ttnn.from_torch(  
+        model_inputs['input_features_mask'],
+        dtype=ttnn.bfloat16,  
+        layout=ttnn.TILE_LAYOUT,  
+        device=device  
+    )  
+    # ttnn_output = ttnn_model.forward(input_ids=ttnn_input_ids, input_features=ttnn_input_feat, input_features_mask=ttnn_input_feat_mask) 
+    ttnn_output = ttnn_model.forward(input_ids=model_inputs['input_ids'], input_features=model_inputs['input_features'], input_features_mask=model_inputs['input_features_mask']) 
+    ttnn_output = ttnn.to_torch(ttnn_output) 
+      
+    # Compare outputs  
+    assert_with_pcc(torch_output, ttnn_output, pcc=0.96)  
+    print(f"GraniteSpeech test passed with PCC: {calculate_pcc(torch_output, ttnn_output):.4f}") 
