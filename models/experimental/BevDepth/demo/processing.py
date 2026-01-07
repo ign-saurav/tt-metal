@@ -1,9 +1,8 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
 
 import os
-import pickle
-import json
+import glob
 import numpy as np
 import torch
 from PIL import Image
@@ -56,12 +55,352 @@ map_name_from_general_to_detection = {
 }
 
 
-def load_infos():
-    """Load sample information from pickle file."""
-    infos_path = os.path.join(RESOURCES_DIR, "infos.pkl")
-    with open(infos_path, "rb") as f:
-        infos = pickle.load(f)
-    return infos
+def generate_infos():
+    """Generate sample information with embedded calibration and annotation data."""
+    cam_names = ["CAM_FRONT", "CAM_FRONT_RIGHT", "CAM_BACK_RIGHT", "CAM_BACK", "CAM_BACK_LEFT", "CAM_FRONT_LEFT"]
+    lidar_names = ["LIDAR_TOP"]
+
+    cam_infos = {
+        "CAM_FRONT": {
+            "sample_token": "e93e98b63d3b40209056d129dc53ceee",
+            "timestamp": 1533151603512404,
+            "is_key_frame": True,
+            "height": 900,
+            "width": 1600,
+            "filename": "samples/CAM_FRONT/n008-2018-08-01-15-16-36-0400__CAM_FRONT__1533151603512404.jpg",
+            "calibrated_sensor": {
+                "token": "d3ab655f3cc540a88491ec218751f9c6",
+                "sensor_token": "725903f5b62f56118f4094b46a4470d8",
+                "translation": [1.72200568478, 0.00475453292289, 1.49491291905],
+                "rotation": [0.5077241387638071, -0.4973392230703816, 0.49837167536166627, -0.4964832014373754],
+                "camera_intrinsic": [
+                    [1252.8131021185304, 0.0, 826.588114781398],
+                    [0.0, 1252.8131021185304, 469.9846626224581],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+            "ego_pose": {
+                "token": "4f5e35aa6c6a426ca945e206fb2f4921",
+                "timestamp": 1533151603512404,
+                "rotation": [-0.9687876119182126, -0.004506968075376869, -0.00792272203393983, 0.24772460658591755],
+                "translation": [599.849775495386, 1647.6411294309523, 0.0],
+            },
+        },
+        "CAM_FRONT_RIGHT": {
+            "sample_token": "e93e98b63d3b40209056d129dc53ceee",
+            "timestamp": 1533151603520482,
+            "is_key_frame": True,
+            "height": 900,
+            "width": 1600,
+            "filename": "samples/CAM_FRONT_RIGHT/n008-2018-08-01-15-16-36-0400__CAM_FRONT_RIGHT__1533151603520482.jpg",
+            "calibrated_sensor": {
+                "token": "69356358127a4756bafab3d45ec7d6b4",
+                "sensor_token": "2f7ad058f1ac5557bf321c7543758f43",
+                "translation": [1.58082565783, -0.499078711449, 1.51749368405],
+                "rotation": [0.20335173766558642, -0.19146333228946724, 0.6785710044972951, -0.6793609166212989],
+                "camera_intrinsic": [
+                    [1256.7485116440405, 0.0, 817.7887570959712],
+                    [0.0, 1256.7485116440403, 451.9541780095127],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+            "ego_pose": {
+                "token": "5ed84fb1dbe24efcb00eb766a22d69d6",
+                "timestamp": 1533151603520482,
+                "rotation": [-0.9687599514054591, -0.004456697153369989, -0.007899682341935369, 0.2478343991908144],
+                "translation": [599.9118549287866, 1647.606633933739, 0.0],
+            },
+        },
+        "CAM_BACK_RIGHT": {
+            "sample_token": "e93e98b63d3b40209056d129dc53ceee",
+            "timestamp": 1533151603528113,
+            "is_key_frame": True,
+            "height": 900,
+            "width": 1600,
+            "filename": "samples/CAM_BACK_RIGHT/n008-2018-08-01-15-16-36-0400__CAM_BACK_RIGHT__1533151603528113.jpg",
+            "calibrated_sensor": {
+                "token": "b37d2a134cf24b4283e74e0654ae6a4b",
+                "sensor_token": "ca7dba2ec9f95951bbe67246f7f2c3f7",
+                "translation": [1.05945173053, -0.46720294852, 1.55050857555],
+                "rotation": [0.13819187705364147, -0.13796718183628456, -0.6893329941542625, 0.697630335509333],
+                "camera_intrinsic": [
+                    [1249.9629280788233, 0.0, 825.3768045375984],
+                    [0.0, 1249.9629280788233, 462.54816385708756],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+            "ego_pose": {
+                "token": "8fafdaa824b74553b1a08011d29baf20",
+                "timestamp": 1533151603528113,
+                "rotation": [-0.9687345485285538, -0.0043670388304257405, -0.007816404838658813, 0.24793791011951208],
+                "translation": [599.9705034252927, 1647.574034904777, 0.0],
+            },
+        },
+        "CAM_BACK": {
+            "sample_token": "e93e98b63d3b40209056d129dc53ceee",
+            "timestamp": 1533151603537558,
+            "is_key_frame": True,
+            "height": 900,
+            "width": 1600,
+            "filename": "samples/CAM_BACK/n008-2018-08-01-15-16-36-0400__CAM_BACK__1533151603537558.jpg",
+            "calibrated_sensor": {
+                "token": "78056a17635540eb9ed0d980d3e24520",
+                "sensor_token": "ce89d4f3050b5892b33b3d328c5e82a3",
+                "translation": [0.05524611077, 0.0107882366898, 1.56794286957],
+                "rotation": [0.5067997344989889, -0.4977567019405021, -0.4987849934090844, 0.496594225837321],
+                "camera_intrinsic": [
+                    [796.8910634503094, 0.0, 857.7774326863696],
+                    [0.0, 796.8910634503094, 476.8848988407415],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+            "ego_pose": {
+                "token": "1908fe7dc09c474ebc6ea23b4c1c5401",
+                "timestamp": 1533151603537558,
+                "rotation": [-0.9687030311295038, -0.0042154863536825755, -0.007752028981545582, 0.24806566308536676],
+                "translation": [600.0430992523302, 1647.5336699861132, 0.0],
+            },
+        },
+        "CAM_BACK_LEFT": {
+            "sample_token": "e93e98b63d3b40209056d129dc53ceee",
+            "timestamp": 1533151603547405,
+            "is_key_frame": True,
+            "height": 900,
+            "width": 1600,
+            "filename": "samples/CAM_BACK_LEFT/n008-2018-08-01-15-16-36-0400__CAM_BACK_LEFT__1533151603547405.jpg",
+            "calibrated_sensor": {
+                "token": "d884789aacbc44649be792a2e203b9bf",
+                "sensor_token": "a89643a5de885c6486df2232dc954da2",
+                "translation": [1.04852047718, 0.483058131052, 1.56210154484],
+                "rotation": [0.7048620297871717, -0.6907306801461466, -0.11209091960167808, 0.11617345743327073],
+                "camera_intrinsic": [
+                    [1254.9860565800168, 0.0, 829.5769333630991],
+                    [0.0, 1254.9860565800168, 467.1680561863987],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+            "ego_pose": {
+                "token": "e4233736f4ba4fd5989684f0f1e84377",
+                "timestamp": 1533151603547405,
+                "rotation": [-0.9686660835660069, -0.004081555849799428, -0.007697727348287311, 0.24821382806848222],
+                "translation": [600.1185731195969, 1647.4917138239566, 0.0],
+            },
+        },
+        "CAM_FRONT_LEFT": {
+            "sample_token": "e93e98b63d3b40209056d129dc53ceee",
+            "timestamp": 1533151603504799,
+            "is_key_frame": True,
+            "height": 900,
+            "width": 1600,
+            "filename": "samples/CAM_FRONT_LEFT/n008-2018-08-01-15-16-36-0400__CAM_FRONT_LEFT__1533151603504799.jpg",
+            "calibrated_sensor": {
+                "token": "51406a6af1e34c6b80c1abe1b0304aca",
+                "sensor_token": "ec4b5d41840a509984f7ec36419d4c09",
+                "translation": [1.5752559464, 0.500519383135, 1.50696032589],
+                "rotation": [0.6812088525125634, -0.6687507165046241, 0.2101702448905517, -0.21108161122114324],
+                "camera_intrinsic": [
+                    [1257.8625342125129, 0.0, 827.2410631095686],
+                    [0.0, 1257.8625342125129, 450.915498205774],
+                    [0.0, 0.0, 1.0],
+                ],
+            },
+            "ego_pose": {
+                "token": "27f02b3e285d4ca18015535511520b3e",
+                "timestamp": 1533151603504799,
+                "rotation": [-0.9688136386550925, -0.004554290680191179, -0.007944423174925015, 0.24762123926008034],
+                "translation": [599.7913353051094, 1647.6735927814666, 0.0],
+            },
+        },
+    }
+
+    lidar_infos = {
+        "LIDAR_TOP": {
+            "sample_token": "e93e98b63d3b40209056d129dc53ceee",
+            "timestamp": 1533151603547590,
+            "filename": "samples/LIDAR_TOP/n008-2018-08-01-15-16-36-0400__LIDAR_TOP__1533151603547590.pcd.bin",
+            "calibrated_sensor": {
+                "token": "d051cafdd9fe4d999b413462364d44a0",
+                "sensor_token": "dc8b396651c05aedbb9cdaae573bb567",
+                "translation": [0.985793, 0.0, 1.84019],
+                "rotation": [0.706749235646644, -0.015300993788500868, 0.01739745181256607, -0.7070846669051719],
+                "camera_intrinsic": [],
+            },
+            "ego_pose": {
+                "token": "fdddd75ee1d94f14a09991988dab8b3e",
+                "timestamp": 1533151603547590,
+                "rotation": [-0.968669701688471, -0.004043399262151301, -0.007666594265959211, 0.24820129589817977],
+                "translation": [600.1202137947669, 1647.490776275174, 0.0],
+            },
+        }
+    }
+
+    ann_infos = [
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [637.141, 1636.252, -0.235],
+            "size": [0.621, 0.647, 1.778],
+            "rotation": [0.3495370229501108, 0.0, 0.0, 0.9369225526088982],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [612.719, 1632.142, 0.491],
+            "size": [0.688, 0.944, 1.904],
+            "rotation": [0.3598258294147673, 0.0, 0.0, 0.9330194920182401],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [619.03, 1648.941, 0.413],
+            "size": [0.578, 0.613, 1.752],
+            "rotation": [0.2267278025893585, 0.0, 0.0, 0.9739581631327913],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [635.378, 1674.253, -0.163],
+            "size": [0.909, 1.105, 2.0],
+            "rotation": [0.859218955073936, 0.0, 0.0, 0.5116080406342863],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [622.35, 1624.018, -0.016],
+            "size": [0.751, 1.03, 1.975],
+            "rotation": [0.3270447225565966, 0.0, 0.0, 0.9450088621001809],
+        },
+        {
+            "category_name": "vehicle.car",
+            "translation": [635.447, 1620.546, -0.326],
+            "size": [2.001, 4.734, 1.481],
+            "rotation": [0.902945631703063, 0.0, 0.0, -0.4297547977490846],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [598.103, 1642.075, 1.029],
+            "size": [0.631, 0.61, 1.929],
+            "rotation": [0.9842156913650645, 0.0, 0.0, -0.1769730851592639],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [622.249, 1646.081, 0.321],
+            "size": [0.697, 0.498, 1.761],
+            "rotation": [0.24369118456274716, 0.0, 0.0, 0.9698528788256522],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [619.603, 1624.655, 0.071],
+            "size": [0.665, 0.736, 1.89],
+            "rotation": [0.9500782963408733, 0.0, 0.0, -0.31201158764062575],
+        },
+        {
+            "category_name": "vehicle.car",
+            "translation": [583.549, 1656.391, 1.267],
+            "size": [1.871, 4.488, 1.515],
+            "rotation": [0.9708735025408489, 0.0, 0.0, -0.23959265861888215],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [627.008, 1617.877, -0.387],
+            "size": [0.546, 0.439, 1.622],
+            "rotation": [0.5418842462178632, 0.0, 0.0, 0.8404531299845923],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [640.863, 1643.013, -0.285],
+            "size": [0.64, 0.395, 1.807],
+            "rotation": [0.7735748318721248, 0.0, 0.0, 0.6337049624975442],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [602.152, 1626.301, 0.234],
+            "size": [0.489, 0.491, 1.851],
+            "rotation": [0.8737340236499682, 0.0, 0.0, 0.4864040048318236],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [631.815, 1636.973, 0.074],
+            "size": [0.612, 0.736, 1.877],
+            "rotation": [-0.21480351118958524, 0.0, 0.0, 0.9766572846094098],
+        },
+        {
+            "category_name": "vehicle.car",
+            "translation": [660.851, 1604.404, -0.423],
+            "size": [1.803, 4.495, 1.56],
+            "rotation": [0.35256038671077344, 0.0, 0.0, 0.935789064758907],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [650.737, 1625.23, -0.3],
+            "size": [0.585, 0.681, 1.711],
+            "rotation": [0.9770697356884313, 0.0, 0.0, -0.21291954255478537],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [582.275, 1668.561, 1.473],
+            "size": [0.908, 1.109, 2.211],
+            "rotation": [0.2657664441485724, 0.0, 0.0, 0.9640374459348681],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [597.73, 1641.374, 0.993],
+            "size": [0.712, 0.601, 1.891],
+            "rotation": [0.9715759823183562, 0.0, 0.0, -0.23672792522666428],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [636.797, 1680.132, -0.198],
+            "size": [0.755, 1.235, 2.083],
+            "rotation": [0.8724192438664237, 0.0, 0.0, 0.4887582868162314],
+        },
+        {
+            "category_name": "vehicle.car",
+            "translation": [582.374, 1660.997, 1.38],
+            "size": [2.037, 4.958, 1.639],
+            "rotation": [0.25477072568470893, 0.0, 0.0, 0.9670014877620855],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [639.585, 1606.675, -0.122],
+            "size": [0.724, 0.828, 1.835],
+            "rotation": [0.940133570865004, 0.0, 0.0, -0.3408062043634423],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [631.807, 1644.622, -0.459],
+            "size": [0.738, 0.783, 1.52],
+            "rotation": [0.8805848980472477, 0.0, 0.0, 0.47388842287095206],
+        },
+        {
+            "category_name": "human.pedestrian.adult",
+            "translation": [637.791, 1636.674, -0.011],
+            "size": [0.699, 0.738, 1.95],
+            "rotation": [0.36583533995688255, 0.0, 0.0, 0.9306795925766462],
+        },
+    ]
+
+    info = {
+        "sample_token": "e93e98b63d3b40209056d129dc53ceee",
+        "timestamp": 1533151603547590,
+        "scene_token": "bebf5f5b2a674631ab5c88fd1aa9e87a",
+        "cam_infos": cam_infos,
+        "lidar_infos": lidar_infos,
+        "cam_sweeps": [],
+        "lidar_sweeps": [],
+        "ann_infos": ann_infos,
+    }
+
+    for cam_name in cam_names:
+        cam_pattern = os.path.join(RESOURCES_DIR, "samples", cam_name, "*.jpg")
+        cam_files = glob.glob(cam_pattern)
+        if cam_files:
+            rel_path = os.path.relpath(cam_files[0], RESOURCES_DIR)
+            info["cam_infos"][cam_name]["filename"] = rel_path
+
+    for lidar_name in lidar_names:
+        lidar_pattern = os.path.join(RESOURCES_DIR, "samples", lidar_name, "*.bin")
+        lidar_files = glob.glob(lidar_pattern)
+        if lidar_files:
+            rel_path = os.path.relpath(lidar_files[0], RESOURCES_DIR)
+            info["lidar_infos"][lidar_name]["filename"] = rel_path
+
+    return [info]
 
 
 def load_images_and_mats(info):
@@ -166,8 +505,9 @@ def load_images_and_mats(info):
         "bda_mat": torch.eye(4).unsqueeze(0),
     }
 
-    ego2global_rotation = np.mean([cam_info[cam]["ego_pose"]["rotation"] for cam in IMG_KEYS], 0)
-    ego2global_translation = np.mean([cam_info[cam]["ego_pose"]["translation"] for cam in IMG_KEYS], 0)
+    lidar_info = info["lidar_infos"]["LIDAR_TOP"]
+    ego2global_rotation = lidar_info["ego_pose"]["rotation"]
+    ego2global_translation = lidar_info["ego_pose"]["translation"]
 
     return imgs, mats_dict, ego2global_rotation, ego2global_translation
 
@@ -466,54 +806,6 @@ def get_gt_corners(info, ego2global_rotation, ego2global_translation, show_range
                 gt_corners.append(corners)
 
     return gt_corners
-
-
-def load_precomputed_results(info, ego2global_rotation, ego2global_translation, score_threshold=0.3):
-    """
-    Load precomputed detection results from JSON file.
-
-    Args:
-        info: Sample information dictionary
-        ego2global_rotation: Ego to global rotation
-        ego2global_translation: Ego to global translation
-        score_threshold: Score threshold for filtering detections
-
-    Returns:
-        boxes_list: List of boxes [x, y, z, dx, dy, dz, yaw, vx, vy]
-        classes_list: List of class names
-        scores_list: List of detection scores
-    """
-    results_path = os.path.join(RESOURCES_DIR, "results.json")
-    with open(results_path, "r") as f:
-        results = json.load(f)
-
-    sample_token = info["sample_token"]
-    detections = results["results"].get(sample_token, [])
-
-    boxes_list = []
-    classes_list = []
-    scores_list = []
-
-    for det in detections:
-        if det["detection_score"] < score_threshold:
-            continue
-
-        box = get_ego_box(
-            dict(
-                size=det["size"],
-                rotation=det["rotation"],
-                translation=det["translation"],
-            ),
-            ego2global_rotation,
-            ego2global_translation,
-        )
-        vx = det.get("velocity", [0, 0])[0]
-        vy = det.get("velocity", [0, 0])[1]
-        boxes_list.append([box[0], box[1], box[2], box[3], box[4], box[5], box[6], vx, vy])
-        classes_list.append(det["detection_name"])
-        scores_list.append(det["detection_score"])
-
-    return boxes_list, classes_list, scores_list
 
 
 def visualize_results(

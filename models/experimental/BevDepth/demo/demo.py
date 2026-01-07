@@ -1,21 +1,13 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
-
-"""
-BEVDepth Demo - TTNN visualization.
-This module orchestrates the demo workflow.
-Supports 'ttnn' mode (TTNN only) or 'both' mode (Torch and TTNN comparison).
-"""
 
 import os
 from argparse import ArgumentParser
 from loguru import logger
 import ttnn
-
-# Import processing utilities
 from models.experimental.BevDepth.demo.processing import (
     RESOURCES_DIR,
-    load_infos,
+    generate_infos,
     load_images_and_mats,
     load_lidar_points,
     decode_predictions,
@@ -23,11 +15,7 @@ from models.experimental.BevDepth.demo.processing import (
     get_gt_corners,
     visualize_results,
 )
-
-# Import common utilities
 from models.experimental.BevDepth.common import run_torch_inference
-
-# Import TTNN utilities
 from models.experimental.BevDepth.tt.utils import run_ttnn_inference
 from models.experimental.BevDepth.tt.custom_preprocessing import prepare_all_parameters_from_reference
 
@@ -56,7 +44,7 @@ def main():
     logger.info("=" * 60)
 
     # Load sample data
-    infos = load_infos()
+    infos = generate_infos()
     info = infos[0]
 
     imgs, mats_dict, ego2global_rotation, ego2global_translation = load_images_and_mats(info)
