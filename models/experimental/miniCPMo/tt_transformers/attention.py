@@ -393,15 +393,43 @@ class Attention(LightweightModule):
         # Use HiFi2 for DRAM-sharded matmuls as they are otherwise flop-bound. Loses 1 bit of activation precision.
         ###
 
-        xqkv_fused_sharded = ttnn.linear(
-            x,
-            self.wqkv,
-            # bias=self.wqkv_bias,
-            memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
-            program_config=self.model_config["XQKV_DECODE_PROGCFG"],
-            compute_kernel_config=self.li_qkv_decode_compute_kernel_cfg,
-            dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
-        )
+        # For smaller models (dim < 4096), use DRAM-based matmul to avoid L1 conflicts
+        use_dram_path = self.hidden_size < 4096
+
+        if use_dram_path:
+            # DRAM interleaved path - slower but avoids L1 conflicts
+            # Use torch conversion to avoid memory layout issues
+            x_torch = ttnn.to_torch(x)
+            wqkv_torch = ttnn.to_torch(self.wqkv)
+
+            x_dram = ttnn.from_torch(
+                x_torch,
+                dtype=ttnn.bfloat16,
+                device=x.device(),
+                layout=ttnn.TILE_LAYOUT,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
+            wqkv_dram = ttnn.from_torch(
+                wqkv_torch,
+                dtype=ttnn.bfloat16,
+                device=x.device(),
+                layout=ttnn.TILE_LAYOUT,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
+
+            xqkv_fused_sharded = ttnn.linear(x_dram, wqkv_dram, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            ttnn.deallocate(x_dram)
+            ttnn.deallocate(wqkv_dram)
+        else:
+            # L1 sharded path - fast, for larger models
+            xqkv_fused_sharded = ttnn.linear(
+                x,
+                self.wqkv,
+                memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
+                program_config=self.model_config["XQKV_DECODE_PROGCFG"],
+                compute_kernel_config=self.li_qkv_decode_compute_kernel_cfg,
+                dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
+            )
         # FIXME: File bug against dram-sharded matmuls with bias
         if self.wqkv_bias_decode:
             # select the bias tensor based on the number of tiles in the rows
@@ -417,8 +445,10 @@ class Attention(LightweightModule):
             cluster_axis=1,
             num_reduce_scatter_links=self.num_reduce_scatter_links,
             num_all_gather_links=self.num_all_gather_links,
-            memory_config=self.model_config["QKV_OUT_GATHERED_MEMCFG"](list(self.mesh_device.shape)[1]),
-            sharded=True,
+            memory_config=self.model_config["QKV_OUT_GATHERED_MEMCFG"](list(self.mesh_device.shape)[1])
+            if not use_dram_path
+            else ttnn.DRAM_MEMORY_CONFIG,
+            sharded=not use_dram_path,
             dtype=self.ccl_dtype,
             topology=self.ccl_topology,
         )
@@ -433,7 +463,14 @@ class Attention(LightweightModule):
             )
         else:
             # bfloat16 is required by nlp_create_qkv_heads_decode
-            xqkv_fused = ttnn.sharded_to_interleaved(xqkv_fused_sharded, ttnn.L1_MEMORY_CONFIG, ttnn.bfloat16)
+            if use_dram_path:
+                # Already in DRAM interleaved format from tt_all_reduce, just convert to L1 and bfloat16
+                # Use xqkv_fused (the all_reduce output), not xqkv_fused_sharded
+                xqkv_fused = ttnn.to_memory_config(xqkv_fused, ttnn.L1_MEMORY_CONFIG)
+                if xqkv_fused.dtype != ttnn.bfloat16:
+                    xqkv_fused = ttnn.typecast(xqkv_fused, ttnn.bfloat16)
+            else:
+                xqkv_fused = ttnn.sharded_to_interleaved(xqkv_fused_sharded, ttnn.L1_MEMORY_CONFIG, ttnn.bfloat16)
 
         ttnn.deallocate(xqkv_fused_sharded)
 
@@ -598,8 +635,10 @@ class Attention(LightweightModule):
                 dim=2,
                 cluster_axis=1,
                 num_links=2,
-                memory_config=self.model_config["GATHER_USERS_MEMCFG"](list(self.mesh_device.shape)[1]),
-                sharded=True,
+                memory_config=self.model_config["GATHER_USERS_MEMCFG"](list(self.mesh_device.shape)[1])
+                if not use_dram_path
+                else ttnn.DRAM_MEMORY_CONFIG,
+                sharded=not use_dram_path,
                 # dtype=self.ccl_dtype,  # Running bf16 until we have SDPA output bfp8 df; otherwise we have two sharded to interleaved/interleaved to sharded conversions
             )
             if self.TG:
@@ -614,16 +653,42 @@ class Attention(LightweightModule):
                     memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
                 )
 
-            # TODO: Fix this once self.TG supports dram-sharded matmuls
-            dense_out_sharded = ttnn.matmul(
-                attn_output,
-                self.wo,
-                core_grid=ttnn.CoreGrid(y=4, x=8) if self.TG else None,
-                program_config=self.model_config["ATTN_OUTPUT_PROGCFG"] if not self.TG else None,
-                memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
-                dtype=ttnn.bfloat8_b if self.TG else None,
-                compute_kernel_config=self.li_o_decode_compute_kernel_cfg,
-            )
+            # For DRAM path, use DRAM memory config and auto-select program config
+            if use_dram_path:
+                try:
+                    dense_out_sharded = ttnn.matmul(
+                        attn_output,
+                        self.wo,
+                        core_grid=None,
+                        program_config=None,
+                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                        compute_kernel_config=self.li_o_decode_compute_kernel_cfg,
+                    )
+                except:
+                    attn_output_conv = ttnn.from_torch(
+                        ttnn.to_torch(attn_output),
+                        dtype=ttnn.bfloat16,
+                        device=attn_output.device(),
+                        layout=ttnn.TILE_LAYOUT,
+                    )
+                    wo_conv = ttnn.from_torch(
+                        ttnn.to_torch(self.wo),
+                        dtype=ttnn.bfloat16,
+                        device=attn_output.device(),
+                        layout=ttnn.TILE_LAYOUT,
+                    )
+                    dense_out_sharded = ttnn.matmul(attn_output_conv, wo_conv)
+            else:
+                # TODO: Fix this once self.TG supports dram-sharded matmuls
+                dense_out_sharded = ttnn.matmul(
+                    attn_output,
+                    self.wo,
+                    core_grid=ttnn.CoreGrid(y=4, x=8) if self.TG else None,
+                    program_config=self.model_config["ATTN_OUTPUT_PROGCFG"] if not self.TG else None,
+                    memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
+                    dtype=ttnn.bfloat8_b if self.TG else None,
+                    compute_kernel_config=self.li_o_decode_compute_kernel_cfg,
+                )
 
             ttnn.deallocate(attn_output_cat)
 
@@ -646,7 +711,7 @@ class Attention(LightweightModule):
                     if self.TG
                     else self.model_config["DECODE_RESIDUAL_MEMCFG"]
                 ),
-                sharded=True,
+                sharded=not use_dram_path,
                 dtype=self.ccl_dtype,
                 use_composite=True if self.hidden_size == 8192 else False,
             )
