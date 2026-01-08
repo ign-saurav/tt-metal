@@ -45,10 +45,12 @@ def test_dla(device):
         pool_size=pool_size,
         linear_root=linear_root,
     )
+    pytorch_dla.load_pretrained_model(data="imagenet", name="dla34", hash="ba72cf86")
     pytorch_dla.eval()
 
     # Create random input
     torch_input = torch.randn(input_shape, dtype=torch.float32)
+    # torch_input = torch.load('cnet_input.pt')
 
     # PyTorch forward pass
     with torch.no_grad():

@@ -94,9 +94,6 @@ class TtDLA(LightweightModule):
         )
 
         # Average pooling and final classification layer
-        import pdb
-
-        pdb.set_trace()
         # self.avgpool = self._create_avgpool(pool_size, parameters.avgpool)# pool_size = 7
         # self.fc = self._create_fc_layer(parameters.fc)  # 512 inch to 1000 outch kernel_size=1, stride=1, padding=0, bias=True
 

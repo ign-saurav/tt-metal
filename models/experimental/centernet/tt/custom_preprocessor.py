@@ -11,6 +11,8 @@ from models.experimental.centernet.reference.network.dlav0 import (
     Root,
     Tree,
     DLA,
+    DLAUp,  # Add DLAUp import
+    Identity,  # Add Identity import
 )
 
 
@@ -144,14 +146,166 @@ def _extract_dla(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
     return parameters
 
 
+def _extract_dla_up(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
+    """Extract and preprocess DLAUp parameters with multiple IDAUp modules."""
+    assert isinstance(model, DLAUp)
+
+    # Process each IDAUp module within DLAUp
+    for i in range(len(model.channels) - 1):
+        ida_name = f"ida_{i}"
+        ida = getattr(model, ida_name)
+
+        # Create nested parameters for each IDAUp
+        parameters[ida_name] = {}
+
+        # Process projection layers in this IDAUp
+        for j in range(len(ida.channels)):
+            proj_name = f"proj_{j}"
+            proj = getattr(ida, proj_name)
+            if not isinstance(proj, Identity):
+                weight, bias = fold_batch_norm2d_into_conv2d(proj[0], proj[1])
+                parameters[ida_name][proj_name] = {}
+                parameters[ida_name][proj_name]["weight"] = ttnn.from_torch(
+                    weight, dtype=dtype, mesh_mapper=mesh_mapper
+                )
+                if bias is not None:
+                    bias = bias.reshape((1, 1, 1, -1))
+                    parameters[ida_name][proj_name]["bias"] = ttnn.from_torch(
+                        bias, dtype=dtype, mesh_mapper=mesh_mapper
+                    )
+                else:
+                    parameters[ida_name][proj_name]["bias"] = None
+
+        # Process upsampling layers in this IDAUp
+        for j in range(len(ida.channels)):
+            up_name = f"up_{j}"
+            up = getattr(ida, up_name)
+            if not isinstance(up, Identity):
+                parameters[ida_name][up_name] = {}
+                parameters[ida_name][up_name]["weight"] = ttnn.from_torch(
+                    up.weight, dtype=dtype, mesh_mapper=mesh_mapper
+                )
+                parameters[ida_name][up_name]["bias"] = None
+
+        # Process node layers in this IDAUp
+        for j in range(1, len(ida.channels)):
+            node_name = f"node_{j}"
+            node = getattr(ida, node_name)
+            weight, bias = fold_batch_norm2d_into_conv2d(node[0], node[1])
+            parameters[ida_name][node_name] = {}
+            parameters[ida_name][node_name]["weight"] = ttnn.from_torch(weight, dtype=dtype, mesh_mapper=mesh_mapper)
+            if bias is not None:
+                bias = bias.reshape((1, 1, 1, -1))
+                parameters[ida_name][node_name]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
+            else:
+                parameters[ida_name][node_name]["bias"] = None
+
+    return parameters
+
+
+def fill_fc_weights(layers):
+    """Initialize weights with std=0.001 and biases to 0."""
+    for m in layers.modules():
+        if isinstance(m, nn.Conv2d):
+            nn.init.normal_(m.weight, std=0.001)
+            if m.bias is not None:
+                nn.init.constant_(m.bias, 0)
+
+
+def _extract_dla_seg(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
+    """Extract and preprocess DLASeg model parameters."""
+    from models.experimental.centernet.reference.network.dlav0 import DLASeg
+
+    assert isinstance(model, DLASeg)
+
+    # Extract base DLA parameters
+    parameters["base"] = {}
+    _extract_dla(model.base, parameters["base"], dtype=dtype, mesh_mapper=mesh_mapper)
+
+    # Extract DLAUp parameters
+    parameters["dla_up"] = {}
+    _extract_dla_up(model.dla_up, parameters["dla_up"], dtype=dtype, mesh_mapper=mesh_mapper)
+
+    # Extract head parameters with proper initialization
+    parameters["heads"] = {}
+    for head_name in model.heads:
+        head_module = getattr(model, head_name)
+        head_params = {}
+
+        if isinstance(head_module, nn.Sequential):
+            # Two-layer head: Conv3x3 -> ReLU -> Conv1x1
+            # First conv layer
+            conv1_weight = head_module[0].weight
+            conv1_bias = head_module[0].bias
+            head_params["conv1"] = {}
+            head_params["conv1"]["weight"] = ttnn.from_torch(conv1_weight, dtype=dtype, mesh_mapper=mesh_mapper)
+            head_params["conv1"]["bias"] = ttnn.from_torch(
+                conv1_bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper
+            )
+
+            # Second conv layer
+            conv2_weight = head_module[2].weight
+            conv2_bias = head_module[2].bias
+            head_params["conv2"] = {}
+            head_params["conv2"]["weight"] = ttnn.from_torch(conv2_weight, dtype=dtype, mesh_mapper=mesh_mapper)
+            head_params["conv2"]["bias"] = ttnn.from_torch(
+                conv2_bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper
+            )
+
+            # Apply fill_fc_weights to the original PyTorch module before conversion
+            fill_fc_weights(head_module)
+
+            # Special handling for heatmap heads
+            if "hm" in head_name:
+                head_module[-1].bias.data.fill_(-2.19)
+                # Update the bias after modification
+                head_params["conv2"]["bias"] = ttnn.from_torch(
+                    head_module[2].bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper
+                )
+        else:
+            # Single-layer head: Conv1x1
+            conv_weight = head_module.weight
+            conv_bias = head_module.bias
+            head_params["weight"] = ttnn.from_torch(conv_weight, dtype=dtype, mesh_mapper=mesh_mapper)
+            head_params["bias"] = ttnn.from_torch(conv_bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper)
+
+            # Apply fill_fc_weights to the original PyTorch module
+            fill_fc_weights(head_module)
+
+            # Special handling for heatmap heads
+            if "hm" in head_name:
+                head_module.bias.data.fill_(-2.19)
+                # Update the bias after modification
+                head_params["bias"] = ttnn.from_torch(
+                    head_module.bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper
+                )
+
+        parameters["heads"][head_name] = head_params
+
+    return parameters
+
+
 def custom_preprocessor(
     model, name, ttnn_module_args, convert_to_ttnn, custom_preprocessor_func=None, mesh_mapper=None
 ):
-    """Custom preprocessor for Centernet and DLA models."""
+    """Custom preprocessor for Centernet, DLA, DLAUp, and DLASeg models."""
     parameters = {}
     weight_dtype = ttnn.bfloat16
 
-    if isinstance(model, DLA):
+    # Import DLASeg at the top of the file
+    from models.experimental.centernet.reference.network.dlav0 import DLASeg
+
+    if isinstance(model, DLASeg):
+        parameters["dla_seg"] = {}
+        parameters["dla_seg"] = _extract_dla_seg(
+            model, parameters["dla_seg"], dtype=weight_dtype, mesh_mapper=mesh_mapper
+        )
+        return parameters
+    elif isinstance(model, DLAUp):
+        parameters["dla_up"] = {}
+        parameters["dla_up"] = _extract_dla_up(model, parameters["dla_up"], dtype=weight_dtype, mesh_mapper=mesh_mapper)
+        return parameters
+    elif isinstance(model, DLA):
         parameters["dla"] = {}
         parameters["dla"] = _extract_dla(model, parameters["dla"], dtype=weight_dtype, mesh_mapper=mesh_mapper)
         return parameters
