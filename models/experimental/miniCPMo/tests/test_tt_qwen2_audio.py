@@ -195,6 +195,216 @@ def mesh_device(request):
 
 
 @pytest.mark.parametrize("mesh_device", [1], indirect=True)
+def test_diagnostic_prefill_comparison(mesh_device):
+    """
+    Diagnostic test: Compare PyTorch Qwen2 prefill vs TT Transformer prefill.
+
+    This helps identify if the issue is in:
+    1. Weight loading/conversion
+    2. Prefill forward pass
+    3. Embedding scale
+    """
+    logger.info("=" * 60)
+    logger.info("DIAGNOSTIC: Comparing PyTorch vs TT Prefill")
+    logger.info("=" * 60)
+
+    # Set HF_MODEL environment variable
+    if not os.environ.get("HF_MODEL"):
+        os.environ["HF_MODEL"] = MODEL_PATH
+
+    # 1. Load inputs
+    logger.info("\n1. Loading Saved Inputs...")
+    try:
+        inputs_embeds, attention_mask, terminators, reference_output = load_saved_inputs()
+    except FileNotFoundError as e:
+        pytest.skip(str(e))
+
+    if inputs_embeds.dim() == 2:
+        inputs_embeds = inputs_embeds.unsqueeze(0)
+
+    batch_size, seq_len, hidden_dim = inputs_embeds.shape
+    logger.info(f"   Inputs shape: {inputs_embeds.shape}")
+    logger.info(f"   Inputs dtype: {inputs_embeds.dtype}")
+    logger.info(f"   Inputs range: [{inputs_embeds.min():.4f}, {inputs_embeds.max():.4f}]")
+    logger.info(f"   Inputs mean: {inputs_embeds.mean():.6f}, std: {inputs_embeds.std():.6f}")
+
+    # 2. Load PyTorch Qwen2 (reference)
+    logger.info("\n2. Loading PyTorch Qwen2...")
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+
+    # Load just the LLM part
+    from transformers import AutoConfig
+
+    config = AutoConfig.from_pretrained(MODEL_PATH, trust_remote_code=True)
+    llm_config = config.llm_config if hasattr(config, "llm_config") else config
+
+    # Load the actual MiniCPM model to get the LLM weights
+    logger.info("   Loading MiniCPM model to extract LLM...")
+    full_model = AutoModelForCausalLM.from_pretrained(
+        MODEL_PATH,
+        trust_remote_code=True,
+        torch_dtype=torch.bfloat16,
+        device_map="cpu",
+    )
+    pytorch_qwen = full_model.llm
+    pytorch_qwen.eval()
+    logger.info("   PyTorch Qwen2 loaded")
+
+    # 3. Run PyTorch prefill
+    logger.info("\n3. Running PyTorch Prefill...")
+    with torch.no_grad():
+        pt_outputs = pytorch_qwen(
+            inputs_embeds=inputs_embeds.to(torch.bfloat16),
+            attention_mask=attention_mask,
+            use_cache=True,
+            return_dict=True,
+        )
+        pt_logits = pt_outputs.logits  # [batch, seq, vocab]
+        pt_last_logits = pt_logits[:, -1, :]  # [batch, vocab]
+        pt_first_token = torch.argmax(pt_last_logits, dim=-1)
+
+    logger.info(f"   PT logits shape: {pt_logits.shape}")
+    logger.info(f"   PT last logits range: [{pt_last_logits.min():.4f}, {pt_last_logits.max():.4f}]")
+    logger.info(f"   PT first token: {pt_first_token.item()}")
+    logger.info(f"   PT first token decoded: '{tokenizer.decode(pt_first_token)}'")
+
+    # Get top-5 tokens from PT
+    pt_top5 = torch.topk(pt_last_logits, 5, dim=-1)
+    logger.info(f"   PT top-5 tokens: {pt_top5.indices[0].tolist()}")
+    logger.info(f"   PT top-5 decoded: {[tokenizer.decode([t]) for t in pt_top5.indices[0].tolist()]}")
+
+    # Free PyTorch model to save memory
+    del full_model, pytorch_qwen
+    torch.cuda.empty_cache() if torch.cuda.is_available() else None
+
+    # 4. Create TT model
+    logger.info("\n4. Creating TT Model...")
+    bridge = MiniCPMWeightBridge(MODEL_PATH)
+    qwen_weights = bridge.get_qwen_weights()
+    logger.info(f"   Loaded {len(qwen_weights)} weight tensors")
+
+    tt_model_args, tt_model, tt_kv_cache, _ = create_tt_model(
+        mesh_device=mesh_device,
+        instruct=False,
+        max_batch_size=1,
+        optimizations=None,
+        max_seq_len=1024,
+        paged_attention_config=None,
+        dtype=ttnn.bfloat8_b,
+        state_dict=qwen_weights,
+        dummy_weights=False,
+    )
+    logger.info(f"   TT Model: {tt_model_args.n_layers} layers, dim={tt_model_args.dim}")
+
+    # 5. Run TT prefill
+    logger.info("\n5. Running TT Prefill...")
+
+    # Pad to 128 boundary
+    padded_len = ((seq_len + 127) // 128) * 128
+    if seq_len != padded_len:
+        inputs_embeds_padded = torch.nn.functional.pad(inputs_embeds, (0, 0, 0, padded_len - seq_len), value=0)
+    else:
+        inputs_embeds_padded = inputs_embeds
+
+    # Convert embeddings to TT tensor
+    tt_embeds = ttnn.from_torch(
+        inputs_embeds_padded.unsqueeze(1),  # [batch, 1, seq, hidden]
+        device=mesh_device,
+        dtype=ttnn.bfloat16,
+        layout=ttnn.TILE_LAYOUT,
+        mesh_mapper=ttnn.ReplicateTensorToMesh(mesh_device),
+    )
+
+    # Slice rotation matrices for prefill
+    tt_rot_mats_prefill = [
+        tt_model.rope_setup.cos_matrix[:, :, :padded_len, :],
+        tt_model.rope_setup.sin_matrix[:, :, :padded_len, :],
+    ]
+
+    tt_rot_mats_local = None
+    if hasattr(tt_model, "rope_local_setup") and tt_model.rope_local_setup:
+        tt_rot_mats_local = [
+            tt_model.rope_local_setup.cos_matrix[:, :, :padded_len, :],
+            tt_model.rope_local_setup.sin_matrix[:, :, :padded_len, :],
+        ]
+
+    # Run prefill
+    tt_out = tt_model.ttnn_prefill_forward(
+        tt_embeds,
+        rot_mats_global=tt_rot_mats_prefill,
+        rot_mats_local=tt_rot_mats_local,
+        user_id=0,
+        page_table=None,
+        kv_cache=tt_kv_cache,
+        get_last_token=(seq_len - 1) // 32 * 32,
+    )
+
+    # Get TT logits
+    tt_logits = ttnn.to_torch(tt_out).float()
+    ttnn.deallocate(tt_embeds)
+    ttnn.deallocate(tt_out)
+
+    logger.info(f"   TT raw output shape: {tt_logits.shape}")
+
+    # Extract logits
+    while tt_logits.dim() > 2:
+        tt_logits = tt_logits.squeeze(0) if tt_logits.shape[0] == 1 else tt_logits.squeeze(1)
+    if tt_logits.dim() == 2:
+        tt_last_logits = tt_logits[-1:]  # Last token only
+    else:
+        tt_last_logits = tt_logits
+
+    logger.info(f"   TT last logits shape: {tt_last_logits.shape}")
+    logger.info(f"   TT last logits range: [{tt_last_logits.min():.4f}, {tt_last_logits.max():.4f}]")
+
+    tt_first_token = torch.argmax(tt_last_logits, dim=-1)
+    logger.info(f"   TT first token: {tt_first_token.item()}")
+    logger.info(f"   TT first token decoded: '{tokenizer.decode([tt_first_token.item()])}'")
+
+    # Get top-5 tokens from TT
+    tt_top5 = torch.topk(tt_last_logits, 5, dim=-1)
+    logger.info(f"   TT top-5 tokens: {tt_top5.indices[0].tolist()}")
+    logger.info(f"   TT top-5 decoded: {[tokenizer.decode([t]) for t in tt_top5.indices[0].tolist()]}")
+
+    # 6. Compare
+    logger.info("\n6. Comparison Results:")
+    logger.info(f"   PT first token: {pt_first_token.item()} ('{tokenizer.decode(pt_first_token)}')")
+    logger.info(f"   TT first token: {tt_first_token.item()} ('{tokenizer.decode([tt_first_token.item()])}')")
+
+    if pt_first_token.item() == tt_first_token.item():
+        logger.info("   ✅ First tokens MATCH!")
+    else:
+        logger.warning("   ❌ First tokens DIFFER - investigating...")
+
+        # Check if TT first token is in PT top-5
+        if tt_first_token.item() in pt_top5.indices[0].tolist():
+            rank = pt_top5.indices[0].tolist().index(tt_first_token.item())
+            logger.info(f"   TT token is PT's #{rank+1} choice")
+        else:
+            logger.warning("   TT token not in PT's top-5!")
+
+    # Calculate logits correlation
+    if pt_last_logits.shape[-1] == tt_last_logits.shape[-1]:
+        # Normalize for comparison
+        pt_probs = torch.softmax(pt_last_logits.float(), dim=-1)
+        tt_probs = torch.softmax(tt_last_logits.float(), dim=-1)
+
+        # Cosine similarity
+        cos_sim = torch.nn.functional.cosine_similarity(pt_probs.view(-1), tt_probs.view(-1), dim=0)
+        logger.info(f"   Logits cosine similarity: {cos_sim.item():.6f}")
+
+        # KL divergence
+        kl_div = torch.nn.functional.kl_div(
+            torch.log_softmax(tt_last_logits.float(), dim=-1), pt_probs, reduction="sum"
+        )
+        logger.info(f"   KL divergence (TT||PT): {kl_div.item():.6f}")
+
+    logger.info("=" * 60)
+
+
+@pytest.mark.parametrize("mesh_device", [1], indirect=True)
 def test_tt_qwen2_audio_generate(mesh_device):
     """
     Test TTQwen2ForCausalLM.generate() with saved audio embeddings.
@@ -228,11 +438,17 @@ def test_tt_qwen2_audio_generate(mesh_device):
     logger.info(f"   Terminators: {terminators}")
 
     # Limit sequence length for L1 memory constraints
+    # IMPORTANT: Take the LAST 256 tokens to preserve the suffix instructions
+    # The embeddings are: [text prefix] + [audio] + [text suffix]
+    # Truncating from the START preserves the suffix that tells the model what to do
     MAX_SEQ_LEN = 256
     if seq_len > MAX_SEQ_LEN:
-        logger.warning(f"   Truncating sequence from {seq_len} to {MAX_SEQ_LEN}")
-        inputs_embeds = inputs_embeds[:, :MAX_SEQ_LEN, :]
+        start_idx = seq_len - MAX_SEQ_LEN
+        logger.warning(f"   Truncating: taking tokens [{start_idx}:{seq_len}] (last {MAX_SEQ_LEN} of {seq_len})")
+        inputs_embeds = inputs_embeds[:, start_idx:, :]
         seq_len = MAX_SEQ_LEN
+    else:
+        logger.info(f"   Using full sequence length: {seq_len} tokens")
 
     # 2. Load weights
     logger.info("\n2. Loading Weights...")
@@ -255,25 +471,26 @@ def test_tt_qwen2_audio_generate(mesh_device):
     )
     logger.info(f"   TT Model: {tt_model_args.n_layers} layers, dim={tt_model_args.dim}")
 
-    # 4. Create TTQwen2ForCausalLM
-    logger.info("\n4. Creating TTQwen2ForCausalLM...")
+    # 4. Load tokenizer
+    logger.info("\n4. Loading Tokenizer...")
+    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+
+    # 5. Create TTQwen2ForCausalLM with Generator
+    logger.info("\n5. Creating TTQwen2ForCausalLM with upstream Generator...")
     model = TTQwen2ForCausalLM.from_tt_model(
         tt_model=tt_model,
         tt_model_args=tt_model_args,
         mesh_device=mesh_device,
         tt_kv_cache=tt_kv_cache,
         model_path=MODEL_PATH,
+        tokenizer=tokenizer,
     )
     model.eval()
-    logger.info("   ✅ TTQwen2ForCausalLM created")
-
-    # 5. Load tokenizer
-    logger.info("\n5. Loading Tokenizer...")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_PATH, trust_remote_code=True)
+    logger.info("   ✅ TTQwen2ForCausalLM created with upstream Generator")
 
     # 6. Run generation
     logger.info("\n6. Running Generation...")
-    max_new_tokens = 20
+    max_new_tokens = 20  # Generate more tokens for meaningful output
 
     with torch.no_grad():
         # Reset cache

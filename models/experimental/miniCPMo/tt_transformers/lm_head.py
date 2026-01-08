@@ -148,21 +148,51 @@ class LMHead(LightweightModule):
             ]
 
     def forward(self, x: ttnn.Tensor):
+        # For smaller models (dim < 4096), use DRAM to avoid L1 memory conflicts
+        use_dram_for_decode = self.args.dim < 4096 and not self.args.is_galaxy
+
         outputs = []
         for weight, pc in zip(self.output_weights, self.program_configs):
-            output = ttnn.linear(
-                x,
-                weight,
-                compute_kernel_config=self.compute_kernel_config,
-                program_config=pc,
-                memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
-                dtype=self.args.lm_head_dtype if hasattr(self.args, "lm_head_dtype") else ttnn.bfloat8_b,
-            )
-            outputs.append(
-                ttnn.sharded_to_interleaved(
-                    output, memory_config=self.model_config.get("LM_HEAD_OUTPUT_MEMCFG", ttnn.L1_MEMORY_CONFIG)
+            if use_dram_for_decode:
+                # DRAM path for small models
+                try:
+                    output = ttnn.linear(
+                        x,
+                        weight,
+                        compute_kernel_config=self.compute_kernel_config,
+                        program_config=None,  # Let ttnn auto-select
+                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                        dtype=self.args.lm_head_dtype if hasattr(self.args, "lm_head_dtype") else ttnn.bfloat8_b,
+                    )
+                    # Already interleaved from DRAM output
+                    outputs.append(output)
+                except Exception as e:
+                    # Fallback to torch conversion
+                    x_torch = ttnn.to_torch(x).to(torch.float32)
+                    w_torch = ttnn.to_torch(weight).to(torch.float32)
+                    out_torch = torch.matmul(x_torch, w_torch)
+                    output = ttnn.from_torch(
+                        out_torch.to(torch.bfloat16),
+                        dtype=self.args.lm_head_dtype if hasattr(self.args, "lm_head_dtype") else ttnn.bfloat8_b,
+                        device=x.device(),
+                        layout=ttnn.TILE_LAYOUT,
+                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    )
+                    outputs.append(output)
+            else:
+                output = ttnn.linear(
+                    x,
+                    weight,
+                    compute_kernel_config=self.compute_kernel_config,
+                    program_config=pc,
+                    memory_config=ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG,
+                    dtype=self.args.lm_head_dtype if hasattr(self.args, "lm_head_dtype") else ttnn.bfloat8_b,
                 )
-            )
+                outputs.append(
+                    ttnn.sharded_to_interleaved(
+                        output, memory_config=self.model_config.get("LM_HEAD_OUTPUT_MEMCFG", ttnn.L1_MEMORY_CONFIG)
+                    )
+                )
 
         # Concatenate the outputs
         output = ttnn.concat(
