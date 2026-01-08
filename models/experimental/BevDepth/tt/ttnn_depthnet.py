@@ -58,7 +58,7 @@ depthnet_optimizations = DepthNetOptimizations(
 )
 
 
-class MLP_TTNN:
+class TtMlp:
     def __init__(self, device, parameters, in_features, hidden_features, out_features, model_config):
         self.device = device
         self.in_features = in_features
@@ -106,7 +106,7 @@ class MLP_TTNN:
         return x
 
 
-class SELayer_TTNN:
+class TtSeLayer:
     def __init__(self, device, parameters, channels, model_config):
         self.device = device
         self.channels = channels
@@ -203,7 +203,7 @@ class SELayer_TTNN:
         return result
 
 
-class BasicBlock_TTNN:
+class TtBasicBlockDepthNet:
     def __init__(self, device, parameters, in_channels, out_channels, model_config):
         self.device = device
         self.in_channels = in_channels
@@ -279,7 +279,7 @@ class BasicBlock_TTNN:
         return out
 
 
-class ASPP_TTNN:
+class TtAspp:
     def __init__(self, device, parameters, in_channels, mid_channels, model_config):
         self.device = device
         self.in_channels = in_channels
@@ -533,7 +533,7 @@ class ASPP_TTNN:
         return out
 
 
-class DepthNet_TTNN:
+class TtDepthNet:
     def __init__(
         self,
         device,
@@ -554,10 +554,10 @@ class DepthNet_TTNN:
         self.optimizations = optimizations or depthnet_optimizations
         self.params = parameters
 
-        self.block1 = BasicBlock_TTNN(device, parameters.block1, mid_channels, mid_channels, self.model_config)
-        self.block2 = BasicBlock_TTNN(device, parameters.block2, mid_channels, mid_channels, self.model_config)
-        self.block3 = BasicBlock_TTNN(device, parameters.block3, mid_channels, mid_channels, self.model_config)
-        self.aspp = ASPP_TTNN(device, parameters.aspp, mid_channels, mid_channels, self.model_config)
+        self.block1 = TtBasicBlockDepthNet(device, parameters.block1, mid_channels, mid_channels, self.model_config)
+        self.block2 = TtBasicBlockDepthNet(device, parameters.block2, mid_channels, mid_channels, self.model_config)
+        self.block3 = TtBasicBlockDepthNet(device, parameters.block3, mid_channels, mid_channels, self.model_config)
+        self.aspp = TtAspp(device, parameters.aspp, mid_channels, mid_channels, self.model_config)
 
         if hasattr(parameters, "depth_mlp") and hasattr(parameters.depth_mlp, "fc1_weight"):
             mlp_in_features = parameters.depth_mlp.fc1_weight.shape[1]  # Get from checkpoint
@@ -565,10 +565,10 @@ class DepthNet_TTNN:
             mlp_in_features = 31
 
         if hasattr(parameters, "depth_mlp") and hasattr(parameters, "context_mlp"):
-            self.depth_mlp = MLP_TTNN(
+            self.depth_mlp = TtMlp(
                 device, parameters.depth_mlp, mlp_in_features, mid_channels, mid_channels, self.model_config
             )
-            self.context_mlp = MLP_TTNN(
+            self.context_mlp = TtMlp(
                 device, parameters.context_mlp, mlp_in_features, mid_channels, mid_channels, self.model_config
             )
         else:
@@ -576,8 +576,8 @@ class DepthNet_TTNN:
             self.context_mlp = None
 
         if hasattr(parameters, "depth_se") and hasattr(parameters, "context_se"):
-            self.depth_se = SELayer_TTNN(device, parameters.depth_se, mid_channels, self.model_config)
-            self.context_se = SELayer_TTNN(device, parameters.context_se, mid_channels, self.model_config)
+            self.depth_se = TtSeLayer(device, parameters.depth_se, mid_channels, self.model_config)
+            self.context_se = TtSeLayer(device, parameters.context_se, mid_channels, self.model_config)
         else:
             self.depth_se = None
             self.context_se = None
@@ -588,7 +588,7 @@ class DepthNet_TTNN:
             self.mlp_bn = None
 
         # Initialize DCN (Deformable Conv) using reference implementation
-        # TODO: Native TTNN implementation pending - https://github.com/tenstorrent/tt-metal/issues/25526
+        # TODO: Native TTNN implementation pending - https://github.com/tenstorrent/tt-metal/issues/34509
         if hasattr(parameters, "dcn_weight"):
             self.dcn = DeformConv2dPack(
                 in_channels=mid_channels,
@@ -919,7 +919,7 @@ class DepthNet_TTNN:
                 depth = ttnn.sharded_to_interleaved(depth, ttnn.DRAM_MEMORY_CONFIG)
 
         # DCN (Deformable Conv) - using reference DeformConv2dPack
-        # TODO: Native TTNN implementation pending - https://github.com/tenstorrent/tt-metal/issues/25526
+        # TODO: Native TTNN implementation pending - https://github.com/tenstorrent/tt-metal/issues/34509
         if self.dcn is not None:
             x_torch = ttnn.to_torch(depth)
 

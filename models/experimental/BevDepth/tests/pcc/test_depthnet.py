@@ -7,7 +7,7 @@ from loguru import logger
 import ttnn
 
 from models.common.utility_functions import comp_pcc
-from models.experimental.BevDepth.tt.ttnn_depthnet import DepthNet_TTNN
+from models.experimental.BevDepth.tt.ttnn_depthnet import TtDepthNet
 from models.experimental.BevDepth.tt.custom_preprocessing import (
     prepare_depthnet_parameters,
     extract_depthnet_state_dict,
@@ -71,7 +71,7 @@ def test_depthnet_pcc(device, batch_size, height, width, depth_channels):
         "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
     }
 
-    ttnn_depthnet = DepthNet_TTNN(
+    ttnn_depthnet = TtDepthNet(
         device=device,
         parameters=depthnet_params,
         in_channels=512,

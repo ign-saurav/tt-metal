@@ -84,12 +84,8 @@ def main():
             if params is not None:
                 ttnn_preds = run_ttnn_inference(device, params, imgs, mats_dict)
                 boxes_ttnn, classes_ttnn, scores_ttnn = decode_predictions(ttnn_preds, class_names, args.threshold)
-                logger.info(f"TTNN detections: {len(boxes_ttnn)} boxes found")
-                if len(boxes_ttnn) > 0:
-                    pred_corners_ttnn, pred_classes_ttnn = boxes_to_corners(boxes_ttnn, classes_ttnn, args.show_range)
-                else:
-                    logger.warning("No TTNN detections found, check threshold or model output")
-                    pred_corners_ttnn, pred_classes_ttnn = [], []
+                pred_corners_ttnn, pred_classes_ttnn = boxes_to_corners(boxes_ttnn, classes_ttnn, args.show_range)
+
         finally:
             ttnn.close_device(device)
 

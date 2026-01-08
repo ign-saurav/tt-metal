@@ -1,11 +1,9 @@
 # BEVDepth
 
-- **Platforms:** Wormhole (n150)
-- **Supported Input Resolution:** `(256, 704)` = (Height, Width)
-- **Supported Model Configuration:** [bev_depth_lss_r50_256x704_128x128_24e_2key.py](https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/exps/nuscenes/mv/bev_depth_lss_r50_256x704_128x128_24e_2key.py)
+**Platforms:** Wormhole (n150)
+**Supported Input Resolution:** `(256, 704)` = (Height, Width)
 
 ## Introduction
-
 BEVDepth is a multi-view 3D object detection model that acquires reliable depth information for accurate Bird's Eye View (BEV) perception. The model uses a **Lift-Splat-Shoot (LSS)** architecture with a **ResNet-50** backbone and **SECONDFPN** neck to process multi-camera inputs and generate 3D object detections in BEV space.
 
 This implementation adapts **BEVDepth** for Tenstorrent hardware using the TT-NN and TT-Metalium stack, optimized for throughput and low-latency inference on Wormhole devices. The implementation supports the [bev_depth_lss_r50_256x704_128x128_24e_2key](https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/exps/nuscenes/mv/bev_depth_lss_r50_256x704_128x128_24e_2key.py) configuration with 6-camera inputs.
@@ -13,7 +11,7 @@ This implementation adapts **BEVDepth** for Tenstorrent hardware using the TT-NN
 This repository provides:
 - A **reference PyTorch model** (from [Megvii-BaseDetection/BEVDepth](https://github.com/Megvii-BaseDetection/BEVDepth)) for correctness validation.
 - A **TT-NN implementation** for Tenstorrent hardware (Wormhole).
-- **tests**, **demo**, and **resources** (sample nuScenes data).
+- **Tests**, **demo**, and **resources** (sample nuScenes data).
 
 ## Table of Contents
 - [Prerequisites](#prerequisites)
@@ -22,7 +20,7 @@ This repository provides:
 - [Quickstart](#quickstart)
   - [Run Tests](#run-tests)
   - [Run the Demo](#run-the-demo)
-- [Model Architecture](#model-architecture)
+- [Performance](#performance)
 - [Configuration Notes](#configuration-notes)
 - [References](#references)
 
@@ -31,13 +29,7 @@ This repository provides:
   <https://github.com/tenstorrent/tt-metal>
 - Install **TT-Metalium™ / TT-NN™**:
   Follow the official instructions: <https://github.com/tenstorrent/tt-metal/blob/main/INSTALLING.md>
-- Install additional dependencies:
-  ```bash
-  pip3 install -r models/experimental/BevDepth/reference/requirements.txt
-  pip3 install pytorch-lightning
-  pip3 install pyquaternion
-  pip3 install nuscenes-devkit
-  ```
+- Install additional dependencies for BevDepth as mentioned in "tt_metal/python_env/requirements-dev.txt" if not already present.
 
 ## Repository Layout
 ```
@@ -87,15 +79,15 @@ models/
         │   ├── ttnn_depthnet.py               # Depth estimation network
         │   ├── ttnn_resnet50_backbone.py      # ResNet-50 backbone
         │   ├── ttnn_secondfpn.py              # SECONDFPN neck
-        │   └── utils.py                       # Utility functions (config creation, etc.)
+        │   └── utils.py                       # Utility functions
         │
         ├── demo/
         │   ├── demo.py                        # Demo script with visualization
-        │   └── processing.py                  # Post-processing utilities (decoding, NMS)
+        │   └── processing.py                  # Post-processing utilities
         │
         ├── tests/
         │   ├── pcc/                           # Pearson Correlation Coefficient tests
-        │   │   ├── test_bevdepth_e2e.py       # End-to-end test
+        │   │   ├── test_bevdepth.py           # End-to-end functional test
         │   │   ├── test_bevdepth_backbone.py  # Backbone test
         │   │   ├── test_bevdepth_head.py      # Head test
         │   │   ├── test_depthnet.py           # DepthNet test
@@ -104,36 +96,37 @@ models/
         │   └── perf/                          # Performance tests
         │       └── test_bevdepth_perf.py      # Device performance test
         │
-        ├── common.py                          # Common utilities (inference, weight loading)
-        └── README.md                          # This file
+        ├── common.py                          # Common utilities
+        └── README.md
 ```
 
 ## Weights
-
 BEVDepth pretrained weights are automatically downloaded when running the model. The weights are from the official BEVDepth repository:
 
 - **Model:** `bev_depth_lss_r50_256x704_128x128_24e_2key`
 - **Download URL:** <https://github.com/Megvii-BaseDetection/BEVDepth/releases/download/v0.0.2/bev_depth_lss_r50_256x704_128x128_24e_2key.pth>
-- **Checkpoint Location:** `/tmp/bevdepth_weights.pth` (auto-downloaded) or `resources/checkpoints/bev_depth_lss_r50_256x704_128x128_24e_2key.pth`
+- **Checkpoint Location:** `resources/checkpoints/bevdepth_weights.pth` (auto-downloaded)
 
-The weights are trained on the nuScenes dataset.
+Note: The weights are trained on the nuScenes dataset.
 
 ## Quickstart
-
 ### Run Tests
-
-#### End-to-End Test
-```bash
-pytest models/experimental/BevDepth/tests/pcc/test_bevdepth_e2e.py
 ```
-This runs a full end-to-end flow that:
-- Loads the BEVDepth reference model from PyTorch
-- Runs the TT-NN implementation
-- Compares results using PCC (Pearson Correlation Coefficient) validation
-- Validates all 6 task heads (heatmap, reg, height, dim, rot, vel)
+pytest models/experimental/BevDepth/tests/pcc/test_bevdepth.py
+```
+This runs an end-to-end flow that:
+  - Loads the BEVDepth reference model from PyTorch,
+  - Runs the TT-NN implementation,
+  - Compares results (PCC validation),
+  - Validates all 6 task heads (heatmap, reg, height, dim, rot, vel).
 
-#### Component Tests
-```bash
+**Note:**
+- **DeformConv2d**: Torchvision's DeformConv2d is currently used as TTNN support is not yet available. A ticket has been raised for TTNN DeformConv2d support (https://github.com/tenstorrent/tt-metal/issues/34509).
+- **SecondFPN Backbone Conv2d**: Torch fallback is used for Conv2d operations in the SecondFPN backbone. With TTNN implementation, the PCC drops to 0.82, while using PyTorch fallback achieves PCC >0.99, ensuring better accuracy.
+- **Running TTNN**: To run the TTNN implementation (instead of torch fallback), set the environment variable `export FALLBACK_ON_SECONDFPN=0` before running tests or demo.
+
+### Component Tests
+```
 # Test ResNet-50 backbone
 pytest models/experimental/BevDepth/tests/pcc/test_resnet50_backbone.py
 
@@ -151,28 +144,21 @@ pytest models/experimental/BevDepth/tests/pcc/test_bevdepth_backbone.py
 ```
 
 ### Run the Demo
-
-The demo script processes sample nuScenes data and visualizes 3D object detections:
-
-```bash
+```
 python3 models/experimental/BevDepth/demo/demo.py --mode ttnn --output bevdepth_output.png
 ```
 
 **Options:**
-- `--mode`: Choose `torch`, `ttnn`, `both`, or `precomputed` (default: `both`)
+- `--mode`: Choose `ttnn`, `both` (default: `ttnn`)
 - `--output`: Output visualization path (default: `bevdepth_demo_output.png`)
 - `--threshold`: Detection score threshold (default: 0.3)
 - `--show-range`: Visualization range in meters (default: 60.0)
 
-The demo will:
-1. Load sample images from `resources/nuScenes/samples/`
-2. Run inference (PyTorch and/or TTNN)
-3. Visualize 3D bounding boxes in BEV space
-4. Save the visualization to the output path
+The demo processes sample nuScenes data and visualizes 3D object detections in BEV space.
 
 ## Performance
 ### Single Device (BS=1)(n150):
-- Device perf is `3.8` FPS
+- end-2-end perf is `3.8` FPS
 
 To run perf test:
 ```
@@ -180,15 +166,12 @@ pytest models/experimental/BevDepth/tests/perf/test_bevdepth_perf.py -s
 ```
 
 ## Configuration Notes
-
-### Supported Configuration
-- **Model Config**: [bev_depth_lss_r50_256x704_128x128_24e_2key.py](https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/exps/nuscenes/mv/bev_depth_lss_r50_256x704_128x128_24e_2key.py)
-- **Input Resolution**: `(256, 704)` (Height, Width)
-- **Number of Cameras**: 6 (CAM_FRONT_LEFT, CAM_FRONT, CAM_FRONT_RIGHT, CAM_BACK_RIGHT, CAM_BACK, CAM_BACK_LEFT)
-
-### Device Configuration
-- **Device**: The demo/tests open a Wormhole device (default id typically 0)
-- **Batch Size**: Tests are written for BS=1. For larger batch sizes, verify memory layouts and tile alignment
+- Resolution: (H, W) = (256, 704) is supported end-to-end.
+- Device: The demo/tests open a Wormhole device (default id typically 0). If you need to change it, adjust the device open call in the demo.
+- Batch Size: Tests are written for BS=1. For larger BS you'll need to verify memory layouts and tile alignment.
+- Number of Cameras: 6 cameras (CAM_FRONT_LEFT, CAM_FRONT, CAM_FRONT_RIGHT, CAM_BACK_RIGHT, CAM_BACK, CAM_BACK_LEFT).
+- Model Config: [bev_depth_lss_r50_256x704_128x128_24e_2key.py](https://github.com/Megvii-BaseDetection/BEVDepth/blob/main/bevdepth/exps/nuscenes/mv/bev_depth_lss_r50_256x704_128x128_24e_2key.py)
+- Weights: Auto-downloaded from the official BEVDepth repository if not cached locally.
 
 ## References
 ### Paper

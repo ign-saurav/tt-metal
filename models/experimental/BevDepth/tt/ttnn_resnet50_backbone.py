@@ -71,7 +71,7 @@ resnet50_optimizations = ResNet50Optimizations(
 )
 
 
-class Bottleneck:
+class TtBottleneck:
     """
     ResNet50 Bottleneck block using TtConv2d builder API directly.
     """
@@ -205,7 +205,7 @@ class Bottleneck:
         return out, final_h, final_w
 
 
-class ResNet50_BEVDepth:
+class TtResNet50Backbone:
     """
     ResNet50 backbone for BEVDepth using TtConv2d builder API directly.
     """
@@ -272,11 +272,11 @@ class ResNet50_BEVDepth:
         layers = []
 
         downsample = None
-        if stride != 1 or self.in_channels != planes * Bottleneck.expansion:
+        if stride != 1 or self.in_channels != planes * TtBottleneck.expansion:
             downsample = True
 
         layers.append(
-            Bottleneck(
+            TtBottleneck(
                 parameters=layer_params[0],
                 in_channels=self.in_channels,
                 out_channels=planes,
@@ -286,11 +286,11 @@ class ResNet50_BEVDepth:
                 optimizations=self.optimizations,
             )
         )
-        self.in_channels = planes * Bottleneck.expansion
+        self.in_channels = planes * TtBottleneck.expansion
 
         for i in range(1, blocks):
             layers.append(
-                Bottleneck(
+                TtBottleneck(
                     parameters=layer_params[i],
                     in_channels=self.in_channels,
                     out_channels=planes,

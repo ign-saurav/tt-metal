@@ -1,7 +1,6 @@
 import os
 import ttnn
 import torch
-import numpy as np
 from dataclasses import dataclass
 
 from models.tt_cnn.tt.builder import TtConv2d
@@ -9,7 +8,7 @@ from models.experimental.BevDepth.tt.utils import (
     create_conv2d_config,
     post_process_conv_output,
 )
-from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_Head_TTNN
+from models.experimental.BevDepth.tt.ttnn_secondfpn import TtSecondFpnHead
 from models.experimental.BevDepth.tt.custom_preprocessing import prepare_secondfpn_head_parameters
 
 
@@ -281,176 +280,6 @@ class TtResNet:
         return (x, x1, x2, x3)
 
 
-class TtDeblock:
-    def __init__(self, device, in_channels, out_channels, kernel_size, stride, parameters, model_config):
-        self.device = device
-        self.in_channels = in_channels
-        self.out_channels = out_channels
-        self.model_config = model_config
-
-        if isinstance(kernel_size, int):
-            self.kernel_size = (kernel_size, kernel_size)
-        else:
-            self.kernel_size = kernel_size
-        if isinstance(stride, int):
-            self.stride = (stride, stride)
-        else:
-            self.stride = stride
-
-        # Prepare weights
-        weight = parameters.get("weight")
-        bias = parameters.get("bias")
-
-        if isinstance(weight, torch.Tensor):
-            weight = weight.float()
-        elif isinstance(weight, np.ndarray):
-            weight = torch.from_numpy(weight).float()
-        elif isinstance(weight, ttnn.Tensor):
-            weight = ttnn.to_torch(weight).float()
-
-        if isinstance(bias, torch.Tensor):
-            bias = bias.float()
-        elif isinstance(bias, np.ndarray):
-            bias = torch.from_numpy(bias).float()
-        elif isinstance(bias, ttnn.Tensor):
-            bias = ttnn.to_torch(bias).float()
-
-        self._weight_ttnn = ttnn.from_torch(weight, dtype=ttnn.float32, layout=ttnn.ROW_MAJOR_LAYOUT)
-        if bias is not None:
-            if len(bias.shape) == 1:
-                bias = bias.view(1, 1, 1, -1)
-            self._bias_ttnn = ttnn.from_torch(bias, dtype=ttnn.float32, layout=ttnn.ROW_MAJOR_LAYOUT)
-        else:
-            self._bias_ttnn = None
-
-    def _create_conv_transpose_config(self):
-        return ttnn.Conv2dConfig(
-            weights_dtype=self.model_config.get("WEIGHTS_DTYPE", ttnn.bfloat16),
-            shard_layout=None,
-            deallocate_activation=False,
-            output_layout=ttnn.TILE_LAYOUT,
-        )
-
-    def _create_compute_config(self):
-        return ttnn.init_device_compute_kernel_config(
-            self.device.arch(),
-            math_fidelity=self.model_config.get("MATH_FIDELITY", ttnn.MathFidelity.HiFi4),
-            math_approx_mode=False,
-            fp32_dest_acc_en=True,
-            packer_l1_acc=False,
-        )
-
-    def __call__(self, x, batch_size, height, width):
-        if x.is_sharded():
-            x = ttnn.sharded_to_interleaved(x, ttnn.DRAM_MEMORY_CONFIG)
-        if x.layout != ttnn.TILE_LAYOUT:
-            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-
-        conv_config = self._create_conv_transpose_config()
-        compute_config = self._create_compute_config()
-
-        out, [out_h, out_w] = ttnn.conv_transpose2d(
-            input_tensor=x,
-            weight_tensor=self._weight_ttnn,
-            bias_tensor=self._bias_ttnn,
-            device=self.device,
-            in_channels=self.in_channels,
-            out_channels=self.out_channels,
-            batch_size=batch_size,
-            input_height=height,
-            input_width=width,
-            kernel_size=self.kernel_size,
-            stride=self.stride,
-            padding=(0, 0),
-            output_padding=(0, 0),
-            dilation=(1, 1),
-            groups=1,
-            conv_config=conv_config,
-            compute_config=compute_config,
-            return_output_dim=True,
-            dtype=self.model_config.get("ACTIVATIONS_DTYPE", ttnn.bfloat16),
-        )
-
-        if out.is_sharded():
-            out = ttnn.sharded_to_interleaved(out, ttnn.DRAM_MEMORY_CONFIG)
-        out = ttnn.relu(out)
-
-        out = post_process_conv_output(out, batch_size, out_h, out_w, self.out_channels)
-
-        return out, (out_h, out_w)
-
-
-class TtSECONDFPN:
-    def __init__(self, device, parameters, model_config):
-        self.device = device
-        self.model_config = model_config
-
-        # Initialize 4 deblocks
-        self.deblocks = [
-            TtDeblock(
-                device=device,
-                in_channels=160,
-                out_channels=64,
-                kernel_size=1,
-                stride=1,
-                parameters=parameters["deblock_0"],
-                model_config=model_config,
-            ),
-            TtDeblock(
-                device=device,
-                in_channels=160,
-                out_channels=64,
-                kernel_size=2,
-                stride=2,
-                parameters=parameters["deblock_1"],
-                model_config=model_config,
-            ),
-            TtDeblock(
-                device=device,
-                in_channels=320,
-                out_channels=64,
-                kernel_size=4,
-                stride=4,
-                parameters=parameters["deblock_2"],
-                model_config=model_config,
-            ),
-            TtDeblock(
-                device=device,
-                in_channels=640,
-                out_channels=64,
-                kernel_size=8,
-                stride=8,
-                parameters=parameters["deblock_3"],
-                model_config=model_config,
-            ),
-        ]
-
-    def __call__(self, x0, x1, x2, x3, batch_size=1):
-        # Get dimensions from inputs
-        h0, w0 = x0.shape[1], x0.shape[2]
-        h1, w1 = x1.shape[1], x1.shape[2]
-        h2, w2 = x2.shape[1], x2.shape[2]
-        h3, w3 = x3.shape[1], x3.shape[2]
-
-        # Process each input through its deblock
-        y0, _ = self.deblocks[0](x0, batch_size, h0, w0)
-        y1, _ = self.deblocks[1](x1, batch_size, h1, w1)
-        y2, _ = self.deblocks[2](x2, batch_size, h2, w2)
-        y3, _ = self.deblocks[3](x3, batch_size, h3, w3)
-
-        # Ensure all tensors are in interleaved DRAM for concat
-        tensors = []
-        for y in [y0, y1, y2, y3]:
-            if y.is_sharded():
-                y = ttnn.sharded_to_interleaved(y, ttnn.DRAM_MEMORY_CONFIG)
-            tensors.append(y)
-
-        # Concatenate along channel dimension (dim=3 in NHWC format)
-        out = ttnn.concat(tensors, dim=3)
-
-        return out
-
-
 class TtTaskHead:
     def __init__(self, device, in_channels, out_channels, parameters, model_config):
         self.device = device
@@ -593,7 +422,7 @@ class TtBEVDepthHead:
         if "state_dict" in state_dict:
             state_dict = state_dict["state_dict"]
         neck_params = prepare_secondfpn_head_parameters(state_dict)
-        self.neck = SECONDFPN_Head_TTNN(
+        self.neck = TtSecondFpnHead(
             device=device,
             parameters=neck_params,
             in_channels=[160, 160, 320, 640],

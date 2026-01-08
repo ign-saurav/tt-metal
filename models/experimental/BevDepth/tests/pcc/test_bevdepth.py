@@ -18,7 +18,7 @@ from models.experimental.BevDepth.tt.ttnn_bevdepth import TtBEVDepth
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-def test_bevdepth(device):
+def test_bevdepth_pcc(device):
     torch.manual_seed(42)
 
     params, reference_model = prepare_all_parameters_from_reference(device)

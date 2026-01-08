@@ -57,7 +57,7 @@ secondfpn_head_optimizations = SECONDFPNHeadOptimizations(
 )
 
 
-class SECONDFPN_TTNN:
+class TtSecondFpnBackbone:
     def __init__(
         self,
         device,
@@ -279,7 +279,7 @@ class SECONDFPN_TTNN:
         return [out]
 
 
-class SECONDFPN_Head_TTNN:
+class TtSecondFpnHead:
     def __init__(
         self,
         device,

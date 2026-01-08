@@ -5,9 +5,9 @@ import os
 import ttnn
 import torch
 
-from models.experimental.BevDepth.tt.ttnn_resnet50_backbone import ResNet50_BEVDepth
-from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_TTNN
-from models.experimental.BevDepth.tt.ttnn_depthnet import DepthNet_TTNN
+from models.experimental.BevDepth.tt.ttnn_resnet50_backbone import TtResNet50Backbone
+from models.experimental.BevDepth.tt.ttnn_secondfpn import TtSecondFpnBackbone
+from models.experimental.BevDepth.tt.ttnn_depthnet import TtDepthNet
 from models.experimental.BevDepth.reference.base_lss_fpn import _voxel_pooling_inference_fallback
 
 
@@ -38,7 +38,7 @@ class TtBaseLSSFPN:
         batch_size = self.model_config.get("batch_size", 1)
 
         # Image backbone: ResNet50
-        self.img_backbone = ResNet50_BEVDepth(
+        self.img_backbone = TtResNet50Backbone(
             device=device,
             parameters=backbone_parameters,
             batch_size=batch_size,
@@ -55,7 +55,7 @@ class TtBaseLSSFPN:
             (img_h // 16, img_w // 16),
             (img_h // 32, img_w // 32),
         ]
-        self.img_neck = SECONDFPN_TTNN(
+        self.img_neck = TtSecondFpnBackbone(
             device=device,
             parameters=neck_parameters,
             in_channels=self.model_config.get("neck_in_channels", [256, 512, 1024, 2048]),
@@ -68,7 +68,7 @@ class TtBaseLSSFPN:
         )
 
         # DepthNet: Depth estimation network
-        self.depth_net = DepthNet_TTNN(
+        self.depth_net = TtDepthNet(
             device=device,
             parameters=depthnet_parameters,
             in_channels=self.model_config.get("depthnet_in_channels", 512),
@@ -189,7 +189,7 @@ class TtBaseLSSFPN:
                     (img_h // 16, img_w // 16),
                     (img_h // 32, img_w // 32),
                 ]
-                fresh_neck = SECONDFPN_TTNN(
+                fresh_neck = TtSecondFpnBackbone(
                     device=self.device,
                     parameters=self._neck_params,
                     in_channels=self.model_config.get("neck_in_channels", [256, 512, 1024, 2048]),

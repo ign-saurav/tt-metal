@@ -13,7 +13,7 @@ from models.experimental.BevDepth.tt.custom_preprocessing import (
     fuse_conv_bn_weights_unified as fuse_conv_bn_weights,
 )
 from models.experimental.BevDepth.common import download_bevdepth_weights
-from models.experimental.BevDepth.tt.ttnn_secondfpn import SECONDFPN_TTNN
+from models.experimental.BevDepth.tt.ttnn_secondfpn import TtSecondFpnBackbone
 from models.experimental.BevDepth.reference.second_fpn import SECONDFPN
 
 
@@ -116,7 +116,7 @@ def test_secondfpn_pcc(device, batch_size, height, width):
         "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
     }
 
-    ttnn_fpn = SECONDFPN_TTNN(
+    ttnn_fpn = TtSecondFpnBackbone(
         device=device,
         parameters=fpn_params,
         in_channels=in_channels,

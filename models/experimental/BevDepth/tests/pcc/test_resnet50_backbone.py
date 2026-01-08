@@ -7,11 +7,11 @@ from loguru import logger
 import ttnn
 
 from models.common.utility_functions import comp_pcc
-from models.experimental.BevDepth.tt.ttnn_resnet50_backbone import ResNet50_BEVDepth
+from models.experimental.BevDepth.tt.ttnn_resnet50_backbone import TtResNet50Backbone
 from models.experimental.BevDepth.tt.custom_preprocessing import (
     extract_backbone_state_dict,
     fuse_batchnorm_into_conv,
-    prepare_ttnn_parameters,
+    prepare_resnet_parameters,
 )
 from models.experimental.BevDepth.common import download_bevdepth_weights
 
@@ -71,9 +71,9 @@ def test_resnet50_bevdepth_pcc(device, batch_size, height, width):
         "MATH_FIDELITY": ttnn.MathFidelity.HiFi4,
     }
 
-    ttnn_params = prepare_ttnn_parameters(backbone_state)
+    ttnn_params = prepare_resnet_parameters(backbone_state)
 
-    ttnn_model = ResNet50_BEVDepth(
+    ttnn_model = TtResNet50Backbone(
         device=device,
         parameters=ttnn_params,
         batch_size=batch_size,
