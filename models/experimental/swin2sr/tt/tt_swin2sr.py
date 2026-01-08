@@ -393,19 +393,10 @@ class TtSwin2SR:
             x = ttnn.sharded_to_interleaved(x, self.memory_config)
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
             # Reshape to recover spatial dimensions (conv_first may flatten output)
-            # Handle sharded tensors for mesh devices (N300): reshape requires interleaved layout
-            # Check if tensor is sharded or if target memory_config is sharded
-            if x.is_sharded() or self.memory_config.is_sharded():
-                # Use interleaved memory_config for reshape, then convert back if needed
-                interleaved_memory_config = ttnn.MemoryConfig(
-                    ttnn.TensorMemoryLayout.INTERLEAVED, self.memory_config.buffer_type()
-                )
-                x = ttnn.reshape(x, (B, H, W, self.embed_dim), memory_config=interleaved_memory_config)
-                # Convert back to sharded if original memory_config was sharded
-                if self.memory_config.is_sharded():
-                    x = ttnn.interleaved_to_sharded(x, self.memory_config)
-            else:
-                x = ttnn.reshape(x, (B, H, W, self.embed_dim), memory_config=self.memory_config)
+            # Get actual batch size from tensor after conv_first (may differ from input B in multi-device setups)
+            x_shape = x.shape
+            actual_B = x_shape[0]
+            x = ttnn.reshape(x, (actual_B, H, W, self.embed_dim), memory_config=self.memory_config)
             x = ttnn.permute(x, (0, 3, 1, 2))  # Now [B, C, H, W]
 
             # Save shortcut AFTER reshape to ensure correct shape
@@ -424,19 +415,9 @@ class TtSwin2SR:
                         x = ttnn.leaky_relu(x, negative_slope=0.2, memory_config=self.memory_config)
                         x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
                 # Reshape to recover spatial dimensions after 3conv
-                # Handle sharded tensors for mesh devices (N300): reshape requires interleaved layout
-                # Check if tensor is sharded or if target memory_config is sharded
-                if x.is_sharded() or self.memory_config.is_sharded():
-                    # Use interleaved memory_config for reshape, then convert back if needed
-                    interleaved_memory_config = ttnn.MemoryConfig(
-                        ttnn.TensorMemoryLayout.INTERLEAVED, self.memory_config.buffer_type()
-                    )
-                    x = ttnn.reshape(x, (B, H, W, self.embed_dim), memory_config=interleaved_memory_config)
-                    # Convert back to sharded if original memory_config was sharded
-                    if self.memory_config.is_sharded():
-                        x = ttnn.interleaved_to_sharded(x, self.memory_config)
-                else:
-                    x = ttnn.reshape(x, (B, H, W, self.embed_dim), memory_config=self.memory_config)
+                # Use actual batch size from tensor (may differ from input B in multi-device setups)
+                actual_B_conv = x.shape[0]
+                x = ttnn.reshape(x, (actual_B_conv, H, W, self.embed_dim), memory_config=self.memory_config)
                 x = ttnn.permute(x, (0, 3, 1, 2))
             else:
                 x = ttnn.permute(x, (0, 2, 3, 1))
@@ -445,19 +426,9 @@ class TtSwin2SR:
                 x = ttnn.sharded_to_interleaved(x, self.memory_config)
                 x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
                 # Reshape to recover spatial dimensions after 1conv
-                # Handle sharded tensors for mesh devices (N300): reshape requires interleaved layout
-                # Check if tensor is sharded or if target memory_config is sharded
-                if x.is_sharded() or self.memory_config.is_sharded():
-                    # Use interleaved memory_config for reshape, then convert back if needed
-                    interleaved_memory_config = ttnn.MemoryConfig(
-                        ttnn.TensorMemoryLayout.INTERLEAVED, self.memory_config.buffer_type()
-                    )
-                    x = ttnn.reshape(x, (B, H, W, self.embed_dim), memory_config=interleaved_memory_config)
-                    # Convert back to sharded if original memory_config was sharded
-                    if self.memory_config.is_sharded():
-                        x = ttnn.interleaved_to_sharded(x, self.memory_config)
-                else:
-                    x = ttnn.reshape(x, (B, H, W, self.embed_dim), memory_config=self.memory_config)
+                # Use actual batch size from tensor (may differ from input B in multi-device setups)
+                actual_B_conv = x.shape[0]
+                x = ttnn.reshape(x, (actual_B_conv, H, W, self.embed_dim), memory_config=self.memory_config)
                 x = ttnn.permute(x, (0, 3, 1, 2))
 
             x = ttnn.add(shortcut, x, memory_config=self.memory_config, dtype=ttnn.bfloat16)
@@ -482,19 +453,7 @@ class TtSwin2SR:
 
             if len(x.shape) == 4 and x.shape[1] == 1:
                 out_channels = x.shape[-1]
-                # Handle sharded tensors for mesh devices (N300): reshape requires interleaved layout
-                # Check if tensor is sharded or if target memory_config is sharded
-                if x.is_sharded() or self.memory_config.is_sharded():
-                    # Use interleaved memory_config for reshape, then convert back if needed
-                    interleaved_memory_config = ttnn.MemoryConfig(
-                        ttnn.TensorMemoryLayout.INTERLEAVED, self.memory_config.buffer_type()
-                    )
-                    x = ttnn.reshape(x, (B_up, H_up, W_up, out_channels), memory_config=interleaved_memory_config)
-                    # Convert back to sharded if original memory_config was sharded
-                    if self.memory_config.is_sharded():
-                        x = ttnn.interleaved_to_sharded(x, self.memory_config)
-                else:
-                    x = ttnn.reshape(x, (B_up, H_up, W_up, out_channels), memory_config=self.memory_config)
+                x = ttnn.reshape(x, (B_up, H_up, W_up, out_channels), memory_config=self.memory_config)
 
             x = ttnn.permute(x, (0, 3, 1, 2))
 
