@@ -69,7 +69,13 @@ class DistributedNorm(LightweightModule):
                     compute_kernel_config=self.ln_cfg,
                 )
 
-        input_mem_cfg = self.norm.sharded_output_config if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG
+        # For smaller models (dim < 4096), use DRAM to avoid L1 memory conflicts
+        use_dram_for_decode = self.args.dim < 4096 and not self.TG
+
+        if use_dram_for_decode and mode == "decode":
+            input_mem_cfg = ttnn.DRAM_MEMORY_CONFIG
+        else:
+            input_mem_cfg = self.norm.sharded_output_config if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG
 
         # Distributed norm already performs a gather
         if self.args.is_multichip and not self.args.is_distributed_norm(mode):
@@ -89,7 +95,10 @@ class DistributedNorm(LightweightModule):
         else:
             x = ttnn.to_memory_config(x, input_mem_cfg)
 
-        x = self.norm(x, mode=mode, in_sharded=(mode == "decode"), out_sharded=(mode == "decode"))
+        # For small models using DRAM, use non-sharded norm
+        in_sharded = (mode == "decode") and not use_dram_for_decode
+        out_sharded = (mode == "decode") and not use_dram_for_decode
+        x = self.norm(x, mode=mode, in_sharded=in_sharded, out_sharded=out_sharded)
 
         # Distributed norm requires a gather
         if self.args.is_distributed_norm(mode):

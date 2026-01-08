@@ -705,11 +705,16 @@ class ModelArgs:
             self.model_config["DECODERS_OPTIMIZATIONS"] = self.optimizations
 
             # Create memory config for sharded tensors
+            # For smaller models (dim < 4096), use DRAM to avoid L1 memory conflicts
+            # For larger models (dim >= 4096), use L1 sharded for better performance
             residual_grid = self.dram_shard_core_grid_for_k(self.dim // self.num_devices)
-            self.model_config["DECODE_RESIDUAL_MEMCFG"] = (
-                ttnn.L1_MEMORY_CONFIG  # FIXME: when residual add support typecasting for sharded tensors
-                if self.is_galaxy
-                else ttnn.create_sharded_memory_config(
+            if self.is_galaxy:
+                self.model_config["DECODE_RESIDUAL_MEMCFG"] = ttnn.L1_MEMORY_CONFIG
+            elif self.dim < 4096:
+                # Use DRAM for smaller models to avoid L1 circular buffer conflicts
+                self.model_config["DECODE_RESIDUAL_MEMCFG"] = ttnn.DRAM_MEMORY_CONFIG
+            else:
+                self.model_config["DECODE_RESIDUAL_MEMCFG"] = ttnn.create_sharded_memory_config(
                     (
                         self.tile_padded_batch_rows,
                         self.dim // residual_grid.num_cores // self.num_devices,
@@ -719,7 +724,6 @@ class ModelArgs:
                     ttnn.ShardOrientation.ROW_MAJOR,
                     use_height_and_width_as_shard_shape=True,
                 )
-            )
 
             # Chunk values based on what works best empirically
             self.model_config["SDPA_PROGCFG"] = lambda seqlen: ttnn.SDPAProgramConfig(
@@ -956,28 +960,35 @@ class ModelArgs:
             )
 
             # MLP configs
+            # For smaller models (dim < 4096), use DRAM to avoid L1 memory conflicts
+            use_dram_for_decode = self.dim < 4096 and not self.is_galaxy
+
             mlp_core_grid = (
                 self.dram_shard_core_grid_for_k(self.dim)
                 if self.is_galaxy
                 else self.dram_shard_core_grid_for_k_and_n(self.dim, self.hidden_dim // self.num_devices)
             )
 
-            self.model_config["SHARDED_MLP_INPUT_MEMCFG"] = ttnn.create_sharded_memory_config(
-                (
-                    self.tile_padded_batch_rows,
-                    self.dim // mlp_core_grid.num_cores,
-                ),  # Shard shape: [32, 128] -> 1 shard per core
-                mlp_core_grid,
-                ttnn.ShardStrategy.WIDTH,
-                ttnn.ShardOrientation.ROW_MAJOR,
-                use_height_and_width_as_shard_shape=True,
-            )
-            self.model_config["DECODE_MLP_W1_W3_PRG_CONFIG"] = self.dram_matmul_config(
-                m=self.tile_padded_batch_rows,
-                k=self.dim,
-                n=self.hidden_dim // self.cluster_shape[1],
-                num_cores=mlp_core_grid.num_cores,
-            )
+            if use_dram_for_decode:
+                self.model_config["SHARDED_MLP_INPUT_MEMCFG"] = ttnn.DRAM_MEMORY_CONFIG
+                self.model_config["DECODE_MLP_W1_W3_PRG_CONFIG"] = None  # Let ttnn auto-select
+            else:
+                self.model_config["SHARDED_MLP_INPUT_MEMCFG"] = ttnn.create_sharded_memory_config(
+                    (
+                        self.tile_padded_batch_rows,
+                        self.dim // mlp_core_grid.num_cores,
+                    ),  # Shard shape: [32, 128] -> 1 shard per core
+                    mlp_core_grid,
+                    ttnn.ShardStrategy.WIDTH,
+                    ttnn.ShardOrientation.ROW_MAJOR,
+                    use_height_and_width_as_shard_shape=True,
+                )
+                self.model_config["DECODE_MLP_W1_W3_PRG_CONFIG"] = self.dram_matmul_config(
+                    m=self.tile_padded_batch_rows,
+                    k=self.dim,
+                    n=self.hidden_dim // self.cluster_shape[1],
+                    num_cores=mlp_core_grid.num_cores,
+                )
 
             mlp2_core_grid = (
                 ttnn.CoreGrid(y=1, x=8)
@@ -985,65 +996,77 @@ class ModelArgs:
                 else self.dram_shard_core_grid_for_k_and_n(self.hidden_dim // self.num_devices, self.dim)
             )
 
-            self.model_config["SHARDED_MLP2_INPUT_MEMCFG"] = ttnn.create_sharded_memory_config(
-                (
-                    32 if self.is_galaxy else self.tile_padded_batch_rows,
-                    self.hidden_dim // self.cluster_shape[1] // mlp2_core_grid.num_cores,
-                ),
-                mlp2_core_grid,
-                ttnn.ShardStrategy.WIDTH,
-                ttnn.ShardOrientation.ROW_MAJOR,
-                use_height_and_width_as_shard_shape=True,
-            )
-            self.model_config["DECODE_MLP_W2_PRG_CONFIG"] = self.dram_matmul_config(
-                m=self.tile_padded_batch_rows,
-                k=self.hidden_dim // self.cluster_shape[1],
-                n=self.dim,
-                num_cores=mlp2_core_grid.num_cores,
-            )
-            attn_input_grid = self.dram_shard_core_grid_for_k(self.dim)
-            self.model_config["SHARDED_ATTN_INPUT_MEMCFG"] = (
-                ttnn.create_sharded_memory_config(
-                    shape=(32, nearest_32(self.dim // (8 * lm_head_num_rows) // 4)),
-                    core_grid=ttnn.CoreGrid(y=lm_head_num_rows, x=8),
-                    strategy=ttnn.ShardStrategy.WIDTH,
-                    orientation=ttnn.ShardOrientation.ROW_MAJOR,
-                    use_height_and_width_as_shard_shape=True,
-                )
-                if self.is_galaxy
-                else ttnn.create_sharded_memory_config(
+            if use_dram_for_decode:
+                self.model_config["SHARDED_MLP2_INPUT_MEMCFG"] = ttnn.DRAM_MEMORY_CONFIG
+                self.model_config["DECODE_MLP_W2_PRG_CONFIG"] = None  # Let ttnn auto-select
+            else:
+                self.model_config["SHARDED_MLP2_INPUT_MEMCFG"] = ttnn.create_sharded_memory_config(
                     (
-                        self.tile_padded_batch_rows,
-                        self.dim // attn_input_grid.num_cores,
-                    ),  # Shard shape: [32, 128] -> 1 shard per core
-                    attn_input_grid,
+                        32 if self.is_galaxy else self.tile_padded_batch_rows,
+                        self.hidden_dim // self.cluster_shape[1] // mlp2_core_grid.num_cores,
+                    ),
+                    mlp2_core_grid,
                     ttnn.ShardStrategy.WIDTH,
                     ttnn.ShardOrientation.ROW_MAJOR,
                     use_height_and_width_as_shard_shape=True,
                 )
-            )
+                self.model_config["DECODE_MLP_W2_PRG_CONFIG"] = self.dram_matmul_config(
+                    m=self.tile_padded_batch_rows,
+                    k=self.hidden_dim // self.cluster_shape[1],
+                    n=self.dim,
+                    num_cores=mlp2_core_grid.num_cores,
+                )
+
+            attn_input_grid = self.dram_shard_core_grid_for_k(self.dim)
+
+            if use_dram_for_decode:
+                self.model_config["SHARDED_ATTN_INPUT_MEMCFG"] = ttnn.DRAM_MEMORY_CONFIG
+            else:
+                self.model_config["SHARDED_ATTN_INPUT_MEMCFG"] = (
+                    ttnn.create_sharded_memory_config(
+                        shape=(32, nearest_32(self.dim // (8 * lm_head_num_rows) // 4)),
+                        core_grid=ttnn.CoreGrid(y=lm_head_num_rows, x=8),
+                        strategy=ttnn.ShardStrategy.WIDTH,
+                        orientation=ttnn.ShardOrientation.ROW_MAJOR,
+                        use_height_and_width_as_shard_shape=True,
+                    )
+                    if self.is_galaxy
+                    else ttnn.create_sharded_memory_config(
+                        (
+                            self.tile_padded_batch_rows,
+                            self.dim // attn_input_grid.num_cores,
+                        ),  # Shard shape: [32, 128] -> 1 shard per core
+                        attn_input_grid,
+                        ttnn.ShardStrategy.WIDTH,
+                        ttnn.ShardOrientation.ROW_MAJOR,
+                        use_height_and_width_as_shard_shape=True,
+                    )
+                )
 
             # glx doesn't support DRAM sharded matmuls yet
-            self.model_config["XQKV_DECODE_PROGCFG"] = (
-                ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
-                    compute_with_storage_grid_size=(8, 5 if self.is_70b or self.is_90b else lm_head_num_rows),
-                    in0_block_w=2 if self.is_70b or self.is_90b else 1,
-                    out_subblock_h=1,
-                    out_subblock_w=1,
-                    per_core_M=1,
-                    per_core_N=1,
-                    fuse_batch=True,
-                    fused_activation=None,
-                    mcast_in0=True,
+            if use_dram_for_decode:
+                self.model_config["XQKV_DECODE_PROGCFG"] = None  # Let ttnn auto-select
+            else:
+                self.model_config["XQKV_DECODE_PROGCFG"] = (
+                    ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
+                        compute_with_storage_grid_size=(8, 5 if self.is_70b or self.is_90b else lm_head_num_rows),
+                        in0_block_w=2 if self.is_70b or self.is_90b else 1,
+                        out_subblock_h=1,
+                        out_subblock_w=1,
+                        per_core_M=1,
+                        per_core_N=1,
+                        fuse_batch=True,
+                        fused_activation=None,
+                        mcast_in0=True,
+                    )
+                    if self.is_galaxy
+                    else self.dram_matmul_config(
+                        m=self.tile_padded_batch_rows,
+                        k=self.dim,
+                        n=self.qkv_size // self.num_devices,
+                        num_cores=attn_input_grid.num_cores,
+                    )
                 )
-                if self.is_galaxy
-                else self.dram_matmul_config(
-                    m=self.tile_padded_batch_rows,
-                    k=self.dim,
-                    n=self.qkv_size // self.num_devices,
-                    num_cores=attn_input_grid.num_cores,
-                )
-            )
 
             full_grid = ttnn.CoreRangeSet(
                 {
@@ -1053,30 +1076,35 @@ class ModelArgs:
                     )
                 }
             )
-            self.model_config["FULL_GRID_MEMCFG"] = ttnn.MemoryConfig(
-                ttnn.TensorMemoryLayout.WIDTH_SHARDED,
-                ttnn.BufferType.L1,
-                ttnn.ShardSpec(
-                    full_grid,
-                    [
-                        32,
-                        nearest_32(56),
-                    ],
-                    ttnn.ShardOrientation.ROW_MAJOR,
-                ),
-            )
 
-            self.model_config["MLP_ACT_MEMCFG"] = (
-                ttnn.create_sharded_memory_config(
-                    shape=(32, self.dim // 4 // 16),  # dim / num devices / 16 cores
-                    core_grid=ttnn.CoreGrid(x=8, y=2),
-                    strategy=ttnn.ShardStrategy.WIDTH,
-                    orientation=ttnn.ShardOrientation.ROW_MAJOR,
-                    use_height_and_width_as_shard_shape=True,
+            # For smaller models, use DRAM to avoid L1 conflicts
+            if use_dram_for_decode:
+                self.model_config["FULL_GRID_MEMCFG"] = ttnn.DRAM_MEMORY_CONFIG
+                self.model_config["MLP_ACT_MEMCFG"] = ttnn.DRAM_MEMORY_CONFIG
+            else:
+                self.model_config["FULL_GRID_MEMCFG"] = ttnn.MemoryConfig(
+                    ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+                    ttnn.BufferType.L1,
+                    ttnn.ShardSpec(
+                        full_grid,
+                        [
+                            32,
+                            nearest_32(56),
+                        ],
+                        ttnn.ShardOrientation.ROW_MAJOR,
+                    ),
                 )
-                if self.dim >= 4096
-                else self.model_config["FULL_GRID_MEMCFG"]
-            )
+                self.model_config["MLP_ACT_MEMCFG"] = (
+                    ttnn.create_sharded_memory_config(
+                        shape=(32, self.dim // 4 // 16),  # dim / num devices / 16 cores
+                        core_grid=ttnn.CoreGrid(x=8, y=2),
+                        strategy=ttnn.ShardStrategy.WIDTH,
+                        orientation=ttnn.ShardOrientation.ROW_MAJOR,
+                        use_height_and_width_as_shard_shape=True,
+                    )
+                    if self.dim >= 4096
+                    else self.model_config["FULL_GRID_MEMCFG"]
+                )
 
             if self.is_galaxy:
                 self.model_config["FF1_3_TG_PROGCFG"] = self.matmul_1d_config_from_tensor_shapes(

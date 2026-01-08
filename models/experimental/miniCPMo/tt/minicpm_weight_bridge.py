@@ -33,6 +33,20 @@ class MiniCPMWeightBridge:
         self.weight_loader = DiskBasedWeightLoader()
         self.model_name = model_name
 
+    def _reverse_permute(self, tensor, n_heads, dim1, dim2):
+        """Convert HF Q/K weights to Meta format for RoPE compatibility."""
+        return tensor.view(n_heads, 2, dim1 // n_heads // 2, dim2).transpose(1, 2).reshape(dim1, dim2)
+
+    def _reverse_permute_1d(self, tensor):
+        """Convert Q/K norm weights from HF to Meta format."""
+        shape = tensor.shape
+        dim = shape[-1]
+        assert dim % 2 == 0, "Last dimension must be even"
+        reals = tensor[..., : dim // 2]
+        imags = tensor[..., dim // 2 :]
+        interleaved = torch.stack((reals, imags), dim=-1).flatten(start_dim=len(shape) - 1)
+        return interleaved
+
     def get_qwen_weights(self) -> Dict[str, torch.Tensor]:
         """
         Get base Qwen LLM weights in tt_transformers format.
@@ -40,6 +54,7 @@ class MiniCPMWeightBridge:
         Conversion:
         - 'llm.model.embed_tokens.weight' → 'model.embed_tokens.weight'
         - 'llm.model.layers.0.self_attn.q_proj.weight' → 'model.layers.0.self_attn.q_proj.weight'
+        - Q/K weights permuted from HF to Meta format for RoPE compatibility
         - Excludes: cross_attn, resampler, vpm, apm components
 
         Returns:
@@ -88,6 +103,21 @@ class MiniCPMWeightBridge:
                 new_key = new_key.replace("input_layernorm.bias", "attention_norm.bias")
                 new_key = new_key.replace("post_attention_layernorm.weight", "ffn_norm.weight")
                 new_key = new_key.replace("post_attention_layernorm.bias", "ffn_norm.bias")
+
+                # Apply RoPE-compatible permutation to Q/K weights
+                # MiniCPM uses head_dim=128 (3584/28)
+                head_dim = 128
+                if "wq.weight" in new_key or "wk.weight" in new_key:
+                    n_heads = tensor.shape[0] // head_dim
+                    tensor = self._reverse_permute(tensor, n_heads, tensor.shape[0], tensor.shape[1])
+                    logger.debug(f"Applied RoPE permutation to {new_key} (n_heads={n_heads})")
+                elif "wq.bias" in new_key or "wk.bias" in new_key:
+                    n_heads = tensor.shape[0] // head_dim
+                    tensor = self._reverse_permute(tensor.unsqueeze(-1), n_heads, tensor.shape[0], 1).squeeze(-1)
+                    logger.debug(f"Applied RoPE permutation to bias {new_key} (n_heads={n_heads})")
+                elif "q_norm.weight" in new_key or "k_norm.weight" in new_key:
+                    tensor = self._reverse_permute_1d(tensor)
+                    logger.debug(f"Applied RoPE permutation to norm {new_key}")
 
                 tt_weights[new_key] = tensor
                 logger.debug(f"Converted: {key} → {new_key}")
