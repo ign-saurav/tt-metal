@@ -69,23 +69,6 @@ class GraniteSpeech:
         self.paged_cache_max_seq_len = (
             page_params["page_block_size"] * page_params["page_max_num_blocks_per_dp"] / self.batch_size
         )
-        # self.model_args, self.tt_model, self.tt_kv_cache, self.state_dict = create_tt_model(
-        #     self.device,
-        #     instruct=True,
-        #     max_batch_size=1,
-        #     optimizations=lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
-        #     max_seq_len=512,
-        #     paged_attention_config=paged_attention_config,
-        # )
-
-        # self.tokenizer = self.model_args.tokenizer
-        # self.generator = Generator(
-        #     [self.tt_model],
-        #     [self.model_args],
-        #     self.device,
-        #     processor=self.model_args.processor,
-        #     tokenizer=self.model_args.tokenizer,
-        # )
 
     def forward(self, input_ids, input_features, input_features_mask):
         global_batch_size = 1
@@ -113,6 +96,7 @@ class GraniteSpeech:
             special_audio_mask,
             audio_features,
         )
+        inputs_embeds = inputs_embeds * 12.0  # embedding multiplier
 
         input_tokens_prefill_pt = inputs_embeds
         prefill_lens = [inputs_embeds.shape[-2]]
@@ -145,6 +129,12 @@ class GraniteSpeech:
         prefilled_token = torch.argmax(logits, dim=-1)
         logger.info(f"Prefill finished")
 
+        # Keep track of generated outputs to print out every iteration
+        all_outputs = [[]] * global_batch_size
+        for user in range(global_batch_size):
+            user_tok = int(prefilled_token[user].item())
+            all_outputs[user].append(user_tok)
+
         user_done = [False] * global_batch_size  # Keeps track when a user reaches EoD token
 
         sampling_params = {"temperature": 0, "top_p": 0.08, "top_k": 32}
@@ -173,7 +163,6 @@ class GraniteSpeech:
         current_pos = torch.tensor([decoding_pos[b] for b in range(global_batch_size)])
 
         user_done = [False] * global_batch_size  # Keeps track when a user reaches EoD token
-        all_outputs = [[]]
         stop_at_eos = True
 
         # Start decoding
@@ -228,8 +217,26 @@ class GraniteSpeech:
                         if all(user_done):
                             users_decoding = False
 
+            # Print out generated outputs for each user at the end of every iteration
+            for user in range(global_batch_size):
+                text = "".join(self.tokenizer.decode(all_outputs[user]))
+                if len(text) > 100:
+                    text = "..." + text[-97:]
+                text = text.replace("\n", " ")
+                logger.debug("[User {}] {}".format(user, text))
+
             iteration += 1
 
             # Upper limit of generated tokens for each user
             if iteration >= self.max_generated_tokens:
                 users_decoding = False
+
+        # Final print
+        if not users_decoding:
+            logger.info("Finished decoding, printing the final outputs...\n")
+            for i, output in enumerate(all_outputs):
+                text = self.tokenizer.decode(output)
+                short_prompt = "TODO: Add prompt"
+                logger.info(
+                    f"\n==REPEAT BATCH {0}\n==USER {i} - PROMPT\n{short_prompt} \n==USER {i} - OUTPUT\n{text}\n"
+                )
