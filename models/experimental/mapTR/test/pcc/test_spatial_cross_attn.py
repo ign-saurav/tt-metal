@@ -74,8 +74,7 @@ def create_ms_deformable_attention_preprocessor(device, weight_dtype=ttnn.bfloat
         # - num_Z_anchors = 4 (height anchors, defined below)
         # - num_key = sum of spatial_shapes: 37*37 + 19*19 + 10*10 + 5*5 = 1855
         # - num_query = BEV queries (e.g., 50x50=2500 or smaller for testing)
-        # (256, 6, 4, 4, 1, 2500, 1855), #OOM
-        (256, 6, 4, 4, 1, 500, 1855),
+        (256, 6, 4, 4, 1, 2500, 1855),
     ],
 )
 @pytest.mark.parametrize("input_dtype", [ttnn.bfloat16])

@@ -1,6 +1,3 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
-# SPDX-License-Identifier: Apache-2.0
-
 # ---------------------------------------------
 # Copyright (c) OpenMMLab. All rights reserved.
 # ---------------------------------------------
@@ -150,10 +147,12 @@ class SpatialCrossAttention(nn.Module):
                     j, index_query_per_img
                 ]
 
-        num_cams, l, bs, embed_dims = key.shape
+        # key shape: (num_cams, l, bs, embed_dims)
+        num_cams_from_key, l, bs_from_key, embed_dims_from_key = key.shape
 
-        key = key.permute(2, 0, 1, 3).reshape(bs * self.num_cams, l, self.embed_dims)
-        value = value.permute(2, 0, 1, 3).reshape(bs * self.num_cams, l, self.embed_dims)
+        # Use bs from query (already computed above) for consistency
+        key = key.permute(2, 0, 1, 3).reshape(bs_from_key * num_cams_from_key, l, embed_dims_from_key)
+        value = value.permute(2, 0, 1, 3).reshape(bs_from_key * num_cams_from_key, l, embed_dims_from_key)
 
         queries = self.deformable_attention(
             query=queries_rebatch.view(bs * self.num_cams, max_len, self.embed_dims),

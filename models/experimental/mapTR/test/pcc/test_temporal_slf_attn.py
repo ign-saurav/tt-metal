@@ -7,7 +7,7 @@ import ttnn
 from loguru import logger
 
 from models.experimental.mapTR.reference.pytorch_temporal_self_attention import TemporalSelfAttention
-from models.experimental.mapTR.tt.temporal_self_attention import TtTemporalSelfAttention
+from models.experimental.mapTR.tt.temporal_sel_attention import TtTemporalSelfAttention
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (
     preprocess_model_parameters,
