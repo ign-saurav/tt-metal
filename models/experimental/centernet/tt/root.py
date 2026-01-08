@@ -75,7 +75,15 @@ class TtRoot(LightweightModule):
 
     def forward(self, *x):
         # Concatenate all inputs along channel dimension
-        x = ttnn.concat(x, dim=3)
+        # x = ttnn.concat(x, dim=3)
+        converted_tensors = []
+        for tensor in x:
+            if tensor.is_sharded():
+                tensor = ttnn.sharded_to_interleaved(tensor, ttnn.L1_MEMORY_CONFIG)
+            converted_tensors.append(tensor)
+
+        # Concatenate all inputs along channel dimension
+        x = ttnn.concat(converted_tensors, dim=3, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         # Apply convolution (with fused BatchNorm and ReLU)
         # x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)

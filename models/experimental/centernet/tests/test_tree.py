@@ -26,9 +26,9 @@ WEIGHTS_PATH = "models/experimental/centernet/ctdet_coco_dlav0_1x.pth"
     "levels,in_channels,out_channels,stride,level_root,root_residual,input_shape",
     [
         # Case 1: Level 1 tree
-        (1, 32, 64, 2, False, False, (1, 32, 256, 256)),
-        # # Case 2: Level 2 tree
-        # (2, 64, 128, 2, False, False, (1, 64, 128, 128)),
+        # (1, 32, 64, 2, False, False, (1, 32, 256, 256)),
+        # Case 2: Level 2 tree
+        (2, 64, 128, 2, False, False, (1, 64, 128, 128)),
         # # Case 3: Level 2 tree with larger channels
         # (2, 128, 256, 2, False, False, (1, 128, 64, 64)),
         # # Case 4: Level 1 tree with large channels
@@ -74,12 +74,6 @@ def test_tree(device, levels, in_channels, out_channels, stride, level_root, roo
     )
 
     # Create TTNN Tree module
-    batch_size = input_shape[0]
-    input_height = input_shape[2]
-    input_width = input_shape[3]
-    import pdb
-
-    pdb.set_trace()
 
     tt_tree = TtTree(
         levels=levels,

@@ -7,7 +7,7 @@ from models.tt_cnn.tt.builder import (
     TtConv2d,
     TtMaxPool2d,
     MaxPool2dConfiguration,
-    AutoShardedStrategyConfiguration,
+    HeightShardedStrategyConfiguration,
 )
 from models.experimental.centernet.tt.root import TtRoot
 from models.experimental.centernet.tt.basic_block import TtBasicBlock
@@ -113,9 +113,6 @@ class TtTree(LightweightModule):
         # Optional downsample layer
         self.downsample = None
         if stride > 1:
-            import pdb
-
-            pdb.set_trace()
             self.downsample = TtMaxPool2d(
                 MaxPool2dConfiguration(
                     input_height=layer_args.downsample.input_height,
@@ -124,7 +121,6 @@ class TtTree(LightweightModule):
                     batch_size=layer_args.downsample.batch_size,
                     kernel_size=(stride, stride),
                     stride=(stride, stride),
-                    # sharding_strategy=AutoShardedStrategyConfiguration(),
                 ),
                 device,
             )
@@ -132,9 +128,6 @@ class TtTree(LightweightModule):
         # Optional project layer (1x1 conv + BatchNorm)
         self.project = None
         if in_channels != out_channels:
-            import pdb
-
-            pdb.set_trace()
             self.project = TtConv2d(
                 self._make_config(
                     parameters.project,
@@ -187,12 +180,10 @@ class TtTree(LightweightModule):
             activation_dtype=ttnn.bfloat16,
             weights_dtype=ttnn.bfloat16,
             output_dtype=ttnn.bfloat16,
-            sharding_strategy=AutoShardedStrategyConfiguration(),
+            sharding_strategy=HeightShardedStrategyConfiguration(reshard_if_not_optimal=True),
             math_fidelity=ttnn.MathFidelity.LoFi,
             fp32_dest_acc_en=True,
-            deallocate_activation=True,
-            # core_grid=core_grid,
-            # override_sharding_config=override_sharding_config,
+            deallocate_activation=False,
         )
 
     # def forward(self, x):
@@ -240,9 +231,7 @@ class TtTree(LightweightModule):
             children.append(bottom)
 
         # Forward through tree1 with residual
-        import pdb
 
-        pdb.set_trace()
         x1 = self.tree1(x, residual)
 
         if self.levels == 1:

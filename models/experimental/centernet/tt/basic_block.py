@@ -4,9 +4,9 @@
 
 import ttnn
 from models.tt_cnn.tt.builder import (
+    AutoShardedStrategyConfiguration,
     Conv2dConfiguration,
     TtConv2d,
-    HeightShardedStrategyConfiguration,
 )
 from models.common.lightweightmodule import LightweightModule
 
@@ -82,7 +82,8 @@ class TtBasicBlock(LightweightModule):
             activation_dtype=ttnn.bfloat16,
             weights_dtype=ttnn.bfloat16,
             output_dtype=ttnn.bfloat16,
-            sharding_strategy=HeightShardedStrategyConfiguration(reshard_if_not_optimal=True),
+            # sharding_strategy=HeightShardedStrategyConfiguration(reshard_if_not_optimal=True),
+            sharding_strategy=AutoShardedStrategyConfiguration(),
             math_fidelity=ttnn.MathFidelity.HiFi2,
             fp32_dest_acc_en=True,
             deallocate_activation=True,
