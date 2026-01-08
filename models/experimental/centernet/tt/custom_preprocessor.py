@@ -4,12 +4,14 @@
 
 import ttnn
 import torch
-
+from ttnn.model_preprocessing import make_parameter_dict
 from ttnn.model_preprocessing import ModuleArgs, fold_batch_norm2d_into_conv2d
 import torch
 import ttnn
+from models.experimental.centernet.reference.network.dlav0 import DLAUp, Identity
 from models.experimental.centernet.reference.network.dlav0 import (
     BasicBlock,
+    Root,
 )
 from ttnn.dot_access import make_dot_access_dict
 
@@ -64,6 +66,149 @@ def create_basic_block_preprocessor():
             }
 
         return parameters
+
+    return preprocessor
+
+
+def create_centernet_head_preprocessor():
+    def custom_preprocessor(model, name, ttnn_module_args, convert_to_ttnn):
+        parameters = {}
+
+        # Check if it's a Sequential with the expected structure
+        if isinstance(model, torch.nn.Sequential) and len(model) == 3:
+            # Handle conv layers at indices 0 and 2
+            for i, layer_name in enumerate(["conv1", "conv2"]):
+                layer_idx = 0 if i == 0 else 2
+                conv_layer = model[layer_idx]
+
+                parameters[layer_name] = {}
+                parameters[layer_name]["weight"] = ttnn.from_torch(conv_layer.weight, dtype=ttnn.float32)
+                if conv_layer.bias is not None:
+                    bias = conv_layer.bias.reshape((1, 1, 1, -1))
+                    parameters[layer_name]["bias"] = ttnn.from_torch(bias, dtype=ttnn.float32)
+                else:
+                    parameters[layer_name]["bias"] = None
+
+        return parameters
+
+    return custom_preprocessor
+
+
+def create_head_preprocessor():
+    """
+    Creates a custom preprocessor for CenterNet heads.
+    """
+
+    def preprocessor(model, name, ttnn_module_args):
+        parameters = {}
+
+        if hasattr(model, "__class__") and "Sequential" in str(type(model)):
+            # Head with intermediate conv (head_conv > 0)
+            for i, layer in enumerate(model):
+                if hasattr(layer, "weight") and hasattr(layer, "bias"):
+                    weight = layer.weight.data
+                    bias = layer.bias.data
+                    parameters[i] = {
+                        "weight": ttnn.from_torch(weight, dtype=ttnn.bfloat16),
+                        "bias": ttnn.from_torch(bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16),
+                    }
+        else:
+            # Single conv head (head_conv = 0)
+            if hasattr(model, "weight") and hasattr(model, "bias"):
+                weight = model.weight.data
+                bias = model.bias.data
+                parameters["weight"] = ttnn.from_torch(weight, dtype=ttnn.bfloat16)
+                parameters["bias"] = ttnn.from_torch(bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16)
+
+        return parameters
+
+    return preprocessor
+
+
+def create_root_preprocessor():
+    def custom_root_preprocessor(model, name, ttnn_module_args, convert_to_ttnn):
+        parameters = {}
+        if isinstance(model, Root):
+            parameters["conv"] = {}
+            parameters["conv"]["weight"] = ttnn.from_torch(model.conv.weight, dtype=ttnn.bfloat16)
+            if model.conv.bias is not None:
+                parameters["conv"]["bias"] = ttnn.from_torch(
+                    torch.reshape(model.conv.bias, (1, 1, 1, -1)), dtype=ttnn.bfloat16
+                )
+        return parameters
+
+    return custom_root_preprocessor
+
+
+def preprocess_tree_parameters(model):
+    """
+    Preprocess tree parameters by traversing the tree structure and folding BatchNorm.
+    """
+    parameters = {}
+
+    def preprocess_subtree(subtree):
+        """Recursively preprocess a subtree (Tree or BasicBlock)"""
+        if hasattr(subtree, "conv1"):  # It's a BasicBlock
+            # Use basic block preprocessing
+            basic_preprocessor = create_basic_block_preprocessor()
+            return basic_preprocessor(subtree, "", None)
+        else:  # It's a Tree
+            sub_params = {}
+            if hasattr(subtree, "tree1"):
+                sub_params["tree1"] = preprocess_subtree(subtree.tree1)
+            if hasattr(subtree, "tree2"):
+                sub_params["tree2"] = preprocess_subtree(subtree.tree2)
+            if hasattr(subtree, "root"):
+                # Preprocess root conv + bn
+                if hasattr(subtree.root, "conv") and hasattr(subtree.root, "bn"):
+                    weight, bias = fold_bn_into_conv(subtree.root.conv, subtree.root.bn)
+                    sub_params["root"] = {
+                        "conv": {
+                            "weight": ttnn.from_torch(weight, dtype=ttnn.bfloat16),
+                            "bias": ttnn.from_torch(bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16),
+                        }
+                    }
+                else:
+                    sub_params["root"] = {}
+            return sub_params
+
+    if hasattr(model, "tree1"):
+        parameters["tree1"] = preprocess_subtree(model.tree1)
+    if hasattr(model, "tree2"):
+        parameters["tree2"] = preprocess_subtree(model.tree2)
+
+    # Handle root, downsample, project at the top level
+    if hasattr(model, "root"):
+        if hasattr(model.root, "conv") and hasattr(model.root, "bn"):
+            weight, bias = fold_bn_into_conv(model.root.conv, model.root.bn)
+            parameters["root"] = {
+                "conv": {
+                    "weight": ttnn.from_torch(weight, dtype=ttnn.bfloat16),
+                    "bias": ttnn.from_torch(bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16),
+                }
+            }
+        else:
+            parameters["root"] = {}
+    if hasattr(model, "downsample") and model.downsample is not None:
+        parameters["downsample"] = {}
+    if hasattr(model, "project") and model.project is not None:
+        if hasattr(model.project, "conv") and hasattr(model.project, "bn"):
+            weight, bias = fold_bn_into_conv(model.project[0], model.project[1])
+            parameters["project"] = {
+                "weight": ttnn.from_torch(weight, dtype=ttnn.bfloat16),
+                "bias": ttnn.from_torch(bias.reshape(1, 1, 1, -1), dtype=ttnn.bfloat16),
+            }
+
+    return make_parameter_dict(parameters)
+
+
+def create_tree_preprocessor():
+    """
+    Creates a custom preprocessor for Tree that uses manual parameter preprocessing.
+    """
+
+    def preprocessor(model, name, ttnn_module_args):
+        return preprocess_tree_parameters(model)
 
     return preprocessor
 
@@ -311,3 +456,59 @@ def create_custom_mesh_preprocessor(mesh_mapper=None):
         )
 
     return custom_mesh_preprocessor
+
+
+def create_dla_up_preprocessor():
+    """Creates a custom preprocessor for DLAUp that handles multiple IDAUp modules."""
+
+    def preprocessor(model, name, ttnn_module_args):
+        parameters = {}
+
+        if isinstance(model, DLAUp):
+            # Process each IDAUp module within DLAUp
+            for i in range(len(model.channels) - 1):
+                ida_name = f"ida_{i}"
+                ida = getattr(model, ida_name)
+
+                # Create nested parameters for each IDAUp
+                parameters[ida_name] = {}
+
+                # Process projection layers in this IDAUp
+                for j in range(len(ida.channels)):
+                    proj_name = f"proj_{j}"
+                    proj = getattr(ida, proj_name)
+                    if not isinstance(proj, Identity):
+                        weight, bias = fold_batch_norm2d_into_conv2d(proj[0], proj[1])
+                        parameters[ida_name][proj_name] = {}
+                        parameters[ida_name][proj_name]["weight"] = ttnn.from_torch(weight, dtype=ttnn.bfloat16)
+                        if bias is not None:
+                            bias = bias.reshape((1, 1, 1, -1))
+                            parameters[ida_name][proj_name]["bias"] = ttnn.from_torch(bias, dtype=ttnn.bfloat16)
+                        else:
+                            parameters[ida_name][proj_name]["bias"] = None
+
+                # Process upsampling layers in this IDAUp
+                for j in range(len(ida.channels)):
+                    up_name = f"up_{j}"
+                    up = getattr(ida, up_name)
+                    if not isinstance(up, Identity):
+                        parameters[ida_name][up_name] = {}
+                        parameters[ida_name][up_name]["weight"] = ttnn.from_torch(up.weight, dtype=ttnn.bfloat16)
+                        parameters[ida_name][up_name]["bias"] = None
+
+                # Process node layers in this IDAUp
+                for j in range(1, len(ida.channels)):
+                    node_name = f"node_{j}"
+                    node = getattr(ida, node_name)
+                    weight, bias = fold_batch_norm2d_into_conv2d(node[0], node[1])
+                    parameters[ida_name][node_name] = {}
+                    parameters[ida_name][node_name]["weight"] = ttnn.from_torch(weight, dtype=ttnn.bfloat16)
+                    if bias is not None:
+                        bias = bias.reshape((1, 1, 1, -1))
+                        parameters[ida_name][node_name]["bias"] = ttnn.from_torch(bias, dtype=ttnn.bfloat16)
+                    else:
+                        parameters[ida_name][node_name]["bias"] = None
+
+        return parameters
+
+    return preprocessor

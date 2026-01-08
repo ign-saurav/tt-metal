@@ -10,10 +10,10 @@ from ttnn.model_preprocessing import preprocess_model_parameters
 
 from models.common.utility_functions import run_for_wormhole_b0, comp_pcc, tt2torch_tensor
 from models.experimental.centernet.reference.network.dlav0 import get_pose_net
-from models.experimental.centernet.tt.tt_head_devin import TtCenterNetHead
+from models.experimental.centernet.tt.tt_head import TtCenterNetHead
 from models.experimental.centernet.tt.custom_preprocessor import create_centernet_head_preprocessor
 
-WEIGHTS_PATH = "models/experimental/centernet/ctdet_coco_dlav0_1x.pth"
+WEIGHTS_PATH = "ctdet_coco_dlav0_1x.pth"
 
 
 @run_for_wormhole_b0()
