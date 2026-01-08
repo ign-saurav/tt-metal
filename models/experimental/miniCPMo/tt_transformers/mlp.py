@@ -102,6 +102,9 @@ class MLP(LightweightModule):
             decoder_id=layer_num, op=OpGroup.LI_FF1_FF3, configuration=self.args
         )
 
+        # For smaller models (dim < 4096), use DRAM to avoid L1 memory conflicts
+        use_dram_for_decode = self.dim < 4096 and not TG
+
         if mode == "decode":  # Sharded config
             if TG:  # TODO: Fix this when TG supports DRAM sharded matmuls
                 pc_1 = self.model_config["FF1_3_TG_PROGCFG"] if self.dim >= 4096 else None
@@ -120,8 +123,11 @@ class MLP(LightweightModule):
             pc_3 = self.model_config["PREFILL_MLP_W1_W3_PRG_CONFIG"](seq_len)
 
         # In decode mode (seqlen <= 32) do DRAM sharded matmuls
-        # These use HiFi2; this drops 1 bit of the activations but would be FLOP-bound on 12 cores with HiFi4
-        memory_config = ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG
+        # For smaller models, use DRAM to avoid L1 conflicts
+        if use_dram_for_decode:
+            memory_config = ttnn.DRAM_MEMORY_CONFIG
+        else:
+            memory_config = ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG
         # import pdb; pdb.set_trace()
         try:
             w1_out = ttnn.linear(
@@ -134,18 +140,31 @@ class MLP(LightweightModule):
                 memory_config=memory_config,
             )
         except:
-            pc_1 = ttnn.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(
-                in0_block_w=1, per_core_M=1, per_core_N=16, fused_activation=None
-            )
-            w1_out = ttnn.linear(
-                x,
-                self.w1,
+            # pc_1 = ttnn.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(
+            #     in0_block_w=1, per_core_M=1, per_core_N=16, fused_activation=None
+            # )
+            # w1_out = ttnn.linear(
+            #     x,
+            #     self.w1,
+            #     dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
+            #     core_grid=None,
+            #     compute_kernel_config=li_ff1_3_compute_kernel_cfg,
+            #     program_config=pc_1,
+            #     memory_config=memory_config,
+            # )
+            x = ttnn.from_torch(
+                ttnn.to_torch(x),
                 dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
-                core_grid=None,
-                compute_kernel_config=li_ff1_3_compute_kernel_cfg,
-                program_config=pc_1,
-                memory_config=memory_config,
+                device=x.device(),
+                layout=ttnn.TILE_LAYOUT,
             )
+            w1 = ttnn.from_torch(
+                ttnn.to_torch(self.w1),
+                dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
+                device=x.device(),
+                layout=ttnn.TILE_LAYOUT,
+            )
+            w1_out = ttnn.linear(x, w1)
 
         try:
             w3_out = ttnn.linear(
@@ -158,19 +177,31 @@ class MLP(LightweightModule):
                 memory_config=memory_config,
             )
         except:
-            pc_3 = ttnn.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(
-                in0_block_w=1, per_core_M=1, per_core_N=16, fused_activation=None
-            )
-            w3_out = ttnn.linear(
-                x,
-                self.w3,
+            # pc_3 = ttnn.MatmulMultiCoreReuseMultiCastDRAMShardedProgramConfig(
+            #     in0_block_w=1, per_core_M=1, per_core_N=16, fused_activation=None
+            # )
+            # w3_out = ttnn.linear(
+            #     x,
+            #     self.w3,
+            #     dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
+            #     core_grid=None,
+            #     compute_kernel_config=li_ff1_3_compute_kernel_cfg,
+            #     program_config=pc_3,
+            #     memory_config=memory_config,
+            # )
+            x = ttnn.from_torch(
+                ttnn.to_torch(x),
                 dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
-                core_grid=None,
-                compute_kernel_config=li_ff1_3_compute_kernel_cfg,
-                program_config=pc_3,
-                memory_config=memory_config,
+                device=x.device(),
+                layout=ttnn.TILE_LAYOUT,
             )
-
+            w3 = ttnn.from_torch(
+                ttnn.to_torch(self.w3),
+                dtype=ttnn.bfloat8_b if TG else activation_dtype or ttnn.bfloat16,
+                device=x.device(),
+                layout=ttnn.TILE_LAYOUT,
+            )
+            w3_out = ttnn.linear(x, w3)
         ttnn.deallocate(x)
 
         if TG:
@@ -272,15 +303,30 @@ class MLP(LightweightModule):
         li_ff2_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
             decoder_id=layer_num, op=OpGroup.LI_FF2, configuration=self.args
         )
-        w2_out = ttnn.linear(
-            w2_in,
-            self.w2,
-            compute_kernel_config=li_ff2_compute_kernel_cfg,
-            dtype=self.args.ccl_dtype if TG else activation_dtype or ttnn.bfloat16,
-            program_config=pc_2,
-            memory_config=memory_config,
-            core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_2 else None,
-        )
+        try:
+            w2_out = ttnn.linear(
+                w2_in,
+                self.w2,
+                compute_kernel_config=li_ff2_compute_kernel_cfg,
+                dtype=self.args.ccl_dtype if TG else activation_dtype or ttnn.bfloat16,
+                program_config=pc_2,
+                memory_config=memory_config,
+                core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_2 else None,
+            )
+        except:
+            w2_in_conv = ttnn.from_torch(
+                ttnn.to_torch(w2_in),
+                dtype=self.args.ccl_dtype if TG else activation_dtype or ttnn.bfloat16,
+                device=w2_in.device(),
+                layout=ttnn.TILE_LAYOUT,
+            )
+            w2_conv = ttnn.from_torch(
+                ttnn.to_torch(self.w2),
+                dtype=self.args.ccl_dtype if TG else activation_dtype or ttnn.bfloat16,
+                device=w2_in.device(),
+                layout=ttnn.TILE_LAYOUT,
+            )
+            w2_out = ttnn.linear(w2_in_conv, w2_conv)
         ttnn.deallocate(w2_in)
         # if mode == "decode" and not TG:
         #     w2_out = ttnn.sharded_to_interleaved(w2_out, ttnn.DRAM_MEMORY_CONFIG)
