@@ -60,7 +60,7 @@ def test_model_output(mesh_device):
     processor = AutoProcessor.from_pretrained("ibm-granite/granite-speech-3.3-8b")
     tokenizer = processor.tokenizer
 
-    ttnn_model = GraniteSpeech(device=mesh_device, config=config, tokenizer=tokenizer, torch_ref=torch_model)
+    ttnn_model = GraniteSpeech(mesh_device=mesh_device, config=config, tokenizer=tokenizer, torch_ref=torch_model)
 
     # load audio
     audio_path = hf_hub_download(repo_id="ibm-granite/granite-speech-3.3-8b", filename="10226_10111_000000.wav")

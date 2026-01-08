@@ -3,77 +3,22 @@ import torch
 from loguru import logger
 
 from models.tt_transformers.tt.common import (
-    PagedAttentionConfig,
-    create_tt_model,
     sample_host,
 )
 from models.tt_transformers.tt.model_config import DecodersPrecision
-from models.experimental.granite_speech_33_8b.tt.generator import Generator
-
-
-def create_tt_page_table(global_batch_size, data_parallel, paged_attention_config: PagedAttentionConfig):
-    page_table = None
-
-    if paged_attention_config:
-        # Implied shuffling of blocks
-        permutation = torch.randperm(paged_attention_config.max_num_blocks)
-        # Page table which maps virtual blocks to physical
-        reverse_permutation = torch.argsort(permutation).repeat(data_parallel)
-        page_table = reverse_permutation.reshape(
-            global_batch_size, paged_attention_config.max_num_blocks // (global_batch_size // data_parallel)
-        )
-
-    return page_table
-
-
-def create_tt_model(
-    mesh_device,
-    instruct,
-    max_batch_size,
-    optimizations,
-    max_seq_len,
-    paged_attention_config: PagedAttentionConfig = None,
-    dtype=ttnn.bfloat8_b,
-    state_dict=None,
-    num_layers=None,
-):
-    # from models.tt_transformers.tt.model import Transformer
-    from models.experimental.granite_speech_33_8b.tt.granite_transformer import GraniteSpeech
-    from models.tt_transformers.tt.model_config import ModelArgs
-
-    tt_model_args = ModelArgs(
-        mesh_device,
-        instruct=instruct,
-        max_batch_size=max_batch_size,
-        optimizations=optimizations,
-        max_seq_len=max_seq_len,
-    )
-    if num_layers is not None:
-        tt_model_args.n_layers = num_layers
-
-    # Avoid loading state_dict for every DP model
-    if not state_dict:
-        state_dict = tt_model_args.load_state_dict()
-
-    model = GraniteSpeech(
-        args=tt_model_args,
-        mesh_device=mesh_device,
-        dtype=dtype,
-        state_dict=state_dict,
-        weight_cache_path=tt_model_args.weight_cache_path(dtype),
-        paged_attention_config=paged_attention_config,
-    )
-
-    tt_kv_cache = [l.attention.layer_past for l in model.layers] if paged_attention_config else None
-
-    return tt_model_args, model, tt_kv_cache, state_dict
+from models.experimental.granite_speech_33_8b.tt.generator import (
+    Generator,
+    SamplingParams,
+    prepare_generator_args,
+)
+from typing import List
 
 
 class GraniteSpeech:
     """TTNN implementation of GraniteSpeech."""
 
-    def __init__(self, device, config, tokenizer=None, torch_ref=None, use_torch_audio_feat=True):
-        self.device = device
+    def __init__(self, mesh_device, config, tokenizer=None, torch_ref=None, use_torch_audio_feat=True):
+        self.mesh_device = mesh_device
         self.config = config
         self.torch_ref = torch_ref
         self.tokenizer = tokenizer
@@ -86,38 +31,64 @@ class GraniteSpeech:
             self.encoder = self.encoder
             self.projector = self.projector
 
-        paged_attention_config = PagedAttentionConfig(
-            block_size=32,  # page_params["page_block_size"],
-            max_num_blocks=256,  # page_params["page_max_num_blocks_per_dp"],
-        )
-
-        self.page_table = create_tt_page_table(
-            global_batch_size=1,
-            data_parallel=1,
-            paged_attention_config=paged_attention_config,
-        )
-
-        self.model_args, self.tt_model, self.tt_kv_cache, self.state_dict = create_tt_model(
-            self.device,
+        self.batch_size = 1
+        self.data_parallel = 1
+        self.repeat_batches = 1
+        self.max_seq_len = 1024
+        self.max_generated_tokens = 200
+        self.num_devices = mesh_device.get_num_devices() if isinstance(mesh_device, ttnn.MeshDevice) else 1
+        self.global_batch_size = (
+            self.batch_size * self.data_parallel
+        )  # input batch_size is interpreted as size per DP group
+        optimisations = lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name)
+        page_params = {"page_block_size": 32, "page_max_num_blocks_per_dp": 256}
+        (
+            self.model_args,
+            self.model,
+            self.page_table,
+            self.tt_kv_cache,
+            self.tokenizer,
+            self.processor,
+        ) = prepare_generator_args(
+            num_devices=self.num_devices,
+            data_parallel=self.data_parallel,
+            mesh_device=self.mesh_device,
             instruct=True,
-            max_batch_size=1,
-            optimizations=lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
-            max_seq_len=512,
-            paged_attention_config=paged_attention_config,
+            global_batch_size=self.global_batch_size,
+            optimizations=optimisations,
+            max_seq_len=self.max_seq_len,
+            page_params=page_params,
+            paged_attention=True,
+            num_layers=None,
         )
 
-        self.tokenizer = self.model_args.tokenizer
         self.generator = Generator(
-            [self.tt_model],
-            [self.model_args],
-            self.device,
-            processor=self.model_args.processor,
-            tokenizer=self.model_args.tokenizer,
+            self.model, self.model_args, self.mesh_device, processor=self.processor, tokenizer=self.tokenizer
         )
+
+        self.paged_cache_max_seq_len = (
+            page_params["page_block_size"] * page_params["page_max_num_blocks_per_dp"] / self.batch_size
+        )
+        # self.model_args, self.tt_model, self.tt_kv_cache, self.state_dict = create_tt_model(
+        #     self.device,
+        #     instruct=True,
+        #     max_batch_size=1,
+        #     optimizations=lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
+        #     max_seq_len=512,
+        #     paged_attention_config=paged_attention_config,
+        # )
+
+        # self.tokenizer = self.model_args.tokenizer
+        # self.generator = Generator(
+        #     [self.tt_model],
+        #     [self.model_args],
+        #     self.device,
+        #     processor=self.model_args.processor,
+        #     tokenizer=self.model_args.tokenizer,
+        # )
 
     def forward(self, input_ids, input_features, input_features_mask):
         global_batch_size = 1
-        max_generated_tokens = 200
 
         """Get the audio features to merged into the multimodal embeddings."""
         encoder_embeds = self.encoder(input_features)
@@ -142,45 +113,87 @@ class GraniteSpeech:
             special_audio_mask,
             audio_features,
         )
-        prompt_lens = inputs_embeds.shape[1]
 
-        # Run TT model
-        logger.info(f"Running TT model...")
-        tt_output_torch = self.generator.prefill_forward_text(
-            inputs_embeds,
+        input_tokens_prefill_pt = inputs_embeds
+        prefill_lens = [inputs_embeds.shape[-2]]
+        decoding_pos = [inputs_embeds.shape[-2]]
+        max_encoded_prompt_len = inputs_embeds.shape[-2]
+        assert self.max_generated_tokens + max_encoded_prompt_len <= self.max_seq_len
+
+        assert (
+            self.max_generated_tokens + max_encoded_prompt_len <= self.paged_cache_max_seq_len
+        ), f"max_generated_tokens ({self.max_generated_tokens}) needs to be <= than paged_cache_max_seq_len ({self.paged_cache_max_seq_len})"
+
+        logger.info("Starting prefill warmup...")
+        logits = self.generator.prefill_forward_text(
+            input_tokens_prefill_pt,  # Prefill warmup for all users, in case some users have different seqlens than others
             page_table=self.page_table,
-            kv_cache=[self.tt_kv_cache],
-            prompt_lens=[prompt_lens],
+            kv_cache=self.tt_kv_cache,
+            prompt_lens=decoding_pos,
             enable_trace=False,
         )
-        logger.info(f"Finished running TT model.")
-        prefilled_token = torch.argmax(tt_output_torch, dim=-1)
+        logger.info("Finished prefill warmup")
+
+        logger.info(f"Starting prefill...")
+        logits = self.generator.prefill_forward_text(
+            input_tokens_prefill_pt,
+            page_table=self.page_table,
+            kv_cache=self.tt_kv_cache,
+            prompt_lens=decoding_pos,
+            enable_trace=False,
+        )
+        prefilled_token = torch.argmax(logits, dim=-1)
+        logger.info(f"Prefill finished")
+
+        user_done = [False] * global_batch_size  # Keeps track when a user reaches EoD token
+
+        sampling_params = {"temperature": 0, "top_p": 0.08, "top_k": 32}
+        device_sampling_params = (
+            SamplingParams(
+                temperature=sampling_params["temperature"],
+                top_k=sampling_params["top_k"],
+                top_p=sampling_params["top_p"],
+                frequency_penalty=sampling_params["frequency_penalty"]
+                if "frequency_penalty" in sampling_params
+                else 0.0,
+                presence_penalty=sampling_params["presence_penalty"] if "presence_penalty" in sampling_params else 0.0,
+                repetition_penalty=sampling_params["repetition_penalty"]
+                if "repetition_penalty" in sampling_params
+                else 1.0,
+            )
+            if self.model[0]._supports_on_device_sampling
+            else None
+        )
+        if device_sampling_params is None and isinstance(sampling_params["temperature"], List):
+            # host sampling only supports single sample param for all users in a batch
+            sampling_params["temperature"] = sampling_params["temperature"][0]
+            sampling_params["top_p"] = sampling_params["top_p"][0]
 
         # Initial positions
-        current_pos = torch.tensor([prompt_lens])
+        current_pos = torch.tensor([decoding_pos[b] for b in range(global_batch_size)])
+
+        user_done = [False] * global_batch_size  # Keeps track when a user reaches EoD token
+        all_outputs = [[]]
+        stop_at_eos = True
 
         # Start decoding
         iteration = 0
         users_decoding = True
-        device_sampling_params = None
-        stress_test = False
-        user_done = [False] * global_batch_size  # Keeps track when a user reaches EoD token
-        all_outputs = []
-        stop_at_eos = True
 
         out_tok = prefilled_token
 
         logger.info(f"Starting decode loop...")
+
         while users_decoding:
             # Run decode forward
-            logits, log_probs = self.generator.decode_forward_text(
+            logits = self.generator.decode_forward_text(
                 out_tok,
                 current_pos,
                 enable_trace=False,
                 page_table=self.page_table,
                 kv_cache=self.tt_kv_cache,
                 sampling_params=device_sampling_params,
-                # prompt_tokens=input_tokens_prefill_pt,
+                prompt_tokens=input_tokens_prefill_pt,
                 output_tokens=out_tok,
             )
 
@@ -192,13 +205,13 @@ class GraniteSpeech:
                 # TODO Fix use case with temperature > 0
                 _, out_tok = sample_host(
                     logits,
-                    temperature=0,  # sampling_params["temperature"],
-                    top_p=0.08,  # sampling_params["top_p"],
+                    temperature=sampling_params["temperature"],
+                    top_p=sampling_params["top_p"],
                     on_host=True,
                 )
 
-            if not stress_test:  # During stress test runs we will iterate over the same position for X iterations
-                current_pos += 1
+            current_pos += 1
+
             # Save output token to print out later
             for user in range(global_batch_size):
                 user_tok = out_tok[user].item()
@@ -215,16 +228,8 @@ class GraniteSpeech:
                         if all(user_done):
                             users_decoding = False
 
-            # Print out generated outputs for each user at the end of every iteration
-            for user in range(global_batch_size):
-                text = "".join(self.tokenizer.decode(all_outputs[user]))
-                if len(text) > 100:
-                    text = "..." + text[-97:]
-                text = text.replace("\n", " ")
-                logger.debug("[User {}] {}".format(user, text))
-
             iteration += 1
 
             # Upper limit of generated tokens for each user
-            if iteration >= max_generated_tokens:
+            if iteration >= self.max_generated_tokens:
                 users_decoding = False

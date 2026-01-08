@@ -33,6 +33,122 @@ from models.tt_transformers.tt.generator import (
     Generator,
 )
 
+from models.tt_transformers.tt.common import PagedAttentionConfig
+
+
+def create_tt_page_table(global_batch_size, data_parallel, paged_attention_config: PagedAttentionConfig):
+    page_table = None
+
+    if paged_attention_config:
+        # Implied shuffling of blocks
+        permutation = torch.randperm(paged_attention_config.max_num_blocks)
+        # Page table which maps virtual blocks to physical
+        reverse_permutation = torch.argsort(permutation).repeat(data_parallel)
+        page_table = reverse_permutation.reshape(
+            global_batch_size, paged_attention_config.max_num_blocks // (global_batch_size // data_parallel)
+        )
+    return page_table
+
+
+def create_tt_model(
+    mesh_device,
+    instruct,
+    max_batch_size,
+    optimizations,
+    max_seq_len,
+    paged_attention_config: PagedAttentionConfig = None,
+    dtype=ttnn.bfloat8_b,
+    state_dict=None,
+    num_layers=None,
+):
+    from models.experimental.granite_speech_33_8b.tt.granite_transformer import GraniteSpeech
+    from models.tt_transformers.tt.model_config import ModelArgs
+
+    tt_model_args = ModelArgs(
+        mesh_device,
+        instruct=instruct,
+        max_batch_size=max_batch_size,
+        optimizations=optimizations,
+        max_seq_len=max_seq_len,
+    )
+    if num_layers is not None:
+        tt_model_args.n_layers = num_layers
+
+    # Avoid loading state_dict for every DP model
+    if not state_dict:
+        state_dict = tt_model_args.load_state_dict()
+
+    model = GraniteSpeech(
+        args=tt_model_args,
+        mesh_device=mesh_device,
+        dtype=dtype,
+        state_dict=state_dict,
+        weight_cache_path=tt_model_args.weight_cache_path(dtype),
+        paged_attention_config=paged_attention_config,
+    )
+
+    tt_kv_cache = [l.attention.layer_past for l in model.layers] if paged_attention_config else None
+
+    return tt_model_args, model, tt_kv_cache, state_dict
+
+
+def prepare_generator_args(
+    num_devices,
+    data_parallel,
+    mesh_device,
+    instruct,
+    global_batch_size,
+    optimizations,
+    max_seq_len,
+    page_params,
+    paged_attention,
+    num_layers,
+):
+    submesh_devices = create_submeshes(mesh_device, data_parallel)
+    state_dict = None
+
+    # Hybrid requires a model per submesh
+    model_args = []
+    model = []
+    tt_kv_cache = []
+
+    paged_attention_config = (
+        PagedAttentionConfig(
+            block_size=page_params["page_block_size"],
+            max_num_blocks=page_params["page_max_num_blocks_per_dp"],
+        )
+        if paged_attention
+        else None
+    )
+
+    for submesh in submesh_devices:
+        model_args_i, model_i, tt_kv_cache_i, state_dict = create_tt_model(
+            submesh,
+            instruct=instruct,
+            max_batch_size=global_batch_size // data_parallel,
+            optimizations=optimizations,
+            max_seq_len=max_seq_len,
+            paged_attention_config=paged_attention_config,
+            dtype=ttnn.bfloat8_b,
+            state_dict=state_dict,
+            num_layers=num_layers,
+        )
+        model_args.append(model_args_i)
+        model.append(model_i)
+        tt_kv_cache.append(tt_kv_cache_i)
+
+    page_table = create_tt_page_table(
+        global_batch_size=global_batch_size,
+        data_parallel=data_parallel,
+        paged_attention_config=paged_attention_config,
+    )
+    # Host code, safe to reuse tokenizer from the 1st model
+    tokenizer = model_args[
+        0
+    ].tokenizer  # TODO Should we support Data Parallel different models? If so, we need to support multiple tokenizers
+    processor = model_args[0].processor
+    return model_args, model, page_table, tt_kv_cache, tokenizer, processor
+
 
 class Generator:
     def __init__(self, model, model_args, mesh_device, processor=None, tokenizer=None):
