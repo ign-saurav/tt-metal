@@ -73,7 +73,7 @@ def main():
             msgs=msgs,
             tokenizer=tokenizer,
             sampling=True,
-            max_new_tokens=15,
+            max_new_tokens=128,
         )
 
         logger.info(f"Chat result: {res}")
