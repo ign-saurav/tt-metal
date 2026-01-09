@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
@@ -13,8 +14,6 @@ from models.experimental.centernet.tt.basic_block import TtBasicBlock
 from models.experimental.centernet.tt.tree import TtTree
 from models.experimental.centernet.tt.custom_preprocessor import create_custom_mesh_preprocessor
 
-WEIGHTS_PATH = "models/experimental/centernet/ctdet_coco_dlav0_1x.pth"
-
 
 @run_for_wormhole_b0()
 @pytest.mark.parametrize(
@@ -26,13 +25,13 @@ WEIGHTS_PATH = "models/experimental/centernet/ctdet_coco_dlav0_1x.pth"
     "levels,in_channels,out_channels,stride,level_root,root_residual,input_shape",
     [
         # Case 1: Level 1 tree
-        # (1, 32, 64, 2, False, False, (1, 32, 256, 256)),
+        (1, 32, 64, 2, False, False, (1, 32, 256, 256)),
         # Case 2: Level 2 tree
         (2, 64, 128, 2, False, False, (1, 64, 128, 128)),
-        # # Case 3: Level 2 tree with larger channels
-        # (2, 128, 256, 2, False, False, (1, 128, 64, 64)),
-        # # Case 4: Level 1 tree with large channels
-        # (1, 256, 512, 2, False, False, (1, 256, 32, 32)),
+        # Case 3: Level 2 tree with larger channels
+        (2, 128, 256, 2, False, False, (1, 128, 64, 64)),
+        # Case 4: Level 1 tree with large channels
+        (1, 256, 512, 2, False, False, (1, 256, 32, 32)),
     ],
 )
 def test_tree(device, levels, in_channels, out_channels, stride, level_root, root_residual, input_shape):
@@ -59,7 +58,7 @@ def test_tree(device, levels, in_channels, out_channels, stride, level_root, roo
         pytorch_output = pytorch_tree(torch_input)
 
     # Get mesh mappers
-    inputs_mesh_mapper, weights_mesh_mapper, output_mesh_composer = get_mesh_mappers(device)
+    _, weights_mesh_mapper, _ = get_mesh_mappers(device)
 
     # Preprocess parameters
     parameters = preprocess_model_parameters(

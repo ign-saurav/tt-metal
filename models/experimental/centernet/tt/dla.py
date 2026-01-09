@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
+# SPDX-License-Identifier: Apache-2.0
+
 import ttnn
 from models.common.lightweightmodule import LightweightModule
 from models.tt_cnn.tt.builder import TtConv2d, TtMaxPool2d
@@ -16,7 +20,7 @@ class TtDLA(LightweightModule):
         levels,
         channels,
         num_classes=1000,
-        block=None,  # TtBasicBlock
+        block=None,
         residual_root=False,
         return_levels=False,
         pool_size=7,
@@ -31,11 +35,9 @@ class TtDLA(LightweightModule):
         self.return_levels = return_levels
         self.num_classes = num_classes
 
-        # Base layer: Conv2d + BatchNorm + ReLU
         self.layer_args = layer_args
         self.base_layer = self._create_base_layer(parameters.base_layer, layer_args.base_layer["0"])
 
-        # Create conv levels for level0 and level1
         self.level0 = self._make_conv_level(
             channels[0], channels[0], levels[0], parameters=parameters.level0, layer_args=layer_args.level0
         )
@@ -43,7 +45,6 @@ class TtDLA(LightweightModule):
             channels[0], channels[1], levels[1], stride=2, parameters=parameters.level1, layer_args=layer_args.level1
         )
 
-        # Tree levels using provided TtTree
         self.level2 = TtTree(
             levels[2],
             block,
@@ -93,16 +94,8 @@ class TtDLA(LightweightModule):
             layer_args=layer_args.level5,
         )
 
-        # Average pooling and final classification layer
-        # self.avgpool = self._create_avgpool(pool_size, parameters.avgpool)# pool_size = 7
-        # self.fc = self._create_fc_layer(parameters.fc)  # 512 inch to 1000 outch kernel_size=1, stride=1, padding=0, bias=True
-
     def _create_base_layer(self, parameters, layer_args):
         """Create base layer with folded BatchNorm"""
-        # Fold BatchNorm into Conv2d
-        # weight, bias = fold_batch_norm2d_into_conv2d(
-        #     parameters.conv, parameters.bn
-        # )
         conv_config = ttnn.Conv2dConfig(
             weights_dtype=ttnn.bfloat16,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
@@ -138,7 +131,6 @@ class TtDLA(LightweightModule):
         layers = []
 
         for i in range(convs):
-            # Fold BatchNorm into Conv2d for each layer
             weight, bias = parameters[f"conv{i}"].weight, parameters[f"conv{i}"].bias
 
             conv_config = ttnn.Conv2dConfig(
@@ -227,18 +219,14 @@ class TtDLA(LightweightModule):
     def forward(self, x):
         y = []
 
-        # Base layer
         x = self.base_layer(x)
 
-        # Level 0 (single conv layer)
         x = self.level0[0](x)
         y.append(x)
 
-        # Level 1 (single conv layer)
         x = self.level1[0](x)
         y.append(x)
 
-        # Tree levels
         x = self.level2(x)
         y.append(x)
 
@@ -254,13 +242,10 @@ class TtDLA(LightweightModule):
         if self.return_levels:
             return y
         else:
-            # Average pooling
             x = self.avgpool(x)
 
-            # Final classification
             x = self.fc(x)
 
-            # Reshape to (batch_size, num_classes)
             batch_size = x.shape[0]
             x = ttnn.reshape(x, (batch_size, -1))
 

@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
@@ -38,15 +39,12 @@ class TtTree(LightweightModule):
         self.root_dim = root_dim
         self.stride = stride
 
-        # Calculate root_dim if not provided
         if root_dim == 0:
             root_dim = 2 * out_channels
         if level_root:
             root_dim += in_channels
 
-        # Create tree branches
         if levels == 1:
-            # Leaf level: use BasicBlock
             self.tree1 = block(
                 inplanes=in_channels,
                 planes=out_channels,
@@ -66,7 +64,6 @@ class TtTree(LightweightModule):
                 layer_args=layer_args.tree2,
             )
         else:
-            # Recursive level: create sub-trees
             self.tree1 = TtTree(
                 levels=levels - 1,
                 block=block,
@@ -98,7 +95,6 @@ class TtTree(LightweightModule):
                 layer_args=layer_args.tree2,
             )
 
-        # Add root module at leaf level
         if levels == 1:
             self.root = TtRoot(
                 in_channels=root_dim,
@@ -151,16 +147,6 @@ class TtTree(LightweightModule):
         bias = getattr(params, "bias", None)
         if bias is not None and isinstance(bias, ttnn.Tensor) and ttnn.is_tensor_storage_on_device(bias):
             bias = ttnn.from_device(bias)
-
-        # For project layer, limit core grid to avoid exceeding available cores
-        if is_project:
-            core_grid = ttnn.CoreRangeSet(
-                {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(7, 7))}  # 8x8 = 64 cores max
-            )
-            override_sharding_config = True
-        else:
-            core_grid = None
-            override_sharding_config = False
 
         return Conv2dConfiguration(
             input_height=h,

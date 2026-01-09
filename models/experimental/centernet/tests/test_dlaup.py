@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
@@ -12,8 +13,6 @@ from models.experimental.centernet.reference.network.dlav0 import DLAUp
 from models.experimental.centernet.tt.dlaup import TtDLAUp
 from models.experimental.centernet.tt.custom_preprocessor import create_custom_mesh_preprocessor
 from models.demos.utils.common_demo_utils import get_mesh_mappers
-
-WEIGHTS_PATH = "models/experimental/centernet/ctdet_coco_dlav0_1x.pth"
 
 
 @run_for_wormhole_b0()
@@ -37,13 +36,6 @@ def test_dla_up(device):
         return_levels=True,  # Enable returning intermediate feature maps
     )
 
-    # Load the same pretrained weights
-    checkpoint = torch.load(WEIGHTS_PATH, map_location="cpu")
-    state_dict = checkpoint["state_dict"]
-    state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-
-    # Load weights into full DLA model
-    dla_model.load_state_dict(state_dict, strict=False)
     dla_model.eval()
 
     # Create DLAUp
@@ -52,9 +44,6 @@ def test_dla_up(device):
 
     dla_up = DLAUp(channels=channels, scales=scales)
 
-    # Load DLAUp weights
-    dla_up_state_dict = {k.replace("dla_up.", ""): v for k, v in state_dict.items() if k.startswith("dla_up.")}
-    dla_up.load_state_dict(dla_up_state_dict, strict=False)
     dla_up.eval()
 
     # Create input for the full DLA model

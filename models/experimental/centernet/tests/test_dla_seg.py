@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
@@ -33,19 +34,17 @@ def test_dla_seg(device):
     pytorch_dla_seg = DLASeg(
         base_name="dla34", heads=heads, pretrained=False, down_ratio=down_ratio, head_conv=head_conv
     )
-    # pytorch_dla_seg = load_model(pytorch_dla_seg, "models/experimental/centernet/ctdet_coco_dlav0_1x.pth")
     pytorch_dla_seg.eval()
 
     # Create random input
     torch_input = torch.randn(input_shape, dtype=torch.float32)
-    # torch_input = torch.load("cnet_input.pt")
 
     # PyTorch forward pass
     with torch.no_grad():
         pytorch_output = pytorch_dla_seg(torch_input)
 
     # Get mesh mappers
-    inputs_mesh_mapper, weights_mesh_mapper, output_mesh_composer = get_mesh_mappers(device)
+    _, weights_mesh_mapper, _ = get_mesh_mappers(device)
 
     # Preprocess parameters
     parameters = preprocess_model_parameters(

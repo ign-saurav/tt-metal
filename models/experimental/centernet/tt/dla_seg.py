@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
+# SPDX-License-Identifier: Apache-2.0
+
 import ttnn
 import numpy as np
 from models.common.lightweightmodule import LightweightModule
@@ -42,7 +46,7 @@ class TtDLASeg(LightweightModule):
         self.base = TtDLA(
             levels=[1, 1, 1, 2, 2, 1],
             channels=[16, 32, 64, 128, 256, 512],
-            block=TtBasicBlock,  # TtBasicBlock would go here
+            block=TtBasicBlock,
             return_levels=True,
             parameters=parameters.base,
             device=device,
@@ -70,7 +74,6 @@ class TtDLASeg(LightweightModule):
             head_layer_args = layer_args[head]
 
             if head_conv > 0:
-                # Create two-layer head: Conv3x3 -> ReLU -> Conv1x1
                 fc = self._create_two_layer_head(
                     head_params,
                     head_layer_args,
@@ -80,7 +83,6 @@ class TtDLASeg(LightweightModule):
                     head,
                 )
             else:
-                # Create single-layer head: Conv1x1
                 fc = self._create_single_layer_head(
                     head_params,
                     channels[self.first_level],
@@ -93,7 +95,6 @@ class TtDLASeg(LightweightModule):
     def _create_two_layer_head(self, parameters, layer_args, in_channels, head_conv, out_channels, head_name):
         """Create a two-layer head (Conv3x3 -> ReLU -> Conv1x1)."""
 
-        # First conv: 3x3 with padding
         conv1_config = ttnn.Conv2dConfig(
             weights_dtype=ttnn.bfloat16,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
@@ -124,7 +125,6 @@ class TtDLASeg(LightweightModule):
             self.device,
         )
 
-        # Second conv: 1x1
         conv2_config = ttnn.Conv2dConfig(
             weights_dtype=ttnn.bfloat16,
             deallocate_activation=False,
@@ -152,10 +152,7 @@ class TtDLASeg(LightweightModule):
             self.device,
         )
 
-        # Handle special bias initialization for heatmap heads
         if "hm" in head_name:
-            # Bias should be initialized to -2.19 for heatmap heads
-            # This would typically be done during parameter preprocessing
             pass
 
         return [conv1, conv2]
@@ -191,10 +188,7 @@ class TtDLASeg(LightweightModule):
             self.device,
         )
 
-        # Handle special bias initialization for heatmap heads
         if "hm" in head_name:
-            # Bias should be initialized to -2.19 for heatmap heads
-            # This would typically be done during parameter preprocessing
             pass
 
         return conv
@@ -213,11 +207,9 @@ class TtDLASeg(LightweightModule):
             head_module = getattr(self, head)
 
             if isinstance(head_module, list):
-                # Two-layer head
                 x_temp = head_module[0](x)  # First conv with ReLU
                 ret[head] = head_module[1](x_temp)  # Second conv
             else:
-                # Single-layer head
                 ret[head] = head_module(x)
 
         return [ret]

@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
@@ -11,8 +12,6 @@ from models.common.utility_functions import run_for_wormhole_b0, comp_pcc, tt2to
 from models.experimental.centernet.reference.network.dlav0 import Root
 from models.experimental.centernet.tt.root import TtRoot
 from models.experimental.centernet.tt.custom_preprocessor import create_custom_mesh_preprocessor
-
-WEIGHTS_PATH = "models/experimental/centernet/ctdet_coco_dlav0_1x.pth"
 
 
 @run_for_wormhole_b0()
@@ -44,29 +43,7 @@ def test_root(device, in_channels, out_channels, kernel_size, input_shapes):
 
     # Create PyTorch Root module
     pytorch_root = Root(in_channels=in_channels, out_channels=out_channels, kernel_size=kernel_size, residual=False)
-    # dla_model = DLA(
-    #     levels=[1, 1, 1, 2, 2, 1],
-    #     channels=[16, 32, 64, 128, 256, 512],
-    #     block=BasicBlock,
-    # )
-    # checkpoint = torch.load(WEIGHTS_PATH, map_location="cpu")
-    # state_dict = checkpoint["state_dict"]
 
-    # state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-
-    # root_weights = {
-    #     k: v for k, v in state_dict.items()
-    #     if ".root." in k
-    # }
-    # for k, v in root_weights.items():
-    #     print(k, v.shape)
-
-    # base_state_dict = {k.replace(".root.", ""): v for k, v in state_dict.items() if k.startswith("base.")}
-    # dla_model.load_state_dict(base_state_dict, strict=False)
-    # dla_model.eval()
-
-    # pytorch_root = dla_model.level5.root
-    # # pytorch_root = dla_model.level4.tree2.root
     assert isinstance(pytorch_root, Root), f"Expected BasicBlock, got {type(pytorch_root)}"
 
     # Create random inputs
@@ -77,7 +54,7 @@ def test_root(device, in_channels, out_channels, kernel_size, input_shapes):
         pytorch_output = pytorch_root(*torch_inputs)
 
     # Get mesh mappers
-    inputs_mesh_mapper, weights_mesh_mapper, output_mesh_composer = get_mesh_mappers(device)
+    _, weights_mesh_mapper, _ = get_mesh_mappers(device)
 
     # Preprocess parameters
     parameters = preprocess_model_parameters(

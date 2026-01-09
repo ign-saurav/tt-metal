@@ -1,4 +1,5 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
@@ -56,7 +57,7 @@ def test_dla(device):
         pytorch_output = pytorch_dla(torch_input)
 
     # Get mesh mappers
-    inputs_mesh_mapper, weights_mesh_mapper, output_mesh_composer = get_mesh_mappers(device)
+    _, weights_mesh_mapper, _ = get_mesh_mappers(device)
 
     # Preprocess parameters
     parameters = preprocess_model_parameters(

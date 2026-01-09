@@ -66,7 +66,6 @@ class TtRoot(LightweightModule):
             activation_dtype=ttnn.bfloat16,
             weights_dtype=ttnn.bfloat16,
             output_dtype=ttnn.bfloat16,
-            # sharding_strategy=HeightShardedStrategyConfiguration(reshard_if_not_optimal=True),
             sharding_strategy=AutoShardedStrategyConfiguration(),
             math_fidelity=ttnn.MathFidelity.HiFi2,
             fp32_dest_acc_en=True,
@@ -74,19 +73,14 @@ class TtRoot(LightweightModule):
         )
 
     def forward(self, *x):
-        # Concatenate all inputs along channel dimension
-        # x = ttnn.concat(x, dim=3)
         converted_tensors = []
         for tensor in x:
             if tensor.is_sharded():
                 tensor = ttnn.sharded_to_interleaved(tensor, ttnn.L1_MEMORY_CONFIG)
             converted_tensors.append(tensor)
 
-        # Concatenate all inputs along channel dimension
         x = ttnn.concat(converted_tensors, dim=3, memory_config=ttnn.L1_MEMORY_CONFIG)
 
-        # Apply convolution (with fused BatchNorm and ReLU)
-        # x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
         x = self.conv(x)
 
         return x

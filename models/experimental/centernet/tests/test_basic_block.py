@@ -13,8 +13,6 @@ from models.experimental.centernet.reference.network.dlav0 import DLA, BasicBloc
 from models.experimental.centernet.tt.basic_block import TtBasicBlock
 from models.experimental.centernet.tt.custom_preprocessor import create_custom_mesh_preprocessor
 
-WEIGHTS_PATH = "models/experimental/centernet/ctdet_coco_dlav0_1x.pth"
-
 
 @run_for_wormhole_b0()
 @pytest.mark.parametrize(
@@ -32,13 +30,6 @@ def test_basic_block(device):
         block=BasicBlock,
     )
 
-    checkpoint = torch.load(WEIGHTS_PATH, map_location="cpu")
-    state_dict = checkpoint["state_dict"]
-
-    state_dict = {k.replace("module.", ""): v for k, v in state_dict.items()}
-
-    base_state_dict = {k.replace("base.", ""): v for k, v in state_dict.items() if k.startswith("base.")}
-    dla_model.load_state_dict(base_state_dict, strict=False)
     dla_model.eval()
 
     pytorch_basic_block = dla_model.level2.tree1
@@ -62,7 +53,7 @@ def test_basic_block(device):
     with torch.no_grad():
         pytorch_output = pytorch_basic_block(torch_input, residual=torch_residual)
 
-    inputs_mesh_mapper, weights_mesh_mapper, output_mesh_composer = get_mesh_mappers(device)
+    _, weights_mesh_mapper, _ = get_mesh_mappers(device)
 
     parameters = preprocess_model_parameters(
         initialize_model=lambda: pytorch_basic_block,

@@ -11,8 +11,8 @@ from models.experimental.centernet.reference.network.dlav0 import (
     Root,
     Tree,
     DLA,
-    DLAUp,  # Add DLAUp import
-    Identity,  # Add Identity import
+    DLAUp,
+    Identity,
 )
 
 
@@ -49,7 +49,6 @@ def _extract_tree(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
     """Extract and preprocess Tree parameters with recursive structure."""
     assert isinstance(model, Tree)
 
-    # Extract tree1 (either BasicBlock or Tree)
     if hasattr(model, "tree1"):
         if isinstance(model.tree1, BasicBlock):
             parameters["tree1"] = {}
@@ -58,7 +57,6 @@ def _extract_tree(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
             parameters["tree1"] = {}
             _extract_tree(model.tree1, parameters["tree1"], dtype=dtype, mesh_mapper=mesh_mapper)
 
-    # Extract tree2 (either BasicBlock or Tree)
     if hasattr(model, "tree2"):
         if isinstance(model.tree2, BasicBlock):
             parameters["tree2"] = {}
@@ -67,12 +65,10 @@ def _extract_tree(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
             parameters["tree2"] = {}
             _extract_tree(model.tree2, parameters["tree2"], dtype=dtype, mesh_mapper=mesh_mapper)
 
-    # Extract root if present (only at leaf levels)
     if hasattr(model, "root") and model.root is not None:
         parameters["root"] = {}
         _extract_root(model.root, parameters["root"], dtype=dtype, mesh_mapper=mesh_mapper)
 
-    # Extract project if present (1x1 conv + BatchNorm)
     if hasattr(model, "project") and model.project is not None:
         parameters["project"] = {}
         weight, bias = fold_batch_norm2d_into_conv2d(model.project[0], model.project[1])
@@ -90,7 +86,6 @@ def _extract_conv_level(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None
     conv_idx = 0
     for i, layer in enumerate(model):
         if isinstance(layer, nn.Conv2d):
-            # Find the corresponding BatchNorm layer
             if i + 1 < len(model) and isinstance(model[i + 1], nn.BatchNorm2d):
                 bn_layer = model[i + 1]
                 weight, bias = fold_batch_norm2d_into_conv2d(layer, bn_layer)
@@ -108,7 +103,6 @@ def _extract_dla(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
     """Extract and preprocess DLA model parameters."""
     assert isinstance(model, DLA)
 
-    # Extract base layer (Conv2d + BatchNorm + ReLU)
     parameters["base_layer"] = {}
     weight, bias = fold_batch_norm2d_into_conv2d(model.base_layer[0], model.base_layer[1])
     bias = bias.reshape((1, 1, 1, -1))
@@ -116,14 +110,12 @@ def _extract_dla(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
     parameters["base_layer"]["conv"]["weight"] = ttnn.from_torch(weight, dtype=dtype, mesh_mapper=mesh_mapper)
     parameters["base_layer"]["conv"]["bias"] = ttnn.from_torch(bias, dtype=dtype, mesh_mapper=mesh_mapper)
 
-    # Extract conv levels
     parameters["level0"] = {}
     _extract_conv_level(model.level0, parameters["level0"], dtype=dtype, mesh_mapper=mesh_mapper)
 
     parameters["level1"] = {}
     _extract_conv_level(model.level1, parameters["level1"], dtype=dtype, mesh_mapper=mesh_mapper)
 
-    # Extract tree levels (using existing _extract_tree function)
     parameters["level2"] = {}
     _extract_tree(model.level2, parameters["level2"], dtype=dtype, mesh_mapper=mesh_mapper)
 
@@ -136,7 +128,6 @@ def _extract_dla(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
     parameters["level5"] = {}
     _extract_tree(model.level5, parameters["level5"], dtype=dtype, mesh_mapper=mesh_mapper)
 
-    # Extract final classification layer
     parameters["fc"] = {}
     fc_weight = model.fc.weight
     fc_bias = model.fc.bias.reshape((1, 1, 1, -1))
@@ -150,15 +141,12 @@ def _extract_dla_up(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
     """Extract and preprocess DLAUp parameters with multiple IDAUp modules."""
     assert isinstance(model, DLAUp)
 
-    # Process each IDAUp module within DLAUp
     for i in range(len(model.channels) - 1):
         ida_name = f"ida_{i}"
         ida = getattr(model, ida_name)
 
-        # Create nested parameters for each IDAUp
         parameters[ida_name] = {}
 
-        # Process projection layers in this IDAUp
         for j in range(len(ida.channels)):
             proj_name = f"proj_{j}"
             proj = getattr(ida, proj_name)
@@ -176,7 +164,6 @@ def _extract_dla_up(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
                 else:
                     parameters[ida_name][proj_name]["bias"] = None
 
-        # Process upsampling layers in this IDAUp
         for j in range(len(ida.channels)):
             up_name = f"up_{j}"
             up = getattr(ida, up_name)
@@ -187,7 +174,6 @@ def _extract_dla_up(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
                 )
                 parameters[ida_name][up_name]["bias"] = None
 
-        # Process node layers in this IDAUp
         for j in range(1, len(ida.channels)):
             node_name = f"node_{j}"
             node = getattr(ida, node_name)
@@ -218,23 +204,18 @@ def _extract_dla_seg(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
 
     assert isinstance(model, DLASeg)
 
-    # Extract base DLA parameters
     parameters["base"] = {}
     _extract_dla(model.base, parameters["base"], dtype=dtype, mesh_mapper=mesh_mapper)
 
-    # Extract DLAUp parameters
     parameters["dla_up"] = {}
     _extract_dla_up(model.dla_up, parameters["dla_up"], dtype=dtype, mesh_mapper=mesh_mapper)
 
-    # Extract head parameters with proper initialization
     parameters["heads"] = {}
     for head_name in model.heads:
         head_module = getattr(model, head_name)
         head_params = {}
 
         if isinstance(head_module, nn.Sequential):
-            # Two-layer head: Conv3x3 -> ReLU -> Conv1x1
-            # First conv layer
             conv1_weight = head_module[0].weight
             conv1_bias = head_module[0].bias
             head_params["conv1"] = {}
@@ -243,7 +224,6 @@ def _extract_dla_seg(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
                 conv1_bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper
             )
 
-            # Second conv layer
             conv2_weight = head_module[2].weight
             conv2_bias = head_module[2].bias
             head_params["conv2"] = {}
@@ -252,30 +232,23 @@ def _extract_dla_seg(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
                 conv2_bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper
             )
 
-            # Apply fill_fc_weights to the original PyTorch module before conversion
             fill_fc_weights(head_module)
 
-            # Special handling for heatmap heads
             if "hm" in head_name:
                 head_module[-1].bias.data.fill_(-2.19)
-                # Update the bias after modification
                 head_params["conv2"]["bias"] = ttnn.from_torch(
                     head_module[2].bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper
                 )
         else:
-            # Single-layer head: Conv1x1
             conv_weight = head_module.weight
             conv_bias = head_module.bias
             head_params["weight"] = ttnn.from_torch(conv_weight, dtype=dtype, mesh_mapper=mesh_mapper)
             head_params["bias"] = ttnn.from_torch(conv_bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper)
 
-            # Apply fill_fc_weights to the original PyTorch module
             fill_fc_weights(head_module)
 
-            # Special handling for heatmap heads
             if "hm" in head_name:
                 head_module.bias.data.fill_(-2.19)
-                # Update the bias after modification
                 head_params["bias"] = ttnn.from_torch(
                     head_module.bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper
                 )
@@ -292,7 +265,6 @@ def custom_preprocessor(
     parameters = {}
     weight_dtype = ttnn.bfloat16
 
-    # Import DLASeg at the top of the file
     from models.experimental.centernet.reference.network.dlav0 import DLASeg
 
     if isinstance(model, DLASeg):

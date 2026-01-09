@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
-import math
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
     TtConv2d,
@@ -19,23 +19,6 @@ class TtIdentity:
         return x
 
 
-def fill_up_weights_tt(up_weight):
-    """TTNN version of fill_up_weights for ConvTranspose2d initialization."""
-    w = up_weight
-    f = math.ceil(w.shape[-2] / 2)
-    c = (2 * f - 1 - f % 2) / (2.0 * f)
-
-    # Create weight pattern for upsampling
-    for i in range(w.shape[-2]):
-        for j in range(w.shape[-1]):
-            w[0, 0, i, j] = (1 - math.fabs(i / f - c)) * (1 - math.fabs(j / f - c))
-
-    for c in range(1, w.shape[0]):
-        w[c, 0, :, :] = w[0, 0, :, :]
-
-    return w
-
-
 class TtIDAUp:
     """TTNN implementation of IDAUp (Iterative Deep Aggregation Upsampling)."""
 
@@ -47,7 +30,6 @@ class TtIDAUp:
         self.up_factors = up_factors
         self.parameters = parameters
         self.layer_args = layer_args
-        # Initialize projection layers
         for i, c in enumerate(channels):
             proj_name = f"proj_{i}"
             try:
@@ -72,7 +54,6 @@ class TtIDAUp:
 
             setattr(self, f"proj_{i}", proj)
 
-        # Initialize node layers
         for i in range(1, len(channels)):
             node_name = f"node_{i}"
             node_params = getattr(parameters, node_name)

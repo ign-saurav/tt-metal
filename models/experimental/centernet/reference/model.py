@@ -1,3 +1,13 @@
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
+
+# SPDX-License-Identifier: Apache-2.0
+
+"""
+Adapted and modified from CenterNet Pytorch (https://github.com/xingyizhou/CenterNet)
+Original repository: https://github.com/xingyizhou/CenterNet
+Original author: Xingyi Zhou
+"""
+
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
