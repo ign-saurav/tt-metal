@@ -30,28 +30,52 @@ class TtIDAUp:
         self.up_factors = up_factors
         self.parameters = parameters
         self.layer_args = layer_args
+
+        self._preprocessed_up_weights = {}
+        for i in range(len(channels)):
+            try:
+                up_params = getattr(self.parameters, f"up_{i}")
+                weight_tensor = up_params["weight"]
+
+                # Move to device FIRST, then configure
+                if hasattr(weight_tensor, "device") and weight_tensor.device() is None:
+                    weight_tensor = ttnn.to_device(weight_tensor, device)
+
+                # Apply layout and memory config on device
+                if weight_tensor.layout != ttnn.ROW_MAJOR_LAYOUT:
+                    weight_tensor = ttnn.to_layout(weight_tensor, ttnn.ROW_MAJOR_LAYOUT)
+                weight_tensor = ttnn.to_memory_config(weight_tensor, ttnn.DRAM_MEMORY_CONFIG)
+
+                self._preprocessed_up_weights[i] = weight_tensor
+            except KeyError:
+                self._preprocessed_up_weights[i] = None
+
+        # Pre-initialize all projection layers
         for i, c in enumerate(channels):
             proj_name = f"proj_{i}"
             try:
                 proj_params = getattr(parameters, proj_name)
+                # Create with default dimensions, will be configured during forward
                 proj = TtConv2d(
-                    self._make_conv_config(
-                        proj_params,
-                        batch_size=1,
+                    Conv2dConfiguration(
                         input_height=64,
                         input_width=64,
                         in_channels=c,
                         out_channels=out_dim,
-                        kernel_size=1,
-                        stride=1,
-                        padding=0,
+                        batch_size=1,
+                        kernel_size=(1, 1),
+                        stride=(1, 1),
+                        padding=(0, 0),
+                        weight=proj_params["weight"],
+                        bias=proj_params["bias"],
                         activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+                        weights_dtype=ttnn.bfloat16,
+                        output_dtype=ttnn.bfloat16,
                     ),
                     device,
                 )
             except KeyError:
                 proj = TtIdentity()
-
             setattr(self, f"proj_{i}", proj)
 
         for i in range(1, len(channels)):
@@ -128,50 +152,35 @@ class TtIDAUp:
 
     def _apply_projection(self, l, i):
         """Apply projection to layer i."""
-        try:
-            proj_params = getattr(self.parameters, f"proj_{i}")
-            n, h, w, c = l.shape
+        proj = getattr(self, f"proj_{i}")
 
-            proj_config = Conv2dConfiguration(
-                input_height=h,
-                input_width=w,
-                in_channels=c,
-                out_channels=self.out_dim,
-                batch_size=n,
-                kernel_size=(1, 1),
-                stride=(1, 1),
-                padding=(0, 0),
-                weight=proj_params["weight"],
-                bias=proj_params["bias"],
-                activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-                weights_dtype=ttnn.bfloat16,
-                output_dtype=ttnn.bfloat16,
-            )
-            proj = TtConv2d(proj_config, self.device)
-            proj_out = proj(l)
-
-            # Reshape if needed to restore spatial dimensions
-            proj_n, proj_h, proj_w, proj_c = proj_out.shape
-            if proj_h != h or proj_w != w:
-                total_elements = proj_n * proj_h * proj_w * proj_c
-                expected_elements = n * h * w * self.out_dim
-
-                if total_elements == expected_elements:
-                    if proj_h == 1 and proj_w == h * w:
-                        # Format is [N, 1, H*W, C] -> [N, H, W, C]
-                        proj_out = ttnn.reshape(proj_out, [n, h, w, self.out_dim])
-                    elif proj_h == self.out_dim and proj_c == h * w:
-                        # Format is [N, C, H*W, 1] -> [N, H, W, C]
-                        proj_out = ttnn.reshape(proj_out, [n, self.out_dim, h, w])
-                        proj_out = ttnn.permute(proj_out, (0, 2, 3, 1))
-                    else:
-                        # Fallback: direct reshape
-                        proj_out = ttnn.reshape(proj_out, [n, h, w, self.out_dim])
-
-            return proj_out
-        except KeyError:
-            # Identity layer
+        if isinstance(proj, TtIdentity):
             return l
+
+        # Apply the pre-initialized projection
+        proj_out = proj(l)
+
+        # Reshape if needed to restore spatial dimensions
+        n, h, w, c = l.shape
+        proj_n, proj_h, proj_w, proj_c = proj_out.shape
+
+        if proj_h != h or proj_w != w:
+            total_elements = proj_n * proj_h * proj_w * proj_c
+            expected_elements = n * h * w * self.out_dim
+
+            if total_elements == expected_elements:
+                if proj_h == 1 and proj_w == h * w:
+                    # Format is [N, 1, H*W, C] -> [N, H, W, C]
+                    proj_out = ttnn.reshape(proj_out, [n, h, w, self.out_dim])
+                elif proj_h == self.out_dim and proj_c == h * w:
+                    # Format is [N, C, H*W, 1] -> [N, H, W, C]
+                    proj_out = ttnn.reshape(proj_out, [n, self.out_dim, h, w])
+                    proj_out = ttnn.permute(proj_out, (0, 2, 3, 1))
+                else:
+                    # Fallback: direct reshape
+                    proj_out = ttnn.reshape(proj_out, [n, h, w, self.out_dim])
+
+        return proj_out
 
     def _apply_upsampling(self, proj_out, i):
         """Apply upsampling to projected output."""
@@ -190,7 +199,7 @@ class TtIDAUp:
         target_w = w_proj * up_factor
 
         up_params = getattr(self.parameters, f"up_{i}")
-        weight_tensor = up_params["weight"]
+        weight_tensor = self._preprocessed_up_weights[i]
 
         # Ensure weight is on host and in ROW_MAJOR layout
         if hasattr(weight_tensor, "device") and weight_tensor.device() is not None:
@@ -217,8 +226,25 @@ class TtIDAUp:
         if proj_out_padded.layout != ttnn.ROW_MAJOR_LAYOUT:
             proj_out_padded = ttnn.to_layout(proj_out_padded, ttnn.ROW_MAJOR_LAYOUT)
 
-        # Use conv_transpose2d for upsampling
-        up_out_padded = ttnn.conv_transpose2d(
+        # Create Conv2dConfig to prevent runtime writes
+        conv_config = ttnn.Conv2dConfig(
+            weights_dtype=ttnn.bfloat16,
+            shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            deallocate_activation=True,
+            enable_act_double_buffer=False,
+            output_layout=ttnn.TILE_LAYOUT,
+        )
+
+        # Create compute config
+        compute_config = ttnn.init_device_compute_kernel_config(
+            self.device.arch(),
+            math_fidelity=ttnn.MathFidelity.HiFi2,
+            fp32_dest_acc_en=True,
+            packer_l1_acc=False,
+        )
+
+        # Use conv_transpose2d with proper configuration
+        up_out_padded, _ = ttnn.conv_transpose2d(
             input_tensor=proj_out_padded,
             weight_tensor=weight_tensor,
             bias_tensor=None,
@@ -234,8 +260,10 @@ class TtIDAUp:
             batch_size=n_proj,
             input_height=padded_h,
             input_width=padded_w,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            mirror_kernel=True,
+            conv_config=conv_config,
+            compute_config=compute_config,
+            return_output_dim=False,
+            return_weights_and_bias=True,
         )
 
         # Reshape if needed: [N, 1, H*W, C] -> [N, H, W, C]
@@ -314,7 +342,6 @@ class TtIDAUp:
             proj_out = self._apply_projection(l, i)
             up_out = self._apply_upsampling(proj_out, i)
             layers[i] = up_out
-
         # Step 2: Apply node convolutions
         x = layers[0]
         y = []

@@ -218,7 +218,6 @@ class TtDLA(LightweightModule):
 
     def forward(self, x):
         y = []
-
         x = self.base_layer(x)
 
         x = self.level0[0](x)
