@@ -53,7 +53,7 @@ def main():
 
         # This replaces model.vpm with TT-accelerated DropInVisionEncoder
         logger.info("Enabling TT acceleration for vision encoder...")
-        model = enable_tt_acceleration(model, device, components=["vision"])
+        model = enable_tt_acceleration(model, device, components=["vision", "llm"])
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
@@ -73,7 +73,7 @@ def main():
             msgs=msgs,
             tokenizer=tokenizer,
             sampling=True,
-            max_new_tokens=128,
+            max_new_tokens=15,
         )
 
         logger.info(f"Chat result: {res}")

@@ -30,6 +30,7 @@ def enable_tt_acceleration(
     model,
     device,
     components: Optional[List[str]] = None,
+    model_path: str = "openbmb/MiniCPM-o-2_6",
 ):
     """
     Replace model components with TT implementations.
@@ -42,10 +43,12 @@ def enable_tt_acceleration(
         model: MiniCPM-o model loaded from HuggingFace (via AutoModel.from_pretrained)
         device: TT device (ttnn.Device or mesh device)
         components: List of components to accelerate. Options:
+                   - 'llm': Replace llm (Qwen2ForCausalLM) - MAIN BOTTLENECK
                    - 'vision': Replace vpm (SigLip vision encoder)
                    - 'audio': Replace apm (Whisper audio encoder)
                    - 'tts': Replace tts (ChatTTS decoder)
                    Default: all available components
+        model_path: HuggingFace model path for weight loading
 
     Returns:
         The same model with components replaced by TT implementations.
@@ -66,17 +69,18 @@ def enable_tt_acceleration(
         >>> model = model.eval().cuda()
         >>> model.init_tts()
         >>>
-        >>> # Enable TT acceleration
+        >>> # Enable TT acceleration for LLM (main bottleneck)
         >>> device = ttnn.open_device(device_id=0)
-        >>> model = enable_tt_acceleration(model, device, ['audio', 'tts'])
+        >>> model = enable_tt_acceleration(model, device, ['llm'])
         >>>
-        >>> # Use model normally
+        >>> # Use model normally - LLM runs on TT hardware
         >>> result = model.chat(msgs=[...], tokenizer=tokenizer, ...)
     """
     from models.experimental.miniCPMo.tt.drop_in_replacements import (
         DropInChatTTSDecoder,
         DropInAudioEncoder,
         DropInVisionEncoder,
+        DropInQwen2LLM,
     )
 
     # Auto-detect available components if not specified
@@ -92,6 +96,18 @@ def enable_tt_acceleration(
 
     # Get LLM embed dimension
     embed_dim = model.embed_dim if hasattr(model, "embed_dim") else model.llm.config.hidden_size
+
+    # Replace LLM (Qwen2ForCausalLM) - main computational bottleneck
+    if "llm" in components:
+        if hasattr(model, "llm") and model.llm is not None:
+            logger.info("Replacing LLM (Qwen2ForCausalLM) with TT implementation...")
+            model.llm = DropInQwen2LLM(
+                reference_model=model.llm,
+                device=device,
+                model_path=model_path,
+            )
+        else:
+            logger.warning("LLM component requested but llm not found or None")
 
     # Replace vision encoder
     if "vision" in components:

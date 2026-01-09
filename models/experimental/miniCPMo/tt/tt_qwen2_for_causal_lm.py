@@ -251,14 +251,23 @@ class TTQwen2ForCausalLM(nn.Module):
             # Sample next token (greedy for now)
             next_token = torch.argmax(logits, dim=-1).reshape(1, 1)  # [1, 1]
 
-            logger.info(f"Token {iteration+1}: {next_token.item()}")
+            # Decode token for logging
+            if self.tokenizer is not None:
+                try:
+                    decoded = self.tokenizer.decode([next_token.item()])
+                    logger.info(f"Token {iteration+1}: {next_token.item()} ('{decoded}')")
+                except:
+                    logger.info(f"Token {iteration+1}: {next_token.item()}")
+            else:
+                logger.info(f"Token {iteration+1}: {next_token.item()}")
 
             generated_tokens.append(next_token)
             current_token = next_token
             self.current_position += 1
 
-            # Check EOS
-            if next_token.item() in eos_token_ids:
+            # Check EOS - but only after generating at least 5 tokens
+            # This helps debug cases where EOS is generated too early
+            if iteration >= 5 and next_token.item() in eos_token_ids:
                 logger.info(f"EOS reached at iteration {iteration}")
                 break
 
@@ -267,3 +276,120 @@ class TTQwen2ForCausalLM(nn.Module):
         logger.info(f"Generated {output.shape[1]} tokens: {output.tolist()}")
 
         return output
+
+    def get_hidden_states(
+        self,
+        input_ids: torch.Tensor = None,
+        inputs_embeds: torch.Tensor = None,
+    ) -> torch.Tensor:
+        """
+        Get hidden states by running TT prefill with get_last_token=-1.
+
+        This returns hidden states AFTER all transformer layers but BEFORE norm/lm_head.
+        Used for TTS speaker embedding extraction.
+
+        Args:
+            input_ids: Token IDs [batch, seq_len] (optional, will be embedded)
+            inputs_embeds: Pre-computed embeddings [batch, seq_len, hidden] (optional)
+
+        Returns:
+            Hidden states [batch, seq_len, hidden_dim]
+        """
+        if inputs_embeds is not None:
+            # Use provided embeddings directly
+            if inputs_embeds.dim() == 2:
+                inputs_embeds = inputs_embeds.unsqueeze(0)
+            batch_size, seq_len, hidden_dim = inputs_embeds.shape
+            logger.info(f"Getting hidden states for {seq_len} tokens via TT prefill (from embeddings)...")
+
+            # Pad to 128 boundary
+            padded_len = ((seq_len + 127) // 128) * 128
+            if seq_len != padded_len:
+                inputs_embeds_padded = torch.nn.functional.pad(inputs_embeds, (0, 0, 0, padded_len - seq_len), value=0)
+            else:
+                inputs_embeds_padded = inputs_embeds
+
+            # Convert to TT tensor [batch, 1, seq, hidden]
+            tt_embeds = ttnn.from_torch(
+                inputs_embeds_padded.unsqueeze(1),
+                device=self.mesh_device,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh_device),
+            )
+        elif input_ids is not None:
+            # Embed token IDs
+            if input_ids.dim() == 1:
+                input_ids = input_ids.unsqueeze(0)
+
+            batch_size, seq_len = input_ids.shape
+            logger.info(f"Getting hidden states for {seq_len} tokens via TT prefill (from token IDs)...")
+
+            # Get embeddings from model's embedding layer
+            tt_embd = self.tt_model.embd
+
+            # Pad to 128 boundary
+            padded_len = ((seq_len + 127) // 128) * 128
+            if seq_len != padded_len:
+                input_ids_padded = torch.nn.functional.pad(input_ids, (0, padded_len - seq_len), value=0)
+            else:
+                input_ids_padded = input_ids
+
+            # Convert to TT tensor
+            tt_input_ids = ttnn.from_torch(
+                input_ids_padded,
+                device=self.mesh_device,
+                dtype=ttnn.uint32,
+                layout=ttnn.ROW_MAJOR_LAYOUT,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh_device),
+            )
+
+            # Get embeddings via TT embd layer
+            tt_embeds = tt_embd(tt_input_ids)
+            ttnn.deallocate(tt_input_ids)
+
+            # Reshape for transformer: [batch, 1, seq, hidden]
+            tt_embeds = ttnn.reshape(tt_embeds, [batch_size, 1, padded_len, -1])
+            tt_embeds = ttnn.to_layout(tt_embeds, ttnn.TILE_LAYOUT)
+        else:
+            raise ValueError("Either input_ids or inputs_embeds must be provided")
+
+        # Prepare rotation matrices for prefill
+        tt_rot_mats_prefill = [
+            self.tt_model.rope_setup.cos_matrix[:, :, :padded_len, :],
+            self.tt_model.rope_setup.sin_matrix[:, :, :padded_len, :],
+        ]
+
+        tt_rot_mats_local = None
+        if hasattr(self.tt_model, "rope_local_setup") and self.tt_model.rope_local_setup:
+            tt_rot_mats_local = [
+                self.tt_model.rope_local_setup.cos_matrix[:, :, :padded_len, :],
+                self.tt_model.rope_local_setup.sin_matrix[:, :, :padded_len, :],
+            ]
+
+        # Run prefill with get_last_token=-1 to get hidden states
+        tt_hidden = self.tt_model.ttnn_prefill_forward(
+            tt_embeds,
+            rot_mats_global=tt_rot_mats_prefill,
+            rot_mats_local=tt_rot_mats_local,
+            user_id=0,
+            page_table=None,
+            kv_cache=self.tt_kv_cache,
+            get_last_token=-1,  # Returns hidden states before norm/lm_head
+        )
+
+        # Convert back to torch
+        hidden_states = ttnn.to_torch(tt_hidden).float()
+        ttnn.deallocate(tt_embeds)
+        ttnn.deallocate(tt_hidden)
+
+        # Reshape: [batch, 1, seq, hidden] -> [batch, seq, hidden]
+        if hidden_states.dim() == 4:
+            hidden_states = hidden_states.squeeze(1)
+
+        # Trim padding
+        if seq_len != padded_len:
+            hidden_states = hidden_states[:, :seq_len, :]
+
+        logger.info(f"Got hidden states shape: {hidden_states.shape}")
+        return hidden_states
