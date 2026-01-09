@@ -6,15 +6,14 @@ from models.experimental.granite_speech_33_8b.tt.ttnn_projector_block import Gra
 
 from models.tt_transformers.tt.common import PagedAttentionConfig, create_tt_model
 from models.tt_transformers.tt.generator import Generator
-from models.tt_transformers.tt.model_config import DecodersPrecision
 
 class GraniteEncoderAndProjector:
     """TTNN implementation of Encoder+Projector."""
 
-    def __init__(self, device, config):
+    def __init__(self, device, config, include_conformer_layernorm=False, use_optimized_attention=True):
         self.device = device
-        self.encoder = GraniteSpeechCTCEncoderTTNN(device, config, include_conformer_layernorm=False)
-        self.projector = GraniteSpeechEncoderProjectorTTNN(device, config)
+        self.encoder = GraniteSpeechCTCEncoderTTNN(device, config.encoder_config, include_conformer_layernorm)
+        self.projector = GraniteSpeechEncoderProjectorTTNN(device, config, use_optimized_attention)
 
         self._setup_compute_config()
 
@@ -32,7 +31,7 @@ class GraniteEncoderAndProjector:
         self, model
     ):
         """Load and convert PyTorch weights to TTNN format."""
-        self.encoder.prepare_weights(model.encoder.state_dict())
+        self.encoder.prepare_weights(model.encoder)
         self.projector.prepare_weights(model.projector)
 
     def forward(self, input_features):
