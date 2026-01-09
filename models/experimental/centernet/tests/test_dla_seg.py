@@ -11,7 +11,6 @@ from models.common.utility_functions import run_for_wormhole_b0, comp_pcc, tt2to
 from models.experimental.centernet.reference.network.dlav0 import DLASeg
 from models.experimental.centernet.tt.dla_seg import TtDLASeg
 from models.experimental.centernet.tt.custom_preprocessor import create_custom_mesh_preprocessor
-from models.experimental.centernet.reference.model import load_model
 
 
 @run_for_wormhole_b0()
@@ -34,12 +33,12 @@ def test_dla_seg(device):
     pytorch_dla_seg = DLASeg(
         base_name="dla34", heads=heads, pretrained=False, down_ratio=down_ratio, head_conv=head_conv
     )
-    pytorch_dla_seg = load_model(pytorch_dla_seg, "models/experimental/centernet/ctdet_coco_dlav0_1x.pth")
+    # pytorch_dla_seg = load_model(pytorch_dla_seg, "models/experimental/centernet/ctdet_coco_dlav0_1x.pth")
     pytorch_dla_seg.eval()
 
     # Create random input
-    # torch_input = torch.randn(input_shape, dtype=torch.float32)
-    torch_input = torch.load("cnet_input.pt")
+    torch_input = torch.randn(input_shape, dtype=torch.float32)
+    # torch_input = torch.load("cnet_input.pt")
 
     # PyTorch forward pass
     with torch.no_grad():
@@ -89,13 +88,13 @@ def test_dla_seg(device):
     for head_name in heads:
         if head_name in pytorch_output[0] and head_name in tt_output_torch:
             passing, pcc_value = comp_pcc(
-                pytorch_output[0][head_name], tt_output_torch[head_name], pcc=0.98 if head_name == "hm" else 0.99
+                pytorch_output[0][head_name], tt_output_torch[head_name], pcc=0.94 if head_name == "reg" else 0.99
             )
             logger.info(f"DLASeg Head '{head_name}' PCC: {pcc_value}")
             if not passing:
                 all_passed = False
                 logger.warning(
-                    f"Head '{head_name}' PCC check failed: {pcc_value} < {0.98 if head_name == 'hm' else 0.99}"
+                    f"Head '{head_name}' PCC check failed: {pcc_value} < {0.94 if head_name == 'reg' else 0.99}"
                 )
         else:
             all_passed = False

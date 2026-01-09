@@ -110,7 +110,6 @@ class TtTree(LightweightModule):
                 device=device,
             )
 
-        # Optional downsample layer
         self.downsample = None
         if stride > 1:
             self.downsample = TtMaxPool2d(
@@ -125,7 +124,6 @@ class TtTree(LightweightModule):
                 device,
             )
 
-        # Optional project layer (1x1 conv + BatchNorm)
         self.project = None
         if in_channels != out_channels:
             self.project = TtConv2d(
@@ -140,7 +138,7 @@ class TtTree(LightweightModule):
                     dilation=1,
                     padding=0,
                     activation=None,
-                    is_project=True,  # Add this flag
+                    is_project=True,
                 ),
                 device,
             )
@@ -181,56 +179,20 @@ class TtTree(LightweightModule):
             weights_dtype=ttnn.bfloat16,
             output_dtype=ttnn.bfloat16,
             sharding_strategy=HeightShardedStrategyConfiguration(reshard_if_not_optimal=True),
-            math_fidelity=ttnn.MathFidelity.LoFi,
+            math_fidelity=ttnn.MathFidelity.HiFi2,
             fp32_dest_acc_en=True,
             deallocate_activation=False,
         )
 
-    # def forward(self, x):
-    #     # Store input for residual connection if needed
-    #     if self.level_root:
-    #         x_residual = x
-
-    #     # Apply projection if input/output channels differ
-    #     if self.project is not None:
-    #         x = self.project(x)
-
-    #     # Apply downsampling if stride > 1
-    #     if self.downsample is not None:
-    #         import pdb; pdb.set_trace()
-    #         x = self.downsample(x)
-
-    #     # Forward through tree branches
-    #     x1 = self.tree1(x)
-    #     x2 = self.tree2(x)
-
-    #     # Apply root at leaf level
-    #     if self.levels == 1:
-    #         # Concatenate branches and apply root
-    #         if self.level_root:
-    #             out = self.root(x1, x2, x_residual)
-    #         else:
-    #             out = self.root(x1, x2)
-    #     else:
-    #         # For non-leaf levels, just return the second branch output
-    #         out = x2
-
-    #     return out
-
     def forward(self, x, residual=None, children=None):
         children = [] if children is None else children
 
-        # Apply downsampling first
         bottom = self.downsample(x) if self.downsample else x
 
-        # Apply projection to the downsampled output
         residual = self.project(bottom) if self.project else bottom
 
-        # Accumulate children if level_root
         if self.level_root:
             children.append(bottom)
-
-        # Forward through tree1 with residual
 
         x1 = self.tree1(x, residual)
 

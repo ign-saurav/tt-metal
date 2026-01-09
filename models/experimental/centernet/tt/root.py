@@ -68,7 +68,7 @@ class TtRoot(LightweightModule):
             output_dtype=ttnn.bfloat16,
             # sharding_strategy=HeightShardedStrategyConfiguration(reshard_if_not_optimal=True),
             sharding_strategy=AutoShardedStrategyConfiguration(),
-            math_fidelity=ttnn.MathFidelity.LoFi,
+            math_fidelity=ttnn.MathFidelity.HiFi2,
             fp32_dest_acc_en=True,
             deallocate_activation=True,
         )

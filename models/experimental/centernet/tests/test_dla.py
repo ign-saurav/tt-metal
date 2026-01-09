@@ -50,7 +50,6 @@ def test_dla(device):
 
     # Create random input
     torch_input = torch.randn(input_shape, dtype=torch.float32)
-    # torch_input = torch.load('cnet_input.pt')
 
     # PyTorch forward pass
     with torch.no_grad():
@@ -90,11 +89,8 @@ def test_dla(device):
     tt_input = ttnn.from_torch(torch_input.permute(0, 2, 3, 1), dtype=ttnn.bfloat16)
     tt_input = ttnn.to_device(tt_input, device)
 
-    # TTNN forward pass
     tt_output = tt_dla.forward(tt_input)
 
-    # Since return_levels=True, output is a list
-    # Convert each level output back to PyTorch format
     tt_output_torch = []
     for level_output in tt_output:
         level_torch = tt2torch_tensor(level_output).permute(0, 3, 1, 2)
