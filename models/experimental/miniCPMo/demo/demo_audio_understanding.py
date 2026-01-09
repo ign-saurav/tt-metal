@@ -2,18 +2,18 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Demo: MiniCPM-o audio understanding (without TTS).
+Demo: MiniCPM-o audio understanding with TT-accelerated LLM.
 
 This demo demonstrates audio understanding:
 1. Load model from HuggingFace (auto-cached)
-2. Enable TT acceleration for audio encoder
+2. Enable TT acceleration for LLM (main computational bottleneck)
 3. Process audio input and generate text response
 
 Model and weights are loaded from HuggingFace URL 'openbmb/MiniCPM-o-2_6'.
 TT implementations are used as drop-in replacements for accelerated inference.
 
 Usage:
-    python models/experimental/miniCPMo/demo/test_mini_cpm_o_audio.py
+    python models/experimental/miniCPMo/demo/demo_audio_understanding.py
 """
 
 import ttnn
@@ -29,7 +29,7 @@ from models.experimental.miniCPMo.tt.tt_model_wrapper import enable_tt_accelerat
 
 def main():
     """
-    Run audio understanding with TT-accelerated audio encoder.
+    Run audio understanding with TT-accelerated LLM.
     """
     torch.manual_seed(42)
 
@@ -51,13 +51,14 @@ def main():
         )
         model = model.eval()
 
-        # This replaces model.apm with TT-accelerated DropInAudioEncoder
-        logger.info("Enabling TT acceleration for audio encoder...")
-        model = enable_tt_acceleration(model, device, components=["audio"])
+        # This replaces model.llm with TT-accelerated DropInQwen2LLM
+        # The LLM is the main computational bottleneck - this provides the biggest speedup
+        logger.info("Enabling TT acceleration for LLM...")
+        model = enable_tt_acceleration(model, device, components=["audio", "llm"], model_path=model_name)
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
-        task_prompt = "Please listen to the audio snippet carefully and transcribe the content.\n"
+        task_prompt = "Please listen to the audio snippet carefully and describe what you hear.\n"
 
         audio_file = hf_hub_download(
             repo_id="openbmb/MiniCPM-o-2_6", filename="assets/input_examples/audio_understanding.mp3", repo_type="model"
@@ -67,12 +68,12 @@ def main():
         audio_input, _ = librosa.load(audio_file, sr=16000, mono=True)
         msgs = [{"role": "user", "content": [task_prompt, audio_input]}]
 
-        logger.info("Running model.chat (audio understanding, no TTS)...")
+        logger.info("Running model.chat (audio understanding with TT LLM)...")
         res = model.chat(
             msgs=msgs,
             tokenizer=tokenizer,
-            sampling=True,
-            max_new_tokens=128,
+            sampling=False,  # Greedy decoding for reproducibility
+            max_new_tokens=20,  # Generate enough tokens for meaningful output
             use_tts_template=False,
             generate_audio=False,
         )
@@ -82,6 +83,11 @@ def main():
         if res is None or len(res) == 0:
             logger.error("Expected non-empty response")
             return 1
+
+        # Check for meaningful output
+        expected_keywords = ["sounds", "like", "park", "birds", "audio", "hear"]
+        found_keywords = [kw for kw in expected_keywords if kw in res.lower()]
+        logger.info(f"Found keywords: {found_keywords}")
 
         logger.info("✅ Demo completed successfully!")
         return 0
