@@ -2,6 +2,9 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import urllib.request
+from pathlib import Path
+
 import ttnn
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
@@ -90,3 +93,66 @@ def _get_sharding_strategy(input_height, input_width, in_channels, out_channels)
             return AutoShardedStrategyConfiguration()
     else:
         return AutoShardedStrategyConfiguration()
+
+
+def ensure_checkpoint_downloaded(checkpoint_filename: str, url: str, checkpoint_dir: str = None) -> str:
+    """
+    Ensure a checkpoint file is downloaded. If it doesn't exist, download it from the URL.
+
+    Args:
+        checkpoint_filename: Name of the checkpoint file (e.g., "Swin2SR_ClassicalSR_X2_64.pth")
+        url: URL to download the checkpoint from
+        checkpoint_dir: Directory where checkpoints are stored. If None, uses default location.
+
+    Returns:
+        Path to the checkpoint file
+    """
+    if checkpoint_dir is None:
+        # Default to swin2sr/resources/checkpoints/
+        current_file = Path(__file__)
+        checkpoint_dir = current_file.parent.parent / "resources" / "checkpoints"
+
+    checkpoint_dir = Path(checkpoint_dir)
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+    checkpoint_path = checkpoint_dir / checkpoint_filename
+
+    if not checkpoint_path.exists():
+        print(f"Checkpoint not found at {checkpoint_path}, downloading from {url}...")
+        try:
+            urllib.request.urlretrieve(url, checkpoint_path)
+            print(f"Successfully downloaded checkpoint to {checkpoint_path}")
+        except Exception as e:
+            raise RuntimeError(f"Failed to download checkpoint from {url}: {e}")
+
+    return str(checkpoint_path)
+
+
+def get_checkpoint_path(checkpoint_filename: str, checkpoint_dir: str = None) -> str:
+    """
+    Get the path to a checkpoint file, downloading it if necessary.
+
+    This function automatically downloads the X2 checkpoint if it doesn't exist.
+    For other checkpoints, use ensure_checkpoint_downloaded directly.
+
+    Args:
+        checkpoint_filename: Name of the checkpoint file
+        checkpoint_dir: Directory where checkpoints are stored. If None, uses default location.
+
+    Returns:
+        Path to the checkpoint file
+    """
+    if checkpoint_filename == "Swin2SR_ClassicalSR_X2_64.pth":
+        url = "https://github.com/mv-lab/swin2sr/releases/download/v0.0.1/Swin2SR_ClassicalSR_X2_64.pth"
+        return ensure_checkpoint_downloaded(checkpoint_filename, url, checkpoint_dir)
+    elif checkpoint_filename == "Swin2SR_ClassicalSR_X4_64.pth":
+        url = "https://github.com/mv-lab/swin2sr/releases/download/v0.0.1/Swin2SR_ClassicalSR_X4_64.pth"
+        return ensure_checkpoint_downloaded(checkpoint_filename, url, checkpoint_dir)
+    else:
+        # For other checkpoints, just return the path (no auto-download)
+        if checkpoint_dir is None:
+            current_file = Path(__file__)
+            checkpoint_dir = current_file.parent.parent / "resources" / "checkpoints"
+        checkpoint_dir = Path(checkpoint_dir)
+        checkpoint_path = checkpoint_dir / checkpoint_filename
+        return str(checkpoint_path)

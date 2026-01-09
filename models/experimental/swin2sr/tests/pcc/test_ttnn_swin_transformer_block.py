@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import torch
 import pytest
 
@@ -17,6 +16,7 @@ from models.experimental.swin2sr.reference.swin_transformer_block import (
 from models.experimental.swin2sr.tt.tt_swin_transformer_block import TtSwinTransformerBlock
 from models.experimental.swin2sr.tests.pcc.test_ttnn_window_attention import create_window_attention_preprocessor
 from models.experimental.swin2sr.tests.pcc.test_ttnn_mlp import create_custom_preprocessor as create_mlp_preprocessor
+from models.experimental.swin2sr.tt.utils import get_checkpoint_path
 
 
 def create_custom_preprocessor(device):
@@ -129,17 +129,7 @@ def load_swin_transformer_block_weights_from_checkpoint(checkpoint_path, layer_i
 )
 def test_swin_transformer_block_ttnn_vs_torch_with_checkpoint(device, layer_idx, block_idx, reset_seeds):
     """Test SwinTransformerBlock with weights from Swin2SR checkpoint."""
-    checkpoint_path = os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "..",
-        "resources",
-        "checkpoints",
-        "Swin2SR_ClassicalSR_X2_64.pth",
-    )
-
-    if not os.path.exists(checkpoint_path):
-        pytest.skip(f"Checkpoint not found at {checkpoint_path}")
+    checkpoint_path = get_checkpoint_path("Swin2SR_ClassicalSR_X2_64.pth")
 
     weights = load_swin_transformer_block_weights_from_checkpoint(
         checkpoint_path, layer_idx=layer_idx, block_idx=block_idx

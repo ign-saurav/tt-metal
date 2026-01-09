@@ -34,24 +34,27 @@ This repository provides:
 models/experimental/swin2sr/
 ├── README.md                    # This file
 ├── demo/
-│   └── demo_tiled.py           # Demo script with tiled processing
+│   └── demo_tiled.py            # Demo script with tiled processing
 ├── resources/
-│   ├── checkpoints/            # Model checkpoints (.pth files)
-│   └── test_images/            # Test images
-├── tt/                         # TTNN implementation
-│   ├── tt_swin2sr.py          # Main model class
-│   ├── tt_rstb.py             # Residual Swin Transformer Block
-│   ├── tt_window_attention.py # Window attention mechanism
+│   ├── checkpoints/             # Model checkpoints (.pth files)
+│   └── test_images/             # Test images
+├── tt/                          # TTNN implementation
+│   ├── tt_swin2sr.py            # Main model class
+│   ├── tt_rstb.py               # Residual Swin Transformer Block
+│   ├── tt_window_attention.py   # Window attention mechanism
 │   ├── tt_swin_transformer_block.py
 │   ├── tt_patch_embed.py
-│   ├── tt_upsample.py         # PixelShuffle upsampling
+│   ├── tt_upsample.py           # PixelShuffle upsampling
 │   ├── tt_mlp.py
 │   ├── tt_basic_layer.py
 │   └── utils.py
-├── reference/                  # PyTorch reference implementation
-└── tests/                      # PCC tests
-    └── pcc/
-        └── test_ttnn_swin2sr.py  # Full network tests
+├── reference/                   # PyTorch reference implementation
+└── tests/                       # PCC tests
+    ├── pcc/
+    |   └── test_ttnn_swin2sr.py # Full network tests
+    └── perf/
+        ├── test_perf.py         # Performance tests
+        └── test_perf_e2e.py
 ```
 
 ## Weights
@@ -112,7 +115,7 @@ python3 models/experimental/swin2sr/demo/demo_tiled.py \
 - end-2-end perf with 1CQ (no trace) is `~2` FPS
 
 ### Multi Device (BS=1, img_size=64x64)(n300):
-- end-2-end perf with trace enabled and 2CQ is `~` FPS
+- end-2-end perf with trace disabled and 2CQ is `~4` FPS
 
 To run perf test:
 ```

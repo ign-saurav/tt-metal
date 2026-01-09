@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import torch
 from torch import nn
 import pytest
@@ -16,6 +15,7 @@ from ttnn.model_preprocessing import (
 from tests.ttnn.utils_for_testing import assert_with_pcc, comp_pcc
 from models.experimental.swin2sr.reference.mlp import MLP as TorchSwin2SRMLP
 from models.experimental.swin2sr.tt.tt_mlp import TtSwin2SRMLP
+from models.experimental.swin2sr.tt.utils import get_checkpoint_path
 
 
 def create_custom_preprocessor(device):
@@ -72,17 +72,7 @@ def load_mlp_weights_from_checkpoint(checkpoint_path, layer_idx=0, block_idx=0):
     ],
 )
 def test_swin2sr_mlp_ttnn_vs_torch_with_checkpoint(device, layer_idx, block_idx, reset_seeds):
-    checkpoint_path = os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "..",
-        "resources",
-        "checkpoints",
-        "Swin2SR_ClassicalSR_X2_64.pth",
-    )
-
-    if not os.path.exists(checkpoint_path):
-        pytest.skip(f"Checkpoint not found at {checkpoint_path}")
+    checkpoint_path = get_checkpoint_path("Swin2SR_ClassicalSR_X2_64.pth")
 
     weights = load_mlp_weights_from_checkpoint(checkpoint_path, layer_idx=layer_idx, block_idx=block_idx)
 

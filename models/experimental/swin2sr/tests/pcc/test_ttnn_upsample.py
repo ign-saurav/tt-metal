@@ -3,7 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import math
-import os
 import torch
 from torch import nn
 import pytest
@@ -12,6 +11,7 @@ import ttnn
 from tests.ttnn.utils_for_testing import comp_pcc
 from models.experimental.swin2sr.reference.swin2sr import Upsample as TorchUpsample
 from models.experimental.swin2sr.tt.tt_upsample import TtUpsample
+from models.experimental.swin2sr.tt.utils import get_checkpoint_path
 
 
 def create_upsample_parameters(torch_model, device):
@@ -123,17 +123,7 @@ def load_upsample_weights_from_checkpoint(checkpoint_path, scale, num_feat):
     ],
 )
 def test_upsample_checkpoint(device, scale, num_feat, input_height, input_width, reset_seeds):
-    checkpoint_path = os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "..",
-        "resources",
-        "checkpoints",
-        "Swin2SR_ClassicalSR_X2_64.pth",
-    )
-
-    if not os.path.exists(checkpoint_path):
-        pytest.skip(f"Checkpoint not found: {checkpoint_path}")
+    checkpoint_path = get_checkpoint_path("Swin2SR_ClassicalSR_X2_64.pth")
 
     weights_list = load_upsample_weights_from_checkpoint(checkpoint_path, scale, num_feat)
 

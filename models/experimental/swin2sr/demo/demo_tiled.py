@@ -16,6 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", "..
 from models.experimental.swin2sr.reference.swin2sr import Swin2SR as TorchSwin2SR
 from models.experimental.swin2sr.tt.tt_swin2sr import TtSwin2SR
 from models.experimental.swin2sr.tests.pcc.test_ttnn_swin2sr import create_swin2sr_preprocessor
+from models.experimental.swin2sr.tt.utils import ensure_checkpoint_downloaded
 
 
 def load_image(image_path: str) -> tuple[np.ndarray, tuple[int, int]]:
@@ -281,6 +282,7 @@ def main():
     args = parser.parse_args()
 
     workspace_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
+    checkpoint_dir = os.path.join(workspace_root, "models", "experimental", "swin2sr", "resources", "checkpoints")
 
     if not os.path.isabs(args.image):
         args.image = (
@@ -299,6 +301,20 @@ def main():
             print(f"Auto-selected checkpoint for scale {args.scale}x: {args.checkpoint}")
         else:
             raise ValueError(f"No default checkpoint available for scale {args.scale}x. Please provide --checkpoint")
+
+    # Download checkpoint only if needed (based on selected scale)
+    if args.checkpoint.endswith("Swin2SR_ClassicalSR_X2_64.pth"):
+        ensure_checkpoint_downloaded(
+            "Swin2SR_ClassicalSR_X2_64.pth",
+            "https://github.com/mv-lab/swin2sr/releases/download/v0.0.1/Swin2SR_ClassicalSR_X2_64.pth",
+            checkpoint_dir,
+        )
+    elif args.checkpoint.endswith("Swin2SR_ClassicalSR_X4_64.pth"):
+        ensure_checkpoint_downloaded(
+            "Swin2SR_ClassicalSR_X4_64.pth",
+            "https://github.com/mv-lab/swin2sr/releases/download/v0.0.1/Swin2SR_ClassicalSR_X4_64.pth",
+            checkpoint_dir,
+        )
 
     if not os.path.isabs(args.checkpoint):
         args.checkpoint = (

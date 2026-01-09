@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import torch
 import pytest
 
@@ -11,6 +10,7 @@ from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_lin
 from tests.ttnn.utils_for_testing import assert_with_pcc, comp_pcc
 from models.experimental.swin2sr.reference.window_attention import WindowAttention as TorchWindowAttention
 from models.experimental.swin2sr.tt.tt_window_attention import TtSwin2SRWindowAttention
+from models.experimental.swin2sr.tt.utils import get_checkpoint_path
 
 
 def to_2tuple(x):
@@ -270,17 +270,7 @@ def load_window_attention_weights_from_checkpoint(checkpoint_path, layer_idx=0, 
 )
 def test_swin2sr_window_attention_ttnn_vs_torch_with_checkpoint(device, layer_idx, block_idx, reset_seeds):
     """Test window attention with weights from Swin2SR checkpoint."""
-    checkpoint_path = os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "..",
-        "resources",
-        "checkpoints",
-        "Swin2SR_ClassicalSR_X2_64.pth",
-    )
-
-    if not os.path.exists(checkpoint_path):
-        pytest.skip(f"Checkpoint not found at {checkpoint_path}")
+    checkpoint_path = get_checkpoint_path("Swin2SR_ClassicalSR_X2_64.pth")
 
     weights = load_window_attention_weights_from_checkpoint(checkpoint_path, layer_idx=layer_idx, block_idx=block_idx)
 

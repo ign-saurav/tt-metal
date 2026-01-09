@@ -306,6 +306,7 @@ def run_perf_e2e_swin2sr(
     logger.info(f"Swin2SR compile time: {compile_time} s")
 
 
+# Note: num_command_queues = 2 works for N300 but fails for N150.
 @run_for_wormhole_b0()
 @pytest.mark.models_performance_bare_metal
 @pytest.mark.parametrize(

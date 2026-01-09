@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import torch
 from torch import nn
 import pytest
@@ -12,6 +11,7 @@ from ttnn.model_preprocessing import preprocess_model_parameters
 from tests.ttnn.utils_for_testing import comp_pcc
 from models.experimental.swin2sr.reference.swin2sr import Swin2SR as TorchSwin2SR
 from models.experimental.swin2sr.tt.tt_swin2sr import TtSwin2SR
+from models.experimental.swin2sr.tt.utils import get_checkpoint_path
 from models.experimental.swin2sr.tests.pcc.test_ttnn_rstb import (
     create_custom_preprocessor as create_rstb_preprocessor,
 )
@@ -248,17 +248,7 @@ def test_swin2sr_ttnn_vs_torch(
 
 def test_swin2sr_checkpoint(device, reset_seeds):
     """Test with real Swin2SR checkpoint."""
-    checkpoint_path = os.path.join(
-        os.path.dirname(__file__),
-        "..",
-        "..",
-        "resources",
-        "checkpoints",
-        "Swin2SR_ClassicalSR_X2_64.pth",
-    )
-
-    if not os.path.exists(checkpoint_path):
-        pytest.skip(f"Checkpoint not found: {checkpoint_path}")
+    checkpoint_path = get_checkpoint_path("Swin2SR_ClassicalSR_X2_64.pth")
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     params = checkpoint["params"] if "params" in checkpoint else checkpoint
