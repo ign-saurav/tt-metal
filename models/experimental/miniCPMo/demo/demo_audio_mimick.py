@@ -57,7 +57,7 @@ def main():
         model = model.eval()
 
         logger.info("Enabling TT acceleration for TTS decoder...")
-        model = enable_tt_acceleration(model, device, components=["tts"])
+        model = enable_tt_acceleration(model, device, components=["tts", "llm", "audio"])
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 
@@ -71,14 +71,14 @@ def main():
         mimick_prompt = "Please repeat each user's speech, including voice style and speech content."
         msgs = [{"role": "user", "content": [mimick_prompt, audio_input]}]
 
-        output_audio_path = "result_mimick.wav"
+        output_audio_path = "result_mimick_full_demo.wav"
 
         logger.info("Running model.chat with mimick prompt (TT-accelerated TTS)...")
         res = model.chat(
             msgs=msgs,
             tokenizer=tokenizer,
             sampling=True,
-            max_new_tokens=128,
+            max_new_tokens=20,  # Reduced for faster testing (~85s/token)
             use_tts_template=True,
             temperature=0.3,
             generate_audio=True,

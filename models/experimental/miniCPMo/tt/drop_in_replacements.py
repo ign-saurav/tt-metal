@@ -471,3 +471,241 @@ class DropInVisionEncoder(nn.Module):
             except AttributeError:
                 pass
         raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
+
+
+class DropInQwen2LLM(nn.Module):
+    """
+    Drop-in replacement for Qwen2ForCausalLM.
+
+    Wraps TTQwen2ForCausalLM with the same interface as the HuggingFace model,
+    so it can be swapped in without changing any calling code.
+
+    Uses the working pattern from test_tt_qwen2_audio.py.
+    """
+
+    def __init__(
+        self,
+        reference_model,
+        device,
+        model_path: str = "openbmb/MiniCPM-o-2_6",
+        max_seq_len: int = 1024,
+    ):
+        """
+        Initialize drop-in replacement for Qwen2ForCausalLM.
+
+        Args:
+            reference_model: The original Qwen2ForCausalLM from HuggingFace
+            device: TT device (ttnn.Device or mesh device)
+            model_path: HuggingFace model path for loading weights
+            max_seq_len: Maximum sequence length for KV cache
+        """
+        import os
+        from transformers import AutoTokenizer
+        from models.experimental.miniCPMo.tt.tt_qwen2_for_causal_lm import TTQwen2ForCausalLM
+        from models.experimental.miniCPMo.tt.minicpm_weight_bridge import MiniCPMWeightBridge
+        from models.experimental.miniCPMo.tt_transformers.common import create_tt_model
+
+        super().__init__()
+        self._reference = reference_model
+        self.tt_device = device
+        self.model_path = model_path
+
+        # Copy config from reference
+        self.config = reference_model.config
+
+        # Set environment variable for model loading
+        if not os.environ.get("HF_MODEL"):
+            os.environ["HF_MODEL"] = model_path
+
+        logger.info("Initializing TT Qwen2 LLM...")
+
+        # Load weights from MiniCPM checkpoint
+        bridge = MiniCPMWeightBridge(model_path)
+        qwen_weights = bridge.get_qwen_weights()
+        logger.info(f"Loaded {len(qwen_weights)} weight tensors from MiniCPM checkpoint")
+
+        # Create TT model
+        tt_model_args, tt_model, tt_kv_cache, _ = create_tt_model(
+            mesh_device=device,
+            instruct=False,
+            max_batch_size=1,
+            optimizations=None,
+            max_seq_len=max_seq_len,
+            paged_attention_config=None,
+            dtype=ttnn.bfloat8_b,
+            state_dict=qwen_weights,
+            dummy_weights=False,
+        )
+        logger.info(f"TT Model: {tt_model_args.n_layers} layers, dim={tt_model_args.dim}")
+
+        # Load tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+
+        # Create TTQwen2ForCausalLM wrapper
+        self.tt_llm = TTQwen2ForCausalLM.from_tt_model(
+            tt_model=tt_model,
+            tt_model_args=tt_model_args,
+            mesh_device=device,
+            tt_kv_cache=tt_kv_cache,
+            model_path=model_path,
+            tokenizer=tokenizer,
+        )
+        self.tt_llm.eval()
+
+        # Store tokenizer for decoding
+        self.tokenizer = tokenizer
+
+        # Keep reference embedding layer for get_input_embeddings()
+        self._input_embeddings = reference_model.get_input_embeddings()
+
+        logger.info("✅ TT Qwen2 LLM initialized")
+
+    def generate(
+        self,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        max_new_tokens: int = 50,
+        eos_token_id: Optional[Union[int, List[int]]] = None,
+        pad_token_id: Optional[int] = None,
+        do_sample: bool = False,
+        temperature: float = 1.0,
+        output_hidden_states: bool = False,
+        return_dict_in_generate: bool = False,
+        **kwargs,
+    ):
+        """
+        Generate tokens using TT hardware.
+
+        This method matches the HuggingFace generate() interface but runs on TT.
+        """
+        # If input_ids provided but not embeddings, get embeddings from reference
+        if inputs_embeds is None and input_ids is not None:
+            inputs_embeds = self._input_embeddings(input_ids)
+
+        if inputs_embeds is None:
+            raise ValueError("Either inputs_embeds or input_ids must be provided")
+
+        # Reset cache before generation
+        self.tt_llm.reset_cache()
+
+        # Run TT generation
+        output_ids = self.tt_llm.generate(
+            inputs_embeds=inputs_embeds,
+            attention_mask=attention_mask,
+            max_new_tokens=max_new_tokens,
+            eos_token_id=eos_token_id,
+            pad_token_id=pad_token_id,
+            do_sample=do_sample,
+            temperature=temperature,
+        )
+
+        # Handle return format
+        if return_dict_in_generate:
+            from dataclasses import dataclass
+
+            @dataclass
+            class GenerateOutput:
+                sequences: torch.Tensor
+                hidden_states: Optional[Tuple] = None
+                attentions: Optional[Tuple] = None
+                past_key_values: Optional[Tuple] = None  # TT uses internal KV cache
+
+            hidden_states = None
+            tt_hidden_states_raw = None
+            # If hidden states needed (for TTS), get them via TT prefill on FULL sequence
+            if output_hidden_states:
+                logger.info("Getting hidden states via TT prefill (for TTS)...")
+
+                # Build FULL sequence: input embeddings + generated token embeddings
+                # inputs_embeds is [batch, input_seq_len, hidden]
+                # output_ids is [batch, num_generated] - need to embed these
+                generated_embeds = self._input_embeddings(output_ids)  # [batch, num_generated, hidden]
+
+                # Concatenate: [batch, input_seq_len + num_generated, hidden]
+                full_embeds = torch.cat([inputs_embeds, generated_embeds], dim=1)
+                logger.info(
+                    f"Full sequence: input={inputs_embeds.shape[1]} + generated={generated_embeds.shape[1]} = {full_embeds.shape[1]} tokens"
+                )
+
+                # Run TT prefill on full sequence to get hidden states
+                tt_hidden_states_raw = self.tt_llm.get_hidden_states(inputs_embeds=full_embeds)
+                # tt_hidden_states_raw is [batch, full_seq_len, hidden]
+
+                # HuggingFace generation format:
+                # hidden_states is tuple of tuples - one outer tuple per token
+                # Each inner tuple has layer hidden states (we provide last layer only)
+                # Format: ((token_0_last_layer_hs,), (token_1_last_layer_hs,), ...)
+                # Where each token_i_last_layer_hs is [batch, 1, hidden]
+                seq_len = tt_hidden_states_raw.shape[1]
+                hidden_states = tuple(
+                    (tt_hidden_states_raw[:, i : i + 1, :],)  # [batch, 1, hidden] wrapped in tuple
+                    for i in range(seq_len)
+                )
+                logger.info(f"Got hidden states for {seq_len} tokens, shape per token: {hidden_states[0][0].shape}")
+
+            return GenerateOutput(
+                sequences=output_ids,
+                hidden_states=hidden_states,
+                attentions=None,
+                past_key_values=None,  # TT KV cache is managed internally
+            )
+
+        return output_ids
+
+    def forward(
+        self,
+        input_ids: Optional[torch.Tensor] = None,
+        attention_mask: Optional[torch.Tensor] = None,
+        position_ids: Optional[torch.Tensor] = None,
+        past_key_values: Optional[Tuple] = None,
+        inputs_embeds: Optional[torch.Tensor] = None,
+        labels: Optional[torch.Tensor] = None,
+        use_cache: Optional[bool] = None,
+        output_attentions: Optional[bool] = None,
+        output_hidden_states: Optional[bool] = None,
+        return_dict: Optional[bool] = None,
+        **kwargs,
+    ):
+        """
+        Forward pass - falls back to reference for now.
+
+        TT model is optimized for generate(), not forward().
+        """
+        logger.debug("DropInQwen2LLM.forward() - using reference model")
+        return self._reference(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            position_ids=position_ids,
+            past_key_values=past_key_values,
+            inputs_embeds=inputs_embeds,
+            labels=labels,
+            use_cache=use_cache,
+            output_attentions=output_attentions,
+            output_hidden_states=output_hidden_states,
+            return_dict=return_dict,
+            **kwargs,
+        )
+
+    def get_input_embeddings(self):
+        """Return the input embeddings layer."""
+        return self._input_embeddings
+
+    def prepare_inputs_for_generation(self, *args, **kwargs):
+        """Forward to reference model's prepare_inputs_for_generation."""
+        return self._reference.prepare_inputs_for_generation(*args, **kwargs)
+
+    def __getattr__(self, name: str):
+        """Forward unknown attributes to reference model for compatibility."""
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            pass
+        _modules = object.__getattribute__(self, "_modules")
+        _reference = _modules.get("_reference")
+        if _reference is not None:
+            try:
+                return getattr(_reference, name)
+            except AttributeError:
+                pass
+        raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")

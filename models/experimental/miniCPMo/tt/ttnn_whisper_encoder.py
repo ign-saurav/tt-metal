@@ -499,8 +499,14 @@ def preprocess_encoder_inputs_minicpm(config, input_features, *, parameters, dev
     # Apply GELU separately to match PyTorch implementation
     conv2_output = ttnn.gelu(conv2_output)
 
-    # Reshape back: [B, seq_len//2, 1, d_model] -> [B, seq_len//2, d_model]
-    conv2_output = ttnn.reshape(conv2_output, shape=[batch_size, seq_len // 2, config.d_model])
+    # Calculate actual output sequence length from conv2d formula:
+    # output_size = floor((input_size + 2*padding - kernel_size) / stride) + 1
+    # For conv2: stride=2, padding=1, kernel=3
+    # output_size = floor((seq_len + 2 - 3) / 2) + 1 = floor((seq_len - 1) / 2) + 1
+    output_seq_len = (seq_len - 1) // 2 + 1
+
+    # Reshape back: [B, output_seq_len, 1, d_model] -> [B, output_seq_len, d_model]
+    conv2_output = ttnn.reshape(conv2_output, shape=[batch_size, output_seq_len, config.d_model])
 
     return conv2_output
 
