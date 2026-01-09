@@ -152,20 +152,20 @@ class Blip2QFormerSelfOutputTTNN:
 class Blip2QFormerMultiHeadAttentionTTNN:
     """TTNN implementation of Blip2QFormerMultiHeadAttention with past_key_value support."""
 
-    def __init__(self, device, config):
+    def __init__(self, device, config, use_optimized_attention=True):
         self.device = device
         self.config = config
 
         # Extract config values
-        self.hidden_size = config.hidden_size
-        self.num_attention_heads = config.num_attention_heads
+        self.hidden_size = config.projector_config.hidden_size
+        self.num_attention_heads = config.projector_config.num_attention_heads
         self.attention_head_size = int(self.hidden_size / self.num_attention_heads)
         self.all_head_size = self.num_attention_heads * self.attention_head_size
-        self.attention_probs_dropout_prob = config.attention_probs_dropout_prob
+        self.attention_probs_dropout_prob = config.projector_config.attention_probs_dropout_prob
 
         # Position embedding settings
         self.position_embedding_type = "absolute"
-        self.optimized = config.optimized
+        self.optimized = use_optimized_attention
 
         self._setup_compute_config()
 
@@ -367,10 +367,10 @@ class Blip2QFormerMultiHeadAttentionTTNN:
 
 
 class Blip2QFormerAttentionTTNN:
-    def __init__(self, device, config):
+    def __init__(self, device, config, use_optimized_attention=True):
         self.device = device
         self.config = config
-        self.attention = Blip2QFormerMultiHeadAttentionTTNN(device, config)
+        self.attention = Blip2QFormerMultiHeadAttentionTTNN(device, config, use_optimized_attention)
         self.output = Blip2QFormerSelfOutputTTNN(device, config)
 
     def prepare_weights(self, attention, output):
@@ -415,25 +415,24 @@ class Blip2QFormerAttentionTTNN:
 class Blip2QFormerLayerTTNN:
     """TTNN implementation of Blip2QFormerLayer."""
 
-    def __init__(self, device, config, layer_idx):
+    def __init__(self, device, config, layer_idx, use_optimized_attention=True):
         self.device = device
         self.config = config
         self.layer_idx = layer_idx
-        self.chunk_size_feed_forward = config.chunk_size_feed_forward
         self.seq_len_dim = 1
 
         # Initialize attention components
-        self.attention = Blip2QFormerAttentionTTNN(device, config)
+        self.attention = Blip2QFormerAttentionTTNN(device, config, use_optimized_attention)
 
         # Conditional cross-attention setup
-        if layer_idx % config.cross_attention_frequency == 0:
-            self.crossattention = Blip2QFormerAttentionTTNN(device, config)
+        if layer_idx % config.projector_config.cross_attention_frequency == 0:
+            self.crossattention = Blip2QFormerAttentionTTNN(device, config, use_optimized_attention)
             self.has_cross_attention = True
         else:
             self.has_cross_attention = False
 
         # Initialize feedforward components
-        if config.use_qformer_text_input:
+        if config.projector_config.use_qformer_text_input:
             self.intermediate = Blip2QFormerIntermediateTTNN(device, config)
             self.output = Blip2QFormerOutputTTNN(device, config)
 
@@ -551,12 +550,12 @@ class Blip2QFormerLayerTTNN:
 class Blip2QFormerEncoderTTNN:
     """TTNN implementation of Blip2QFormerEncoder."""
 
-    def __init__(self, device, config):
+    def __init__(self, device, config, use_optimized_attention=True):
         self.device = device
         self.config = config
         self.gradient_checkpointing = False
 
-        self.layer = [Blip2QFormerLayerTTNN(device, config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
+        self.layer = [Blip2QFormerLayerTTNN(device, config, layer_idx, use_optimized_attention) for layer_idx in range(config.projector_config.num_hidden_layers)]
 
         self._setup_compute_config()
 
@@ -653,11 +652,11 @@ class Blip2QFormerEncoderTTNN:
 class Blip2QFormerModelTTNN:
     """TTNN implementation of Blip2QFormerModel."""
 
-    def __init__(self, device, config):
+    def __init__(self, device, config, use_optimized_attention=True):
         self.device = device
         self.config = config
 
-        self.encoder = Blip2QFormerEncoderTTNN(device, config)
+        self.encoder = Blip2QFormerEncoderTTNN(device, config, use_optimized_attention)
 
         self._setup_compute_config()
 
@@ -771,7 +770,7 @@ class Blip2QFormerModelTTNN:
 
             encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
 
-        head_mask = head_mask if head_mask is not None else [None] * self.config.num_hidden_layers
+        head_mask = head_mask if head_mask is not None else [None] * self.config.projector_config.num_hidden_layers
 
         encoder_outputs = self.encoder.forward(
             embedding_output,
@@ -808,15 +807,15 @@ class Blip2QFormerModelTTNN:
 class GraniteSpeechEncoderProjectorTTNN:
     """TTNN implementation of GraniteSpeechEncoderProjector."""
 
-    def __init__(self, device, config):
+    def __init__(self, device, config, use_optimized_attention=True):
         self.device = device
         self.config = config
-        self.hidden_size = config.projector_config_hidden_size
+        self.hidden_size = config.projector_config.hidden_size
         self.downsample_rate = config.downsample_rate
         self.window_size = config.window_size
         self.num_queries = config.window_size // config.downsample_rate
 
-        self.qformer = Blip2QFormerModelTTNN(device, config)
+        self.qformer = Blip2QFormerModelTTNN(device, config, use_optimized_attention)
 
         self._setup_compute_config()
 

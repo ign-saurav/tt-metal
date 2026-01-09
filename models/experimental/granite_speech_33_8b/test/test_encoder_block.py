@@ -11,23 +11,6 @@ from models.experimental.granite_speech_33_8b.tt.ttnn_encoder_block import (
 )
 from transformers import AutoModelForSpeechSeq2Seq
 
-class TestConfig:
-    """Test configuration for Conformer modules."""
-
-    def __init__(self): 
-        self.input_dim = 160 
-        self.hidden_dim = 1024
-        self.output_dim = 256
-        self.feedforward_mult = 4  
-        self.num_heads = 8  
-        self.dim_head = 128  
-        self.max_pos_emb = 512
-        self.context_size = 200
-        self.conv_expansion_factor = 2
-        self.conv_kernel_size = 15
-        self.dropout = 0.1
-        self.num_layers = 16
-
 
 @pytest.mark.parametrize(
     "device_params",
@@ -35,13 +18,13 @@ class TestConfig:
     indirect=True,
 )
 def test_feedforward(device):
-    config = TestConfig()
-
     # Initialize models
-    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16).encoder.layers[0].ff1
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
+    config = torch_model.config
+    torch_model = torch_model.encoder.layers[0].ff1
     torch_model.eval()
 
-    ttnn_model = GraniteSpeechConformerFeedForwardTTNN(device=device, config=config)
+    ttnn_model = GraniteSpeechConformerFeedForwardTTNN(device=device, config=config.encoder_config)
 
     # Prepare weights
     ttnn_model.prepare_weights(
@@ -82,13 +65,13 @@ def test_feedforward(device):
     indirect=True,
 )
 def test_attention(device):
-    config = TestConfig()
-
     # Initialize models
-    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16).encoder.layers[0].attn
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
+    config = torch_model.config
+    torch_model = torch_model.encoder.layers[0].attn
     torch_model.eval()
 
-    ttnn_model = GraniteSpeechConformerAttentionTTNN(device=device, config=config)
+    ttnn_model = GraniteSpeechConformerAttentionTTNN(device=device, config=config.encoder_config)
 
     # Prepare weights
     ttnn_model.prepare_weights(
@@ -108,8 +91,8 @@ def test_attention(device):
     # Create attention distances
     attention_dists = torch.randint(
         0,
-        config.max_pos_emb + 1,
-        (config.context_size, config.context_size)
+        config.encoder_config.max_pos_emb + 1,
+        (config.encoder_config.context_size, config.encoder_config.context_size)
     )
 
     # PyTorch forward pass
@@ -137,13 +120,13 @@ def test_attention(device):
     indirect=True,
 )
 def test_conv_module(device):
-    config = TestConfig()
-
     # Initialize models
-    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16).encoder.layers[0].conv
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
+    config = torch_model.config
+    torch_model = torch_model.encoder.layers[0].conv
     torch_model.eval()
 
-    ttnn_model = GraniteSpeechConformerConvModuleTTNN(device=device, config=config)
+    ttnn_model = GraniteSpeechConformerConvModuleTTNN(device=device, config=config.encoder_config)
 
     # Prepare weights
     ttnn_model.prepare_weights(
@@ -188,13 +171,14 @@ def test_conv_module(device):
     indirect=True,
 )
 def test_conformer_block(device):
-    config = TestConfig()
-    for i in range(config.num_layers):
+    model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
+    config = model.config
+    for i in range(config.encoder_config.num_layers):
         # Initialize models
-        torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16).encoder.layers[i]
+        torch_model = model.encoder.layers[i]
         torch_model.eval()
 
-        ttnn_model = GraniteSpeechConformerBlockTTNN(device=device, config=config, include_layernorm=False)
+        ttnn_model = GraniteSpeechConformerBlockTTNN(device=device, config=config.encoder_config, include_layernorm=False)
 
         # Prepare all weights
         ttnn_model.prepare_weights(
@@ -206,14 +190,14 @@ def test_conformer_block(device):
         )
 
         # Create test input
-        batch_size, seq_len = 1, 844
-        torch_input = torch.randn(batch_size, seq_len, config.hidden_dim, dtype=torch.bfloat16)
+        batch_size, seq_len, hidden_dim = 1, 844, 1024
+        torch_input = torch.randn(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)
 
         # Create attention distances
         attention_dists = torch.randint(
             0,
-            config.max_pos_emb + 1,
-            (config.context_size, config.context_size)
+            config.encoder_config.max_pos_emb + 1,
+            (config.encoder_config.context_size, config.encoder_config.context_size)
         )
 
         # PyTorch forward pass
@@ -241,21 +225,21 @@ def test_conformer_block(device):
     indirect=True,
 )
 def test_encoder_block(device):
-    config = TestConfig()
-
     # Initialize models
-    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16).encoder
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
+    config = torch_model.config
+    torch_model = torch_model.encoder
     torch_model.eval()
 
-    ttnn_model = GraniteSpeechCTCEncoderTTNN(device=device, config=config, include_conformer_layernorm=False)
+    ttnn_model = GraniteSpeechCTCEncoderTTNN(device=device, config=config.encoder_config, include_conformer_layernorm=False)
 
     # Prepare all weights
     ttnn_model.prepare_weights(torch_model)
 
     # Create test input
     torch.manual_seed(0)
-    batch_size, seq_len = 1, 844
-    torch_input = torch.randn(batch_size, seq_len, config.input_dim, dtype=torch.bfloat16)
+    batch_size, seq_len, input_dim = 1, 844, 160
+    torch_input = torch.randn(batch_size, seq_len, input_dim, dtype=torch.bfloat16)
 
     # PyTorch forward pass
     with torch.no_grad():
