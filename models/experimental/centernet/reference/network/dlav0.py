@@ -2,6 +2,11 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+"""
+Adapted and modified from CenterNet Pytorch (https://github.com/xingyizhou/CenterNet)
+Original repository: https://github.com/xingyizhou/CenterNet
+Original author: Xingyi Zhou
+"""
 
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
