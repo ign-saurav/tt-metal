@@ -16,18 +16,17 @@ class Blip2QFormerIntermediateTTNN:
         self._setup_compute_config()
 
     def _setup_compute_config(self):
-        """Setup compute kernel configuration for high accuracy."""
+        """Setup compute kernel configuration."""
         self.compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.HiFi4,  # High fidelity for 0.99 PCC
+            math_fidelity=ttnn.MathFidelity.HiFi4,
             math_approx_mode=False,
-            fp32_dest_acc_en=True,  # Enable FP32 accumulation for accuracy
+            fp32_dest_acc_en=True,
             packer_l1_acc=False,
         )
 
     def prepare_weights(self, dense_weight, dense_bias):
         """Load and convert PyTorch weights to TTNN format."""
-        # Linear projection weights (transpose for TTNN)
         self.dense_weight = ttnn.from_torch(
             dense_weight.transpose(-1, -2), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
@@ -54,24 +53,22 @@ class Blip2QFormerOutputTTNN:
         self._setup_compute_config()
 
     def _setup_compute_config(self):
-        """Setup compute kernel configuration for high accuracy."""
+        """Setup compute kernel configuration."""
         self.compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.HiFi4,  # High fidelity for 0.99 PCC
+            math_fidelity=ttnn.MathFidelity.HiFi4,
             math_approx_mode=False,
-            fp32_dest_acc_en=True,  # Enable FP32 accumulation for accuracy
+            fp32_dest_acc_en=True,
             packer_l1_acc=False,
         )
 
     def prepare_weights(self, dense_weight, dense_bias, layernorm_weight, layernorm_bias):
         """Load and convert PyTorch weights to TTNN format."""
-        # Linear projection weights (transpose for TTNN) and bias
         self.dense_weight = ttnn.from_torch(
             dense_weight.transpose(-1, -2), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
         self.dense_bias = ttnn.from_torch(dense_bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
 
-        # Layernorm weights and bias
         self.layernorm_weight = ttnn.from_torch(
             layernorm_weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
@@ -106,24 +103,22 @@ class Blip2QFormerSelfOutputTTNN:
         self._setup_compute_config()
 
     def _setup_compute_config(self):
-        """Setup compute kernel configuration for high accuracy."""
+        """Setup compute kernel configuration."""
         self.compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.HiFi4,  # High fidelity for 0.99 PCC
+            math_fidelity=ttnn.MathFidelity.HiFi4,
             math_approx_mode=False,
-            fp32_dest_acc_en=True,  # Enable FP32 accumulation for accuracy
+            fp32_dest_acc_en=True,
             packer_l1_acc=False,
         )
 
     def prepare_weights(self, dense_weight, dense_bias, layernorm_weight, layernorm_bias):
         """Load and convert PyTorch weights to TTNN format."""
-        # Linear projection weights (transpose for TTNN) and bias
         self.dense_weight = ttnn.from_torch(
             dense_weight.transpose(-1, -2), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
         self.dense_bias = ttnn.from_torch(dense_bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
 
-        # Layernorm weights and bias
         self.layernorm_weight = ttnn.from_torch(
             layernorm_weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
@@ -155,7 +150,7 @@ class Blip2QFormerSelfOutputTTNN:
 
 
 class Blip2QFormerMultiHeadAttentionTTNN:
-    """TTNN implementation of Blip2QFormerMultiHeadAttention with past_key_value support and 0.99 PCC accuracy."""
+    """TTNN implementation of Blip2QFormerMultiHeadAttention with past_key_value support."""
 
     def __init__(self, device, config):
         self.device = device
@@ -172,43 +167,38 @@ class Blip2QFormerMultiHeadAttentionTTNN:
         self.position_embedding_type = "absolute"
         self.optimized = config.optimized
 
-        # Setup compute config for high accuracy
         self._setup_compute_config()
 
     def _setup_compute_config(self):
-        """Setup compute kernel configuration for 0.99 PCC accuracy."""
+        """Setup compute kernel configuration."""
         self.compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.HiFi4,  # High fidelity for 0.99 PCC
+            math_fidelity=ttnn.MathFidelity.HiFi4,
             math_approx_mode=False,
-            fp32_dest_acc_en=True,  # Enable FP32 accumulation for accuracy
+            fp32_dest_acc_en=True,
             packer_l1_acc=False,
         )
 
-        # Additional SDPA-specific config for high accuracy
         self.sdpa_compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
             math_fidelity=ttnn.MathFidelity.HiFi4,
-            math_approx_mode=False,  # Critical for accuracy
+            math_approx_mode=False,
             fp32_dest_acc_en=True,
             packer_l1_acc=False,
         )
 
     def prepare_weights(self, query_weight, query_bias, key_weight, key_bias, value_weight, value_bias):
         """Load and convert PyTorch weights to TTNN format."""
-        # Query weights and bias
         self.query_weight = ttnn.from_torch(
             query_weight.transpose(-1, -2), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
         self.query_bias = ttnn.from_torch(query_bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
 
-        # Key weights and bias
         self.key_weight = ttnn.from_torch(
             key_weight.transpose(-1, -2), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
         self.key_bias = ttnn.from_torch(key_bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
 
-        # Value weights and bias
         self.value_weight = ttnn.from_torch(
             value_weight.transpose(-1, -2), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
@@ -216,7 +206,6 @@ class Blip2QFormerMultiHeadAttentionTTNN:
 
     def transpose_for_scores(self, x):
         """Transpose and reshape for multi-head attention."""
-        # Convert shape to tuple to avoid slicing error with TTNN Shape object
         shape_tuple = tuple(x.shape)
         new_x_shape = shape_tuple[:-1] + (self.num_attention_heads, self.attention_head_size)
         x = ttnn.reshape(x, new_x_shape)
@@ -234,10 +223,8 @@ class Blip2QFormerMultiHeadAttentionTTNN:
     ):
         """Forward pass using ttnn.transformer.scaled_dot_product_attention."""
 
-        # Determine if cross-attention
         is_cross_attention = encoder_hidden_states is not None
 
-        # Compute key and value layers (same as before)
         if is_cross_attention:
             key_layer = self.transpose_for_scores(
                 ttnn.linear(
@@ -281,28 +268,22 @@ class Blip2QFormerMultiHeadAttentionTTNN:
                 )
             )
 
-        # Compute query layer
         mixed_query_layer = ttnn.linear(
             hidden_states, self.query_weight, bias=self.query_bias, compute_kernel_config=self.compute_config
         )
         query_layer = self.transpose_for_scores(mixed_query_layer)
 
-        # Store current key/value for past_key_value return
         past_key_value = (key_layer, value_layer)
-
-        # Scale factor for attention
         scale = 1.0 / math.sqrt(self.attention_head_size)
 
         if self.optimized:
-            # Add program config for short sequences
             program_config = ttnn.SDPAProgramConfig(
                 compute_with_storage_grid_size=self.device.compute_with_storage_grid_size(),
-                q_chunk_size=32,  # Small chunk for short sequences
+                q_chunk_size=32,
                 k_chunk_size=32,
-                exp_approx_mode=False,  # Disable exponential approximation
+                exp_approx_mode=False,
             )
 
-            # Pad inputs to next multiple of 32(q_chunk_size)
             original_seq_len = query_layer.shape[2]
             original_mask_q_len = attention_mask.shape[2]
             original_mask_k_len = attention_mask.shape[3]
@@ -315,16 +296,9 @@ class Blip2QFormerMultiHeadAttentionTTNN:
                 key_layer = ttnn.pad(key_layer, padding=[(0, 0), (0, 0), (0, pad_size), (0, 0)], value=0)
                 value_layer = ttnn.pad(value_layer, padding=[(0, 0), (0, 0), (0, pad_size), (0, 0)], value=0)
 
-                # Pad attention mask to match attention scores shape (batch, heads, seq_q, seq_k)
-                # SDPA requires mask shape[2] (query dim) to match query_layer shape[2]
-                # After padding query to 32, mask query dim must also be 32
-                # Pad mask query dimension to match padded query length (32)
                 q_pad_needed = 32 - (original_mask_q_len % 32) if original_mask_q_len % 32 != 0 else 0
                 if original_mask_q_len == 1:
-                    # If original mask query dim is 1, pad to 32 (not to original_seq_len)
-                    # Use 0 for query padding since original was 1 (intended to broadcast)
                     q_pad_needed = 32 - 1
-                    # First pad query dim with 0 (so it still broadcasts), then pad key dim with -10000
                     attention_mask = ttnn.pad(
                         attention_mask, padding=[(0, 0), (0, 0), (0, q_pad_needed), (0, 0)], value=0.0
                     )
@@ -332,25 +306,20 @@ class Blip2QFormerMultiHeadAttentionTTNN:
                         attention_mask, padding=[(0, 0), (0, 0), (0, 0), (0, pad_size)], value=-10000.0
                     )
                 else:
-                    # Query dimension matches sequence length, pad both dimensions
                     attention_mask = ttnn.pad(
                         attention_mask, padding=[(0, 0), (0, 0), (0, q_pad_needed), (0, pad_size)], value=-10000.0
                     )
-            if (
-                query_layer.shape[0] != key_layer.shape[0]
-            ):  # In cross attn, dim 0 of query is different from dim 0 of key and value so repeating batch times(Note: padding leads to poor pcc)
+            if query_layer.shape[0] != key_layer.shape[0]:
                 batch = key_layer.shape[0]
                 query_layer = ttnn.repeat(query_layer, [batch, 1, 1, 1])
             if attention_mask.shape[0] != query_layer.shape[0]:
-                # Repeat attention mask to match batch size (similar to query_layer)
                 batch = query_layer.shape[0]
                 attention_mask = ttnn.repeat(attention_mask, [batch, 1, 1, 1])
-            # Call the optimized SDPA function
             context_layer = ttnn.transformer.scaled_dot_product_attention(
                 query_layer,
                 key_layer,
                 value_layer,
-                is_causal=False,  # Causal for self-attention
+                is_causal=False,
                 attn_mask=attention_mask,
                 scale=scale,
                 compute_kernel_config=self.sdpa_compute_config,
@@ -358,52 +327,39 @@ class Blip2QFormerMultiHeadAttentionTTNN:
                 program_config=program_config,
             )
 
-            # Unpad the sequence dimension back to original length
             context_layer = ttnn.slice(
                 context_layer,
                 [0, 0, 0, 0],
                 [context_layer.shape[0], context_layer.shape[1], original_seq_len, context_layer.shape[3]],
             )
         else:
-            # Compute attention scores: Q @ K^T
-            if (
-                query_layer.shape[0] != key_layer.shape[0]
-            ):  # In cross attn, dim 0 of query is different from dim 0 of key and value so repeating batch times(Note: padding leads to poor pcc)
+            if query_layer.shape[0] != key_layer.shape[0]:
                 batch = key_layer.shape[0]
                 query_layer = ttnn.repeat(query_layer, [batch, 1, 1, 1])
             key_layer_transposed = ttnn.transpose(key_layer, -2, -1)
             attention_scores = ttnn.matmul(query_layer, key_layer_transposed, compute_kernel_config=self.compute_config)
 
-            # Scale attention scores
             scale_factor = 1.0 / math.sqrt(self.attention_head_size)
             attention_scores = ttnn.mul(attention_scores, scale_factor)
 
-            # Apply attention mask if provided
             if attention_mask is not None:
                 attention_scores = ttnn.add(attention_scores, attention_mask)
 
-            # Apply softmax to get attention probabilities
             attention_probs = ttnn.softmax(attention_scores, dim=-1)
 
-            # Apply head mask if provided
             if head_mask is not None:
                 attention_probs = ttnn.mul(attention_probs, head_mask)
 
-            # Compute context layer: attention_probs @ value_layer
             context_layer = ttnn.matmul(attention_probs, value_layer, compute_kernel_config=self.compute_config)
 
-        # Reshape output back to [batch, seq_len, all_head_size]
         context_layer = ttnn.permute(context_layer, [0, 2, 1, 3])
         shape_tuple = tuple(context_layer.shape)
         new_context_layer_shape = shape_tuple[:-2] + (self.all_head_size,)
         context_layer = ttnn.reshape(context_layer, new_context_layer_shape)
 
-        # Prepare outputs
         outputs = (context_layer,)
         if output_attentions:
-            # SDPA doesn't return attention_probs by default for efficiency
-            # You'd need to compute them separately if needed
-            attention_probs = None  # Would need separate computation
+            attention_probs = None
             outputs = (context_layer, attention_probs)
 
         outputs = outputs + (past_key_value,)
@@ -450,11 +406,9 @@ class Blip2QFormerAttentionTTNN:
             output_attentions,
         )
 
-        # Ensure consistent memory layout before passing to output module
         attention_output = self_outputs[0]
-
         attention_output = self.output.forward(attention_output, hidden_states)
-        outputs = (attention_output,) + self_outputs[1:]  # add attentions if we output them
+        outputs = (attention_output,) + self_outputs[1:]
         return outputs
 
 
@@ -488,10 +442,8 @@ class Blip2QFormerLayerTTNN:
 
     def prepare_weights(self, layer):
         """Prepare weights from PyTorch layer."""
-        # Prepare attention weights
         self.attention.prepare_weights(layer.attention.attention, layer.attention.output)
 
-        # Prepare cross-attention weights if present
         if self.has_cross_attention:
             self.crossattention.prepare_weights(layer.crossattention.attention, layer.crossattention.output)
 
@@ -516,10 +468,8 @@ class Blip2QFormerLayerTTNN:
         output_attentions=False,
         query_length=0,
     ):
-        # Handle past key values for self-attention
         self_attn_past_key_value = past_key_value[:2] if past_key_value is not None else None
 
-        # Self-attention
         self_attention_outputs = self.attention.forward(
             hidden_states,
             attention_mask,
@@ -532,14 +482,11 @@ class Blip2QFormerLayerTTNN:
         outputs = self_attention_outputs[1:-1]
         present_key_value = self_attention_outputs[-1]
 
-        # Handle query-specific processing
         if query_length > 0:
-            # Extract query attention output
             query_attention_output = ttnn.slice(
                 attention_output, [0, 0, 0], [attention_output.shape[0], query_length, attention_output.shape[2]]
             )
 
-            # Cross-attention for queries if enabled
             if self.has_cross_attention:
                 if encoder_hidden_states is None:
                     raise ValueError("encoder_hidden_states must be given for cross-attention layers")
@@ -555,13 +502,11 @@ class Blip2QFormerLayerTTNN:
                 query_attention_output = cross_attention_outputs[0]
                 outputs = outputs + cross_attention_outputs[1:-1]
 
-            # Apply feedforward chunking to query
             layer_output = self._apply_chunking_to_forward(
                 self.feed_forward_chunk_query,
                 query_attention_output,
             )
 
-            # Handle text portion if present
             if attention_output.shape[1] > query_length:
                 text_attention_output = ttnn.slice(
                     attention_output,
@@ -574,10 +519,8 @@ class Blip2QFormerLayerTTNN:
                     text_attention_output,
                 )
 
-                # Concatenate query and text outputs
                 layer_output = ttnn.concat([layer_output, layer_output_text], dim=1)
         else:
-            # Apply feedforward chunking to full attention output
             layer_output = self._apply_chunking_to_forward(
                 self.feed_forward_chunk,
                 attention_output,
@@ -602,32 +545,28 @@ class Blip2QFormerLayerTTNN:
 
     def _apply_chunking_to_forward(self, feed_forward_chunk, attention_output):
         """Apply chunking to forward pass."""
-        # For TTNN, we implement chunking by processing the full tensor
-        # since TTNN operations are already optimized for large tensors
         return feed_forward_chunk(attention_output)
 
 
 class Blip2QFormerEncoderTTNN:
-    """TTNN implementation of Blip2QFormerEncoder with high accuracy configuration."""
+    """TTNN implementation of Blip2QFormerEncoder."""
 
     def __init__(self, device, config):
         self.device = device
         self.config = config
         self.gradient_checkpointing = False
 
-        # Initialize layer modules
         self.layer = [Blip2QFormerLayerTTNN(device, config, layer_idx) for layer_idx in range(config.num_hidden_layers)]
 
-        # Setup compute configuration for high accuracy
         self._setup_compute_config()
 
     def _setup_compute_config(self):
-        """Setup compute kernel configuration for 0.9999 PCC accuracy."""
+        """Setup compute kernel configuration."""
         self.compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.HiFi4,  # Highest fidelity for 0.9999 PCC
+            math_fidelity=ttnn.MathFidelity.HiFi4,
             math_approx_mode=False,
-            fp32_dest_acc_en=True,  # Enable FP32 accumulation
+            fp32_dest_acc_en=True,
             packer_l1_acc=False,
         )
 
@@ -650,30 +589,21 @@ class Blip2QFormerEncoderTTNN:
         return_dict=True,
         query_length=0,
     ):
-        # Initialize output collections
         all_hidden_states = () if output_hidden_states else None
         all_self_attentions = () if output_attentions else None
         all_cross_attentions = () if output_attentions else None
         next_decoder_cache = () if use_cache else None
 
-        # Process through each layer
         for i, layer_module in enumerate(self.layer):
-            # Collect hidden states if requested
             if output_hidden_states:
                 all_hidden_states = all_hidden_states + (hidden_states,)
 
-            # Extract layer-specific masks and past key values
             layer_head_mask = head_mask[i] if head_mask is not None else None
             past_key_value = past_key_values[i] if past_key_values is not None else None
 
-            # Handle gradient checkpointing warning
             if getattr(self.config, "gradient_checkpointing", False) and self.training and use_cache:
-                logger.warning(
-                    "`use_cache=True` is incompatible with gradient checkpointing. Setting `use_cache=False`..."
-                )
                 use_cache = False
 
-            # Forward pass through layer
             layer_outputs = layer_module.forward(
                 hidden_states,
                 attention_mask,
@@ -685,24 +615,19 @@ class Blip2QFormerEncoderTTNN:
                 query_length=query_length,
             )
 
-            # Update hidden states
             hidden_states = layer_outputs[0]
 
-            # Collect cache if requested
             if use_cache:
                 next_decoder_cache += (layer_outputs[-1],)
 
-            # Collect attention outputs if requested
             if output_attentions:
                 all_self_attentions = all_self_attentions + (layer_outputs[1],)
                 if layer_module.has_cross_attention:
                     all_cross_attentions = all_cross_attentions + (layer_outputs[2],)
 
-        # Add final hidden states
         if output_hidden_states:
             all_hidden_states = all_hidden_states + (hidden_states,)
 
-        # Return in requested format
         if not return_dict:
             return tuple(
                 v
@@ -726,31 +651,28 @@ class Blip2QFormerEncoderTTNN:
 
 
 class Blip2QFormerModelTTNN:
-    """TTNN implementation of Blip2QFormerModel with high accuracy configuration."""
+    """TTNN implementation of Blip2QFormerModel."""
 
     def __init__(self, device, config):
         self.device = device
         self.config = config
 
-        # Initialize components
         self.encoder = Blip2QFormerEncoderTTNN(device, config)
 
-        # Setup compute configuration for high accuracy
         self._setup_compute_config()
 
     def _setup_compute_config(self):
-        """Setup compute kernel configuration for 0.9999 PCC accuracy."""
+        """Setup compute kernel configuration."""
         self.compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.HiFi4,  # Highest fidelity for 0.9999 PCC
+            math_fidelity=ttnn.MathFidelity.HiFi4,
             math_approx_mode=False,
-            fp32_dest_acc_en=True,  # Enable FP32 accumulation
+            fp32_dest_acc_en=True,
             packer_l1_acc=False,
         )
 
     def prepare_weights(self, model):
         """Prepare weights from PyTorch model."""
-        # Prepare layernorm weights
         self.layernorm_weight = ttnn.from_torch(
             model.layernorm.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
@@ -758,7 +680,6 @@ class Blip2QFormerModelTTNN:
             model.layernorm.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
 
-        # Prepare encoder weights
         self.encoder.prepare_weights(model.encoder)
 
     def get_extended_attention_mask(self, attention_mask, input_shape, device):
@@ -780,14 +701,12 @@ class Blip2QFormerModelTTNN:
 
     def invert_attention_mask(self, encoder_attention_mask):
         """Invert attention mask for cross-attention."""
-        # print(f"{encoder_attention_mask.shape=}")
         if encoder_attention_mask.dim() == 3:
             encoder_extended_attention_mask = encoder_attention_mask[:, None, :, :]
         elif encoder_attention_mask.dim() == 2:
             encoder_extended_attention_mask = encoder_attention_mask[:, None, None, :]
         else:
             raise ValueError(f"Wrong shape for encoder_attention_mask: {encoder_attention_mask.shape}")
-        # print(f"{encoder_extended_attention_mask.shape=}")
 
         encoder_extended_attention_mask = encoder_extended_attention_mask.to(dtype=torch.bfloat16)
         encoder_extended_attention_mask = (1.0 - encoder_extended_attention_mask) * -10000.0
@@ -810,24 +729,20 @@ class Blip2QFormerModelTTNN:
         output_hidden_states=False,
         return_dict=True,
     ):
-        # Handle default values
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
             output_hidden_states if output_hidden_states is not None else self.config.output_hidden_states
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
-        # Calculate past_key_values_length
         past_key_values_length = 0
         if past_key_values is not None:
             past_key_values_length = past_key_values[0][0].shape[2] - self.config.query_length
 
-        # Determine query_length
         query_length = (
             query_length if query_length is not None else query_embeds.shape[1] if query_embeds is not None else 0
         )
 
-        # Apply layernorm
         embedding_output = ttnn.layer_norm(
             query_embeds,
             weight=self.layernorm_weight,
@@ -835,27 +750,18 @@ class Blip2QFormerModelTTNN:
             epsilon=1e-12,
             compute_kernel_config=self.compute_config,
         )
-        # embedding_output = query_embeds
 
-        # Apply dropout (for inference, this is typically a no-op)
-        # In TTNN, dropout is often handled differently or skipped for inference
-
-        # Get input shape
         embedding_output_shape = tuple(embedding_output.shape)
         input_shape = embedding_output_shape[:-1]
         batch_size, seq_length = input_shape
 
-        # Create attention mask if needed
         if attention_mask is None:
             attention_mask = torch.ones((batch_size, seq_length + past_key_values_length))
 
-        # Create extended attention mask
         extended_attention_mask = self.get_extended_attention_mask(attention_mask, input_shape, self.device)
 
-        # Handle encoder attention mask
         encoder_extended_attention_mask = None
         if encoder_hidden_states is not None:
-            # Handle encoder attention mask
             if encoder_attention_mask is None:
                 if isinstance(encoder_hidden_states, list):
                     encoder_batch_size, encoder_sequence_length, _ = encoder_hidden_states[0].shape
@@ -865,10 +771,8 @@ class Blip2QFormerModelTTNN:
 
             encoder_extended_attention_mask = self.invert_attention_mask(encoder_attention_mask)
 
-        # Prepare head mask
         head_mask = head_mask if head_mask is not None else [None] * self.config.num_hidden_layers
 
-        # Forward through encoder
         encoder_outputs = self.encoder.forward(
             embedding_output,
             attention_mask=extended_attention_mask,
@@ -885,7 +789,6 @@ class Blip2QFormerModelTTNN:
 
         sequence_output = encoder_outputs[0]
 
-        # Create pooled output (take first token)
         pooled_output = ttnn.slice(sequence_output, [0, 0, 0], [sequence_output.shape[0], 1, sequence_output.shape[2]])
         pooled_output = ttnn.reshape(pooled_output, (sequence_output.shape[0], sequence_output.shape[2]))
 
@@ -903,7 +806,7 @@ class Blip2QFormerModelTTNN:
 
 
 class GraniteSpeechEncoderProjectorTTNN:
-    """TTNN implementation of GraniteSpeechEncoderProjector with high accuracy configuration."""
+    """TTNN implementation of GraniteSpeechEncoderProjector."""
 
     def __init__(self, device, config):
         self.device = device
@@ -913,33 +816,28 @@ class GraniteSpeechEncoderProjectorTTNN:
         self.window_size = config.window_size
         self.num_queries = config.window_size // config.downsample_rate
 
-        # Initialize QFormer
         self.qformer = Blip2QFormerModelTTNN(device, config)
 
-        # Setup compute configuration for high accuracy
         self._setup_compute_config()
 
     def _setup_compute_config(self):
-        """Setup compute kernel configuration for 0.99 PCC accuracy."""
+        """Setup compute kernel configuration."""
         self.compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.HiFi4,  # High fidelity for 0.99 PCC
+            math_fidelity=ttnn.MathFidelity.HiFi4,
             math_approx_mode=False,
-            fp32_dest_acc_en=True,  # Enable FP32 accumulation
+            fp32_dest_acc_en=True,
             packer_l1_acc=False,
         )
 
     def prepare_weights(self, model):
         """Prepare weights from PyTorch model."""
-        # Prepare query embeddings
         self.query_tt = ttnn.from_torch(model.query, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
 
-        # Prepare QFormer weights
         self.qformer.prepare_weights(model.qformer)
 
-        # Prepare linear layer weights
         self.linear_weight = ttnn.from_torch(
-            model.linear.weight.transpose(-1, -2),  # Transpose for TTNN
+            model.linear.weight.transpose(-1, -2),
             dtype=ttnn.bfloat16,
             layout=ttnn.TILE_LAYOUT,
             device=self.device,
@@ -950,23 +848,18 @@ class GraniteSpeechEncoderProjectorTTNN:
 
     def forward(self, hidden_states):
         """Forward pass through the encoder projector."""
-        # Get input dimensions
         batch_size, seq_len, dim = hidden_states.shape
 
-        # Calculate padding and blocks
         nblocks = math.ceil(seq_len / self.window_size)
         pad = nblocks * self.window_size - seq_len
 
-        # Pad hidden_states if needed
         if pad > 0:
             hidden_states = ttnn.to_layout(hidden_states, ttnn.ROW_MAJOR_LAYOUT)
-            hidden_states = ttnn.pad(hidden_states, [(0, 0), (0, pad), (0, 0)], 0.0)  # Pad along sequence dimension
+            hidden_states = ttnn.pad(hidden_states, [(0, 0), (0, pad), (0, 0)], 0.0)
             hidden_states = ttnn.to_layout(hidden_states, ttnn.TILE_LAYOUT)
 
-        # Reshape for windowed processing
         hidden_states = ttnn.reshape(hidden_states, (batch_size * nblocks, self.window_size, dim))
 
-        # Process through QFormer
         query_output = self.qformer.forward(
             query_embeds=self.query_tt,
             encoder_hidden_states=hidden_states,
@@ -974,11 +867,9 @@ class GraniteSpeechEncoderProjectorTTNN:
             return_dict=True,
         )
 
-        # Get last hidden state and reshape
         last_hidden_state = query_output.last_hidden_state
         last_hidden_state = ttnn.reshape(last_hidden_state, (batch_size, nblocks * self.num_queries, -1))
 
-        # Apply linear projection
         query_proj = ttnn.linear(
             last_hidden_state, self.linear_weight, bias=self.linear_bias, compute_kernel_config=self.compute_config
         )
