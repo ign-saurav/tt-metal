@@ -88,6 +88,9 @@ from models.experimental.miniCPMo.reference.utils import sentence_end
 from models.experimental.miniCPMo.reference.utils import VoiceChecker
 from models.experimental.miniCPMo.tt.ttnn_whisper_encoder import TtnnWhisperEncoder
 from models.experimental.miniCPMo.tt.ttnn_audio_projector import TtnnAudioProjector
+from models.experimental.miniCPMo.tt.tt_qwen2_for_causal_lm import TTQwen2ForCausalLM
+from models.experimental.miniCPMo.tt.minicpm_weight_bridge import MiniCPMWeightBridge
+from models.experimental.miniCPMo.tt_transformers.common import create_tt_model
 
 logger = logging.getLogger(__name__)
 
@@ -157,13 +160,77 @@ class MiniCPMOPreTrainedModel(Qwen2PreTrainedModel):
 
 
 class TTMiniCPMO(MiniCPMOPreTrainedModel):
-    def __init__(self, config, tt_device, patch_size=None, num_patches_per_side=None, parameters=None, state_dict=None):
+    def __init__(
+        self,
+        config,
+        tt_device,
+        patch_size=None,
+        num_patches_per_side=None,
+        parameters=None,
+        state_dict=None,
+        use_tt_llm: bool = False,
+        model_path: str = "openbmb/MiniCPM-o-2_6",
+    ):
         super().__init__(config)
-        # gets killed without meta
-        # with torch.device("meta"):
-        self.llm = Qwen2ForCausalLM(config)
-        print("QWEN INITIALIZED")
-        self.llm.prepare_inputs_for_generation = types.MethodType(prepare_inputs_for_generation, self.llm)  # patch llm
+        self.use_tt_llm = use_tt_llm
+        self.tt_llm = None
+        self.tt_kv_cache = None
+        self.tt_model_args = None
+
+        if use_tt_llm:
+            # Initialize TT LLM (TTQwen2ForCausalLM)
+            logger.info("Initializing TT Qwen LLM...")
+
+            # Set HF_MODEL environment variable required by create_tt_model
+            if not os.environ.get("HF_MODEL"):
+                os.environ["HF_MODEL"] = model_path
+
+            bridge = MiniCPMWeightBridge(model_path)
+            qwen_weights = bridge.get_qwen_weights()
+            logger.info(f"Loaded {len(qwen_weights)} weight tensors for TT LLM")
+
+            tt_model_args, tt_model, tt_kv_cache, _ = create_tt_model(
+                mesh_device=tt_device,
+                instruct=False,
+                max_batch_size=1,
+                optimizations=None,
+                max_seq_len=1024,
+                paged_attention_config=None,
+                dtype=ttnn.bfloat8_b,
+                state_dict=qwen_weights,
+                dummy_weights=False,
+            )
+            self.tt_model_args = tt_model_args
+            self.tt_kv_cache = tt_kv_cache
+
+            # Create tokenizer for TT LLM
+            from transformers import AutoTokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+
+            # Create TTQwen2ForCausalLM wrapper
+            self.tt_llm = TTQwen2ForCausalLM.from_tt_model(
+                tt_model=tt_model,
+                tt_model_args=tt_model_args,
+                mesh_device=tt_device,
+                tt_kv_cache=tt_kv_cache,
+                model_path=model_path,
+                tokenizer=tokenizer,
+            )
+            self.tt_llm.eval()
+            logger.info("TT Qwen LLM initialized successfully")
+
+            # Create a minimal PyTorch LLM for config access (no weights loaded)
+            from accelerate import init_empty_weights
+
+            with init_empty_weights():
+                self.llm = Qwen2ForCausalLM(config)
+            self.llm.prepare_inputs_for_generation = types.MethodType(prepare_inputs_for_generation, self.llm)
+        else:
+            # Use PyTorch LLM (original behavior)
+            self.llm = Qwen2ForCausalLM(config)
+            print("QWEN INITIALIZED")
+            self.llm.prepare_inputs_for_generation = types.MethodType(prepare_inputs_for_generation, self.llm)
 
         self.tt_state_dict = state_dict
         self.tt_device = tt_device
@@ -802,16 +869,49 @@ class TTMiniCPMO(MiniCPMOPreTrainedModel):
         kwargs.pop("output_hidden_states", None)
         kwargs.pop("return_dict_in_generate", None)
         terminators = [tokenizer.convert_tokens_to_ids(i) for i in self.terminators]
-        outputs = self.llm.generate(
-            inputs_embeds=inputs_embeds,
-            pad_token_id=0,
-            eos_token_id=terminators,
-            attention_mask=attention_mask,
-            output_hidden_states=True,
-            return_dict_in_generate=True,
-            **kwargs,
-        )
-        return outputs
+
+        if self.use_tt_llm and self.tt_llm is not None:
+            # Use TT LLM for generation
+            logger.info("Using TT LLM for generation")
+
+            # Reset the TT LLM cache before generation
+            self.tt_llm.reset_cache()
+
+            # Extract max_new_tokens from kwargs
+            max_new_tokens = kwargs.pop("max_new_tokens", 128)
+
+            # Run TT generate
+            output_ids = self.tt_llm.generate(
+                inputs_embeds=inputs_embeds,
+                attention_mask=attention_mask,
+                max_new_tokens=max_new_tokens,
+                eos_token_id=terminators,
+                pad_token_id=0,
+                do_sample=kwargs.pop("do_sample", False),
+                temperature=kwargs.pop("temperature", 1.0),
+            )
+
+            # Create a simple output object that matches the expected format
+            # The PyTorch generate returns GenerateEncoderDecoderOutput with .sequences
+            @dataclass
+            class TTGenerateOutput:
+                sequences: torch.Tensor
+                hidden_states: Optional[tuple] = None
+
+            outputs = TTGenerateOutput(sequences=output_ids, hidden_states=None)
+            return outputs
+        else:
+            # Use PyTorch LLM for generation (original behavior)
+            outputs = self.llm.generate(
+                inputs_embeds=inputs_embeds,
+                pad_token_id=0,
+                eos_token_id=terminators,
+                attention_mask=attention_mask,
+                output_hidden_states=True,
+                return_dict_in_generate=True,
+                **kwargs,
+            )
+            return outputs
 
     def _decode_stream(self, inputs_embeds, tokenizer, **kwargs):
         terminators = [tokenizer.convert_tokens_to_ids(i) for i in self.terminators]
