@@ -70,11 +70,10 @@ def calculate_pcc(tensor1: torch.Tensor, tensor2: torch.Tensor) -> float:
     indirect=True,
 )
 def test_blip_intermediate(device):
-    """Test FeedForward TTNN implementation against PyTorch."""
+    """Test Blip2QFormerIntermediate TTNN implementation against PyTorch."""
     config = TestConfig()
 
     # Initialize models
-    # torch_model = GraniteSpeechConformerFeedForward(config).to(torch.bfloat16)
     torch_model = (
         AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
         .projector.qformer.encoder.layer[0]
@@ -111,11 +110,10 @@ def test_blip_intermediate(device):
     indirect=True,
 )
 def test_blip_output(device):
-    """Test FeedForward TTNN implementation against PyTorch."""
+    """Test Blip2QFormerOutput TTNN implementation against PyTorch."""
     config = TestConfig()
 
     # Initialize models
-    # torch_model = GraniteSpeechConformerFeedForward(config).to(torch.bfloat16)
     torch_model = (
         AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
         .projector.qformer.encoder.layer[0]
@@ -156,11 +154,10 @@ def test_blip_output(device):
     indirect=True,
 )
 def test_blip_self_output(device):
-    """Test FeedForward TTNN implementation against PyTorch."""
+    """Test Blip2QFormerSelfOutput TTNN implementation against PyTorch."""
     config = TestConfig()
 
     # Initialize models
-    # torch_model = GraniteSpeechConformerFeedForward(config).to(torch.bfloat16)
     torch_model = (
         AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
         .projector.qformer.encoder.layer[0]
@@ -201,7 +198,7 @@ def test_blip_self_output(device):
     indirect=True,
 )
 def test_blip_multi_head_attention_output(device):
-    """Test FeedForward TTNN implementation against PyTorch."""
+    """Test Blip2QFormerMultiHeadAttention TTNN implementation against PyTorch."""
     config = TestConfig()
 
     # Initialize models
@@ -243,7 +240,6 @@ def test_blip_multi_head_attention_output(device):
         torch_attn_mask_input, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device
     )
     ttnn_output = ttnn_model.forward(ttnn_hidden_input, ttnn_attn_mask_input)
-    # ttnn_output = ttnn.to_torch(ttnn_output)
     ttnn_output1 = ttnn_output[0]
     ttnn_output2 = ttnn_output[1][0]
     ttnn_output3 = ttnn_output[1][1]
@@ -252,10 +248,7 @@ def test_blip_multi_head_attention_output(device):
     ttnn_output3 = ttnn.to_torch(ttnn_output3)
 
     # Compare outputs
-    # assert_with_pcc(torch_output, ttnn_output, pcc=0.97)
-    # print(f"BlipMultiHeadAttn test passed with PCC: {calculate_pcc(torch_output, ttnn_output):.4f}")
-
-    assert_with_pcc(torch_output1, ttnn_output1, pcc=0.97)
+    assert_with_pcc(torch_output1, ttnn_output1, pcc=0.99)
     print(f"BlipMultiHeadAttn test passed with PCC: {calculate_pcc(torch_output1, ttnn_output1):.4f}")
 
     assert_with_pcc(torch_output2, ttnn_output2, pcc=0.99)
@@ -271,7 +264,7 @@ def test_blip_multi_head_attention_output(device):
     indirect=True,
 )
 def test_blip_multi_head_cross_attention_output(device):
-    """Test FeedForward TTNN implementation against PyTorch."""
+    """Test Blip2QFormerMultiHeadAttention cross-attention TTNN implementation against PyTorch."""
     config = TestConfig()
 
     # Initialize models
@@ -339,7 +332,7 @@ def test_blip_multi_head_cross_attention_output(device):
     ttnn_output3 = ttnn.to_torch(ttnn_output3)
 
     # Compare outputs
-    assert_with_pcc(torch_output1, ttnn_output1, pcc=0.97)
+    assert_with_pcc(torch_output1, ttnn_output1, pcc=0.99)
     print(f"BlipMultiHeadAttn test passed with PCC: {calculate_pcc(torch_output1, ttnn_output1):.4f}")
 
     assert_with_pcc(torch_output2, ttnn_output2, pcc=0.99)
@@ -355,7 +348,7 @@ def test_blip_multi_head_cross_attention_output(device):
     indirect=True,
 )
 def test_blip_attention_output(device):
-    """Test FeedForward TTNN implementation against PyTorch."""
+    """Test Blip2QFormerAttention TTNN implementation against PyTorch."""
     config = TestConfig()
 
     # Initialize models
@@ -414,7 +407,7 @@ def test_blip_attention_output(device):
     indirect=True,
 )
 def test_blip_cross_attention_output(device):
-    """Test FeedForward TTNN implementation against PyTorch."""
+    """Test Blip2QFormerAttention cross-attention TTNN implementation against PyTorch."""
     config = TestConfig()
 
     # Initialize models
@@ -478,7 +471,7 @@ def test_blip_cross_attention_output(device):
     ttnn_output3 = ttnn.to_torch(ttnn_output3)
 
     # Compare outputs
-    assert_with_pcc(torch_output1, ttnn_output1, pcc=0.98)
+    assert_with_pcc(torch_output1, ttnn_output1, pcc=0.99)
     print(f"BlipCrossAttn test passed with PCC: {calculate_pcc(torch_output1, ttnn_output1):.4f}")
 
     assert_with_pcc(torch_output2, ttnn_output2, pcc=0.99)
@@ -494,7 +487,7 @@ def test_blip_cross_attention_output(device):
     indirect=True,
 )
 def test_blip_layer_output(device):
-    """Test FeedForward TTNN implementation against PyTorch."""
+    """Test Blip2QFormerLayer TTNN implementation against PyTorch."""
     config = TestConfig()
 
     # Initialize models
@@ -555,7 +548,7 @@ def test_blip_layer_output(device):
     ttnn_output3 = ttnn.to_torch(ttnn_output3)
 
     # Compare outputs
-    assert_with_pcc(torch_output1, ttnn_output1, pcc=0.95)
+    assert_with_pcc(torch_output1, ttnn_output1, pcc=0.99)
     print(f"BlipLayer test passed with PCC: {calculate_pcc(torch_output1, ttnn_output1):.4f}")
 
     assert_with_pcc(torch_output2, ttnn_output2, pcc=0.99)
@@ -571,7 +564,7 @@ def test_blip_layer_output(device):
     indirect=True,
 )
 def test_blip_encoder_output(device):
-    """Test FeedForward TTNN implementation against PyTorch."""
+    """Test Blip2QFormerEncoder TTNN implementation against PyTorch."""
     config = TestConfig()
 
     # Initialize models
@@ -634,7 +627,7 @@ def test_blip_encoder_output(device):
     indirect=True,
 )
 def test_blip_model_output(device):
-    """Test FeedForward TTNN implementation against PyTorch."""
+    """Test Blip2QFormerModel TTNN implementation against PyTorch."""
     config = TestConfig()
 
     # Initialize models
@@ -677,7 +670,7 @@ def test_blip_model_output(device):
     indirect=True,
 )
 def test_projector_output(device):
-    """Test FeedForward TTNN implementation against PyTorch."""
+    """Test GraniteSpeechEncoderProjector TTNN implementation against PyTorch."""
     config = TestConfig()
 
     # Initialize models
