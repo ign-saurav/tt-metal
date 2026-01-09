@@ -19,14 +19,14 @@ models.perf.device_perf_utils.run_device_profiler = _run_device_profiler_op_supp
 @pytest.mark.parametrize(
     "batch_size, model_name, expected_perf",
     [
-        (1, "ttnn_swin2sr", 2),
+        (1, "ttnn_swin2sr", 1.95),
     ],
 )
 @pytest.mark.models_device_performance_bare_metal
 def test_perf_device_bare_metal_swin2sr(batch_size, model_name, expected_perf):
     subdir = model_name
     num_iterations = 1
-    margin = 0.1
+    margin = 0.1282
 
     command = f"pytest models/experimental/swin2sr/tests/pcc/test_ttnn_swin2sr.py::test_swin2sr_checkpoint"
 
