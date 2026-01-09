@@ -1,8 +1,6 @@
 import ttnn
 import torch
-import torch.nn.functional as F
 import math
-from typing import Optional, Tuple
 
 
 class GraniteSpeechConformerFeedForwardTTNN:
@@ -28,9 +26,9 @@ class GraniteSpeechConformerFeedForwardTTNN:
         """Setup compute kernel configuration for high accuracy."""
         self.compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.HiFi4,  # High fidelity for 0.99 PCC
+            math_fidelity=ttnn.MathFidelity.HiFi4,
             math_approx_mode=False,
-            fp32_dest_acc_en=True,  # Enable FP32 accumulation for accuracy
+            fp32_dest_acc_en=True,
             packer_l1_acc=False,
         )
 
@@ -80,10 +78,7 @@ class GraniteSpeechConformerFeedForwardTTNN:
         # 3. SiLU activation
         hidden_states = ttnn.silu(hidden_states)
 
-        # 4. Dropout (typically disabled during inference)
-        # Note: TTNN doesn't have dropout, it's inference-only
-
-        # 5. Linear projection (down_proj)
+        # 4. Linear projection (down_proj)
         hidden_states = ttnn.linear(
             hidden_states, self.down_proj_weight, bias=self.down_proj_bias, compute_kernel_config=self.compute_config
         )
@@ -105,9 +100,9 @@ class GraniteSpeechConformerAttentionTTNN:
         """Setup compute kernel configuration for high accuracy."""
         self.compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.HiFi4,  # High fidelity for 0.99 PCC
+            math_fidelity=ttnn.MathFidelity.HiFi4,
             math_approx_mode=False,
-            fp32_dest_acc_en=True,  # Enable FP32 accumulation for accuracy
+            fp32_dest_acc_en=True,
             packer_l1_acc=False,
         )
 
@@ -193,14 +188,8 @@ class GraniteSpeechConformerAttentionTTNN:
         value_states = ttnn.reshape(value_states, (bsz * num_blocks, self.context_size, self.num_heads, -1))
         value_states = ttnn.permute(value_states, (0, 2, 1, 3), memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-        # shaw's relative positional embedding
-        # TODO:
+        # Shaw's relative positional embedding
         rel_pos_emb = torch.nn.functional.embedding(dist, weight=self.rel_pos_emb_weight)
-        # alternative computation of `pos_attn` - for readability
-        # rel_pos_emb_expanded = rel_pos_emb.view([1, 1, 1] + list(rel_pos_emb.shape))
-        # pos_attn = torch.sum(query_states.unsqueeze(-2) * rel_pos_emb_expanded, dim=-1) * self.scale
-        # einsum implementation of pos_attn - gives x30 speedup over the alternative
-        # TODO (@avihu111) find a fast alternative to einsum
         query_states_torch = ttnn.to_torch(query_states)
         query_states_torch = query_states_torch.reshape(
             num_blocks, query_states_torch.shape[-3], query_states_torch.shape[-2], query_states_torch.shape[-1]
@@ -216,8 +205,8 @@ class GraniteSpeechConformerAttentionTTNN:
             pos_attn_sdpa = pos_attn[:, :1, :, :]
 
         ttnn_mask = ttnn.from_torch(pos_attn_sdpa, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
-        # Use SDPA for attention computation
-        # Pad from 200 to 224
+        
+        # Pad sequence length to multiple of 32 for SDPA
         if query_states.shape[2] % 32 != 0:
             pad_size = 32 - (query_states.shape[2] % 32)
             query_states = ttnn.pad(query_states, padding=[(0, 0), (0, 0), (0, pad_size), (0, 0)], value=0)
@@ -280,7 +269,7 @@ class GraniteSpeechConformerConvModuleTTNN:
         self.batch_norm_running_mean = None
         self.batch_norm_running_var = None
 
-        # Initialize depthwise conv module using your class
+        # Initialize depthwise conv module
         self.depth_conv = GraniteSpeechConformerDepthWiseConv1dTTNN(
             device, self.inner_dim, self.inner_dim, self.conv_kernel_size
         )
@@ -289,12 +278,12 @@ class GraniteSpeechConformerConvModuleTTNN:
         self._setup_compute_config()
 
     def _setup_compute_config(self):
-        """Setup compute kernel configuration for high accuracy."""
+        """Setup compute kernel configuration."""
         self.compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.LoFi,  # High fidelity for 0.99 PCC
+            math_fidelity=ttnn.MathFidelity.LoFi,
             math_approx_mode=False,
-            fp32_dest_acc_en=True,  # Enable FP32 accumulation for accuracy
+            fp32_dest_acc_en=True,
             packer_l1_acc=False,
         )
 
@@ -321,7 +310,7 @@ class GraniteSpeechConformerConvModuleTTNN:
 
         # Conv1d weights (transpose for TTNN)
         self.up_conv_weight = ttnn.from_torch(
-            up_conv_weight.transpose(-1, -2), dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device  # .transpose(-1, -2),
+            up_conv_weight.transpose(-1, -2), dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
         )
 
         self.down_conv_weight = ttnn.from_torch(
@@ -405,8 +394,7 @@ class GraniteSpeechConformerConvModuleTTNN:
         glu_output = glu_output[:, :, :seq_len, :]
         glu_output = ttnn.reshape(glu_output, (bsz, out_length, self.inner_dim))
 
-        # 4. Depthwise Convolution (using your class)
-        # Call your depthwise conv forward method
+        # 4. Depthwise Convolution
         depth_output = self.depth_conv.forward(glu_output)
 
         # 5. BatchNorm1d + SiLU
@@ -473,7 +461,6 @@ class GraniteSpeechConformerDepthWiseConv1dTTNN:
         pad_offset = (kernel_size + 1) % 2
         self.padding = [pad, pad - pad_offset]
 
-        # Initialize weights (you'll need to load these from your model)
         self.weight_tensor = None
         self._setup_conv_config()
 
@@ -487,7 +474,7 @@ class GraniteSpeechConformerDepthWiseConv1dTTNN:
 
         self.compute_config = ttnn.init_device_compute_kernel_config(
             self.device.arch(),
-            math_fidelity=ttnn.MathFidelity.LoFi,#HiFi4,
+            math_fidelity=ttnn.MathFidelity.LoFi,
             math_approx_mode=False,
             fp32_dest_acc_en=True,
             packer_l1_acc=False,
@@ -513,12 +500,12 @@ class GraniteSpeechConformerDepthWiseConv1dTTNN:
             bias_tensor=None,
             kernel_size=self.kernel_size,
             stride=1,
-            padding=self.padding,  # Padding applied
+            padding=self.padding,
             batch_size=batch_size,
             input_length=length,
             conv_config=self.conv_config,
             compute_config=self.compute_config,
-            groups=self.chan_in,  # Depthwise convolution
+            groups=self.chan_in,
             dtype=ttnn.bfloat16,
             return_output_dim=True,
             return_weights_and_bias=True,
@@ -554,72 +541,72 @@ class GraniteSpeechConformerBlockTTNN:
             packer_l1_acc=False,
         )
         if self.include_layernorm:
-            self.layernorm_compute_config = ttnn.init_device_compute_kernel_config(  
-                self.device.arch(),  
-                math_fidelity=ttnn.MathFidelity.LoFi,  
-                math_approx_mode=False,  
-                fp32_dest_acc_en=False,  # Note: False for distributed LN due to L1 OOM  
-                packer_l1_acc=True,  
-            )  
+            self.layernorm_compute_config = ttnn.init_device_compute_kernel_config(
+                self.device.arch(),
+                math_fidelity=ttnn.MathFidelity.LoFi,
+                math_approx_mode=False,
+                fp32_dest_acc_en=False,
+                packer_l1_acc=True,
+            )
             self.layernorm_config = ttnn.LayerNormDefaultProgramConfig()
 
-    def prepare_weights(self, weights_dict):
+    def prepare_weights(self, ff1, ff2, attn, conv, post_norm):
         """Prepare all weights for sub-modules."""
         # FeedForward weights
         self.ff1.prepare_weights(
-            weights_dict["ff1.pre_norm.weight"],
-            weights_dict["ff1.pre_norm.bias"],
-            weights_dict["ff1.up_proj.weight"],
-            weights_dict["ff1.up_proj.bias"],
-            weights_dict["ff1.down_proj.weight"],
-            weights_dict["ff1.down_proj.bias"],
+            ff1.pre_norm.weight,
+            ff1.pre_norm.bias,
+            ff1.up_proj.weight,
+            ff1.up_proj.bias,
+            ff1.down_proj.weight,
+            ff1.down_proj.bias,
         )
         self.ff2.prepare_weights(
-            weights_dict["ff2.pre_norm.weight"],
-            weights_dict["ff2.pre_norm.bias"],
-            weights_dict["ff2.up_proj.weight"],
-            weights_dict["ff2.up_proj.bias"],
-            weights_dict["ff2.down_proj.weight"],
-            weights_dict["ff2.down_proj.bias"],
+            ff2.pre_norm.weight,
+            ff2.pre_norm.bias,
+            ff2.up_proj.weight,
+            ff2.up_proj.bias,
+            ff2.down_proj.weight,
+            ff2.down_proj.bias,
         )
 
         # Attention weights
         self.attn.prepare_weights(
-            weights_dict["attn.pre_norm.weight"],
-            weights_dict["attn.pre_norm.bias"],
-            weights_dict["attn.to_q.weight"],
-            weights_dict["attn.to_kv.weight"],
-            weights_dict["attn.to_out.weight"],
-            weights_dict["attn.to_out.bias"],
-            weights_dict["attn.rel_pos_emb.weight"],
+            attn.pre_norm.weight,
+            attn.pre_norm.bias,
+            attn.to_q.weight,
+            attn.to_kv.weight,
+            attn.to_out.weight,
+            attn.to_out.bias,
+            attn.rel_pos_emb.weight,
         )
 
         # Conv module weights
         self.conv.prepare_weights(
-            weights_dict["conv.norm.weight"],
-            weights_dict["conv.norm.bias"],
-            weights_dict["conv.up_conv.weight"],
-            weights_dict["conv.down_conv.weight"],
-            weights_dict["conv.batch_norm.weight"],
-            weights_dict["conv.batch_norm.bias"],
-            weights_dict["conv.batch_norm.running_mean"],
-            weights_dict["conv.batch_norm.running_var"],
-            weights_dict["conv.depth_conv.weight"],
+            conv.norm.weight,
+            conv.norm.bias,
+            conv.up_conv.weight,
+            conv.down_conv.weight,
+            conv.batch_norm.weight,
+            conv.batch_norm.bias,
+            conv.batch_norm.running_mean,
+            conv.batch_norm.running_var,
+            conv.depth_conv.conv.weight,
         )
 
         # Prepare layer norm weights
-        if self.include_layernorm:  
-            self.weight_tensor = ttnn.from_torch(  
-                weights_dict['post_norm.weight'], 
-                dtype=ttnn.bfloat16,  
-                layout=ttnn.TILE_LAYOUT,  
-                device=self.device  
-            )  
-            self.bias_tensor = ttnn.from_torch(  
-                weights_dict['post_norm.bias'], 
-                dtype=ttnn.bfloat16,   
-                layout=ttnn.TILE_LAYOUT,  
-                device=self.device  
+        if self.include_layernorm:
+            self.weight_tensor = ttnn.from_torch(
+                post_norm.weight,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device
+            )
+            self.bias_tensor = ttnn.from_torch(
+                post_norm.bias,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device
             )
 
     def forward(self, hidden_states: ttnn.Tensor, attention_dists: torch.Tensor) -> ttnn.Tensor:
@@ -642,178 +629,143 @@ class GraniteSpeechConformerBlockTTNN:
         # Post norm
         if self.include_layernorm:
             hidden_states = ttnn.layer_norm(
-                hidden_states, weight=self.weight_tensor, bias=self.bias_tensor, epsilon=1e-5, compute_kernel_config=self.layernorm_compute_config, program_config=self.layernorm_config
+                hidden_states,
+                weight=self.weight_tensor,
+                bias=self.bias_tensor,
+                epsilon=1e-5,
+                compute_kernel_config=self.layernorm_compute_config,
+                program_config=self.layernorm_config
             )
 
         return hidden_states
 
 
-class GraniteSpeechCTCEncoderTTNN:  
-    """TTNN implementation of CTC Encoder with 0.99 PCC accuracy."""  
-      
-    def __init__(self, device, config, include_conformer_layernorm):  
-        self.device = device  
-        self.config = config  
-        self.num_layers = config.num_layers  
+class GraniteSpeechCTCEncoderTTNN:
+    """TTNN implementation of CTC Encoder."""
+
+    def __init__(self, device, config, include_conformer_layernorm):
+        self.device = device
+        self.config = config
+        self.num_layers = config.num_layers
         self.include_conformer_layernorm = include_conformer_layernorm
-          
-        # Precompute attention distances (same as PyTorch)  
-        seq = torch.arange(config.context_size)  
-        relpos_dist = seq.view(-1, 1) - seq.view(1, -1)  
-        self.attention_dists = torch.clamp(relpos_dist, -config.context_size, config.context_size) + config.max_pos_emb   
-          
-        # Initialize conformer blocks  
-        self.layers = [  
-            GraniteSpeechConformerBlockTTNN(device, config, self.include_conformer_layernorm)   
-            for _ in range(config.num_layers)  
-        ]  
-          
-        # Setup compute configurations  
-        self._setup_compute_config()   
-      
-    def _setup_compute_config(self):  
-        """Setup linear layer configurations."""  
-        self.compute_config = ttnn.init_device_compute_kernel_config(  
-            self.device.arch(),  
-            math_fidelity=ttnn.MathFidelity.LoFi,  
-            math_approx_mode=False,  
+
+        # Precompute attention distances
+        seq = torch.arange(config.context_size)
+        relpos_dist = seq.view(-1, 1) - seq.view(1, -1)
+        self.attention_dists = torch.clamp(relpos_dist, -config.context_size, config.context_size) + config.max_pos_emb
+
+        # Initialize conformer blocks
+        self.layers = [
+            GraniteSpeechConformerBlockTTNN(device, config, self.include_conformer_layernorm)
+            for _ in range(config.num_layers)
+        ]
+
+        self._setup_compute_config()
+
+    def _setup_compute_config(self):
+        """Setup compute kernel configuration."""
+        self.compute_config = ttnn.init_device_compute_kernel_config(
+            self.device.arch(),
+            math_fidelity=ttnn.MathFidelity.LoFi,
+            math_approx_mode=False,
             fp32_dest_acc_en=True,
-            packer_l1_acc=False,  
-        )   
-      
-    def prepare_weights(self, state_dict):  
-        """Prepare and load all weights from PyTorch state dict."""  
-        # Input linear layer weights  
-        self.input_weight = ttnn.from_torch(  
-            state_dict['input_linear.weight'].transpose(-1, -2), 
-            dtype=ttnn.bfloat16,  
-            layout=ttnn.TILE_LAYOUT,  
-            device=self.device  
-        )  
-        self.input_bias = ttnn.from_torch(  
-            state_dict['input_linear.bias'],  
-            dtype=ttnn.bfloat16,  
-            layout=ttnn.TILE_LAYOUT,  
-            device=self.device  
-        )  
-          
-        # Output linear layer weights  
-        self.out_weight = ttnn.from_torch(  
-            state_dict['out.weight'].transpose(-1, -2), 
-            dtype=ttnn.bfloat16,  
-            layout=ttnn.TILE_LAYOUT,  
-            device=self.device  
-        )  
-        self.out_bias = ttnn.from_torch(  
-            state_dict['out.bias'],  
-            dtype=ttnn.bfloat16,  
-            layout=ttnn.TILE_LAYOUT,  
-            device=self.device  
-        )  
-          
-        # Mid linear layer weights  
-        self.out_mid_weight = ttnn.from_torch(  
-            state_dict['out_mid.weight'].transpose(-1, -2), 
-            dtype=ttnn.bfloat16,  
-            layout=ttnn.TILE_LAYOUT,  
-            device=self.device  
-        )  
-        self.out_mid_bias = ttnn.from_torch(  
-            state_dict['out_mid.bias'],  
-            dtype=ttnn.bfloat16,  
-            layout=ttnn.TILE_LAYOUT,  
-            device=self.device  
-        )  
-          
-        # Prepare conformer block weights  
-        for i, layer in enumerate(self.layers):
-            weights_dict = {  
-                'ff1.up_proj.weight': state_dict[f'layers.{i}.ff1.up_proj.weight'],
-                'ff1.up_proj.bias': state_dict[f'layers.{i}.ff1.up_proj.bias'],  
-                'ff1.pre_norm.weight': state_dict[f'layers.{i}.ff1.pre_norm.weight'],
-                'ff1.pre_norm.bias': state_dict[f'layers.{i}.ff1.pre_norm.bias'],  
-                'ff1.down_proj.weight': state_dict[f'layers.{i}.ff1.down_proj.weight'],
-                'ff1.down_proj.bias': state_dict[f'layers.{i}.ff1.down_proj.bias'],  
-                'ff2.up_proj.weight': state_dict[f'layers.{i}.ff2.up_proj.weight'],
-                'ff2.up_proj.bias': state_dict[f'layers.{i}.ff2.up_proj.bias'],
-                'ff2.pre_norm.weight': state_dict[f'layers.{i}.ff2.pre_norm.weight'],
-                'ff2.pre_norm.bias': state_dict[f'layers.{i}.ff2.pre_norm.bias'],    
-                'ff2.down_proj.weight': state_dict[f'layers.{i}.ff2.down_proj.weight'],
-                'ff2.down_proj.bias': state_dict[f'layers.{i}.ff2.down_proj.bias'],  
-                'attn.to_q.weight': state_dict[f'layers.{i}.attn.to_q.weight'],  
-                'attn.to_kv.weight': state_dict[f'layers.{i}.attn.to_kv.weight'],  
-                'attn.to_out.weight': state_dict[f'layers.{i}.attn.to_out.weight'],
-                'attn.to_out.bias': state_dict[f'layers.{i}.attn.to_out.bias'], 
-                'attn.pre_norm.weight': state_dict[f'layers.{i}.attn.pre_norm.weight'],
-                'attn.pre_norm.bias': state_dict[f'layers.{i}.attn.pre_norm.bias'],  
-                'attn.rel_pos_emb.weight': state_dict[f'layers.{i}.attn.rel_pos_emb.weight'],
-                'conv.norm.weight': state_dict[f'layers.{i}.conv.norm.weight'],  
-                'conv.norm.bias': state_dict[f'layers.{i}.conv.norm.bias'],  
-                'conv.up_conv.weight': state_dict[f'layers.{i}.conv.up_conv.weight'],  
-                'conv.depth_conv.weight': state_dict[f'layers.{i}.conv.depth_conv.conv.weight'],  
-                'conv.down_conv.weight': state_dict[f'layers.{i}.conv.down_conv.weight'],  
-                'conv.batch_norm.weight': state_dict[f'layers.{i}.conv.batch_norm.weight'],  
-                'conv.batch_norm.bias': state_dict[f'layers.{i}.conv.batch_norm.bias'], 
-                'conv.batch_norm.running_mean': state_dict[f'layers.{i}.conv.batch_norm.running_mean'],  
-                'conv.batch_norm.running_var': state_dict[f'layers.{i}.conv.batch_norm.running_var'],
-                'post_norm.weight':state_dict[f'layers.{i}.post_norm.weight'],
-                'post_norm.bias':state_dict[f'layers.{i}.post_norm.bias']  
-            }  
-            layer.prepare_weights(weights_dict)  
-      
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:  
-        """Forward pass with mid-layer residual connection."""  
-        batch_size, seq_len, input_dim = hidden_states.shape    
-          
-        # Input linear projection  
-        tt_hidden_states = ttnn.linear(  
-            hidden_states,  
-            self.input_weight,  
-            bias=self.input_bias,  
-            compute_kernel_config=self.compute_config  
+            packer_l1_acc=False,
         )
-          
-        # Process through conformer blocks  
-        for idx, layer in enumerate(self.layers, start=1):  
-            tt_hidden_states = layer.forward(tt_hidden_states, self.attention_dists) 
-              
-            # Mid-layer residual connection  
-            if idx == self.num_layers // 2:  
-                # Clone for mid processing  
-                tt_hidden_states_mid = ttnn.clone(tt_hidden_states)  
-                  
-                # Apply output projection  
-                tt_mid_out = ttnn.linear(  
-                    tt_hidden_states_mid,  
-                    self.out_weight,  
-                    bias=self.out_bias,  
-                    compute_kernel_config=self.compute_config  
-                )  
-                  
-                # Apply softmax (convert to torch for softmax, back to TTNN)  
-                tt_mid_out_host = ttnn.from_device(tt_mid_out)  
-                mid_out_torch = ttnn.to_torch(tt_mid_out_host)  
-                softmax_out = torch.nn.functional.softmax(mid_out_torch, dim=-1)  
-                  
-                # Convert back to TTNN  
-                tt_softmax_out = ttnn.from_torch(  
-                    softmax_out,  
-                    dtype=ttnn.bfloat16,  
-                    layout=ttnn.TILE_LAYOUT,  
-                    device=self.device  
-                )  
-                  
-                # Apply mid projection  
-                tt_mid_residual = ttnn.linear(  
-                    tt_softmax_out,  
-                    self.out_mid_weight,  
-                    bias=self.out_mid_bias,  
-                    compute_kernel_config=self.compute_config  
-                )  
-                  
-                # Add residual connection  
-                tt_hidden_states = ttnn.add(tt_hidden_states, tt_mid_residual)  
-          
-        output_tensor = tt_hidden_states  
-          
-        return output_tensor
+
+    def prepare_weights(self, encoder):
+        """Prepare and load all weights from PyTorch encoder model."""
+        # Input linear layer weights
+        self.input_weight = ttnn.from_torch(
+            encoder.input_linear.weight.transpose(-1, -2),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device
+        )
+        self.input_bias = ttnn.from_torch(
+            encoder.input_linear.bias,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device
+        )
+
+        # Output linear layer weights
+        self.out_weight = ttnn.from_torch(
+            encoder.out.weight.transpose(-1, -2),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device
+        )
+        self.out_bias = ttnn.from_torch(
+            encoder.out.bias,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device
+        )
+
+        # Mid linear layer weights
+        self.out_mid_weight = ttnn.from_torch(
+            encoder.out_mid.weight.transpose(-1, -2),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device
+        )
+        self.out_mid_bias = ttnn.from_torch(
+            encoder.out_mid.bias,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device
+        )
+
+        # Prepare conformer block weights
+        for i, layer in enumerate(self.layers):
+            torch_layer = encoder.layers[i]
+            layer.prepare_weights(
+                torch_layer.ff1,
+                torch_layer.ff2,
+                torch_layer.attn,
+                torch_layer.conv,
+                torch_layer.post_norm
+            )
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """Forward pass with mid-layer residual connection."""
+        batch_size, seq_len, input_dim = hidden_states.shape
+
+        # Input linear projection
+        tt_hidden_states = ttnn.linear(
+            hidden_states,
+            self.input_weight,
+            bias=self.input_bias,
+            compute_kernel_config=self.compute_config
+        )
+
+        # Process through conformer blocks
+        for idx, layer in enumerate(self.layers, start=1):
+            tt_hidden_states = layer.forward(tt_hidden_states, self.attention_dists)
+
+            # Mid-layer residual connection
+            if idx == self.num_layers // 2:
+                tt_hidden_states_mid = ttnn.clone(tt_hidden_states)
+
+                # Apply output projection
+                tt_mid_out = ttnn.linear(
+                    tt_hidden_states_mid,
+                    self.out_weight,
+                    bias=self.out_bias,
+                    compute_kernel_config=self.compute_config
+                )
+
+                tt_softmax_out = ttnn.softmax(tt_mid_out, dim=-1)
+
+                # Apply mid projection
+                tt_mid_residual = ttnn.linear(
+                    tt_softmax_out,
+                    self.out_mid_weight,
+                    bias=self.out_mid_bias,
+                    compute_kernel_config=self.compute_config
+                )
+
+                # Add residual connection
+                tt_hidden_states = ttnn.add(tt_hidden_states, tt_mid_residual)
+
+        return tt_hidden_states
