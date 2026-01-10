@@ -29,7 +29,6 @@ class CenterNetPerformantTestInfra:
         assert l1_input_tensor.memory_config().buffer_type == ttnn.BufferType.L1
 
         # Convert to DRAM and tile layout for model input
-        # import pdb; pdb.set_trace()
         input_for_model = ttnn.to_memory_config(l1_input_tensor, self.memory_config)
         if input_for_model.layout != ttnn.TILE_LAYOUT:
             input_for_model = ttnn.to_layout(input_for_model, ttnn.TILE_LAYOUT)

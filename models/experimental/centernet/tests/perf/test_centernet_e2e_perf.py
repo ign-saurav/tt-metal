@@ -63,10 +63,6 @@ def test_centernet_e2e_performant(
     )
     torch_model.eval()
 
-    # Load pretrained weights (you'll need to provide the path)
-    # For now, we'll use random weights for the performance test
-    # torch_model = load_model(torch_model, "path/to/ctdet_coco_dlav0_1x.pth")
-
     # Create input tensor
     torch_input = torch.randn(batch_size, 3, size, size, dtype=torch.float32)
 
@@ -104,13 +100,6 @@ def test_centernet_e2e_performant(
     ttnn_input_tensor, l1_input_memory_config, dram_input_memory_config = infra.create_pipeline_memory_configs(
         torch_input
     )
-
-    warmup_input = ttnn.from_torch(torch_input.permute(0, 2, 3, 1), dtype=ttnn.bfloat16)
-    warmup_input = ttnn.to_device(warmup_input, device)
-
-    _ = ttnn_model.forward(warmup_input)
-    ttnn.deallocate(warmup_input)
-    ttnn.synchronize_device(device)
 
     # Create pipeline
     pipeline = create_pipeline_from_config(

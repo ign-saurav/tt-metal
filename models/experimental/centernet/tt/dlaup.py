@@ -4,9 +4,9 @@
 
 import ttnn
 from models.tt_cnn.tt.builder import (
-    Conv2dConfiguration,
     TtConv2d,
 )
+from models.experimental.centernet.tt.utils import TtConvTranspose2D
 
 
 class TtIdentity:
@@ -30,7 +30,6 @@ class TtIDAUp:
         self.up_factors = up_factors
         self.parameters = parameters
         self.layer_args = layer_args
-        # Pre-create all projection layers
         self.projs = []
         for i, c in enumerate(channels):
             try:
@@ -54,37 +53,31 @@ class TtIDAUp:
             except KeyError:
                 self.projs.append(TtIdentity())
 
-        self.upsampling_weights = []
+        self.upsampling_layers = []
         for i in range(len(channels)):
             try:
                 up_params = getattr(parameters, f"up_{i}")
-                weight_tensor = up_params["weight"]
-
-                # Ensure weight is on host and in ROW_MAJOR layout
-                if hasattr(weight_tensor, "device") and weight_tensor.device() is not None:
-                    weight_tensor = ttnn.from_device(weight_tensor)
-
-                if weight_tensor.layout != ttnn.ROW_MAJOR_LAYOUT:
-                    weight_tensor = ttnn.to_layout(weight_tensor, ttnn.ROW_MAJOR_LAYOUT)
-
-                self.upsampling_weights.append(weight_tensor)
+                up_args = getattr(layer_args, f"up_{i}")
+                upsample_layer = TtConvTranspose2D(up_args, up_params, device)
+                self.upsampling_layers.append(upsample_layer)
             except KeyError:
-                self.upsampling_weights.append(None)
+                self.upsampling_layers.append(None)
 
         for i in range(1, len(channels)):
             node_name = f"node_{i}"
             node_params = getattr(parameters, node_name)
+            node_args = getattr(layer_args, node_name)
             node = TtConv2d(
                 self._make_conv_config(
                     node_params,
-                    batch_size=1,
-                    input_height=64,
-                    input_width=64,
-                    in_channels=out_dim * 2,
-                    out_channels=out_dim,
-                    kernel_size=node_kernel,
-                    stride=1,
-                    padding=node_kernel // 2,
+                    batch_size=node_args["0"].batch_size,
+                    input_height=node_args["0"].input_height,
+                    input_width=node_args["0"].input_width,
+                    in_channels=node_args["0"].in_channels,
+                    out_channels=node_args["0"].out_channels,
+                    kernel_size=node_args["0"].kernel_size,
+                    stride=node_args["0"].stride,
+                    padding=node_args["0"].padding,
                     activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
                 ),
                 device,
@@ -151,7 +144,6 @@ class TtIDAUp:
             return l
 
         proj_out = proj(l)
-        # Reshape if needed to restore spatial dimensions
         proj_n, proj_h, proj_w, proj_c = proj_out.shape
         if proj_h != h or proj_w != w:
             total_elements = proj_n * proj_h * proj_w * proj_c
@@ -187,8 +179,6 @@ class TtIDAUp:
         target_h = h_proj * up_factor
         target_w = w_proj * up_factor
 
-        weight_tensor = self.upsampling_weights[i]
-
         # Pad input to tile-aligned dimensions if needed
         pad_h = (32 - (h_proj % 32)) % 32
         pad_w = (32 - (w_proj % 32)) % 32
@@ -208,25 +198,7 @@ class TtIDAUp:
             proj_out_padded = ttnn.to_layout(proj_out_padded, ttnn.ROW_MAJOR_LAYOUT)
 
         # Use conv_transpose2d for upsampling
-        up_out_padded = ttnn.conv_transpose2d(
-            input_tensor=proj_out_padded,
-            weight_tensor=weight_tensor,
-            bias_tensor=None,
-            in_channels=self.out_dim,
-            out_channels=self.out_dim,
-            kernel_size=(up_factor * 2, up_factor * 2),
-            stride=(up_factor, up_factor),
-            padding=(up_factor // 2, up_factor // 2),
-            output_padding=(0, 0),
-            dilation=(1, 1),
-            groups=self.out_dim,
-            device=self.device,
-            batch_size=n_proj,
-            input_height=padded_h,
-            input_width=padded_w,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            mirror_kernel=True,
-        )
+        up_out_padded = self.upsampling_layers[i](proj_out_padded)
 
         # Reshape if needed: [N, 1, H*W, C] -> [N, H, W, C]
         actual_out_n, actual_out_h, actual_out_w, actual_out_c = up_out_padded.shape
@@ -244,49 +216,14 @@ class TtIDAUp:
 
     def _apply_node_convolution(self, x, layer_i, i):
         """Apply node convolution after concatenation."""
-        # Ensure spatial dimensions match
-        layer_n, layer_h, layer_w, layer_c = layer_i.shape
-        x = ttnn.reshape(x, (layer_n, layer_h, layer_w, layer_c))
-        x_n, x_h, x_w, x_c = x.shape
-
-        if x_h != layer_h or x_w != layer_w:
-            # Upsample the smaller one to match
-            if x_h < layer_h or x_w < layer_w:
-                scale_h = max(1, layer_h // x_h) if x_h > 0 else 1
-                scale_w = max(1, layer_w // x_w) if x_w > 0 else 1
-                if scale_h > 1 or scale_w > 1:
-                    x = ttnn.upsample(x, (scale_h, scale_w))
-            elif layer_h < x_h or layer_w < x_w:
-                scale_h = max(1, x_h // layer_h) if layer_h > 0 else 1
-                scale_w = max(1, x_w // layer_w) if layer_w > 0 else 1
-                if scale_h > 1 or scale_w > 1:
-                    layer_i = ttnn.upsample(layer_i, (scale_h, scale_w))
-
-        # Concatenate along channel dimension
+        x = ttnn.reshape(x, layer_i.shape)
         concat_out = ttnn.concat([x, layer_i], dim=3, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-        # Apply node convolution
-        n, h, w, c = concat_out.shape
-        node_params = getattr(self.parameters, f"node_{i}")
-
-        node_config = Conv2dConfiguration(
-            input_height=h,
-            input_width=w,
-            in_channels=c,
-            out_channels=self.out_dim,
-            batch_size=n,
-            kernel_size=(3, 3),
-            stride=(1, 1),
-            padding=(1, 1),
-            weight=node_params["weight"],
-            bias=node_params["bias"],
-            activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
-            weights_dtype=ttnn.bfloat16,
-            output_dtype=ttnn.bfloat16,
-        )
-        node = TtConv2d(node_config, self.device)
+        node_name = f"node_{i}"
+        node = getattr(self, node_name)
 
         # Reshape for conv2d: [N, H, W, C] -> [N, 1, H*W, C]
+        n, h, w, c = concat_out.shape
         reshaped = ttnn.reshape(concat_out, [n, 1, h * w, c])
         x = node(reshaped)
         # Reshape back: [N, 1, H*W, C] -> [N, H, W, C]
@@ -299,13 +236,11 @@ class TtIDAUp:
         assert len(self.channels) == len(layers), f"{len(self.channels)} vs {len(layers)} layers"
         layers = list(layers)
 
-        # Step 1: Apply projection and upsampling to each layer
         for i, l in enumerate(layers):
             proj_out = self._apply_projection(l, i)
             up_out = self._apply_upsampling(proj_out, i)
             layers[i] = up_out
 
-        # Step 2: Apply node convolutions
         x = layers[0]
         y = []
         for i in range(1, len(layers)):

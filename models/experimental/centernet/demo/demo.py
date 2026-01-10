@@ -25,6 +25,8 @@ from models.experimental.centernet.reference.model import load_model
 from models.experimental.centernet.reference.utils.decode import ctdet_decode
 from models.experimental.centernet.reference.utils.debugger import Debugger
 from models.experimental.centernet.reference.utils.image import get_affine_transform, transform_preds
+from models.experimental.centernet.tests.perf.performant_infra import CenterNetPerformantTestInfra
+from models.tt_cnn.tt.pipeline import PipelineConfig, create_pipeline_from_config
 
 
 class Demo:
@@ -37,6 +39,8 @@ class Demo:
         self.inputs_mesh_mapper = None
         self.weights_mesh_mapper = None
         self.output_mesh_composer = None
+        self.infra: Optional[CenterNetPerformantTestInfra] = None
+        self.pipeline: Optional[Any] = None
 
         self.heads = {"hm": 80, "wh": 2, "reg": 2}
         self.down_ratio = 4
@@ -59,8 +63,8 @@ class Demo:
         logger.info("PyTorch model ready.")
 
     def initialize_ttnn_model(self, weights_path: str) -> None:
-        """Initialize TTNN model, preprocess parameters, and build runtime graph."""
-        logger.info("Initializing TTNN CenterNet model...")
+        """Initialize TTNN model with performant infrastructure."""
+        logger.info("Initializing TTNN CenterNet model with performant infra...")
 
         self.ttnn_device = ttnn.open_device(
             device_id=0, l1_small_size=32768, trace_region_size=1702912, num_command_queues=2
@@ -101,7 +105,10 @@ class Demo:
             device=self.ttnn_device,
             layer_args=parameters.layer_args,
         )
-        logger.info("TTNN model ready.")
+
+        # Initialize performant infrastructure
+        self.infra = CenterNetPerformantTestInfra(self.ttnn_device, self.ttnn_model, dtype=ttnn.bfloat16)
+        logger.info("TTNN model with performant infra ready.")
 
     def run_torch_inference(self, input_tensor: torch.Tensor):
         """Run PyTorch inference."""
@@ -114,15 +121,41 @@ class Demo:
         logger.info("PyTorch inference completed in {:.4f}s", time.time() - start)
         return output
 
-    def run_ttnn_inference(self, input_tensor: ttnn.Tensor):
-        """Run TTNN inference."""
-        if self.ttnn_model is None or self.ttnn_device is None:
-            raise RuntimeError("TTNN model/device not initialized.")
-        logger.info("Running TTNN inference...")
+    def run_ttnn_inference(self, torch_input: torch.Tensor):
+        """Run TTNN inference using pipeline."""
+        if self.infra is None or self.ttnn_device is None:
+            raise RuntimeError("TTNN infra/device not initialized.")
+
+        logger.info("Running TTNN inference with pipeline...")
         start = time.time()
-        output = self.ttnn_model.forward(input_tensor)
+
+        # Pass the original PyTorch tensor to create_pipeline_memory_configs
+        ttnn_input_tensor, l1_input_memory_config, dram_input_memory_config = self.infra.create_pipeline_memory_configs(
+            torch_input  # Use torch_input instead of ttnn_input
+        )
+
+        assert ttnn_input_tensor.storage_type() == ttnn.StorageType.HOST, "Input tensor must be on host"
+
+        # Create pipeline if not already created
+        if self.pipeline is None:
+            self.pipeline = create_pipeline_from_config(
+                config=PipelineConfig(
+                    use_trace=True, num_command_queues=2, all_transfers_on_separate_command_queue=False
+                ),
+                model=self.infra,
+                device=self.ttnn_device,
+                dram_input_memory_config=dram_input_memory_config,
+                l1_input_memory_config=l1_input_memory_config,
+            )
+
+            ttnn.synchronize_device(self.ttnn_device)
+            self.pipeline.compile(ttnn_input_tensor)
+
+        # Run inference
+        outputs = self.pipeline.enqueue([ttnn_input_tensor]).pop_all()
+
         logger.info("TTNN inference completed in {:.4f}s", time.time() - start)
-        return output
+        return outputs
 
     def preprocess_image(self, image_path: str):
         """Preprocess image for CenterNet using original CenterNet preprocessing."""
@@ -145,7 +178,7 @@ class Demo:
         ttnn_input = None
         if self.ttnn_device is not None:
             ttnn_input = ttnn.from_torch(torch_input.permute(0, 2, 3, 1), dtype=ttnn.bfloat16)
-            ttnn_input = ttnn.to_device(ttnn_input, self.ttnn_device)
+            # Keep on host for pipeline - don't move to device yet
 
         meta = {
             "c": c,
@@ -220,22 +253,26 @@ class Demo:
         self.draw_detections(image_path, output_dir, torch_detections, "pytorch", meta=meta, score_threshold=0.3)
 
         if ttnn_input is not None:
-            tt_output = self.run_ttnn_inference(ttnn_input)
+            tt_output = self.run_ttnn_inference(torch_input)
 
+            # Convert list output to dictionary format
             tt_output_torch = {}
-            output_h = self.input_size // self.down_ratio
-            output_w = self.input_size // self.down_ratio
+            head_names = ["hm", "wh", "reg"]  # Order matches performant_infra output
 
-            for head_name in tt_output[0]:
-                head_output = tt2torch_tensor(tt_output[0][head_name])
+            for i, head_name in enumerate(head_names):
+                if i < len(tt_output[0]):
+                    head_output = tt2torch_tensor(tt_output[0][i])
 
-                if len(head_output.shape) == 4:
-                    if head_output.shape[1] == 1 and head_output.shape[2] == output_h * output_w:
-                        num_channels = head_output.shape[3]
-                        head_output = head_output.reshape(1, output_h, output_w, num_channels)
-                    head_output = head_output.permute(0, 3, 1, 2)
+                    # Reshape if needed
+                    if len(head_output.shape) == 4:
+                        output_h = self.input_size // self.down_ratio
+                        output_w = self.input_size // self.down_ratio
+                        if head_output.shape[1] == 1 and head_output.shape[2] == output_h * output_w:
+                            num_channels = head_output.shape[3]
+                            head_output = head_output.reshape(1, output_h, output_w, num_channels)
+                        head_output = head_output.permute(0, 3, 1, 2)
 
-                tt_output_torch[head_name] = head_output
+                    tt_output_torch[head_name] = head_output
 
             tt_output_torch["hm"] = torch.sigmoid(tt_output_torch["hm"])
 
@@ -260,6 +297,13 @@ class Demo:
 
     def cleanup(self) -> None:
         """Release device resources."""
+        if self.pipeline is not None:
+            try:
+                self.pipeline.cleanup()
+                logger.info("Pipeline cleaned up.")
+            except Exception:
+                pass
+
         if self.ttnn_device is not None:
             try:
                 ttnn.close_device(self.ttnn_device)
