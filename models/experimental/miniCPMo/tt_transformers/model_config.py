@@ -2406,7 +2406,11 @@ class ModelArgs:
 
         processor = None
         try:
-            processor = AutoProcessor.from_pretrained(self.TOKENIZER_PATH, local_files_only=os.getenv("CI") == "true")
+            processor = AutoProcessor.from_pretrained(
+                self.TOKENIZER_PATH,
+                trust_remote_code=self.trust_remote_code_hf,
+                local_files_only=os.getenv("CI") == "true",
+            )
             logger.info(f"Successfully loaded processor from {self.TOKENIZER_PATH}")
         except Exception as e:
             logger.warning(f"Failed to load processor from {self.TOKENIZER_PATH}: {e}")

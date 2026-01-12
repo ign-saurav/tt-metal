@@ -85,6 +85,9 @@ class LMHead(LightweightModule):
                 )
             )
         else:
+            # For smaller models (dim < 4096), use INTERLEAVED memory to avoid sharding issues
+            use_interleaved_weights = args.dim < 4096
+
             for i, split_size in enumerate(split_sizes):
                 # Create a list to store the split tensors for each device
                 device_splits = []
@@ -101,9 +104,12 @@ class LMHead(LightweightModule):
                     if args.dummy_weights
                     else weight_cache_path / f"output_lm_head_{num_splits}_split_shard_{i}_{combined_split.shape[-1]}"
                 )
-                memory_config = args.create_dram_sharded_mem_config(
-                    k=args.dim, n=math.ceil(combined_split.shape[-1] / self.num_devices)
-                )
+                if use_interleaved_weights:
+                    memory_config = ttnn.DRAM_MEMORY_CONFIG
+                else:
+                    memory_config = args.create_dram_sharded_mem_config(
+                        k=args.dim, n=math.ceil(combined_split.shape[-1] / self.num_devices)
+                    )
                 self.output_weights.append(
                     ttnn.as_tensor(
                         combined_split,
@@ -155,30 +161,15 @@ class LMHead(LightweightModule):
         for weight, pc in zip(self.output_weights, self.program_configs):
             if use_dram_for_decode:
                 # DRAM path for small models
-                try:
-                    output = ttnn.linear(
-                        x,
-                        weight,
-                        compute_kernel_config=self.compute_kernel_config,
-                        program_config=None,  # Let ttnn auto-select
-                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                        dtype=self.args.lm_head_dtype if hasattr(self.args, "lm_head_dtype") else ttnn.bfloat8_b,
-                    )
-                    # Already interleaved from DRAM output
-                    outputs.append(output)
-                except Exception as e:
-                    # Fallback to torch conversion
-                    x_torch = ttnn.to_torch(x).to(torch.float32)
-                    w_torch = ttnn.to_torch(weight).to(torch.float32)
-                    out_torch = torch.matmul(x_torch, w_torch)
-                    output = ttnn.from_torch(
-                        out_torch.to(torch.bfloat16),
-                        dtype=self.args.lm_head_dtype if hasattr(self.args, "lm_head_dtype") else ttnn.bfloat8_b,
-                        device=x.device(),
-                        layout=ttnn.TILE_LAYOUT,
-                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                    )
-                    outputs.append(output)
+                output = ttnn.linear(
+                    x,
+                    weight,
+                    compute_kernel_config=self.compute_kernel_config,
+                    program_config=None,  # Let ttnn auto-select
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    dtype=self.args.lm_head_dtype if hasattr(self.args, "lm_head_dtype") else ttnn.bfloat8_b,
+                )
+                outputs.append(output)
             else:
                 output = ttnn.linear(
                     x,

@@ -209,10 +209,17 @@ class Attention(LightweightModule):
         assert configuration.qkv_size % self.num_devices_per_group == 0
         assert configuration.dim % self.num_devices_per_group == 0
 
+        # For smaller models (dim < 4096), use INTERLEAVED memory to avoid sharding issues
+        # WIDTH_SHARDED weights cause "Input B memory layout must be INTERLEAVED" errors
+        self.use_interleaved_weights = configuration.dim < 4096 and not self.TG
+
         # wqkv: 4096 x 3072 (2 devices): width-sharded on 12 banks, 3072 over 12 banks.
-        wqkv_mem_config = configuration.create_dram_sharded_mem_config(
-            configuration.dim, configuration.qkv_size // configuration.num_devices
-        )
+        if self.use_interleaved_weights:
+            wqkv_mem_config = ttnn.DRAM_MEMORY_CONFIG
+        else:
+            wqkv_mem_config = configuration.create_dram_sharded_mem_config(
+                configuration.dim, configuration.qkv_size // configuration.num_devices
+            )
 
         qkv_list = []
         for i in range(self.num_devices_per_group):
@@ -236,7 +243,7 @@ class Attention(LightweightModule):
             dtype=self.wqkv_dtype,
             layout=ttnn.TILE_LAYOUT,
             device=self.mesh_device,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG if self.TG else wqkv_mem_config,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG if (self.TG or self.use_interleaved_weights) else wqkv_mem_config,
             mesh_mapper=ttnn.ShardTensor2dMesh(
                 self.mesh_device, dims=(3, 2) if self.TG else (2, 3), mesh_shape=configuration.cluster_shape
             ),
@@ -297,16 +304,21 @@ class Attention(LightweightModule):
         self.use_fused_all_gather_matmul = self.model_config["USE_FUSED_ALL_GATHER_MATMUL"]
         pt_wo = state_dict[f"{wo_str}.weight"].transpose(-1, -2).unsqueeze(0).unsqueeze(0)
 
-        wo_mem_config = configuration.create_dram_sharded_mem_config(
-            (configuration.n_heads * configuration.head_dim) // configuration.num_devices, configuration.dim
-        )
+        if self.use_interleaved_weights:
+            wo_mem_config = ttnn.DRAM_MEMORY_CONFIG
+        else:
+            wo_mem_config = configuration.create_dram_sharded_mem_config(
+                (configuration.n_heads * configuration.head_dim) // configuration.num_devices, configuration.dim
+            )
 
         self.wo = ttnn.as_tensor(
             pt_wo,
             dtype=self.wo_dtype,
             layout=ttnn.TILE_LAYOUT,
             device=self.mesh_device,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG if (self.use_fused_all_gather_matmul or self.TG) else wo_mem_config,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG
+            if (self.use_fused_all_gather_matmul or self.TG or self.use_interleaved_weights)
+            else wo_mem_config,
             mesh_mapper=ttnn.ShardTensor2dMesh(
                 self.mesh_device,
                 dims=(2, 3) if (self.use_fused_all_gather_matmul or self.TG) else (3, 2),
@@ -387,39 +399,24 @@ class Attention(LightweightModule):
         x: (seq_len, 1, batch, dim)
         current_pos: (batch_size), current token position in the sequence for each user
         """
-
         ###
         # QKV matmuls
         # Use HiFi2 for DRAM-sharded matmuls as they are otherwise flop-bound. Loses 1 bit of activation precision.
         ###
 
         # For smaller models (dim < 4096), use DRAM-based matmul to avoid L1 conflicts
-        use_dram_path = self.hidden_size < 4096
+        use_dram_path = self.hidden_size < 4096 and not self.TG
 
         if use_dram_path:
-            # DRAM interleaved path - slower but avoids L1 conflicts
-            # Use torch conversion to avoid memory layout issues
-            x_torch = ttnn.to_torch(x)
-            wqkv_torch = ttnn.to_torch(self.wqkv)
-
-            x_dram = ttnn.from_torch(
-                x_torch,
-                dtype=ttnn.bfloat16,
-                device=x.device(),
-                layout=ttnn.TILE_LAYOUT,
+            # DRAM interleaved path for small models
+            xqkv_fused_sharded = ttnn.linear(
+                x,
+                self.wqkv,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                program_config=None,  # Let ttnn auto-select
+                compute_kernel_config=self.li_qkv_decode_compute_kernel_cfg,
+                dtype=self.activation_dtype or ttnn.bfloat16,
             )
-            wqkv_dram = ttnn.from_torch(
-                wqkv_torch,
-                dtype=ttnn.bfloat16,
-                device=x.device(),
-                layout=ttnn.TILE_LAYOUT,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            )
-
-            xqkv_fused_sharded = ttnn.linear(x_dram, wqkv_dram, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-            ttnn.deallocate(x_dram)
-            ttnn.deallocate(wqkv_dram)
         else:
             # L1 sharded path - fast, for larger models
             xqkv_fused_sharded = ttnn.linear(
@@ -655,29 +652,14 @@ class Attention(LightweightModule):
 
             # For DRAM path, use DRAM memory config and auto-select program config
             if use_dram_path:
-                try:
-                    dense_out_sharded = ttnn.matmul(
-                        attn_output,
-                        self.wo,
-                        core_grid=None,
-                        program_config=None,
-                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                        compute_kernel_config=self.li_o_decode_compute_kernel_cfg,
-                    )
-                except:
-                    attn_output_conv = ttnn.from_torch(
-                        ttnn.to_torch(attn_output),
-                        dtype=ttnn.bfloat16,
-                        device=attn_output.device(),
-                        layout=ttnn.TILE_LAYOUT,
-                    )
-                    wo_conv = ttnn.from_torch(
-                        ttnn.to_torch(self.wo),
-                        dtype=ttnn.bfloat16,
-                        device=attn_output.device(),
-                        layout=ttnn.TILE_LAYOUT,
-                    )
-                    dense_out_sharded = ttnn.matmul(attn_output_conv, wo_conv)
+                dense_out_sharded = ttnn.matmul(
+                    attn_output,
+                    self.wo,
+                    core_grid=None,
+                    program_config=None,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    compute_kernel_config=self.li_o_decode_compute_kernel_cfg,
+                )
             else:
                 # TODO: Fix this once self.TG supports dram-sharded matmuls
                 dense_out_sharded = ttnn.matmul(
@@ -739,6 +721,9 @@ class Attention(LightweightModule):
         # QKV matmuls
         ###
 
+        # For smaller models (dim < 4096), use None program config to avoid L1 buffer overflow
+        use_auto_program_config = self.hidden_size < 4096 and not self.TG
+
         # reshaping long sequence to matmul fit on device
         if seq_len > self.MAX_QKV_MM_SEQ_LEN:
             if seq_len % self.MAX_QKV_MM_SEQ_LEN != 0:
@@ -751,7 +736,7 @@ class Attention(LightweightModule):
             dtype=self.ccl_dtype if self.TG else self.activation_dtype or ttnn.bfloat16,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             compute_kernel_config=self.li_qkv_prefill_compute_kernel_cfg,
-            program_config=self.model_config["XQKV_PREFILL_PROGCFG"](seq_len),
+            program_config=None if use_auto_program_config else self.model_config["XQKV_PREFILL_PROGCFG"](seq_len),
         )
 
         # FIXME: surely ttnn.linear bias should work?
@@ -943,7 +928,7 @@ class Attention(LightweightModule):
             compute_kernel_config=self.li_o_prefill_compute_kernel_cfg,
             dtype=self.activation_dtype or ttnn.bfloat8_b,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            program_config=self.model_config["WO_PREFILL_PROGCFG"](seq_len),
+            program_config=None if use_auto_program_config else self.model_config["WO_PREFILL_PROGCFG"](seq_len),
         )
 
         if seq_len > 1024:
