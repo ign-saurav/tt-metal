@@ -15,6 +15,9 @@ from models.experimental.miniCPMo.tt.ttnn_siglip_vision import TtSiglipVisionTra
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.experimental.miniCPMo.tests.test_siglip_vision_emb import create_siglip_vision_embedding_preprocessor
 
+from transformers import SiglipVisionConfig
+from transformers.models.siglip.modeling_siglip import SiglipVisionTransformer
+
 
 def create_tensor(shape, dtype):
     return torch.randn(shape, dtype=dtype) if dtype.is_floating_point else torch.tensor([[27, 37]], dtype=torch.int32)
@@ -42,13 +45,36 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
     patch_attn_mask = torch.ones((1, 999), dtype=torch.bool)
     tgt_sizes = create_tensor((1, 2), torch.int32)
 
-    vpm = model.vpm
+    config = SiglipVisionConfig(
+        image_size=224,
+        patch_size=14,
+        hidden_size=1152,
+        num_hidden_layers=27,
+        num_attention_heads=16,
+        intermediate_size=4304,
+    )
+
+    vpm = SiglipVisionTransformer(config)
+
+    # vpm = model.vpm
+    state_dict = torch.load("siglip_weights.pth", map_location="cpu")
+    # Remove "vision_model." prefix
+    new_state_dict = {}
+    for k, v in state_dict.items():
+        if k.startswith("vision_model."):
+            new_state_dict[k.replace("vision_model.", "", 1)] = v
+    vpm.head = None
+    import pdb
+
+    pdb.set_trace()
+    # vpm.load_state_dict(new_state_dict)
+    missing, unexpected = vpm.load_state_dict(new_state_dict, strict=False)
     torch_output = vpm.forward(all_pixel_values, patch_attn_mask, tgt_sizes)
 
     # Get the state dict of vpm
     vpm_state_dict = vpm.state_dict()
 
-    embeddings_model = model.vpm.embeddings
+    # embeddings_model = model.vpm.embeddings
     parameters = preprocess_model_parameters(
         initialize_model=lambda: embeddings_model,
         custom_preprocessor=create_siglip_vision_embedding_preprocessor(device, weight_dtype),
