@@ -345,7 +345,7 @@ class TtnnDVAE:
         self.downsample_conv = [
             {
                 "weight": ttnn.from_torch(
-                    weights_dict["downsample_conv.0.weight"].unsqueeze(-2),
+                    weights_dict["downsample_conv.0.weight"],
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
@@ -357,7 +357,7 @@ class TtnnDVAE:
             },
             {
                 "weight": ttnn.from_torch(
-                    weights_dict["downsample_conv.2.weight"].unsqueeze(-2),
+                    weights_dict["downsample_conv.2.weight"],
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
@@ -373,7 +373,7 @@ class TtnnDVAE:
         self.encoder_conv_in = [
             {
                 "weight": ttnn.from_torch(
-                    weights_dict["encoder.conv_in.0.weight"].unsqueeze(-2),
+                    weights_dict["encoder.conv_in.0.weight"],
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
@@ -385,7 +385,7 @@ class TtnnDVAE:
             },
             {
                 "weight": ttnn.from_torch(
-                    weights_dict["encoder.conv_in.2.weight"].unsqueeze(-2),
+                    weights_dict["encoder.conv_in.2.weight"],
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
@@ -403,7 +403,7 @@ class TtnnDVAE:
             block_weights = {
                 "dwconv": {
                     "weight": torch_to_ttnn(
-                        weights_dict[f"encoder.decoder_block.{i}.dwconv.weight"].unsqueeze(-2),
+                        weights_dict[f"encoder.decoder_block.{i}.dwconv.weight"],
                         self.device,
                         memory_config=get_weights_memory_config(),
                         layout=ttnn.ROW_MAJOR_LAYOUT,
@@ -412,7 +412,7 @@ class TtnnDVAE:
                 },
                 "norm": {
                     "weight": torch_to_ttnn(
-                        weights_dict[f"encoder.decoder_block.{i}.norm.weight"].unsqueeze(-2),
+                        weights_dict[f"encoder.decoder_block.{i}.norm.weight"],
                         self.device,
                         memory_config=get_weights_memory_config(),
                         layout=ttnn.TILE_LAYOUT,
@@ -450,7 +450,7 @@ class TtnnDVAE:
         # Encoder output convolution
         # Weights should be in DRAM for conv2d operations
         self.encoder_conv_out = ttnn.from_torch(
-            weights_dict["encoder.conv_out.weight"].unsqueeze(-2),
+            weights_dict["encoder.conv_out.weight"],
             dtype=ttnn.bfloat16,
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
@@ -459,7 +459,7 @@ class TtnnDVAE:
         self.decoder_conv_in = [
             {
                 "weight": ttnn.from_torch(
-                    weights_dict["decoder.conv_in.0.weight"].unsqueeze(-2),
+                    weights_dict["decoder.conv_in.0.weight"],
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
@@ -471,7 +471,7 @@ class TtnnDVAE:
             },
             {
                 "weight": ttnn.from_torch(
-                    weights_dict["decoder.conv_in.2.weight"].unsqueeze(-2),
+                    weights_dict["decoder.conv_in.2.weight"],
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
@@ -489,7 +489,7 @@ class TtnnDVAE:
             block_weights = {
                 "dwconv": {
                     "weight": torch_to_ttnn(
-                        weights_dict[f"decoder.decoder_block.{i}.dwconv.weight"].unsqueeze(-2),
+                        weights_dict[f"decoder.decoder_block.{i}.dwconv.weight"],
                         self.device,
                         memory_config=get_weights_memory_config(),
                         layout=ttnn.ROW_MAJOR_LAYOUT,
@@ -498,7 +498,7 @@ class TtnnDVAE:
                 },
                 "norm": {
                     "weight": torch_to_ttnn(
-                        weights_dict[f"decoder.decoder_block.{i}.norm.weight"].unsqueeze(-2),
+                        weights_dict[f"decoder.decoder_block.{i}.norm.weight"],
                         self.device,
                         memory_config=get_weights_memory_config(),
                         layout=ttnn.TILE_LAYOUT,
@@ -536,7 +536,7 @@ class TtnnDVAE:
         # Decoder projection - NEW: hidden_dim -> 512 channels (1x1 conv)
         # Weights should NOT be on device for conv2d
         self.decoder_proj = ttnn.from_torch(
-            weights_dict["decoder.conv_out.weight"].unsqueeze(-2),
+            weights_dict["decoder.conv_out.weight"],
             dtype=ttnn.bfloat16,
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
@@ -544,7 +544,7 @@ class TtnnDVAE:
         # Output convolution - weights should NOT be on device for conv2d
         self.out_conv = {
             "weight": ttnn.from_torch(
-                weights_dict["out_conv.weight"].unsqueeze(-2),
+                weights_dict["out_conv.weight"],
                 dtype=ttnn.bfloat16,
                 layout=ttnn.ROW_MAJOR_LAYOUT,
             ),

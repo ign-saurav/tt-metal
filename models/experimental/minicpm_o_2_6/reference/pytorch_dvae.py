@@ -51,44 +51,44 @@ class PyTorchDVAE(nn.Module):
         # Coefficient
         self.coef = nn.Parameter(torch.randn(1, num_mel_bins, 1))
 
-        # Encoder downsampling (2D conv)
+        # Encoder downsampling (1D conv)
         self.encoder_downsample = nn.Sequential(
-            nn.Conv2d(num_mel_bins, 512, (1, 3), padding=(0, 1)),  # 2D conv: H=1, W=kernel
+            nn.Conv1d(num_mel_bins, 512, 3, padding=1),  # 1D conv
             nn.GELU(),  # Production: GELU instead of ReLU
-            nn.Conv2d(512, 512, (1, 4), stride=(1, 2), padding=(0, 1)),  # 2D conv with stride
+            nn.Conv1d(512, 512, 4, stride=2, padding=1),  # 1D conv with stride
             nn.GELU(),  # Production: GELU instead of ReLU
         )
 
         # Encoder input (Production: bn_dim=128)
         self.encoder_input = nn.Sequential(
-            nn.Conv2d(512, bn_dim, (1, 3), padding=(0, 1)),
+            nn.Conv1d(512, bn_dim, 3, padding=1),
             nn.GELU(),  # Production: GELU instead of ReLU
-            nn.Conv2d(bn_dim, hidden_dim, (1, 3), padding=(0, 1)),
+            nn.Conv1d(bn_dim, hidden_dim, 3, padding=1),
             # nn.GELU(),  # Production: GELU instead of ReLU
         )
 
-        # Encoder blocks (2D ConvNeXt)
-        self.encoder_blocks = nn.ModuleList([ConvNeXtBlock2D(hidden_dim) for _ in range(num_encoder_layers)])
+        # Encoder blocks (1D ConvNeXt)
+        self.encoder_blocks = nn.ModuleList([ConvNeXtBlock1D(hidden_dim) for _ in range(num_encoder_layers)])
 
         # Encoder output
-        self.encoder_output = nn.Conv2d(hidden_dim, 1024, (1, 1))  # 1x1 conv
+        self.encoder_output = nn.Conv1d(hidden_dim, 1024, 1)  # 1x1 conv
 
         # Decoder input (Production: decoder processes 1024 channels from encoder)
         self.decoder_input = nn.Sequential(
-            nn.Conv2d(512, bn_dim, (1, 3), padding=(0, 1)),  # Production: 512 input channels from encoder
+            nn.Conv1d(512, bn_dim, 3, padding=1),  # Production: 512 input channels from encoder
             nn.GELU(),  # Production: GELU instead of ReLU
-            nn.Conv2d(bn_dim, hidden_dim, (1, 3), padding=(0, 1)),
+            nn.Conv1d(bn_dim, hidden_dim, 3, padding=1),
             # nn.GELU(),  # Production: GELU instead of ReLU
         )
 
         # Decoder blocks
-        self.decoder_blocks = nn.ModuleList([ConvNeXtBlock2D(hidden_dim) for _ in range(num_decoder_layers)])
+        self.decoder_blocks = nn.ModuleList([ConvNeXtBlock1D(hidden_dim) for _ in range(num_decoder_layers)])
 
         # Decoder projection: hidden_dim -> 512 channels (NEW layer)
-        self.decoder_proj = nn.Conv2d(hidden_dim, 512, (1, 1))  # 1x1 conv
+        self.decoder_proj = nn.Conv1d(hidden_dim, 512, 1)  # 1x1 conv
 
         # Decoder output (Production: 512 -> num_mel_bins)
-        self.decoder_output = nn.Conv2d(512, num_mel_bins, (1, 3), padding=(0, 1))
+        self.decoder_output = nn.Conv1d(512, num_mel_bins, 3, padding=1)
 
     def forward(self, mel_spectrogram: torch.Tensor) -> torch.Tensor:
         """
@@ -100,12 +100,9 @@ class PyTorchDVAE(nn.Module):
         Returns:
             torch.Tensor: Reconstructed mel spectrogram
         """
-        # Reshape for 2D conv: [batch, mel_bins, time_steps] -> [batch, 1, time_steps, mel_bins] (NHWC)
-        batch_size, num_mel_bins, time_steps = mel_spectrogram.shape
-        x = mel_spectrogram.permute(0, 2, 1).unsqueeze(1)  # [batch, 1, time_steps, mel_bins]
-
+        # Input is already in [B, C, T] format for Conv1d
         # Encoder
-        encoded = self._encode(x)
+        encoded = self._encode(mel_spectrogram)
 
         # Apply GFSQ quantization (or bypass if disabled)
         if self.enable_gfsq:
@@ -115,107 +112,88 @@ class PyTorchDVAE(nn.Module):
             # Bypass quantization - pass through unchanged
             quantized = encoded
 
+        print("quantized.shape : ", quantized.shape)
+
         quantized = (
             quantized.view(
-                (1, 1, quantized.size(2), 2, quantized.size(3) // 2),
-            )
-            .permute(0, 1, 4, 2, 3)
-            .flatten(3)
-            .permute(0, 1, 3, 2)
+                (1, quantized.size(1) // 2, 2, quantized.size(2)),
+            ).flatten(2)
+            # .permute(0, 2, 1)
         )
-
-        print(quantized.shape)
 
         # Decoder
         reconstructed = self._decode(quantized)
-
-        # Reshape back: [batch, 1, time_steps, mel_bins] -> [batch, mel_bins, time_steps] (NCHW)
-        reconstructed = reconstructed.squeeze(1).permute(0, 2, 1)
 
         return reconstructed
 
     def _encode(self, x: torch.Tensor) -> torch.Tensor:
         """
         Encoder forward pass.
-        Input x: [batch, 1, time_steps, mel_bins] (NHWC)
+        Input x: [batch, num_mel_bins, time_steps] (NCT format for Conv1d)
         """
         # Skip coefficient for testing basic conv operations
-        # coef_expanded = self.coef.unsqueeze(-1).unsqueeze(1)  # [1, 1, mel_bins, 1]
+        # coef_expanded = self.coef.unsqueeze(-1)  # [1, num_mel_bins, 1]
         # x = x * coef_expanded
 
-        # Convert NHWC to NCHW for downsampling: [B, 1, T, C] -> [B, C, 1, T]
-        x = x.permute(0, 3, 1, 2)  # [B, C, 1, T]
-
-        # Downsampling (NCHW format)
+        # Downsampling (NCT format: [B, C, T])
         x = self.encoder_downsample(x)
 
-        # Keep in NCHW for encoder_input: [B, C, 1, T]
-
-        # Input processing (NCHW)
+        # Input processing (NCT format)
         x = self.encoder_input(x)
 
-        # Convert to NHWC for ConvNeXt blocks: [B, C, 1, T] -> [B, 1, T, C]
-        x = x.permute(0, 2, 3, 1)  # [B, 1, T, C]
+        # ConvNeXt blocks (PRODUCTION: 12 blocks enabled)
+        # Convert to [B, T, C] for ConvNeXt blocks
+        x = x.permute(0, 2, 1)  # [B, T, C]
 
-        # ConvNeXt blocks (PRODUCTION: 12 blocks enabled, NHWC)
         for block in self.encoder_blocks:
             x = block(x)
 
-        # Convert to NCHW for encoder_output: [B, 1, T, C] -> [B, C, 1, T]
-        x = x.permute(0, 3, 1, 2)  # [B, C, 1, T]
+        # Convert back to [B, C, T] for encoder_output
+        x = x.permute(0, 2, 1)  # [B, C, T]
 
-        # Output (NCHW)
+        # Output
         x = self.encoder_output(x)
-
-        # Convert back to NHWC for decoder: [B, C, 1, T] -> [B, 1, T, C]
-        x = x.permute(0, 2, 3, 1)  # [B, 1, T, C]
 
         return x
 
     def _decode(self, x: torch.Tensor) -> torch.Tensor:
         """
         Decoder forward pass.
-        Production: processes 512-channel VQ features, applies 12 ConvNeXt blocks
-        Input x: [batch, 1, time_steps, 1024] (encoder output, NHWC)
+        Production: processes 1024-channel features from encoder, applies 12 ConvNeXt blocks
+        Input x: [batch, 1024, time_steps] (encoder output, NCT format)
         """
-        # Convert to NCHW for decoder_input: [B, 1, T, C] -> [B, C, 1, T]
-        x = x.permute(0, 3, 1, 2)  # [B, C, 1, T]
-
-        # Input processing (1024 -> 512 -> hidden_dim, NCHW)
+        # Input processing (1024 -> bn_dim -> hidden_dim, NCT format)
         x = self.decoder_input(x)
 
-        # Convert to NHWC for ConvNeXt blocks: [B, C, 1, T] -> [B, 1, T, C]
-        x = x.permute(0, 2, 3, 1)  # [B, 1, T, C]
+        # ConvNeXt blocks (PRODUCTION: 12 blocks enabled)
+        # Convert to [B, T, C] for ConvNeXt blocks
+        x = x.permute(0, 2, 1)  # [B, T, C]
 
-        # ConvNeXt blocks (PRODUCTION: 12 blocks enabled, NHWC)
         for block in self.decoder_blocks:
             x = block(x)
 
-        # Convert to NCHW for decoder output: [B, 1, T, C] -> [B, C, 1, T]
-        x = x.permute(0, 3, 1, 2)  # [B, C, 1, T]
+        # Convert back to [B, C, T] for decoder output
+        x = x.permute(0, 2, 1)  # [B, C, T]
 
         # Decoder projection: hidden_dim -> 512 channels
         x = self.decoder_proj(x)
 
-        # Output (512 -> num_mel_bins, NCHW)
+        # Output (512 -> num_mel_bins, NCT format)
         x = self.decoder_output(x)
-
-        # Convert back to NHWC for return: [B, C, 1, T] -> [B, 1, T, C]
-        x = x.permute(0, 2, 3, 1)  # [B, 1, T, C]
 
         return x
 
 
-class ConvNeXtBlock2D(nn.Module):
+class ConvNeXtBlock1D(nn.Module):
     """
-    Simplified ConvNeXt block for 2D convolutions.
-    Adapted for mel spectrogram processing in NHWC format: [batch, 1, time_steps, channels]
+    Simplified ConvNeXt block for 1D convolutions.
+    Adapted for mel spectrogram processing: [batch, time_steps, channels]
     """
 
     def __init__(self, dim: int):
         super().__init__()
-        # Depthwise 2D conv: groups=dim for depthwise
-        self.dwconv = nn.Conv2d(dim, dim, (1, 7), padding=(0, 3), groups=dim)
+        # Depthwise 1D conv: groups=dim for depthwise
+        self.dwconv = nn.Conv1d(dim, dim, 7, padding=3, groups=dim)
         self.norm = nn.LayerNorm(dim)
         self.pwconv1 = nn.Linear(dim, 4 * dim)
         self.act = nn.GELU()
@@ -226,30 +204,25 @@ class ConvNeXtBlock2D(nn.Module):
         Forward pass.
 
         Args:
-            x: [batch_size, 1, time_steps, dim] (NHWC format)
+            x: [batch_size, time_steps, dim] (NTC format)
 
         Returns:
-            torch.Tensor: [batch_size, 1, time_steps, dim] (NHWC format)
+            torch.Tensor: [batch_size, time_steps, dim] (NTC format)
         """
         residual = x
 
-        # Depthwise conv (NHWC -> NHWC, but Conv2d expects NCHW)
-        # Convert to NCHW for Conv2d: [B, 1, T, C] -> [B, C, 1, T]
-        x_nchw = x.permute(0, 3, 1, 2)  # [B, C, 1, T]
-        x_nchw = self.dwconv(x_nchw)  # [B, C, 1, T]
+        # Depthwise conv: Convert to [B, C, T] for Conv1d
+        x_nct = x.permute(0, 2, 1)  # [B, C, T]
+        x_nct = self.dwconv(x_nct)  # [B, C, T]
 
-        # Convert back to NHWC for LayerNorm: [B, C, 1, T] -> [B, 1, T, C]
-        x = x_nchw.permute(0, 2, 3, 1)  # [B, 1, T, C]
+        # Convert back to [B, T, C] for LayerNorm
+        x = x_nct.permute(0, 2, 1)  # [B, T, C]
 
-        # Permute for LayerNorm: [B, 1, T, C] -> [B, T, C]
-        x_for_norm = x.squeeze(1)  # [B, T, C]
-        x_for_norm = self.norm(x_for_norm)
-        x_for_norm = self.pwconv1(x_for_norm)
-        x_for_norm = self.act(x_for_norm)
-        x_for_norm = self.pwconv2(x_for_norm)
-
-        # Reshape back: [B, T, C] -> [B, 1, T, C]
-        x = x_for_norm.unsqueeze(1)  # [B, 1, T, C]
+        # LayerNorm and pointwise convs
+        x = self.norm(x)
+        x = self.pwconv1(x)
+        x = self.act(x)
+        x = self.pwconv2(x)
 
         # Residual
         x = x + residual

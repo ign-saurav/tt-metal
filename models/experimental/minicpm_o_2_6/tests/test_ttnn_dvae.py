@@ -22,7 +22,7 @@ if str(tt_path) not in sys.path:
 if str(ref_path) not in sys.path:
     sys.path.insert(0, str(ref_path))
 
-from models.experimental.minicpm_o_2_6.tt.ttnn_dvae import TtnnDVAE
+from models.experimental.minicpm_o_2_6.tt.ttnn_dvae_new import TtnnDVAE
 
 # Import directly from the file to avoid reference_pytorch path conflict
 import importlib.util
@@ -83,6 +83,8 @@ def test_dvae_forward_pcc(device):
 
     # Create models
     ttnn_model = TtnnDVAE(mesh_device=device)
+    import pickle
+    import os
 
     pt_model = PyTorchDVAE(
         num_encoder_layers=num_encoder_layers,
@@ -101,35 +103,35 @@ def test_dvae_forward_pcc(device):
         pt_model.coef.copy_(weights["coef"])
 
         # Downsample convs - TTNN format is [out, in, H, W], PyTorch expects [out, in, H, W]
-        pt_model.encoder_downsample[0].weight.copy_(weights["downsample_conv.0.weight"].unsqueeze(-2))
+        pt_model.encoder_downsample[0].weight.copy_(weights["downsample_conv.0.weight"])
         pt_model.encoder_downsample[0].bias.copy_(weights["downsample_conv.0.bias"].squeeze())
-        pt_model.encoder_downsample[2].weight.copy_(weights["downsample_conv.2.weight"].unsqueeze(-2))
+        pt_model.encoder_downsample[2].weight.copy_(weights["downsample_conv.2.weight"])
         pt_model.encoder_downsample[2].bias.copy_(weights["downsample_conv.2.bias"].squeeze())
 
         # Encoder input convs
-        pt_model.encoder_input[0].weight.copy_(weights["encoder.conv_in.0.weight"].unsqueeze(-2))
+        pt_model.encoder_input[0].weight.copy_(weights["encoder.conv_in.0.weight"])
         pt_model.encoder_input[0].bias.copy_(weights["encoder.conv_in.0.bias"].squeeze())
-        pt_model.encoder_input[2].weight.copy_(weights["encoder.conv_in.2.weight"].unsqueeze(-2))
+        pt_model.encoder_input[2].weight.copy_(weights["encoder.conv_in.2.weight"])
         pt_model.encoder_input[2].bias.copy_(weights["encoder.conv_in.2.bias"].squeeze())
 
         # Encoder output - [1024, 256, 1, 1] -> [1024, 256, 1, 1] (no squeeze needed)
-        pt_model.encoder_output.weight.copy_(weights["encoder.conv_out.weight"].unsqueeze(-2))
+        pt_model.encoder_output.weight.copy_(weights["encoder.conv_out.weight"])
 
         # Decoder input convs
-        pt_model.decoder_input[0].weight.copy_(weights["decoder.conv_in.0.weight"].unsqueeze(-2))
+        pt_model.decoder_input[0].weight.copy_(weights["decoder.conv_in.0.weight"])
         pt_model.decoder_input[0].bias.copy_(
             weights["decoder.conv_in.0.bias"].squeeze()
         )  # Convert [1,1,1,bn_dim] -> [bn_dim]
-        pt_model.decoder_input[2].weight.copy_(weights["decoder.conv_in.2.weight"].unsqueeze(-2))
+        pt_model.decoder_input[2].weight.copy_(weights["decoder.conv_in.2.weight"])
         pt_model.decoder_input[2].bias.copy_(
             weights["decoder.conv_in.2.bias"].squeeze()
         )  # Convert [1,1,1,hidden_dim] -> [hidden_dim]
 
         # Decoder projection
-        pt_model.decoder_proj.weight.copy_(weights["decoder.conv_out.weight"].unsqueeze(-2))
+        pt_model.decoder_proj.weight.copy_(weights["decoder.conv_out.weight"])
 
         # Output conv
-        pt_model.decoder_output.weight.copy_(weights["out_conv.weight"].unsqueeze(-2))
+        pt_model.decoder_output.weight.copy_(weights["out_conv.weight"])
 
         # ConvNeXt blocks (simplified - skip for now due to complexity)
 
@@ -138,8 +140,16 @@ def test_dvae_forward_pcc(device):
     mel_spectrogram_nchw = torch.randn(batch_size, num_mel_bins, time_steps)  # [B, C, W]
 
     # PyTorch forward (expects NCHW format)
-    with torch.no_grad():
-        pt_output_nchw = pt_model(mel_spectrogram_nchw)  # Output: [B, C, W]
+    if not os.path.exists("model_output.pkl"):
+        with torch.no_grad():
+            pt_output_nchw = pt_model(mel_spectrogram_nchw)  # Output: [B, C, W]
+        with open("model_output.pkl", "wb") as f:
+            pickle.dump(pt_output_nchw, f)
+
+    else:
+        # Load
+        with open("model_output.pkl", "rb") as f:
+            pt_output_nchw = pickle.load(f)
 
     # Convert to NHWC format for TTNN: [B, C, W] -> [B, H=1, W, C]
     mel_spectrogram_nhwc = mel_spectrogram_nchw.unsqueeze(1).permute(0, 1, 3, 2)  # [B, 1, W, C]
