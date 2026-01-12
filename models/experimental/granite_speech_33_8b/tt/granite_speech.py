@@ -12,12 +12,23 @@ from models.experimental.granite_speech_33_8b.tt.generator import (
     prepare_generator_args,
 )
 from typing import List
+from models.experimental.granite_speech_33_8b.tt.ttnn_encoder_block import GraniteSpeechCTCEncoderTTNN
+from models.experimental.granite_speech_33_8b.tt.ttnn_projector_block import GraniteSpeechEncoderProjectorTTNN
 
 
 class GraniteSpeech:
     """TTNN implementation of GraniteSpeech."""
 
-    def __init__(self, mesh_device, config, tokenizer=None, torch_ref=None, use_torch_audio_feat=True):
+    def __init__(
+        self,
+        mesh_device,
+        config,
+        tokenizer=None,
+        torch_ref=None,
+        use_torch_audio_feat=True,
+        include_conformer_layernorm=True,
+        use_optimized_attention_projector=True,
+    ):
         self.mesh_device = mesh_device
         self.config = config
         self.torch_ref = torch_ref
@@ -28,8 +39,12 @@ class GraniteSpeech:
             self.encoder = self.torch_ref.encoder
             self.projector = self.torch_ref.projector
         else:
-            self.encoder = self.encoder
-            self.projector = self.projector
+            self.encoder = GraniteSpeechCTCEncoderTTNN(mesh_device, config.encoder_config, include_conformer_layernorm)
+            self.projector = GraniteSpeechEncoderProjectorTTNN(mesh_device, config, use_optimized_attention_projector)
+            self.encoder.prepare_weights(self.torch_ref.encoder)
+            self.projector.prepare_weights(self.torch_ref.projector)
+            self.encoder = self.encoder.forward
+            self.projector = self.projector.forward
 
         self.batch_size = 1
         self.data_parallel = 1
@@ -74,8 +89,17 @@ class GraniteSpeech:
         global_batch_size = 1
 
         """Get the audio features to merged into the multimodal embeddings."""
+        if not self.use_torch_audio_feat:
+            input_features = ttnn.from_torch(
+                input_features, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.mesh_device
+            )
+        else:
+            input_features = input_features.to(torch.bfloat16)
         encoder_embeds = self.encoder(input_features)
         audio_features = self.projector(encoder_embeds)
+
+        if not self.use_torch_audio_feat:
+            audio_features = ttnn.to_torch(audio_features)
 
         is_audio_index = input_ids == self.config.audio_token_id
         llm_input_ids = torch.where(is_audio_index, 0, input_ids)
@@ -143,13 +167,13 @@ class GraniteSpeech:
                 temperature=sampling_params["temperature"],
                 top_k=sampling_params["top_k"],
                 top_p=sampling_params["top_p"],
-                frequency_penalty=sampling_params["frequency_penalty"]
-                if "frequency_penalty" in sampling_params
-                else 0.0,
+                frequency_penalty=(
+                    sampling_params["frequency_penalty"] if "frequency_penalty" in sampling_params else 0.0
+                ),
                 presence_penalty=sampling_params["presence_penalty"] if "presence_penalty" in sampling_params else 0.0,
-                repetition_penalty=sampling_params["repetition_penalty"]
-                if "repetition_penalty" in sampling_params
-                else 1.0,
+                repetition_penalty=(
+                    sampling_params["repetition_penalty"] if "repetition_penalty" in sampling_params else 1.0
+                ),
             )
             if self.model[0]._supports_on_device_sampling
             else None
@@ -236,7 +260,4 @@ class GraniteSpeech:
             logger.info("Finished decoding, printing the final outputs...\n")
             for i, output in enumerate(all_outputs):
                 text = self.tokenizer.decode(output)
-                short_prompt = "TODO: Add prompt"
-                logger.info(
-                    f"\n==REPEAT BATCH {0}\n==USER {i} - PROMPT\n{short_prompt} \n==USER {i} - OUTPUT\n{text}\n"
-                )
+                logger.info(f"\nSTT OUTPUT: {text}\n")
