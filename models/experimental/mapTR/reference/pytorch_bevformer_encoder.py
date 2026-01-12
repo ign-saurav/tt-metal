@@ -318,7 +318,7 @@ class BEVFormerLayer(nn.Module):
         num_ffns = operation_order.count("ffn")
 
         for ffn_index in range(num_ffns):
-            self.ffns.append(FFN(self.embed_dims))
+            self.ffns.append(FFN(self.embed_dims, feedforward_channels=self.feedforward_channels))
 
         self.norms = nn.ModuleList()
         num_norms = operation_order.count("norm")
