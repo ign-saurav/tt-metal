@@ -403,22 +403,29 @@ class TtnnDVAE:
             block_weights = {
                 "dwconv": {
                     "weight": torch_to_ttnn(
+                        # Conv1D [out, 1, W] -> Conv2D [out, 1, 1, W]
                         weights_dict[f"encoder.decoder_block.{i}.dwconv.weight"].unsqueeze(-2),
                         self.device,
                         memory_config=get_weights_memory_config(),
                         layout=ttnn.ROW_MAJOR_LAYOUT,
                     ),
-                    "bias": None,  # Disable bias for testing
+                    "bias": torch_to_ttnn(
+                        weights_dict[f"encoder.decoder_block.{i}.dwconv.bias"].view(1, 1, 1, -1),
+                        self.device,
+                        memory_config=get_weights_memory_config(),
+                        layout=ttnn.ROW_MAJOR_LAYOUT,
+                    ),
                 },
                 "norm": {
+                    # LayerNorm weights are 1D [hidden_dim]
                     "weight": torch_to_ttnn(
-                        weights_dict[f"encoder.decoder_block.{i}.norm.weight"].unsqueeze(-2),
+                        weights_dict[f"encoder.decoder_block.{i}.norm.weight"],
                         self.device,
                         memory_config=get_weights_memory_config(),
                         layout=ttnn.TILE_LAYOUT,
                     ),
                     "bias": torch_to_ttnn(
-                        weights_dict[f"encoder.decoder_block.{i}.norm.bias"].view(1, 1, 1, -1),
+                        weights_dict[f"encoder.decoder_block.{i}.norm.bias"],
                         self.device,
                         memory_config=get_weights_memory_config(),
                         layout=ttnn.TILE_LAYOUT,
@@ -432,7 +439,11 @@ class TtnnDVAE:
                         self.device,
                         memory_config=get_weights_memory_config(),
                     ),
-                    "bias": None,  # Disable bias for testing
+                    "bias": torch_to_ttnn(
+                        weights_dict[f"encoder.decoder_block.{i}.pwconv1.bias"],
+                        self.device,
+                        memory_config=get_weights_memory_config(),
+                    ),
                 },
                 "pwconv2": {
                     "weight": torch_to_ttnn(
@@ -442,7 +453,11 @@ class TtnnDVAE:
                         self.device,
                         memory_config=get_weights_memory_config(),
                     ),
-                    "bias": None,  # Disable bias for testing
+                    "bias": torch_to_ttnn(
+                        weights_dict[f"encoder.decoder_block.{i}.pwconv2.bias"],
+                        self.device,
+                        memory_config=get_weights_memory_config(),
+                    ),
                 },
             }
             self.encoder_blocks.append(block_weights)
@@ -489,22 +504,29 @@ class TtnnDVAE:
             block_weights = {
                 "dwconv": {
                     "weight": torch_to_ttnn(
+                        # Conv1D [out, 1, W] -> Conv2D [out, 1, 1, W]
                         weights_dict[f"decoder.decoder_block.{i}.dwconv.weight"].unsqueeze(-2),
                         self.device,
                         memory_config=get_weights_memory_config(),
                         layout=ttnn.ROW_MAJOR_LAYOUT,
                     ),
-                    "bias": None,  # Disable bias for testing
+                    "bias": torch_to_ttnn(
+                        weights_dict[f"decoder.decoder_block.{i}.dwconv.bias"].view(1, 1, 1, -1),
+                        self.device,
+                        memory_config=get_weights_memory_config(),
+                        layout=ttnn.ROW_MAJOR_LAYOUT,
+                    ),
                 },
                 "norm": {
+                    # LayerNorm weights are 1D [hidden_dim]
                     "weight": torch_to_ttnn(
-                        weights_dict[f"decoder.decoder_block.{i}.norm.weight"].unsqueeze(-2),
+                        weights_dict[f"decoder.decoder_block.{i}.norm.weight"],
                         self.device,
                         memory_config=get_weights_memory_config(),
                         layout=ttnn.TILE_LAYOUT,
                     ),
                     "bias": torch_to_ttnn(
-                        weights_dict[f"decoder.decoder_block.{i}.norm.bias"].view(1, 1, 1, -1),
+                        weights_dict[f"decoder.decoder_block.{i}.norm.bias"],
                         self.device,
                         memory_config=get_weights_memory_config(),
                         layout=ttnn.TILE_LAYOUT,
@@ -518,7 +540,11 @@ class TtnnDVAE:
                         self.device,
                         memory_config=get_weights_memory_config(),
                     ),
-                    "bias": None,  # Disable bias for testing
+                    "bias": torch_to_ttnn(
+                        weights_dict[f"decoder.decoder_block.{i}.pwconv1.bias"],
+                        self.device,
+                        memory_config=get_weights_memory_config(),
+                    ),
                 },
                 "pwconv2": {
                     "weight": torch_to_ttnn(
@@ -528,7 +554,11 @@ class TtnnDVAE:
                         self.device,
                         memory_config=get_weights_memory_config(),
                     ),
-                    "bias": None,  # Disable bias for testing
+                    "bias": torch_to_ttnn(
+                        weights_dict[f"decoder.decoder_block.{i}.pwconv2.bias"],
+                        self.device,
+                        memory_config=get_weights_memory_config(),
+                    ),
                 },
             }
             self.decoder_blocks.append(block_weights)
@@ -978,7 +1008,7 @@ class TtnnDVAE:
             x = ttnn.linear(
                 x,
                 weights["pwconv1"]["weight"],
-                bias=None,  # Disable bias for testing
+                bias=weights["pwconv1"]["bias"],
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)  # Convert back to ROW_MAJOR
@@ -1002,7 +1032,7 @@ class TtnnDVAE:
             x = ttnn.linear(
                 x,
                 weights["pwconv2"]["weight"],
-                bias=None,  # Disable bias for testing
+                bias=weights["pwconv2"]["bias"],
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)  # Convert back to ROW_MAJOR
