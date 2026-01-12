@@ -183,10 +183,12 @@ def split_conv1d_and_run(
             batch_size_full, input_length_full, channels_full = hidden_states.shape
 
             # Use ttnn.slice for proper tensor slicing
+            # ttnn.slice expects slice_start and slice_end as positional arguments
+            # For 3D tensor [batch, time_steps, channels], we slice along the last dimension
             hidden_states_slice = ttnn.slice(
                 hidden_states,
-                start=[0, 0, channel_start],
-                end=[batch_size_full, input_length_full, channel_end],
+                [0, 0, channel_start],
+                [batch_size_full, input_length_full, channel_end],
             )
 
             # Ensure tensor is on device and in ROW_MAJOR layout before operations
@@ -194,31 +196,95 @@ def split_conv1d_and_run(
             hidden_states_slice = ttnn.to_layout(hidden_states_slice, ttnn.ROW_MAJOR_LAYOUT)
 
             # Get actual dimensions from the sliced tensor (should be 3D: [batch, time_steps, channels])
-            if len(hidden_states_slice.shape) != 3:
+            slice_shape = hidden_states_slice.shape
+            if len(slice_shape) != 3:
                 raise ValueError(
-                    f"Expected 3D tensor after slicing, got shape with {len(hidden_states_slice.shape)} dimensions: {hidden_states_slice.shape}"
+                    f"Expected 3D tensor after slicing, got shape with {len(slice_shape)} dimensions: {slice_shape}"
                 )
 
-            batch_size_slice, input_length_slice, channels_slice = hidden_states_slice.shape
+            batch_size_slice = int(slice_shape[0])
+            input_length_slice = int(slice_shape[1])
+            channels_slice = int(slice_shape[2])
 
             # Update input_length and batch_size in conv_kwargs to match the actual tensor shape
             conv_kwargs_slice = conv_kwargs.copy()
             conv_kwargs_slice["input_length"] = input_length_slice
             conv_kwargs_slice["batch_size"] = batch_size_slice
 
-            # Pass 3D tensor and let ttnn.conv1d handle the reshaping internally
-            # According to conv1d.cpp, it reshapes [batch, time_steps, channels] to [batch, time_steps, 1, channels]
             bias_tensor = conv_bias[out_channel_slice_id] if conv_bias is not None else None
-            results = ttnn.conv1d(
-                input_tensor=hidden_states_slice,
-                weight_tensor=conv_weight[in_channel_slice_id][out_channel_slice_id],
-                bias_tensor=bias_tensor,
-                **conv_kwargs_slice,
-                compute_config=compute_config,
-                return_weights_and_bias=return_weights_and_bias,
-                dtype=conv_output_dtype,
+
+            # Use ttnn.conv1d directly - it handles reshape to 4D internally and automatically sets L1_FULL slice config
+            # Input: 3D tensor [batch, input_length, channels] (ttnn.conv1d will reshape to 4D internally if needed)
+            # Weight: 3D tensor [out_channels, in_channels, kernel_size]
+            # Padding: int or tuple (left, right) for conv1d
+            # Note: ttnn.conv1d expects Conv2dConfig (not Conv1dConfig) because it internally uses conv2d
+            weight_tensor = conv_weight[in_channel_slice_id][out_channel_slice_id]
+
+            # Convert Conv1dConfig to Conv2dConfig for ttnn.conv1d
+            # ttnn.conv1d internally uses conv2d, so it needs Conv2dConfig
+            conv2d_config = ttnn.Conv2dConfig(
+                weights_dtype=conv_config.weights_dtype if hasattr(conv_config, "weights_dtype") else ttnn.bfloat8_b,
+                shard_layout=conv_config.shard_layout if hasattr(conv_config, "shard_layout") else None,
+                deallocate_activation=conv_config.deallocate_activation
+                if hasattr(conv_config, "deallocate_activation")
+                else True,
+                enable_act_double_buffer=conv_config.enable_act_double_buffer
+                if hasattr(conv_config, "enable_act_double_buffer")
+                else False,
+                reshard_if_not_optimal=conv_config.reshard_if_not_optimal
+                if hasattr(conv_config, "reshard_if_not_optimal")
+                else True,
             )
-            # Deallocate the 3D slice
+
+            # ttnn.conv1d accepts 3D or 4D input and 3D weights
+            # It automatically handles reshape, padding conversion, and sets L1_FULL slice config
+            if return_weights_and_bias:
+                output_tensor, _, weights_and_bias = ttnn.conv1d(
+                    input_tensor=hidden_states_slice,
+                    weight_tensor=weight_tensor,
+                    bias_tensor=bias_tensor,
+                    device=device,
+                    in_channels=split_input_channels,
+                    out_channels=split_output_channels,
+                    batch_size=batch_size_slice,
+                    input_length=input_length_slice,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                    dilation=1,
+                    groups=1,
+                    dtype=conv_output_dtype,
+                    conv_config=conv2d_config,
+                    compute_config=compute_config,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    return_output_dim=False,
+                    return_weights_and_bias=True,
+                )
+                results = (output_tensor, weights_and_bias)
+            else:
+                results = ttnn.conv1d(
+                    input_tensor=hidden_states_slice,
+                    weight_tensor=weight_tensor,
+                    bias_tensor=bias_tensor,
+                    device=device,
+                    in_channels=split_input_channels,
+                    out_channels=split_output_channels,
+                    batch_size=batch_size_slice,
+                    input_length=input_length_slice,
+                    kernel_size=kernel_size,
+                    stride=stride,
+                    padding=padding,
+                    dilation=1,
+                    groups=1,
+                    dtype=conv_output_dtype,
+                    conv_config=conv2d_config,
+                    compute_config=compute_config,
+                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                    return_output_dim=False,
+                    return_weights_and_bias=False,
+                )
+
+            # Deallocate input tensor
             hidden_states_slice.deallocate(True)
 
             if return_weights_and_bias:
