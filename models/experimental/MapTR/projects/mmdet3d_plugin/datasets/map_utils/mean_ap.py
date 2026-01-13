@@ -3,7 +3,8 @@ from multiprocessing import Pool
 from shapely.geometry import LineString
 import mmcv
 import numpy as np
-from mmcv.utils import print_log
+from models.experimental.MapTR.dependency import print_log, dump, Timer
+import mmcv
 from terminaltables import AsciiTable
 from os import path as osp
 from functools import partial
@@ -77,10 +78,13 @@ def get_cls_results(
     # if len(gen_results) == 0 or
 
     cls_gens, cls_scores = [], []
+    all_pred_coords = []
     for res in gen_results["vectors"]:
         if res["type"] == class_id:
             if len(res["pts"]) < 2:
                 continue
+            # Always collect coordinates for debugging
+            all_pred_coords.extend(res["pts"])
             if not eval_use_same_gt_sample_num_flag:
                 sampled_points = np.array(res["pts"])
             else:
@@ -123,10 +127,21 @@ def get_cls_results(
         # print(f'for class {i}, cls_gens has shape {cls_gens.shape}')
 
     cls_gts = []
+    all_gt_coords = []
+    # Debug: Check annotations structure
+    if not isinstance(annotations, dict) or "vectors" not in annotations:
+        print(
+            f"DEBUG get_cls_results: annotations is not a dict with 'vectors' key. Type: {type(annotations)}, Keys: {list(annotations.keys()) if isinstance(annotations, dict) else 'N/A'}"
+        )
+        num_gts = 0
+        cls_gts = np.zeros((0, num_sample * 2))
+        return cls_gens, cls_gts
+
     for ann in annotations["vectors"]:
         if ann["type"] == class_id:
             # line = ann['pts'] +  np.array((1,1)) # for hdmapnet
             line = ann["pts"]
+            all_gt_coords.extend(ann["pts"])
             # line = ann['pts'].cumsum(0)
             line = LineString(line)
             distances = np.linspace(0, line.length, num_sample)
@@ -136,6 +151,24 @@ def get_cls_results(
 
             cls_gts.append(sampled_points)
     num_gts = len(cls_gts)
+
+    # Debug: Compare coordinate ranges for all classes (limit to first 3 to avoid spam)
+    if class_id < 3 and len(all_pred_coords) > 0 and len(all_gt_coords) > 0:
+        pred_coords = np.array(all_pred_coords)
+        gt_coords = np.array(all_gt_coords)
+        pred_center = (pred_coords[:, 0].mean(), pred_coords[:, 1].mean())
+        gt_center = (gt_coords[:, 0].mean(), gt_coords[:, 1].mean())
+        center_distance = np.sqrt((pred_center[0] - gt_center[0]) ** 2 + (pred_center[1] - gt_center[1]) ** 2)
+        print(
+            f"DEBUG get_cls_results class {class_id}: "
+            f"Pred coords X:[{pred_coords[:, 0].min():.2f}, {pred_coords[:, 0].max():.2f}], "
+            f"Y:[{pred_coords[:, 1].min():.2f}, {pred_coords[:, 1].max():.2f}], "
+            f"center=({pred_center[0]:.2f}, {pred_center[1]:.2f}); "
+            f"GT coords X:[{gt_coords[:, 0].min():.2f}, {gt_coords[:, 0].max():.2f}], "
+            f"Y:[{gt_coords[:, 1].min():.2f}, {gt_coords[:, 1].max():.2f}], "
+            f"center=({gt_center[0]:.2f}, {gt_center[1]:.2f}); "
+            f"center_distance={center_distance:.2f}m"
+        )
     if num_gts > 0:
         cls_gts = np.stack(cls_gts).reshape(num_gts, -1)
     else:
@@ -157,7 +190,7 @@ def format_res_gt_by_classes(
     nproc=24,
 ):
     assert cls_names is not None
-    timer = mmcv.Timer()
+    timer = Timer()
     num_fixed_sample_pts = 100
     fix_interval = False
     print("results path: {}".format(result_path))
@@ -232,7 +265,7 @@ def format_res_gt_by_classes(
         cls_gens[clsname] = gens
         cls_gts[clsname] = gts
 
-    mmcv.dump([cls_gens, cls_gts], formatting_file)
+    dump([cls_gens, cls_gts], formatting_file)
     print("Cls data formatting done in {:2f}s!! with {}".format(float(timer.since_start()), formatting_file))
     pool.close()
     return cls_gens, cls_gts
@@ -252,7 +285,7 @@ def eval_map(
     num_pred_pts_per_instance=30,
     nproc=24,
 ):
-    timer = mmcv.Timer()
+    timer = Timer()
     pool = Pool(nproc)
 
     eval_results = []

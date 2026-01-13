@@ -254,7 +254,26 @@ class MapTRNMSFreeCoder(BaseBBoxCoder):
         pts_preds = pts_preds[bbox_index]
 
         final_box_preds = denormalize_2d_bbox(bbox_preds, self.pc_range)
+        # Debug: Check normalized coordinates before denormalization
+        import os
+
+        debug_enabled = os.environ.get("MAPTR_DEBUG_EVAL", "0") == "1"
+        if debug_enabled and len(pts_preds) > 0:
+            print(f"\n=== BBox Coder Debug ===")
+            print(f"PC range: {self.pc_range}")
+            print(f"pts_preds (normalized) shape: {pts_preds.shape}")
+            print(f"pts_preds (normalized) range: [{pts_preds.min():.4f}, {pts_preds.max():.4f}]")
+            print(f"First 3 normalized points: {pts_preds[0, :3]}")
+
         final_pts_preds = denormalize_2d_pts(pts_preds, self.pc_range)  # num_q,num_p,2
+
+        if debug_enabled and len(final_pts_preds) > 0:
+            print(f"final_pts_preds (denormalized) shape: {final_pts_preds.shape}")
+            print(f"final_pts_preds (denormalized) range: [{final_pts_preds.min():.2f}, {final_pts_preds.max():.2f}]")
+            print(f"First 3 denormalized points: {final_pts_preds[0, :3]}")
+            print(
+                f"Expected range: X:[{self.pc_range[0]:.2f}, {self.pc_range[3]:.2f}], Y:[{self.pc_range[1]:.2f}, {self.pc_range[4]:.2f}]"
+            )
         # final_box_preds = bbox_preds
         final_scores = scores
         final_preds = labels

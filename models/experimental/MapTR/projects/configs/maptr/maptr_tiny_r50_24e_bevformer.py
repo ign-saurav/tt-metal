@@ -138,7 +138,7 @@ model = dict(
         bbox_coder=dict(
             type="MapTRNMSFreeCoder",
             # post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
-            post_center_range=[-20, -35, -20, -35, 20, 35, 20, 35],
+            post_center_range=[-15, -30, -15, -30, 15, 30, 15, 30],
             pc_range=point_cloud_range,
             max_num=50,
             voxel_size=voxel_size,
@@ -150,12 +150,7 @@ model = dict(
             row_num_embed=bev_h_,
             col_num_embed=bev_w_,
         ),
-        # loss_cls=dict(
-        #     type='FocalLoss',
-        #     use_sigmoid=True,
-        #     gamma=2.0,
-        #     alpha=0.25,
-        #     loss_weight=2.0),
+        loss_cls=dict(type="FocalLoss", use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=2.0)
         # loss_bbox=dict(type='L1Loss', loss_weight=0.0),
         # loss_iou=dict(type='GIoULoss', loss_weight=0.0),
         # loss_pts=dict(type='PtsL1Loss',
@@ -163,6 +158,7 @@ model = dict(
         # loss_dir=dict(type='PtsDirCosLoss', loss_weight=0.005)
     ),
 )
+
 # model training and testing settings
 # train_cfg=dict(pts=dict(
 #     grid_size=[512, 512, 1],

@@ -2,6 +2,7 @@ from __future__ import division
 import mmcv
 import os
 import torch
+import torch.nn.functional as F
 import warnings
 
 # from mmcv import Config, DictAction
@@ -1331,10 +1332,33 @@ def multi_scale_deformable_attn_pytorch(value, value_spatial_shapes, sampling_lo
     """
     import torch.nn.functional as F
 
+    # ===== ADD THESE DEBUG CHECKS =====
+    print(f"\n=== MSDeformAttn Debug ===")
+    print(f"value shape: {value.shape}, range: [{value.min():.4f}, {value.max():.4f}]")
+    print(f"value has NaN: {torch.isnan(value).any()}, has Inf: {torch.isinf(value).any()}")
+
+    print(f"sampling_locations shape: {sampling_locations.shape}")
+    print(f"sampling_locations range: [{sampling_locations.min():.4f}, {sampling_locations.max():.4f}]")
+    print(f"sampling_locations has NaN: {torch.isnan(sampling_locations).any()}")
+
+    print(f"attention_weights shape: {attention_weights.shape}")
+    print(f"attention_weights range: [{attention_weights.min():.4f}, {attention_weights.max():.4f}]")
+    print(f"attention_weights sum (per query): {attention_weights[0, 0, 0].sum():.4f}")
+    print(f"attention_weights has NaN: {torch.isnan(attention_weights).any()}")
+    # ===== END DEBUG =====
+
     bs, _, num_heads, embed_dims = value.shape
     _, num_queries, num_heads, num_levels, num_points, _ = sampling_locations.shape
     value_list = value.split([H_ * W_ for H_, W_ in value_spatial_shapes], dim=1)
     sampling_grids = 2 * sampling_locations - 1
+
+    # ===== ADD THIS CHECK =====
+    print(f"sampling_grids range: [{sampling_grids.min():.4f}, {sampling_grids.max():.4f}]")
+    # Should be in [-1, 1] for grid_sample to work correctly
+    if sampling_grids.min() < -1.5 or sampling_grids.max() > 1.5:
+        print(f"WARNING: sampling_grids out of expected range!")
+    # ===== END CHECK =====
+
     sampling_value_list = []
     for level, (H_, W_) in enumerate(value_spatial_shapes):
         # bs, H_*W_, num_heads, embed_dims ->
@@ -1362,6 +1386,10 @@ def multi_scale_deformable_attn_pytorch(value, value_spatial_shapes, sampling_lo
         .sum(-1)
         .view(bs, num_heads * embed_dims, num_queries)
     )
+    # ===== ADD THIS =====
+    print(f"output range: [{output.min():.4f}, {output.max():.4f}]")
+    print(f"output has NaN: {torch.isnan(output).any()}")
+    # ===== END DEBUG =====
     return output.transpose(1, 2).contiguous()
 
 
@@ -4844,10 +4872,16 @@ class DETRHead(AnchorFreeHead):
         # self.loss_bbox = build_loss(loss_bbox) if isinstance(loss_bbox, dict) else loss_bbox
         # self.loss_iou = build_loss(loss_iou) if isinstance(loss_iou, dict) else loss_iou
 
-        # if self.loss_cls.use_sigmoid:
-        #     self.cls_out_channels = num_classes
-        # else:
-        self.cls_out_channels = num_classes + 1
+        if isinstance(loss_cls, dict):
+            use_sigmoid = loss_cls.get("use_sigmoid", True)
+        elif loss_cls is not None:
+            use_sigmoid = getattr(loss_cls, "use_sigmoid", True)
+        else:
+            use_sigmoid = True
+        if use_sigmoid:
+            self.cls_out_channels = num_classes
+        else:
+            self.cls_out_channels = num_classes + 1
 
     def forward(self, feats, img_metas):
         """Forward function."""
@@ -5238,7 +5272,7 @@ class MVXTwoStageDetector(Base3DDetector):
         if img_backbone:
             self.img_backbone = build_backbone(img_backbone) if isinstance(img_backbone, dict) else img_backbone
         if img_neck is not None:
-            self.img_neck = None
+            self.img_neck = build_neck(img_neck) if isinstance(img_neck, dict) else img_neck
         if img_rpn_head is not None:
             self.img_rpn_head = None
         if img_roi_head is not None:
@@ -8071,6 +8105,212 @@ def scatter_kwargs(inputs, kwargs, target_gpus, dim=0):
     inputs = tuple(inputs)
     kwargs = tuple(kwargs)
     return inputs, kwargs
+
+
+# FPN class from mmdetection v2.14.0
+# Source: https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/necks/fpn.py
+@NECKS.register_module()
+class FPN(BaseModule):
+    r"""Feature Pyramid Network.
+
+    This is an implementation of paper `Feature Pyramid Networks for Object
+    Detection <https://arxiv.org/abs/1612.03144>`_.
+
+    Args:
+        in_channels (List[int]): Number of input channels per scale.
+        out_channels (int): Number of output channels (used at each scale)
+        num_outs (int): Number of output scales.
+        start_level (int): Index of the start input backbone level used to
+            build the feature pyramid. Default: 0.
+        end_level (int): Index of the end input backbone level (exclusive) to
+            build the feature pyramid. Default: -1, which means the last level.
+        add_extra_convs (bool | str): If bool, it decides whether to add conv
+            layers on top of the original feature maps. Default to False.
+            If True, it is equivalent to `add_extra_convs='on_input'`.
+            If str, it specifies the source feature map of the extra convs.
+            Only the following options are allowed
+
+            - 'on_input': Last feat map of neck inputs (i.e. backbone feature).
+            - 'on_lateral':  Last feature map after lateral convs.
+            - 'on_output': The last output feature map after fpn convs.
+        relu_before_extra_convs (bool): Whether to apply relu before the extra
+            conv. Default: False.
+        no_norm_on_lateral (bool): Whether to apply norm on lateral.
+            Default: False.
+        conv_cfg (dict): Config dict for convolution layer. Default: None.
+        norm_cfg (dict): Config dict for normalization layer. Default: None.
+        act_cfg (str): Config dict for activation layer in ConvModule.
+            Default: None.
+        upsample_cfg (dict): Config dict for interpolate layer.
+            Default: `dict(mode='nearest')`
+        init_cfg (dict or list[dict], optional): Initialization config dict.
+
+    Example:
+        >>> import torch
+        >>> in_channels = [2, 3, 5, 7]
+        >>> scales = [340, 170, 84, 43]
+        >>> inputs = [torch.rand(1, c, s, s)
+        ...           for c, s in zip(in_channels, scales)]
+        >>> self = FPN(in_channels, 11, len(in_channels)).eval()
+        >>> outputs = self.forward(inputs)
+        >>> for i in range(len(outputs)):
+        ...     print(f'outputs[{i}].shape = {outputs[i].shape}')
+        outputs[0].shape = torch.Size([1, 11, 340, 340])
+        outputs[1].shape = torch.Size([1, 11, 170, 170])
+        outputs[2].shape = torch.Size([1, 11, 84, 84])
+        outputs[3].shape = torch.Size([1, 11, 43, 43])
+    """
+
+    def __init__(
+        self,
+        in_channels,
+        out_channels,
+        num_outs,
+        start_level=0,
+        end_level=-1,
+        add_extra_convs=False,
+        relu_before_extra_convs=False,
+        no_norm_on_lateral=False,
+        conv_cfg=None,
+        norm_cfg=None,
+        act_cfg=None,
+        upsample_cfg=dict(mode="nearest"),
+        init_cfg=dict(type="Xavier", layer="Conv2d", distribution="uniform"),
+    ):
+        super(FPN, self).__init__(init_cfg)
+        assert isinstance(in_channels, list)
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.num_ins = len(in_channels)
+        self.num_outs = num_outs
+        self.relu_before_extra_convs = relu_before_extra_convs
+        self.no_norm_on_lateral = no_norm_on_lateral
+        self.fp16_enabled = False
+        self.upsample_cfg = upsample_cfg.copy()
+
+        if end_level == -1:
+            self.backbone_end_level = self.num_ins
+            assert num_outs >= self.num_ins - start_level
+        else:
+            # if end_level < inputs, no extra level is allowed
+            self.backbone_end_level = end_level
+            assert end_level <= len(in_channels)
+            assert num_outs == end_level - start_level
+        self.start_level = start_level
+        self.end_level = end_level
+        self.add_extra_convs = add_extra_convs
+        assert isinstance(add_extra_convs, (str, bool))
+        if isinstance(add_extra_convs, str):
+            # Extra_convs_source choices: 'on_input', 'on_lateral', 'on_output'
+            assert add_extra_convs in ("on_input", "on_lateral", "on_output")
+        elif add_extra_convs:  # True
+            self.add_extra_convs = "on_input"
+
+        self.lateral_convs = nn.ModuleList()
+        self.fpn_convs = nn.ModuleList()
+
+        for i in range(self.start_level, self.backbone_end_level):
+            l_conv = ConvModule(
+                in_channels[i],
+                out_channels,
+                1,
+                conv_cfg=conv_cfg,
+                norm_cfg=norm_cfg if not self.no_norm_on_lateral else None,
+                act_cfg=act_cfg,
+                inplace=False,
+            )
+            fpn_conv = ConvModule(
+                out_channels,
+                out_channels,
+                3,
+                padding=1,
+                conv_cfg=conv_cfg,
+                norm_cfg=norm_cfg,
+                act_cfg=act_cfg,
+                inplace=False,
+            )
+
+            self.lateral_convs.append(l_conv)
+            self.fpn_convs.append(fpn_conv)
+
+        # add extra conv layers (e.g., RetinaNet)
+        extra_levels = num_outs - self.backbone_end_level + self.start_level
+        if self.add_extra_convs and extra_levels >= 1:
+            for i in range(extra_levels):
+                if i == 0 and self.add_extra_convs == "on_input":
+                    in_channels = self.in_channels[self.backbone_end_level - 1]
+                else:
+                    in_channels = out_channels
+                extra_fpn_conv = ConvModule(
+                    in_channels,
+                    out_channels,
+                    3,
+                    stride=2,
+                    padding=1,
+                    conv_cfg=conv_cfg,
+                    norm_cfg=norm_cfg,
+                    act_cfg=act_cfg,
+                    inplace=False,
+                )
+                self.fpn_convs.append(extra_fpn_conv)
+
+    @auto_fp16()
+    def forward(self, inputs):
+        """Forward function."""
+        assert len(inputs) == len(self.in_channels)
+
+        if self.fp16_enabled and len(inputs) > 0 and inputs[0].dtype == torch.half:
+            # Convert all parameters to FP16 if they're still FP32
+            for module_list in [self.lateral_convs, self.fpn_convs]:
+                for m in module_list:
+                    for param in m.parameters():
+                        if param.dtype == torch.float32:
+                            param.data = param.data.half()
+                    for buffer in m.buffers():
+                        if buffer.dtype == torch.float32:
+                            buffer.data = buffer.data.half()
+
+        # build laterals
+        laterals = [lateral_conv(inputs[i + self.start_level]) for i, lateral_conv in enumerate(self.lateral_convs)]
+
+        # build top-down path
+        used_backbone_levels = len(laterals)
+        for i in range(used_backbone_levels - 1, 0, -1):
+            # In some cases, fixing `scale factor` (e.g. 2) is preferred, but
+            #  it cannot co-exist with `size` in `F.interpolate`.
+            if "scale_factor" in self.upsample_cfg:
+                laterals[i - 1] += F.interpolate(laterals[i], **self.upsample_cfg)
+            else:
+                prev_shape = laterals[i - 1].shape[2:]
+                laterals[i - 1] += F.interpolate(laterals[i], size=prev_shape, **self.upsample_cfg)
+
+        # build outputs
+        # part 1: from original levels
+        outs = [self.fpn_convs[i](laterals[i]) for i in range(used_backbone_levels)]
+        # part 2: add extra levels
+        if self.num_outs > len(outs):
+            # use max pool to get more levels on top of outputs
+            # (e.g., Faster R-CNN, Mask R-CNN)
+            if not self.add_extra_convs:
+                for i in range(self.num_outs - used_backbone_levels):
+                    outs.append(F.max_pool2d(outs[-1], 1, stride=2))
+            # add conv layers on top of original feature maps (RetinaNet)
+            else:
+                if self.add_extra_convs == "on_input":
+                    extra_source = inputs[self.backbone_end_level - 1]
+                elif self.add_extra_convs == "on_lateral":
+                    extra_source = laterals[-1]
+                elif self.add_extra_convs == "on_output":
+                    extra_source = outs[-1]
+                else:
+                    raise NotImplementedError
+                outs.append(self.fpn_convs[used_backbone_levels](extra_source))
+                for i in range(used_backbone_levels + 1, self.num_outs):
+                    if self.relu_before_extra_convs:
+                        outs.append(self.fpn_convs[i](F.relu(outs[-1])))
+                    else:
+                        outs.append(self.fpn_convs[i](outs[-1]))
+        return tuple(outs)
 
 
 # Register ResNet with BACKBONES at the end of the file
@@ -11539,69 +11779,297 @@ def get_dist_info():
 
 
 # https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/runner/checkpoint.py
+# Copyright (c) OpenMMLab. All rights reserved.
 import os
+import os.path as osp
+import pkgutil
+import re
+import warnings
+from collections import OrderedDict
+from importlib import import_module
+
+import torch
+import torchvision
 
 
-def load_checkpoint(model, filename, map_location=None, logger=None):
-    """load checkpoint through URL scheme path.
+def is_module_wrapper(module):
+    """Check if a module is a wrapper.
+
+    The following modules are regarded as wrappers:
+    1. DataParallel
+    2. DistributedDataParallel
+    3. ModelParallel (used in model parallelization)
 
     Args:
-        model (nn.Module): Model to load checkpoint for (not used, kept for compatibility).
-        filename (str): checkpoint file name with given prefix
-        map_location (str, optional): Same as :func:`torch.load`.
-            Default: None
-        logger (:mod:`logging.Logger`, optional): The logger for message.
-            Default: None
+        module (nn.Module): The module to be checked.
+
+    Returns:
+        bool: True if the input module is a wrapper module.
+    """
+    from torch.nn.parallel import DataParallel, DistributedDataParallel
+
+    module_wrappers = (DataParallel, DistributedDataParallel)
+    return isinstance(module, module_wrappers)
+
+
+def load_state_dict(module, state_dict, strict=False, logger=None):
+    """Load state_dict to a module.
+
+    This method is modified from :meth:`torch.nn.Module.load_state_dict`.
+    Default value for ``strict`` is set to ``False`` and the message for
+    param mismatch will be shown even if strict is False.
+
+    Args:
+        module (Module): Module that receives the state_dict.
+        state_dict (OrderedDict): Weights.
+        strict (bool): whether to strictly enforce that the keys
+            in :attr:`state_dict` match the keys returned by this module's
+            :meth:`~torch.nn.Module.state_dict` function. Default: ``False``.
+        logger (:obj:`logging.Logger`, optional): Logger to log the error
+            message. If not specified, print function will be used.
+    """
+    unexpected_keys = []
+    all_missing_keys = []
+    err_msg = []
+
+    metadata = getattr(state_dict, "_metadata", None)
+    state_dict = state_dict.copy()
+    if metadata is not None:
+        state_dict._metadata = metadata
+
+    def load(module, prefix=""):
+        if is_module_wrapper(module):
+            module = module.module
+        local_metadata = {} if metadata is None else metadata.get(prefix[:-1], {})
+        module._load_from_state_dict(
+            state_dict, prefix, local_metadata, True, all_missing_keys, unexpected_keys, err_msg
+        )
+        for name, child in module._modules.items():
+            if child is not None:
+                load(child, prefix + name + ".")
+
+    load(module)
+    load = None
+
+    missing_keys = [key for key in all_missing_keys if "num_batches_tracked" not in key]
+
+    if unexpected_keys:
+        err_msg.append("unexpected key in source " f'state_dict: {", ".join(unexpected_keys)}\n')
+    if missing_keys:
+        err_msg.append(f'missing keys in source state_dict: {", ".join(missing_keys)}\n')
+
+    rank, _ = get_dist_info()
+    if len(err_msg) > 0 and rank == 0:
+        err_msg.insert(0, "The model and loaded state dict do not match exactly\n")
+        err_msg = "\n".join(err_msg)
+        if strict:
+            raise RuntimeError(err_msg)
+        elif logger is not None:
+            logger.warning(err_msg)
+        else:
+            print(err_msg)
+
+
+def _load_checkpoint(filename, map_location=None, logger=None):
+    """Load checkpoint from somewhere (modelzoo, file, url).
+
+    Args:
+        filename (str): Accept local filepath, URL, ``torchvision://xxx``,
+            ``open-mmlab://xxx``. Please refer to ``docs/model_zoo.md`` for
+            details.
+        map_location (str | None): Same as :func:`torch.load`.
+            Default: None.
+        logger (:mod:`logging.Logger` or None): The logger for error message.
+
+    Returns:
+        dict or OrderedDict: The loaded checkpoint. It can be either an
+            OrderedDict storing model weights or a dict containing other
+            information, which depends on the checkpoint.
+    """
+    if filename.startswith("modelzoo://"):
+        pass
+
+        warnings.warn("modelzoo:// is deprecated, please use " "open-mmlab:// instead")
+        filename = filename[11:]
+        filename = filename.replace("//", "/")
+        model_urls = get_external_models()
+        filename = model_urls.get(filename, None)
+        if filename is None:
+            raise IOError(f"{filename} is not available in modelzoo")
+    elif filename.startswith("torchvision://"):
+        model_name = filename[14:]
+        torchvision_models = get_torchvision_models()
+        model_urls = torchvision_models.get(model_name, None)
+        if model_urls is None:
+            raise IOError(f"{model_name} is not available in torchvision")
+        filename = model_urls
+    elif filename.startswith("open-mmlab://"):
+        model_name = filename[13:]
+        model_urls = get_external_models()
+        filename = model_urls.get(model_name, None)
+        if filename is None:
+            raise IOError(f"{model_name} is not available in model zoo")
+    elif filename.startswith("mmcls://"):
+        model_name = filename[8:]
+        model_urls = get_mmcls_models()
+        filename = model_urls.get(model_name, None)
+        if filename is None:
+            raise IOError(f"{model_name} is not available in mmcls model zoo")
+    elif not osp.isfile(filename):
+        raise IOError(f"{filename} is not a checkpoint file")
+    return torch.load(filename, map_location=map_location)
+
+
+def load_checkpoint(model, filename, map_location=None, strict=False, logger=None, revise_keys=[(r"^module\.", "")]):
+    """Load checkpoint from a file or URI.
+
+    Args:
+        model (Module): Module to load checkpoint.
+        filename (str): Accept local filepath, URL, ``torchvision://xxx``,
+            ``open-mmlab://xxx``. Please refer to ``docs/model_zoo.md`` for
+            details.
+        map_location (str): Same as :func:`torch.load`.
+        strict (bool): Whether to allow different params for the model and
+            checkpoint.
+        logger (:mod:`logging.Logger` or None): The logger for error message.
+        revise_keys (list): A list of customized keywords to modify the
+            state_dict in checkpoint. Each item is a (pattern, replacement)
+            pair of the regular expression operations. Default: strip
+            the prefix 'module.' by [(r'^module\\.', '')].
 
     Returns:
         dict or OrderedDict: The loaded checkpoint.
     """
-    if logger is not None:
-        # from models.experimental.MapTR.projects.mmdet3d_plugin.dependency import print_log
+    checkpoint = _load_checkpoint(filename, map_location, logger)
+    if not isinstance(checkpoint, dict):
+        raise RuntimeError(f"No state_dict found in checkpoint file {filename}")
+    if "state_dict" in checkpoint:
+        state_dict = checkpoint["state_dict"]
+    else:
+        state_dict = checkpoint
 
-        print_log(f"load checkpoint from path: {filename}", logger=logger)
+    original_keys_count = len(state_dict)
+    print(f"[CHECKPOINT LOADING] Original checkpoint keys: {original_keys_count}")
 
-    # Validate file exists and is readable
-    if not os.path.exists(filename):
-        raise FileNotFoundError(f"Checkpoint file not found: {filename}")
+    metadata = getattr(state_dict, "_metadata", OrderedDict())
+    for p, r in revise_keys:
+        state_dict = OrderedDict({re.sub(p, r, k): v for k, v in state_dict.items()})
 
-    if not os.path.isfile(filename):
-        raise ValueError(f"Checkpoint path is not a file: {filename}")
+    after_revise_keys_count = len(state_dict)
+    print(f"[CHECKPOINT LOADING] Keys after revise_keys (remove 'module.' prefix): {after_revise_keys_count}")
 
-    # Check file size
-    file_size = os.path.getsize(filename)
-    if file_size == 0:
-        raise ValueError(f"Checkpoint file is empty: {filename}")
+    new_state_dict = OrderedDict()
+    ffn_mapped_count = 0
+    for k, v in state_dict.items():
+        new_key = k
+        if ".ffns.0.layers.0.0." in k:
+            new_key = k.replace(".ffns.0.layers.0.0.", ".ffns.0.layers.0.")
+            ffn_mapped_count += 1
+        elif ".ffns.0.layers.1." in k:
+            new_key = k.replace(".ffns.0.layers.1.", ".ffns.0.layers.3.")
+            ffn_mapped_count += 1
+        new_state_dict[new_key] = v
 
-    # Check if file appears to be a text file (likely a download error or URL)
+    after_ffn_mapping_count = len(new_state_dict)
+    print(
+        f"[CHECKPOINT LOADING] Keys after FFN mapping: {after_ffn_mapping_count} (FFN keys mapped: {ffn_mapped_count})"
+    )
+
+    model_state_dict = model.state_dict()
+    model_keys_count = len(model_state_dict)
+    print(f"[CHECKPOINT LOADING] Model state_dict keys: {model_keys_count}")
+
+    checkpoint_keys_set = set(new_state_dict.keys())
+    model_keys_set = set(model_state_dict.keys())
+
+    missing_keys = model_keys_set - checkpoint_keys_set
+    unexpected_keys = checkpoint_keys_set - model_keys_set
+
+    missing_keys_filtered = {k for k in missing_keys if "num_batches_tracked" not in k}
+
+    print(f"[CHECKPOINT LOADING] Missing keys (in model but not in checkpoint): {len(missing_keys_filtered)}")
+    if missing_keys_filtered:
+        for key in sorted(missing_keys_filtered)[:10]:
+            print(f"  - {key}")
+        if len(missing_keys_filtered) > 10:
+            print(f"  ... and {len(missing_keys_filtered) - 10} more")
+
+    print(f"[CHECKPOINT LOADING] Unexpected keys (in checkpoint but not in model): {len(unexpected_keys)}")
+    if unexpected_keys:
+        for key in sorted(unexpected_keys)[:10]:
+            print(f"  - {key}")
+        if len(unexpected_keys) > 10:
+            print(f"  ... and {len(unexpected_keys) - 10} more")
+
+    matched_keys = checkpoint_keys_set & model_keys_set
+    print(f"[CHECKPOINT LOADING] Matched keys (will be loaded): {len(matched_keys)}")
+
+    new_state_dict._metadata = metadata
+    load_state_dict(model, new_state_dict, strict, logger)
+
+    print(f"[CHECKPOINT LOADING] Checkpoint loading completed")
+    return checkpoint
+
+
+def get_torchvision_models():
+    model_urls = dict()
+    for _, name, ispkg in pkgutil.walk_packages(torchvision.models.__path__):
+        if ispkg:
+            continue
+        _zoo = import_module(f"torchvision.models.{name}")
+        if hasattr(_zoo, "model_urls"):
+            _urls = getattr(_zoo, "model_urls")
+            model_urls.update(_urls)
+    return model_urls
+
+
+def get_external_models():
     try:
-        with open(filename, "rb") as f:
-            first_bytes = f.read(100)
-            # PyTorch checkpoint files should start with specific pickle magic bytes
-            # If it starts with text characters, it's likely not a valid checkpoint
-            if first_bytes.startswith(b"--") or first_bytes.startswith(b"http") or first_bytes.startswith(b"<!"):
-                raise ValueError(
-                    f"Checkpoint file appears to be a text file or download error, not a valid PyTorch checkpoint.\n"
-                    f"File path: {filename}\n"
-                    f"File size: {file_size} bytes\n"
-                    f"Please ensure the checkpoint file is properly downloaded from the source."
-                )
-    except (UnicodeDecodeError, ValueError) as e:
-        # If it's already a ValueError from our check, re-raise it
-        if isinstance(e, ValueError) and "Checkpoint file appears" in str(e):
-            raise
-        # Otherwise, continue to try loading
+        from mmcv.fileio import load as load_file
 
+        mmcv_home = os.path.expanduser(
+            os.getenv("MMCV_HOME", os.path.join(os.getenv("XDG_CACHE_HOME", "~/.cache"), "mmcv"))
+        )
+        default_json_path = osp.join(mmcv.__path__[0], "model_zoo/open_mmlab.json")
+        if osp.exists(default_json_path):
+            default_urls = load_file(default_json_path)
+        else:
+            default_urls = {}
+        assert isinstance(default_urls, dict)
+        external_json_path = osp.join(mmcv_home, "open_mmlab.json")
+        if osp.exists(external_json_path):
+            external_urls = load_file(external_json_path)
+            assert isinstance(external_urls, dict)
+            default_urls.update(external_urls)
+        return default_urls
+    except:
+        return {}
+
+
+def get_mmcls_models():
     try:
-        # weights_only=False is required for PyTorch 2.6+ compatibility with checkpoint files
-        checkpoint = torch.load(filename, map_location=map_location, weights_only=False)
-        return checkpoint
-    except Exception as e:
-        raise RuntimeError(
-            f"Failed to load checkpoint from {filename}: {str(e)}\n"
-            f"File size: {file_size} bytes. "
-            f"Please verify the checkpoint file is valid and not corrupted."
-        ) from e
+        from mmcv.fileio import load as load_file
+
+        mmcls_json_path = osp.join(mmcv.__path__[0], "model_zoo/mmcls.json")
+        if osp.exists(mmcls_json_path):
+            mmcls_urls = load_file(mmcls_json_path)
+            return mmcls_urls
+        return {}
+    except:
+        return {}
+
+
+def get_deprecated_model_names():
+    try:
+        from mmcv.fileio import load as load_file
+
+        deprecate_json_path = osp.join(mmcv.__path__[0], "model_zoo/deprecated.json")
+        if osp.exists(deprecate_json_path):
+            deprecate_urls = load_file(deprecate_json_path)
+            return deprecate_urls
+        return {}
+    except:
+        return {}
 
 
 # Adapted from : https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/parallel/data_parallel.py

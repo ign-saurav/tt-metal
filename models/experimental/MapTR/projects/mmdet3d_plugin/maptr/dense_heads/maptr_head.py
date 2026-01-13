@@ -315,6 +315,43 @@ class MapTRHead(DETRHead):
 
         bev_embed, hs, init_reference, inter_references = outputs
         hs = hs.permute(0, 2, 1, 3)
+
+        # Debug: Query initialization
+        if hasattr(self, "_debug_enabled") and self._debug_enabled:
+            print(f"\n=== Query Initialization Debug ===")
+            print(f"Query embeds shape: {object_query_embeds.shape}")
+            print(f"Query embeds range: [{object_query_embeds.min():.4f}, {object_query_embeds.max():.4f}]")
+            if init_reference is not None:
+                print(f"Init reference points shape: {init_reference.shape}")
+                print(
+                    f"Init reference points (normalized) range: [{init_reference.min():.4f}, {init_reference.max():.4f}]"
+                )
+                print(f"First 5 reference points (normalized): {init_reference[0, :5]}")
+                # Denormalize reference points to check real coordinates
+                ref_pts_real = denormalize_2d_pts(init_reference[0].view(-1, 2), self.pc_range)
+                print(
+                    f"Reference points (denormalized) range: X[{ref_pts_real[:, 0].min():.2f}, {ref_pts_real[:, 0].max():.2f}], Y[{ref_pts_real[:, 1].min():.2f}, {ref_pts_real[:, 1].max():.2f}]"
+                )
+                print(f"First 5 reference points (real): {ref_pts_real[:5]}")
+                print(f"PC range: {self.pc_range}")
+                # Visualize reference points
+                try:
+                    import matplotlib.pyplot as plt
+
+                    ref_pts_cpu = init_reference[0].detach().cpu().numpy()
+                    plt.figure(figsize=(10, 5))
+                    plt.scatter(ref_pts_cpu[:, 0], ref_pts_cpu[:, 1], s=1, alpha=0.5)
+                    plt.xlim([0, 1])
+                    plt.ylim([0, 1])
+                    plt.title("Decoder Query Reference Points (normalized)")
+                    plt.xlabel("X (normalized)")
+                    plt.ylabel("Y (normalized)")
+                    plt.savefig("debug_reference_points.png")
+                    plt.close()
+                    print("Saved reference points visualization to debug_reference_points.png")
+                except Exception as e:
+                    print(f"Could not create reference points visualization: {e}")
+
         outputs_classes = []
         outputs_coords = []
         outputs_pts_coords = []
@@ -335,6 +372,25 @@ class MapTRHead(DETRHead):
             tmp[..., 0:2] += reference[..., 0:2]
             # tmp[..., 0:2] = tmp[..., 0:2].sigmoid()
             tmp = tmp.sigmoid()  # cx,cy,w,h
+
+            # Debug: Prediction head output (only for last decoder layer)
+            if hasattr(self, "_debug_enabled") and self._debug_enabled and lvl == hs.shape[0] - 1:
+                print(f"\n=== Prediction Head Output (Layer {lvl}) ===")
+                print(f"Raw coords (tmp) shape: {tmp.shape}")
+                print(f"Raw coords (normalized) range: [{tmp.min():.4f}, {tmp.max():.4f}]")
+                print(f"First 3 normalized coords: {tmp[0, :3, :2]}")
+                # Denormalize to check
+                denorm_pts = denormalize_2d_pts(tmp.view(tmp.shape[0], -1, 2), self.pc_range)
+                print(
+                    f"Denorm coords range: X[{denorm_pts[:, 0].min():.2f}, {denorm_pts[:, 0].max():.2f}], Y[{denorm_pts[:, 1].min():.2f}, {denorm_pts[:, 1].max():.2f}]"
+                )
+                print(f"First 3 denormalized coords: {denorm_pts[:3]}")
+                print(f"PC range: {self.pc_range}")
+                print(
+                    f"Reference points (before inverse_sigmoid) range: [{reference.min():.4f}, {reference.max():.4f}]"
+                )
+                print(f"Reference points (after inverse_sigmoid) first 3: {reference[0, :3]}")
+
             # import pdb;pdb.set_trace()
             # tmp[..., 0:1] = (tmp[..., 0:1] * (self.pc_range[3] -
             #                  self.pc_range[0]) + self.pc_range[0])

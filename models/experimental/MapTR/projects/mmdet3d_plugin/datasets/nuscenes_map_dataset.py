@@ -584,6 +584,18 @@ class VectorizedLocalMap(object):
 
         patch_box = (map_pose[0], map_pose[1], self.patch_size[0], self.patch_size[1])
         patch_angle = quaternion_yaw(rotation) / np.pi * 180
+
+        # Debug: Check coordinate transformation
+        import os
+
+        debug_enabled = os.environ.get("MAPTR_DEBUG_EVAL", "0") == "1"
+        if debug_enabled:
+            print(f"\n=== GT Coordinate Transformation Debug ===")
+            print(f"lidar2global_translation: {lidar2global_translation}")
+            print(f"map_pose (patch center): ({map_pose[0]:.2f}, {map_pose[1]:.2f})")
+            print(f"patch_box: {patch_box}")
+            print(f"patch_angle: {patch_angle:.2f} degrees")
+            print(f"GT should be transformed to ego frame (centered at 0, 0)")
         vectors = []
         for vec_class in self.vec_classes:
             if vec_class == "divider":
@@ -624,6 +636,21 @@ class VectorizedLocalMap(object):
             self.padding_value,
             patch_size=self.patch_size,
         )
+
+        # Debug: Check GT coordinates after transformation
+        import os
+
+        debug_enabled = os.environ.get("MAPTR_DEBUG_EVAL", "0") == "1"
+        if debug_enabled and len(gt_instance.instance_list) > 0:
+            # Get first few GT instances to check coordinates
+            for i, inst in enumerate(gt_instance.instance_list[:3]):
+                coords = np.array(list(inst.coords))
+                print(f"GT instance {i} after transformation:")
+                print(f"  Coords shape: {coords.shape}")
+                print(f"  X range: [{coords[:, 0].min():.2f}, {coords[:, 0].max():.2f}]")
+                print(f"  Y range: [{coords[:, 1].min():.2f}, {coords[:, 1].max():.2f}]")
+                print(f"  Center: ({coords[:, 0].mean():.2f}, {coords[:, 1].mean():.2f})")
+                print(f"  Should be centered near (0, 0) in ego frame")
 
         anns_results = dict(
             gt_vecs_pts_loc=gt_instance,
@@ -1404,8 +1431,21 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
                 gt_vec_list = []
                 for i, (gt_label, gt_vec) in enumerate(zip(gt_labels, gt_vecs)):
                     name = mapped_class_names[gt_label]
+                    pts = np.array(list(gt_vec.coords))
+                    # Debug: Check GT coordinate centering
+                    import os
+
+                    debug_enabled = os.environ.get("MAPTR_DEBUG_EVAL", "0") == "1"
+                    if debug_enabled and i == 0:
+                        print(f"\n=== GT Coordinate Debug (first vector) ===")
+                        print(f"GT pts shape: {pts.shape}")
+                        print(
+                            f"GT pts range: X[{pts[:, 0].min():.2f}, {pts[:, 0].max():.2f}], Y[{pts[:, 1].min():.2f}, {pts[:, 1].max():.2f}]"
+                        )
+                        print(f"GT center: ({pts[:, 0].mean():.2f}, {pts[:, 1].mean():.2f})")
+                        print(f"GT should be centered near (0, 0) in ego frame")
                     anno = dict(
-                        pts=np.array(list(gt_vec.coords)),
+                        pts=pts,
                         pts_num=len(list(gt_vec.coords)),
                         cls_name=name,
                         type=gt_label,
@@ -1536,8 +1576,10 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         Returns:
             dict: Dictionary of evaluation details.
         """
-        from projects.mmdet3d_plugin.datasets.map_utils.mean_ap import eval_map
-        from projects.mmdet3d_plugin.datasets.map_utils.mean_ap import format_res_gt_by_classes
+        from models.experimental.MapTR.projects.mmdet3d_plugin.datasets.map_utils.mean_ap import eval_map
+        from models.experimental.MapTR.projects.mmdet3d_plugin.datasets.map_utils.mean_ap import (
+            format_res_gt_by_classes,
+        )
 
         result_path = osp.abspath(result_path)
         detail = dict()
@@ -1546,9 +1588,60 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         with open(result_path, "r") as f:
             pred_results = json.load(f)
         gen_results = pred_results["results"]
+        print(f"DEBUG: Loaded {len(gen_results)} prediction samples")
         with open(self.map_ann_file, "r") as ann_f:
             gt_anns = json.load(ann_f)
         annotations = gt_anns["GTs"]
+        print(f"DEBUG: Loaded {len(annotations)} ground truth samples")
+
+        # Check for samples with no ground truth vectors
+        total_gt_vectors = sum(len(ann.get("vectors", [])) for ann in annotations if isinstance(ann, dict))
+        total_pred_vectors = sum(len(res.get("vectors", [])) for res in gen_results if isinstance(res, dict))
+
+        print(f"DEBUG: Total GT vectors across all samples: {total_gt_vectors}")
+        print(f"DEBUG: Total prediction vectors across all samples: {total_pred_vectors}")
+
+        if total_gt_vectors == 0:
+            print("WARNING: No ground truth vectors found in any sample!")
+            print("This could mean:")
+            print("  1. The test samples don't have ground truth annotations")
+            print("  2. The annotation file is incomplete or incorrect")
+            print("  3. You're evaluating on a test set (use validation set instead)")
+            print("  4. The sample tokens don't match between predictions and ground truth")
+
+        # Debug: Check first few samples
+        if len(annotations) > 0:
+            print(
+                f"DEBUG: First GT sample keys: {list(annotations[0].keys()) if isinstance(annotations[0], dict) else 'not a dict'}"
+            )
+            if isinstance(annotations[0], dict):
+                sample_token = annotations[0].get("sample_token", "N/A")
+                print(f"DEBUG: First GT sample_token: {sample_token}")
+                if "vectors" in annotations[0]:
+                    print(f"DEBUG: First GT sample has {len(annotations[0]['vectors'])} vectors")
+                    if len(annotations[0]["vectors"]) > 0:
+                        print(
+                            f"DEBUG: First vector type: {annotations[0]['vectors'][0].get('type', 'N/A')}, pts shape: {len(annotations[0]['vectors'][0].get('pts', []))}"
+                        )
+        if len(gen_results) > 0:
+            print(
+                f"DEBUG: First pred sample keys: {list(gen_results[0].keys()) if isinstance(gen_results[0], dict) else 'not a dict'}"
+            )
+            if isinstance(gen_results[0], dict):
+                sample_token = gen_results[0].get("sample_token", "N/A")
+                print(f"DEBUG: First pred sample_token: {sample_token}")
+                if "vectors" in gen_results[0]:
+                    print(f"DEBUG: First pred sample has {len(gen_results[0]['vectors'])} vectors")
+
+        # Check if sample tokens match
+        if len(annotations) > 0 and len(gen_results) > 0:
+            gt_token = annotations[0].get("sample_token") if isinstance(annotations[0], dict) else None
+            pred_token = gen_results[0].get("sample_token") if isinstance(gen_results[0], dict) else None
+            if gt_token and pred_token:
+                if gt_token != pred_token:
+                    print(f"WARNING: Sample tokens don't match! GT: {gt_token}, Pred: {pred_token}")
+                else:
+                    print(f"DEBUG: Sample tokens match: {gt_token}")
         cls_gens, cls_gts = format_res_gt_by_classes(
             result_path,
             gen_results,
@@ -1560,10 +1653,14 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         )
 
         metrics = metric if isinstance(metric, list) else [metric]
+        # Map mAP to iou (mAP is computed using IoU metric)
+        metrics = ["iou" if m == "mAP" or m.lower() == "map" else m for m in metrics]
         allowed_metrics = ["chamfer", "iou"]
         for metric in metrics:
             if metric not in allowed_metrics:
-                raise KeyError(f"metric {metric} is not supported")
+                raise KeyError(
+                    f"metric {metric} is not supported. Allowed metrics: {allowed_metrics} (or use 'mAP' which maps to 'iou')"
+                )
 
         for metric in metrics:
             print("-*" * 10 + f"use metric:{metric}" + "-*" * 10)
@@ -1664,6 +1761,18 @@ def output_to_vecs(detection):
     scores = detection["scores_3d"].numpy()
     labels = detection["labels_3d"].numpy()
     pts = detection["pts_3d"].numpy()
+
+    # Debug: Check coordinates at extraction point
+    import os
+
+    debug_enabled = os.environ.get("MAPTR_DEBUG_EVAL", "0") == "1"
+    if debug_enabled and len(pts) > 0:
+        print(f"\n=== output_to_vecs Debug ===")
+        print(f"pts shape: {pts.shape}")
+        print(f"pts range: [{pts.min():.2f}, {pts.max():.2f}]")
+        print(f"First prediction pts sample: {pts[0, :3]}")
+        print(f"boxes_3d range: [{box3d.min():.2f}, {box3d.max():.2f}]")
+        print(f"First box3d: {box3d[0]}")
 
     vec_list = []
     for i in range(box3d.shape[0]):

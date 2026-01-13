@@ -360,6 +360,17 @@ class MapTRPerceptionTransformer(BaseModule):
         reference_points = reference_points.sigmoid()
         init_reference_out = reference_points
 
+        # Debug: Reference points initialization
+        import os
+
+        debug_enabled = os.environ.get("MAPTR_DEBUG_EVAL", "0") == "1"
+        if debug_enabled:
+            print(f"\n=== Transformer Reference Points Initialization ===")
+            print(f"reference_points (after sigmoid) shape: {reference_points.shape}")
+            print(f"reference_points range: [{reference_points.min():.4f}, {reference_points.max():.4f}]")
+            print(f"First 5 reference points: {reference_points[0, :5]}")
+            print(f"Reference points should be in normalized [0, 1] range")
+
         query = query.permute(1, 0, 2)
         query_pos = query_pos.permute(1, 0, 2)
         bev_embed = bev_embed.permute(1, 0, 2)

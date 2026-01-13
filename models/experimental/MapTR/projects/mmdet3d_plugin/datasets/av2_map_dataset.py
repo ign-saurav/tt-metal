@@ -1375,8 +1375,10 @@ class CustomAV2LocalMapDataset(CustomNuScenesDataset):
         Returns:
             dict: Dictionary of evaluation details.
         """
-        from projects.mmdet3d_plugin.datasets.map_utils.mean_ap import eval_map
-        from projects.mmdet3d_plugin.datasets.map_utils.mean_ap import format_res_gt_by_classes
+        from models.experimental.MapTR.projects.mmdet3d_plugin.datasets.map_utils.mean_ap import eval_map
+        from models.experimental.MapTR.projects.mmdet3d_plugin.datasets.map_utils.mean_ap import (
+            format_res_gt_by_classes,
+        )
 
         result_path = osp.abspath(result_path)
         # import pdb;pdb.set_trace()
