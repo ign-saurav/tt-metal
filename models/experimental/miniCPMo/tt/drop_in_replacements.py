@@ -12,6 +12,7 @@ Usage:
     from models.experimental.miniCPMo.tt.drop_in_replacements import (
         DropInChatTTSDecoder,
         DropInAudioEncoder,
+        DropInDVAE,
     )
 
     # Load model from HuggingFace
@@ -20,6 +21,7 @@ Usage:
     # Replace components with TT implementations
     model.tts = DropInChatTTSDecoder(model.tts, device, model.embed_dim)
     model.apm = DropInAudioEncoder(model.apm, device, model.config.audio_config)
+    model.tts.dvae = DropInDVAE(model.tts.dvae, device)
 """
 
 import torch
@@ -31,6 +33,7 @@ from loguru import logger
 # Import TT implementations
 from models.experimental.miniCPMo.tt.ttnn_chattts_decoder import TtnnChatTTSDecoder
 from models.experimental.miniCPMo.tt.ttnn_whisper_encoder import TtnnWhisperEncoder
+from models.experimental.miniCPMo.tt.ttnn_dvae import TtnnDVAE
 
 
 class DropInChatTTSDecoder(nn.Module):
@@ -709,3 +712,61 @@ class DropInQwen2LLM(nn.Module):
             except AttributeError:
                 pass
         raise AttributeError(f"'{type(self).__name__}' has no attribute '{name}'")
+
+
+class DropInDVAE(nn.Module):
+    """
+    Drop-in replacement for DVAE.
+
+    Wraps TtnnDVAE with the same interface as the HuggingFace model,
+    so it can be swapped in without changing any calling code.
+
+    Usage:
+        # Replace DVAE in the TTS module
+        model.tts.dvae = DropInDVAE(model.tts.dvae, device)
+
+        # Now decode_to_mel_specs will use TT-accelerated DVAE
+        mel_specs = model.tts.decode_to_mel_specs(result_list)
+    """
+
+    def __init__(self, reference_model, device):
+        """
+        Initialize drop-in replacement for DVAE.
+
+        Args:
+            reference_model: The original DVAE model from HuggingFace
+            device: TT device (ttnn.Device or mesh device)
+        """
+        super().__init__()
+        self._reference = reference_model
+        self.tt_device = device
+
+        # Keep reference to vq_layer for GFSQ (PyTorch fallback)
+        self.vq_layer = reference_model.vq_layer
+        self.coef = reference_model.coef
+
+        # Initialize TT DVAE
+        logger.info("Initializing TT DVAE...")
+        self.tt_dvae = TtnnDVAE(mesh_device=device)
+
+        # Load weights from reference model
+        state_dict = {k: v.float() for k, v in reference_model.state_dict().items()}
+        self.tt_dvae.load_weights(state_dict)
+        logger.info("✅ TT DVAE initialized with weights")
+
+    def forward(self, inp: torch.Tensor, mode: str = "decode") -> torch.Tensor:
+        """
+        Forward pass matching PyTorch DVAE interface.
+
+        Args:
+            inp: Input tensor
+                - mode="encode": mel spectrogram [num_mel_bins, time_steps]
+                - mode="decode": indices from vq_layer [batch, num_vq, seq_len]
+            mode: "encode" or "decode" (default: "decode")
+
+        Returns:
+            - mode="encode": indices from GFSQ quantization
+            - mode="decode": reconstructed mel spectrogram
+        """
+        # Use TT DVAE with PyTorch vq_layer fallback
+        return self.tt_dvae(inp, mode=mode, vq_layer=self.vq_layer)
