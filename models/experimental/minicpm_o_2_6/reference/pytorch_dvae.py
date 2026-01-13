@@ -9,6 +9,73 @@ Simplified implementation focusing on encoder/decoder architecture.
 
 import torch
 import torch.nn as nn
+from typing import List
+import math
+
+# Try to import GroupedResidualFSQ, fallback to dummy if not available
+try:
+    from vector_quantize_pytorch import GroupedResidualFSQ
+
+    GFSQ_AVAILABLE = True
+except ImportError:
+    GFSQ_AVAILABLE = False
+
+
+class GFSQ(nn.Module):
+    """
+    Grouped Finite Scalar Quantization layer.
+    Matches the GFSQ implementation in modeling_minicpmo.py.
+    Can be used as torch fallback in TTNN.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        levels: List[int],
+        G: int,
+        R: int,
+        eps: float = 1e-5,
+        transpose: bool = True,
+    ):
+        super(GFSQ, self).__init__()
+        if not GFSQ_AVAILABLE:
+            raise ImportError(
+                "vector_quantize_pytorch is required for GFSQ. Install with: pip install vector-quantize-pytorch"
+            )
+
+        self.quantizer = GroupedResidualFSQ(
+            dim=dim,
+            levels=list(levels),
+            num_quantizers=R,
+            groups=G,
+        )
+        self.n_ind = math.prod(levels)
+        self.eps = eps
+        self.transpose = transpose
+        self.G = G
+        self.R = R
+
+    def _embed(self, x: torch.Tensor) -> torch.Tensor:
+        """Convert indices back to features."""
+        if self.transpose:
+            x = x.transpose(1, 2)
+        x = x.view(x.size(0), x.size(1), self.G, self.R).permute(2, 0, 1, 3)
+        feat = self.quantizer.get_output_from_indices(x)
+        return feat.transpose_(1, 2) if self.transpose else feat
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Quantize input and return indices."""
+        if self.transpose:
+            x = x.transpose(1, 2)
+        _, ind = self.quantizer(x)
+        ind = ind.permute(1, 2, 0, 3).contiguous()
+        ind = ind.view(ind.size(0), ind.size(1), -1)
+        return ind.transpose_(1, 2) if self.transpose else ind
+
+    def quantize_and_embed(self, x: torch.Tensor) -> torch.Tensor:
+        """Quantize input and immediately embed back to features (full round-trip)."""
+        indices = self.forward(x)
+        return self._embed(indices)
 
 
 class PyTorchDVAE(nn.Module):
@@ -73,6 +140,19 @@ class PyTorchDVAE(nn.Module):
         # Encoder output
         self.encoder_output = nn.Conv2d(hidden_dim, 1024, (1, 1))  # 1x1 conv
 
+        # GFSQ quantization layer (only used if enable_gfsq=True)
+        if enable_gfsq and GFSQ_AVAILABLE:
+            self.gfsq = GFSQ(
+                dim=1024,
+                levels=[8, 5, 5, 5],  # 8*5*5*5 = 1000 codebook entries
+                G=2,  # 2 groups
+                R=2,  # 2 residual quantizers
+                eps=1e-5,
+                transpose=True,
+            )
+        else:
+            self.gfsq = None
+
         # Decoder input (Production: decoder processes 1024 channels from encoder)
         self.decoder_input = nn.Sequential(
             nn.Conv2d(512, bn_dim, (1, 3), padding=(0, 1)),  # Production: 512 input channels from encoder
@@ -106,25 +186,28 @@ class PyTorchDVAE(nn.Module):
 
         # Encoder
         encoded = self._encode(x)
+        # encoded shape: [B, 1, T, 1024] (NHWC) after _encode
 
         # Apply GFSQ quantization (or bypass if disabled)
-        if self.enable_gfsq:
-            # Apply GFSQ quantization (simplified - pass through for now)
-            quantized = encoded
+        if self.enable_gfsq and self.gfsq is not None:
+            # Convert NHWC to NCT for GFSQ: [B, 1, T, 1024] -> [B, 1024, T]
+            encoded_3d = encoded.squeeze(1).permute(0, 2, 1)  # [B, 1024, T]
+            # GFSQ round-trip: quantize and embed
+            quantized_3d = self.gfsq.quantize_and_embed(encoded_3d)  # [B, 1024, T]
         else:
-            # Bypass quantization - pass through unchanged
-            quantized = encoded
+            # Bypass quantization - convert to 3D for reshape
+            quantized_3d = encoded.squeeze(1).permute(0, 2, 1)  # [B, 1024, T]
 
+        # Reshape from [B, 1024, T] to [B, 1, T*2, 512] using interleaved reshape
         quantized = (
-            quantized.view(
-                (1, 1, quantized.size(2), 2, quantized.size(3) // 2),
-            )
-            .permute(0, 1, 4, 2, 3)
-            .flatten(3)
-            .permute(0, 1, 3, 2)
+            quantized_3d.view(batch_size, 2, 512, -1)  # [B, 2, 512, T]
+            .permute(0, 2, 1, 3)  # [B, 512, 2, T]
+            .reshape(batch_size, 512, -1)  # [B, 512, T*2]
+            .permute(0, 2, 1)  # [B, T*2, 512]
+            .unsqueeze(1)  # [B, 1, T*2, 512] (NHWC)
         )
 
-        print(quantized.shape)
+        print(f"quantized shape: {quantized.shape}")
 
         # Decoder
         reconstructed = self._decode(quantized)

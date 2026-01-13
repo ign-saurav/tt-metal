@@ -22,12 +22,19 @@ try:
         get_activations_memory_config,
         torch_to_ttnn,
     )
+    from ..reference.pytorch_dvae import GFSQ, GFSQ_AVAILABLE
 except ImportError:
     from common import (
         get_weights_memory_config,
         get_activations_memory_config,
         torch_to_ttnn,
     )
+
+    try:
+        from models.experimental.minicpm_o_2_6.reference.pytorch_dvae import GFSQ, GFSQ_AVAILABLE
+    except ImportError:
+        GFSQ_AVAILABLE = False
+        GFSQ = None
 
 
 class TtnnGFSQ:
@@ -255,20 +262,24 @@ class TtnnDVAE:
         self.out_conv = None
         self.coef = None
 
-        # Initialize GFSQ quantizer (MiniCPM-o-2_6 configuration)
+        # Initialize GFSQ quantizer using PyTorch fallback
         if self.config["enable_gfsq"]:
-            self.vq_layer = TtnnGFSQ(
-                device=self.device,  # Pass device to GFSQ
-                dim=1024,  # Encoder output dimension
-                levels=[5, 5, 5, 5],  # 4-level quantization per group
-                G=2,  # 2 groups
-                R=2,  # 2 residual levels
-            )
-
-            # Load GFSQ weights immediately after initialization
-            self.vq_layer.load_weights({})  # Empty dict for now - uses random codebooks
+            if GFSQ_AVAILABLE and GFSQ is not None:
+                # Use PyTorch GFSQ as torch fallback
+                self.gfsq_torch = GFSQ(
+                    dim=1024,  # Encoder output dimension
+                    levels=[8, 5, 5, 5],  # 8*5*5*5 = 1000 codebook entries
+                    G=2,  # 2 groups
+                    R=2,  # 2 residual quantizers
+                    eps=1e-5,
+                    transpose=True,
+                )
+                logger.info("GFSQ: Using PyTorch fallback for quantization")
+            else:
+                logger.warning("GFSQ not available - quantization will be bypassed")
+                self.gfsq_torch = None
         else:
-            self.vq_layer = None
+            self.gfsq_torch = None
 
         # Create conv config (shared for all conv operations)
         self.conv_config = ttnn.Conv2dConfig(
@@ -600,20 +611,34 @@ class TtnnDVAE:
 
         # Encoder
         encoded = self._encode(x, debug_ops)
+        # encoded shape: [batch, 1, seq, 1024] (NHWC)
 
-        # Reshape from [batch, 1, seq, dim] to [batch, seq, dim] for quantization
         batch, _, seq, dim = encoded.shape
-        encoded_flat = ttnn.reshape(encoded, [batch, seq, dim])
 
-        # Apply GFSQ quantization (or bypass if disabled)
-        if self.enable_gfsq:
-            quantized, quant_indices = self.vq_layer.quantize(encoded_flat)
+        # Apply GFSQ quantization using PyTorch fallback (or bypass if disabled)
+        if self.enable_gfsq and self.gfsq_torch is not None:
+            # Convert TTNN to torch for GFSQ: [B, 1, T, 1024] -> [B, 1024, T]
+            encoded_torch = ttnn.to_torch(encoded)  # [B, 1, T, 1024]
+            encoded_3d = encoded_torch.squeeze(1).permute(0, 2, 1)  # [B, 1024, T]
+
+            # GFSQ round-trip: quantize and embed (PyTorch fallback)
+            quantized_3d = self.gfsq_torch.quantize_and_embed(encoded_3d)  # [B, 1024, T]
         else:
-            # Bypass quantization - pass through unchanged
-            quantized = encoded_flat
+            # Bypass quantization - convert to 3D
+            encoded_torch = ttnn.to_torch(encoded)  # [B, 1, T, 1024]
+            quantized_3d = encoded_torch.squeeze(1).permute(0, 2, 1)  # [B, 1024, T]
 
-        # Reshape back to [batch, 1, seq, dim] for decoder
-        quantized_4d = ttnn.reshape(quantized, [batch, 1, seq * 2, dim // 2])
+        # Reshape from [B, 1024, T] to [B, 1, T*2, 512] using interleaved reshape (on torch)
+        quantized_torch = (
+            quantized_3d.view(batch, 2, 512, -1)  # [B, 2, 512, T]
+            .permute(0, 2, 1, 3)  # [B, 512, 2, T]
+            .reshape(batch, 512, -1)  # [B, 512, T*2]
+            .permute(0, 2, 1)  # [B, T*2, 512]
+            .unsqueeze(1)  # [B, 1, T*2, 512] (NHWC)
+        )
+
+        # Convert back to TTNN
+        quantized_4d = torch_to_ttnn(quantized_torch, self.device)
 
         # Decoder
         reconstructed = self._decode(quantized_4d, debug_ops)
