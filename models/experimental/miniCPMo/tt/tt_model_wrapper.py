@@ -47,6 +47,7 @@ def enable_tt_acceleration(
                    - 'vision': Replace vpm (SigLip vision encoder)
                    - 'audio': Replace apm (Whisper audio encoder)
                    - 'tts': Replace tts (ChatTTS decoder)
+                   - 'dvae': Replace tts.dvae (DVAE decoder for mel spectrogram)
                    Default: all available components
         model_path: HuggingFace model path for weight loading
 
@@ -81,6 +82,7 @@ def enable_tt_acceleration(
         DropInAudioEncoder,
         DropInVisionEncoder,
         DropInQwen2LLM,
+        DropInDVAE,
     )
 
     # Auto-detect available components if not specified
@@ -144,6 +146,17 @@ def enable_tt_acceleration(
             )
         else:
             logger.warning("TTS component requested but tts not found or None")
+
+    # Replace DVAE (inside TTS module)
+    if "dvae" in components:
+        if hasattr(model, "tts") and model.tts is not None and hasattr(model.tts, "dvae"):
+            logger.info("Replacing DVAE with TT implementation...")
+            model.tts.dvae = DropInDVAE(
+                reference_model=model.tts.dvae,
+                device=device,
+            )
+        else:
+            logger.warning("DVAE component requested but tts.dvae not found or None")
 
     logger.info(f"✅ TT acceleration enabled for components: {components}")
     return model
