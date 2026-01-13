@@ -345,10 +345,15 @@ class TtnnDVAE:
         """
         logger.info("Loading DVAE weights...")
 
-        # Quantizer coefficient
-        self.coef = torch_to_ttnn(
-            weights_dict["coef"],
-            self.device,
+        # Quantizer coefficient - reshape from [1, 100, 1] to [1, 1, 1, 100] for NHWC broadcast
+        # Use ROW_MAJOR_LAYOUT to avoid TILE padding issues with small dimensions
+        coef_nhwc = weights_dict["coef"].squeeze(-1).view(1, 1, 1, -1)  # [1, 100, 1] -> [1, 1, 1, 100]
+        self.coef_torch = weights_dict["coef"].squeeze(-1)  # Store PyTorch version [100]
+        self.coef = ttnn.from_torch(
+            coef_nhwc.contiguous(),
+            device=self.device,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
             memory_config=get_weights_memory_config(),
         )
 
@@ -412,6 +417,12 @@ class TtnnDVAE:
         self.encoder_blocks = []
         for i in range(self.num_encoder_layers):
             block_weights = {
+                "coef": torch_to_ttnn(
+                    # Residual scaling coefficient [hidden_dim] -> [1, 1, 1, hidden_dim] for NHWC broadcast
+                    weights_dict[f"encoder.decoder_block.{i}.coef"].view(1, 1, 1, -1),
+                    self.device,
+                    memory_config=get_weights_memory_config(),
+                ),
                 "dwconv": {
                     "weight": torch_to_ttnn(
                         # Conv1D [out, 1, W] -> Conv2D [out, 1, 1, W]
@@ -513,6 +524,12 @@ class TtnnDVAE:
         self.decoder_blocks = []
         for i in range(self.num_decoder_layers):
             block_weights = {
+                "coef": torch_to_ttnn(
+                    # Residual scaling coefficient [hidden_dim] -> [1, 1, 1, hidden_dim] for NHWC broadcast
+                    weights_dict[f"decoder.decoder_block.{i}.coef"].view(1, 1, 1, -1),
+                    self.device,
+                    memory_config=get_weights_memory_config(),
+                ),
                 "dwconv": {
                     "weight": torch_to_ttnn(
                         # Conv1D [out, 1, W] -> Conv2D [out, 1, 1, W]
@@ -594,56 +611,84 @@ class TtnnDVAE:
 
         logger.info("✅ DVAE weights loaded")
 
-    def __call__(self, mel_spectrogram: ttnn.Tensor, debug_ops: dict = None) -> ttnn.Tensor:
+    def __call__(
+        self,
+        inp: torch.Tensor,
+        mode: str = "decode",
+        vq_layer=None,
+    ) -> torch.Tensor:
         """
-        Forward pass of DVAE.
+        Forward pass matching PyTorch DVAE interface.
 
         Args:
-            mel_spectrogram: Input mel spectrogram in NHWC format [batch_size, 1, time_steps, num_mel_bins]
-                           (Note: Caller must convert from NCHW to NHWC before calling)
+            inp: Input tensor
+                - mode="encode": mel spectrogram [num_mel_bins, time_steps]
+                - mode="decode": indices from vq_layer
+            mode: "encode" or "decode"
+            vq_layer: GFSQ layer from loaded PyTorch model (required)
 
         Returns:
-            ttnn.Tensor: Reconstructed mel spectrogram in NHWC format [batch_size, 1, time_steps, num_mel_bins]
-                        (Note: Caller must convert back to NCHW for comparison with PyTorch)
+            - mode="encode": indices from GFSQ quantization
+            - mode="decode": reconstructed mel spectrogram [num_mel_bins, time_steps]
         """
-        # Input is in NHWC format: [batch, H=1, W=time_steps, C=mel_bins]
-        x = mel_spectrogram
+        if vq_layer is None:
+            raise ValueError("vq_layer is required")
 
-        # Encoder
-        encoded = self._encode(x, debug_ops)
-        # encoded shape: [batch, 1, seq, 1024] (NHWC)
+        coef = self.coef_torch
 
-        batch, _, seq, dim = encoded.shape
+        if mode == "encode":
+            # Encode: mel -> indices
+            mel = inp.clone()
 
-        # Apply GFSQ quantization using PyTorch fallback (or bypass if disabled)
-        if self.enable_gfsq and self.gfsq_torch is not None:
-            # Convert TTNN to torch for GFSQ: [B, 1, T, 1024] -> [B, 1024, T]
-            encoded_torch = ttnn.to_torch(encoded)  # [B, 1, T, 1024]
-            encoded_3d = encoded_torch.squeeze(1).permute(0, 2, 1)  # [B, 1024, T]
+            # Prepare input in NHWC format
+            mel_nhwc = mel.unsqueeze(0).unsqueeze(0).permute(0, 1, 3, 2)  # [1, 1, T, 100]
+            tt_coef = ttnn.from_torch(
+                coef.view(1, 1, 1, -1), device=self.device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT
+            )
+            tt_input = ttnn.from_torch(
+                mel_nhwc,
+                device=self.device,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.ROW_MAJOR_LAYOUT,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
 
-            # GFSQ round-trip: quantize and embed (PyTorch fallback)
-            quantized_3d = self.gfsq_torch.quantize_and_embed(encoded_3d)  # [B, 1024, T]
-        else:
-            # Bypass quantization - convert to 3D
-            encoded_torch = ttnn.to_torch(encoded)  # [B, 1, T, 1024]
-            quantized_3d = encoded_torch.squeeze(1).permute(0, 2, 1)  # [B, 1024, T]
+            # Coef division
+            tt_after_coef = ttnn.div(tt_input, tt_coef)
 
-        # Reshape from [B, 1024, T] to [B, 1, T*2, 512] using interleaved reshape (on torch)
-        quantized_torch = (
-            quantized_3d.view(batch, 2, 512, -1)  # [B, 2, 512, T]
-            .permute(0, 2, 1, 3)  # [B, 512, 2, T]
-            .reshape(batch, 512, -1)  # [B, 512, T*2]
-            .permute(0, 2, 1)  # [B, T*2, 512]
-            .unsqueeze(1)  # [B, 1, T*2, 512] (NHWC)
-        )
+            # TTNN Encode
+            tt_encoder_output = self._encode(tt_after_coef)
+            tt_encoder_torch = ttnn.to_torch(tt_encoder_output).float()
+            tt_encoder_nchw = tt_encoder_torch.squeeze(1).permute(0, 2, 1)  # [1, 1024, 32]
 
-        # Convert back to TTNN
-        quantized_4d = torch_to_ttnn(quantized_torch, self.device)
+            # GFSQ quantization (PyTorch fallback)
+            with torch.no_grad():
+                indices = vq_layer(tt_encoder_nchw)
 
-        # Decoder
-        reconstructed = self._decode(quantized_4d, debug_ops)
+            return indices
 
-        return reconstructed
+        else:  # mode == "decode"
+            # Decode: indices -> mel
+            with torch.no_grad():
+                vq_feats = vq_layer._embed(inp)
+                vq_feats = vq_feats.view(vq_feats.size(0), 2, vq_feats.size(1) // 2, vq_feats.size(2))
+                vq_feats = vq_feats.permute(0, 2, 3, 1).flatten(2)  # [1, 512, 64]
+
+            # TTNN Decode
+            decoder_input_nhwc = vq_feats.permute(0, 2, 1).unsqueeze(1)  # [1, 1, 64, 512]
+            tt_dec_input = ttnn.from_torch(
+                decoder_input_nhwc,
+                device=self.device,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.ROW_MAJOR_LAYOUT,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
+            tt_decoder_output = self._decode(tt_dec_input)
+            tt_decoder_torch = ttnn.to_torch(tt_decoder_output).float()
+            tt_decoder_nchw = tt_decoder_torch.squeeze(1).permute(0, 2, 1)  # [1, 100, 64]
+
+            # Coef multiplication
+            return torch.mul(tt_decoder_nchw, coef.view(1, -1, 1))
 
     def _encode(self, x: ttnn.Tensor, debug_ops: dict = None) -> ttnn.Tensor:
         """
@@ -850,17 +895,17 @@ class TtnnDVAE:
         )
 
         # Decoder input convolutions
-        # Production: decoder processes 1024-channel features from encoder
-        # Input: [batch, 1, time_steps//2, 1024] (NHWC from encoder output)
+        # After GFSQ reshape: [B, 512, T*2] -> [B, 1, T*2, 512] (NHWC)
+        # decoder.conv_in: 512 -> 128 -> 256
         for i, conv in enumerate(self.decoder_conv_in):
             if i == 0:
-                # Weight: [bn_dim, 1024, 1, 3] - Production: bn_dim=128
-                # Output: [batch, 1, time_steps//2, bn_dim]
+                # Weight: [bn_dim, 512, 1, 3] - Production: bn_dim=128
+                # Output: [batch, 1, time_steps*2, bn_dim]
                 [x, [out_h, out_w]] = ttnn.conv2d(
                     input_tensor=x,
                     weight_tensor=conv["weight"],
                     bias_tensor=conv["bias"],
-                    in_channels=1024,  # FIXED: Production encoder outputs 1024 channels
+                    in_channels=512,  # FIXED: Input is from GFSQ reshape, not encoder
                     out_channels=self.bn_dim,
                     device=self.device,
                     batch_size=x.shape[0],
@@ -991,6 +1036,8 @@ class TtnnDVAE:
             # TTNN conv2d expects NHWC format: [B, H, W, C]
             # Input x is already in NHWC format: [B, 1, T, C]
             # For depthwise conv: kernel_size=(1, 7), groups = channels
+            # PyTorch uses dilation=2, so effective kernel size is 1 + (7-1)*2 = 13
+            # padding = dilation * (kernel // 2) = 2 * 3 = 6 per side
             x = ttnn.conv2d(
                 input_tensor=x,
                 weight_tensor=weights["dwconv"]["weight"],
@@ -1003,7 +1050,8 @@ class TtnnDVAE:
                 input_width=x.shape[2],  # width = time_steps
                 kernel_size=(1, 7),
                 stride=(1, 1),
-                padding=(0, 0, 3, 3),  # (top, bottom, left, right)
+                padding=(0, 0, 6, 6),  # (top, bottom, left, right) - 6 for dilation=2
+                dilation=(1, 2),  # Match PyTorch dilation=2
                 groups=x.shape[3],  # depthwise: groups = channels
                 conv_config=self.conv_config,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
@@ -1064,11 +1112,18 @@ class TtnnDVAE:
             # Ensure output tensor stays on device
             x = ttnn.to_device(x, self.device)
 
-        # Step 6: Residual connection
+        # Step 6: Residual connection with coefficient scaling
         if debug_ops["residual"]:
-            # Residual connection - add directly in NHWC format
-            # Ensure both tensors are in the same memory config
+            # Apply coefficient scaling: output = residual + coef * x
+            # The coef is in NHWC format [1, 1, 1, hidden_dim] for broadcast
             x = ttnn.to_memory_config(x, get_activations_memory_config())
+
+            # Scale the block output by coef before adding to residual
+            if "coef" in weights:
+                x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)  # TILE for multiply
+                x = ttnn.mul(x, weights["coef"], memory_config=get_activations_memory_config())
+                x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)  # Back to ROW_MAJOR
+
             x = ttnn.add(x, residual, memory_config=get_activations_memory_config())
             # Ensure output tensor stays on device
             x = ttnn.to_device(x, self.device)
