@@ -1,7 +1,7 @@
 # Swin2SR
 
 **Platforms:** Wormhole (n150 and n300)
-**Supported Input Resolution:** Variable (tiled processing for arbitrary sizes, default tile size: 64x64)
+**Supported Input Resolution:** Variable (tiled processing for arbitrary sizes, default tile size: 64x64). Supports input sizes like 256×256 and 512×512 for scale factors 2× and 4× respectively.
 
 ## Introduction
 Swin2SR (Swin Transformer V2 for Super-Resolution) is a state-of-the-art image super-resolution model based on Swin Transformer V2 architecture. This implementation provides a pure TTNN version optimized for Tenstorrent hardware accelerators.
@@ -102,13 +102,24 @@ Sample images are placed under:
 ```
 models/experimental/swin2sr/resources/test_images/
 ```
-Then re-run the demo:
+
+**Example for 2× upscaling:**
 ```
 python3 models/experimental/swin2sr/demo/demo_tiled.py \
     --image models/experimental/swin2sr/resources/test_images/Set5/LR_bicubic/X2/babyx2.png \
     --scale 2 \
     --output output_2x.png
 ```
+
+**Example for 4× upscaling:**
+```
+python3 models/experimental/swin2sr/demo/demo_tiled.py \
+    --image models/experimental/swin2sr/resources/test_images/Set5/LR_bicubic/X4/your_image.png \
+    --scale 4 \
+    --output output_4x.png
+```
+
+The model supports various input sizes including 256×256 and 512×512 pixels. For larger images, the demo automatically uses tiled processing to handle memory constraints.
 
 ## Performance
 ### Single Device (BS=1, img_size=64x64)(n150):
@@ -129,7 +140,7 @@ This test validates Swin2SR on single and multi-device setups using:
 
 
 ## Configuration Notes
-- Resolution: Variable input sizes supported via tiled processing (default tile size: 64x64). Tile size must be a multiple of window_size (8).
+- Resolution: Variable input sizes supported via tiled processing (default tile size: 64x64). Tile size must be a multiple of window_size (8). The model supports input sizes like 256×256 for 2× upscaling and 512×512 for 4× upscaling, with automatic tiling for larger images.
 - Device: The demo opens a Wormhole device (default id typically 0). If you need to change it, use `--device-id` argument.
 - Batch Size: Demo/tests are written for BS=1. For larger BS you'll need to verify memory layouts and tile alignment.
 - Memory Layouts: The TT-NN path uses ROW_MAJOR layout for resize ops and may pad channels to multiples of 32 to satisfy kernel/tile alignment.
