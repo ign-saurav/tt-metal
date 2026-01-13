@@ -6,6 +6,188 @@ import warnings
 
 # from mmcv import Config, DictAction
 from mmengine import Config
+import argparse
+
+# ============================================================================
+# MMCV UTILS - DictAction
+# Source: https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/misc.py
+# This class is extracted from mmcv v1.4.0 to avoid dependency on mmcv.
+# Original implementation: mmcv.utils.misc.DictAction
+# ============================================================================
+
+
+class DictAction(argparse.Action):
+    """
+    argparse action to split an argument into KEY=VALUE form
+    on the first = and append to a dictionary. List options can
+    be passed as comma separated values, i.e 'KEY=V1,V2,V3', or
+    with explicit brackets, i.e. 'KEY=[V1,V2,V3]'. It also
+    support nested brackets, i.e. 'KEY=[(V1,V2),(V3,V4)]'.
+    """
+
+    @staticmethod
+    def _parse_int_float_bool(val):
+        try:
+            return int(val)
+        except ValueError:
+            pass
+        try:
+            return float(val)
+        except ValueError:
+            pass
+        if val.lower() in ["true", "false"]:
+            return val.lower() == "true"
+        if val == "None":
+            return None
+        return val
+
+    @staticmethod
+    def _parse_iterable(val):
+        """Parse iterable values in the string.
+
+        All elements inside '()' or '[]' are treated as iterable values.
+
+        Args:
+            val (str): Value string.
+
+        Returns:
+            list | tuple: The expanded list or tuple from the string.
+
+        Examples:
+            >>> DictAction._parse_iterable('1,2,3')
+            [1, 2, 3]
+            >>> DictAction._parse_iterable('[1,2,3]')
+            [1, 2, 3]
+            >>> DictAction._parse_iterable('(1,2,3)')
+            (1, 2, 3)
+            >>> DictAction._parse_iterable('[(1,2),(3,4)]')
+            [(1, 2), (3, 4)]
+        """
+        # Strip ' and " characters
+        val = val.strip("\"'")
+        # Remove '[' and ']' characters
+        if val.startswith("[") and val.endswith("]"):
+            val = val[1:-1]
+            return [DictAction._parse_iterable(x) for x in val.split(",")]
+        elif val.startswith("(") and val.endswith(")"):
+            val = val[1:-1]
+            return tuple([DictAction._parse_iterable(x) for x in val.split(",")])
+        else:
+            # Split by comma unless it's inside a bracket
+            parts = []
+            bracket_level = 0
+            current_part = []
+            for char in val:
+                if char == "[":
+                    bracket_level += 1
+                    current_part.append(char)
+                elif char == "]":
+                    bracket_level -= 1
+                    current_part.append(char)
+                elif char == "," and bracket_level == 0:
+                    parts.append("".join(current_part))
+                    current_part = []
+                else:
+                    current_part.append(char)
+            if current_part:
+                parts.append("".join(current_part))
+            if len(parts) == 1:
+                return DictAction._parse_int_float_bool(parts[0])
+            return [DictAction._parse_int_float_bool(x.strip()) for x in parts]
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        options = {}
+        for kv in values:
+            if "=" not in kv:
+                raise ValueError(f"Expected KEY=VALUE format, got {kv}")
+            key, val = kv.split("=", 1)
+            options[key] = self._parse_iterable(val)
+        setattr(namespace, self.dest, options)
+
+
+# ============================================================================
+# MMCV CNN - fuse_conv_bn
+# Source: Based on mmcv.cnn.utils.fuse_conv_bn and tools/misc/fuse_conv_bn.py
+# This function fuses Conv2d and BatchNorm2d layers to improve inference speed.
+# ============================================================================
+
+from torch import nn as nn_module
+
+
+def _fuse_conv_bn_pair(conv, bn):
+    """Fuse a single Conv2d and BatchNorm2d layer.
+
+    During inference, the functionality of batch norm layers is turned off but
+    only the mean and var alone channels are used, which exposes the chance to
+    fuse it with the preceding conv layers to save computations and simplify
+    network structures.
+
+    Args:
+        conv (nn.Conv2d): Convolution layer
+        bn (nn.BatchNorm2d or nn.SyncBatchNorm): Batch normalization layer
+
+    Returns:
+        nn.Conv2d: Fused convolution layer
+    """
+    conv_w = conv.weight
+    conv_b = conv.bias if conv.bias is not None else torch.zeros_like(bn.running_mean)
+
+    factor = bn.weight / torch.sqrt(bn.running_var + bn.eps)
+    conv.weight = nn_module.Parameter(conv_w * factor.reshape([conv.out_channels, 1, 1, 1]))
+    conv.bias = nn_module.Parameter((conv_b - bn.running_mean) * factor + bn.bias)
+    return conv
+
+
+def _fuse_module(m):
+    """Recursively fuse Conv2d and BatchNorm2d layers in a model.
+
+    Args:
+        m (nn.Module): PyTorch model to fuse
+
+    Returns:
+        nn.Module: Model with fused conv+bn layers
+    """
+    last_conv = None
+    last_conv_name = None
+
+    for name, child in m.named_children():
+        if isinstance(child, (nn_module.BatchNorm2d, nn_module.SyncBatchNorm)):
+            if last_conv is None:  # only fuse BN that is after Conv
+                continue
+            fused_conv = _fuse_conv_bn_pair(last_conv, child)
+            m._modules[last_conv_name] = fused_conv
+            # To reduce changes, set BN as Identity instead of deleting it.
+            m._modules[name] = nn_module.Identity()
+            last_conv = None
+        elif isinstance(child, nn_module.Conv2d):
+            last_conv = child
+            last_conv_name = name
+        else:
+            _fuse_module(child)
+    return m
+
+
+def fuse_conv_bn(conv_or_model, bn=None):
+    """Fuse Conv2d and BatchNorm2d layers.
+
+    This function matches mmcv.cnn.fuse_conv_bn API. When called with a model,
+    it fuses all conv+bn pairs throughout the model. When called with (conv, bn),
+    it fuses a single conv+bn pair.
+
+    Args:
+        conv_or_model: Either a Conv2d layer or a full PyTorch model
+        bn: BatchNorm2d layer (only used if conv_or_model is Conv2d)
+
+    Returns:
+        Fused conv layer or fused model
+    """
+    if bn is not None:
+        # Single conv+bn fusion
+        return _fuse_conv_bn_pair(conv_or_model, bn)
+    else:
+        # Model-wide fusion (matches mmcv API)
+        return _fuse_module(conv_or_model)
+
 
 # from mmcv.parallel import MMDataParallel
 # from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
@@ -11806,3 +11988,4 @@ def bev_pool(feats, coords, B, D, H, W):
 
 
 # Import build_dataloader at the end of the file after all dependencies are defined to avoid circular import
+from models.experimental.MapTR.projects.mmdet3d_plugin.datasets.builder import build_dataloader  # noqa: F401

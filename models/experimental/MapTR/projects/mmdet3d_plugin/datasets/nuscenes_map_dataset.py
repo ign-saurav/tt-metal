@@ -563,30 +563,9 @@ class VectorizedLocalMap(object):
         self.nusc_maps = {}
         self.map_explorer = {}
 
-        # Check if maps/expansion directory exists
-        maps_expansion = os.path.join(map_dataroot, "maps", "expansion")
-        expansion_exists = os.path.exists(maps_expansion) and os.path.isdir(maps_expansion)
-
         for loc in self.MAPS:
-            try:
-                # Try to create NuScenesMap (will fail if expansion doesn't exist)
-                self.nusc_maps[loc] = NuScenesMap(dataroot=map_dataroot, map_name=loc)
-                # Only create explorer if expansion directory exists
-                if expansion_exists:
-                    self.map_explorer[loc] = NuScenesMapExplorer(self.nusc_maps[loc])
-                else:
-                    # Maps folder exists but expansion doesn't - skip explorer
-                    import warnings
-
-                    warnings.warn(f"Maps expansion directory not found. Skipping map explorer for {loc}.")
-                    self.map_explorer[loc] = None
-            except (FileNotFoundError, OSError) as e:
-                # If maps/expansion doesn't exist, NuScenesMap will fail
-                import warnings
-
-                warnings.warn(f"Map file not found for {loc} in {map_dataroot}: {e}. Maps may not be available.")
-                self.nusc_maps[loc] = None
-                self.map_explorer[loc] = None
+            self.nusc_maps[loc] = NuScenesMap(dataroot=map_dataroot, map_name=loc)
+            self.map_explorer[loc] = NuScenesMapExplorer(self.nusc_maps[loc])
 
         self.patch_size = patch_size
         self.sample_dist = sample_dist
@@ -839,8 +818,6 @@ class VectorizedLocalMap(object):
         return self._one_type_line_geom_to_vectors(results)
 
     def get_contour_line(self, patch_box, patch_angle, layer_name, location):
-        if self.map_explorer[location] is None:
-            return []
         if layer_name not in self.map_explorer[location].map_api.non_geometric_polygon_layers:
             raise ValueError("{} is not a polygonal layer".format(layer_name))
 
@@ -888,8 +865,6 @@ class VectorizedLocalMap(object):
         return polygon_list
 
     def get_divider_line(self, patch_box, patch_angle, layer_name, location):
-        if self.map_explorer[location] is None:
-            return []
         if layer_name not in self.map_explorer[location].map_api.non_geometric_line_layers:
             raise ValueError("{} is not a line layer".format(layer_name))
 
@@ -917,8 +892,6 @@ class VectorizedLocalMap(object):
         return line_list
 
     def get_ped_crossing_line(self, patch_box, patch_angle, location):
-        if self.map_explorer[location] is None:
-            return []
         patch_x = patch_box[0]
         patch_y = patch_box[1]
 
