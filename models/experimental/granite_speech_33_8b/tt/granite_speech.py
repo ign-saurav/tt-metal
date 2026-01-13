@@ -98,7 +98,8 @@ class GraniteSpeechTTNN:
         audio_features = self.projector(encoder_embeds)
 
         if not self.use_torch_audio_feat:
-            audio_features = ttnn.to_torch(audio_features)
+            composer = ttnn.concat_mesh_to_tensor_composer(self.mesh_device, dim=-1)
+            audio_features = ttnn.to_torch(audio_features, mesh_composer=composer)
 
         is_audio_index = input_ids == self.config.audio_token_id
         llm_input_ids = torch.where(is_audio_index, 0, input_ids)
