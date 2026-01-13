@@ -95,17 +95,6 @@ def load_torch_encoder(
         else:
             checkpoint_key = model_key
 
-        # Handle FFN layer mapping differences
-        # Model: 0.ffns.0.layers.0.weight -> Checkpoint: 0.ffns.0.layers.0.0.weight
-        # Model: 0.ffns.0.layers.2.weight -> Checkpoint: 0.ffns.0.layers.1.weight
-        if ".ffns." in checkpoint_key:
-            if ".layers.0." in checkpoint_key:
-                # First linear: layers.0 -> layers.0.0
-                checkpoint_key = checkpoint_key.replace(".layers.0.", ".layers.0.0.")
-            elif ".layers.2." in checkpoint_key:
-                # Second linear: layers.2 -> layers.1
-                checkpoint_key = checkpoint_key.replace(".layers.2.", ".layers.1.")
-
         if checkpoint_key in encoder_weights:
             new_state_dict[model_key] = encoder_weights[checkpoint_key]
             matched_keys.append(model_key)
@@ -187,15 +176,17 @@ def custom_preprocessor_encoder(model, name):
             # FFN
             layer_params["ffn"] = {}
             ffn = layer.ffns[0]
-            # FFN has Sequential with [Linear, ReLU, Linear]
+            # FFN has Sequential with [Sequential(Linear, ReLU, Dropout), Linear, Dropout]
+            # First linear is inside inner Sequential at layers[0][0]
+            # Second linear is at layers[1]
             layer_params["ffn"]["ffn0"] = {
                 "linear1": {
-                    "weight": preprocess_linear_weight(ffn.layers[0].weight, dtype=ttnn.bfloat16),
-                    "bias": preprocess_linear_bias(ffn.layers[0].bias, dtype=ttnn.bfloat16),
+                    "weight": preprocess_linear_weight(ffn.layers[0][0].weight, dtype=ttnn.bfloat16),
+                    "bias": preprocess_linear_bias(ffn.layers[0][0].bias, dtype=ttnn.bfloat16),
                 },
                 "linear2": {
-                    "weight": preprocess_linear_weight(ffn.layers[2].weight, dtype=ttnn.bfloat16),
-                    "bias": preprocess_linear_bias(ffn.layers[2].bias, dtype=ttnn.bfloat16),
+                    "weight": preprocess_linear_weight(ffn.layers[1].weight, dtype=ttnn.bfloat16),
+                    "bias": preprocess_linear_bias(ffn.layers[1].bias, dtype=ttnn.bfloat16),
                 },
             }
 
@@ -312,7 +303,6 @@ def test_maptr_bevformer_encoder(device, reset_seeds):
     point_cloud_range = [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
     embed_dims = 256
     num_heads = 8  # MSDeformableAttention3D uses 8 heads
-    num_points = 8  # Sampling points per head
     feedforward_channels = 512
     num_layers = 1  # Test with 1 layer for simplicity
     bev_h = 50  # Reduced from 200 for memory
@@ -328,7 +318,6 @@ def test_maptr_bevformer_encoder(device, reset_seeds):
         return_intermediate=False,
         embed_dims=embed_dims,
         num_heads=num_heads,
-        num_points=num_points,
         feedforward_channels=feedforward_channels,
     )
 
@@ -393,7 +382,6 @@ def test_maptr_bevformer_encoder(device, reset_seeds):
         return_intermediate=False,
         embed_dims=embed_dims,
         num_heads=num_heads,
-        num_points=num_points,
         feedforward_channels=feedforward_channels,
     )
 

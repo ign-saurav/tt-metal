@@ -4,7 +4,7 @@
 
 import warnings
 import ttnn
-from models.experimental.vadv2.tt.tt_utils import multi_scale_deformable_attn
+from models.experimental.mapTR.tt.utils import multi_scale_deformable_attn
 
 
 class TtSpatialCrossAttention:
@@ -63,35 +63,34 @@ class TtSpatialCrossAttention:
 
         bs, num_query, _ = query.shape
 
-        D = reference_points_cam.size(3)
-        indexes = []
-        indexes = []
-        for i, mask_per_img in enumerate(bev_mask):
-            index_query_per_img = ttnn.sum(mask_per_img[0], -1)
-            index_query_per_img = ttnn.to_layout(index_query_per_img, ttnn.ROW_MAJOR_LAYOUT)
-            for _ in range(3):  # unsqueeze 3 times
-                index_query_per_img = ttnn.unsqueeze(index_query_per_img, 0)
-            output_tensor = ttnn.nonzero(index_query_per_img, queue_id=0, memory_config=ttnn.L1_MEMORY_CONFIG)
-            ttnn.deallocate(index_query_per_img)
+        D = reference_points_cam.shape[3]
 
-            no_of_non_zero_indices = output_tensor[0][..., 0].item()
-            index_query_per_img = output_tensor[1][:, :, :, :no_of_non_zero_indices]
+        # Convert to PyTorch for index computation (avoids bfloat16 precision issues in ttnn.nonzero)
+        # Check if tensors are already PyTorch tensors (can happen in some test configurations)
+        if isinstance(query, ttnn.Tensor):
+            query = ttnn.to_torch(query)
+        if isinstance(reference_points_cam, ttnn.Tensor):
+            reference_points_cam = ttnn.to_torch(reference_points_cam)
+        if isinstance(bev_mask, ttnn.Tensor):
+            bev_mask_torch = ttnn.to_torch(bev_mask)
+        else:
+            bev_mask_torch = bev_mask
 
-            for _ in range(3):  # squeeze back
-                index_query_per_img = ttnn.squeeze(index_query_per_img, 0)
+        # Compute indices in PyTorch for exact matching with reference
+        indexes = []
+        for i, mask_per_img in enumerate(bev_mask_torch):
+            index_query_per_img = mask_per_img[0].sum(-1).nonzero().squeeze(-1)
             indexes.append(index_query_per_img)
-            ttnn.deallocate(output_tensor[0])
 
-        max_len = max([each.shape[0] for each in indexes])
-        query = ttnn.to_torch(query)
-        # each camera only interacts with its corresponding BEV queries. This step can  greatly save GPU memory.
+        max_len = max([len(each) for each in indexes])
+
+        # each camera only interacts with its corresponding BEV queries. This step can greatly save GPU memory.
         queries_rebatch = query.new_zeros([bs, self.num_cams, max_len, self.embed_dims])
         reference_points_rebatch = reference_points_cam.new_zeros([bs, self.num_cams, max_len, D, 2])
 
         for j in range(bs):
             for i, reference_points_per_img in enumerate(reference_points_cam):
                 index_query_per_img = indexes[i]
-                index_query_per_img = ttnn.to_torch(index_query_per_img)
                 queries_rebatch[j, i, : len(index_query_per_img)] = query[j, index_query_per_img]
                 reference_points_rebatch[j, i, : len(index_query_per_img)] = reference_points_per_img[
                     j, index_query_per_img
@@ -123,23 +122,17 @@ class TtSpatialCrossAttention:
         queries = ttnn.to_torch(queries)
         for j in range(bs):
             for i, index_query_per_img in enumerate(indexes):
-                index_query_per_img = ttnn.to_torch(index_query_per_img)
-
                 slots[j, index_query_per_img] += queries[j, i, : len(index_query_per_img)]
-        for j in range(bs):
-            for i, index_query_per_img in enumerate(indexes):
-                ttnn.deallocate(index_query_per_img)
 
-        count = ttnn.sum(bev_mask, -1) > 0
-        count = ttnn.permute(count, (1, 2, 0))
+        # Count normalization in PyTorch for consistency
+        count = bev_mask_torch.sum(-1) > 0
+        count = count.permute(1, 2, 0).sum(-1)
+        count = count.clamp(min=1.0)
+        slots = slots / count[..., None]
 
-        count = ttnn.sum(count, -1)
-        count = ttnn.clamp(count, min=1.0)
-        count = ttnn.unsqueeze(count, -1)
+        # Convert back to TT for output projection
         slots = ttnn.from_torch(slots, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
-        slots = ttnn.div(slots, count)
         slots = ttnn.linear(slots, self.params.output_proj.weight, bias=self.params.output_proj.bias)
-        ttnn.deallocate(count)
         ttnn.deallocate(key)
         ttnn.deallocate(value)
         ttnn.deallocate(self.params.output_proj.weight)

@@ -22,12 +22,15 @@ def multi_scale_deformable_attn(
     attention_weights_torch = ttnn.to_torch(attention_weights)
     spatial_shapes_torch = ttnn.to_torch(spatial_shapes)
 
+    # Convert spatial shapes to list of integer tuples
+    spatial_shapes_list = [(int(h), int(w)) for h, w in spatial_shapes_torch]
+
     # Perform multi-scale deformable attention in PyTorch
-    value_list = value_torch.split([h * w for h, w in spatial_shapes_torch], dim=1)
+    value_list = value_torch.split([h * w for h, w in spatial_shapes_list], dim=1)
     sampling_grids = 2 * sampling_locations_torch - 1
     sampling_value_list = []
 
-    for level_idx, (h, w) in enumerate(spatial_shapes_torch):
+    for level_idx, (h, w) in enumerate(spatial_shapes_list):
         value_l = value_list[level_idx].permute(0, 2, 3, 1).reshape(bs * num_heads, embed_dims, h, w)
         sampling_grid_l = (
             sampling_grids[:, :, :, level_idx].permute(0, 2, 1, 3, 4).reshape(bs * num_heads, num_query, num_points, 2)

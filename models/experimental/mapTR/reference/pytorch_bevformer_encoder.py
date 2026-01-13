@@ -8,13 +8,9 @@ import torch.nn as nn
 import copy
 import warnings
 
-# Use local MapTR implementations
+from models.experimental.mapTR.reference.pytorch_ffn import FFN
 from models.experimental.mapTR.reference.pytorch_temporal_self_attention import TemporalSelfAttention
-from models.experimental.mapTR.reference.pytorch_spatial_cross_attention import (
-    SpatialCrossAttention,
-    MSDeformableAttention3D,
-)
-from models.experimental.mapTR.reference.pytorch_custom_base_transformer_layer import FFN
+from models.experimental.mapTR.reference.pytorch_spatial_cross_attention import SpatialCrossAttention
 
 
 class BEVFormerEncoder(nn.Module):
@@ -25,8 +21,9 @@ class BEVFormerEncoder(nn.Module):
         num_points_in_pillar=4,
         return_intermediate=False,
         embed_dims=256,
-        num_heads=8,
-        num_points=8,
+        num_heads=4,
+        dilation=1,
+        kernel_size=(3, 5),
         im2col_step=192,
         feedforward_channels=512,
         ffn_dropout=0.1,
@@ -41,16 +38,16 @@ class BEVFormerEncoder(nn.Module):
 
         transformer_layers = dict(
             attn_cfgs=[
-                # TemporalSelfAttention uses num_heads=8
-                dict(type="TemporalSelfAttention", embed_dims=embed_dims, num_heads=8, num_levels=1),
+                dict(type="TemporalSelfAttention", embed_dims=embed_dims, num_levels=1),
                 dict(
                     type="SpatialCrossAttention",
                     pc_range=pc_range,
                     attention=dict(
                         embed_dims=embed_dims,
-                        num_heads=num_heads,  # MSDeformableAttention3D uses 8 heads
+                        num_heads=num_heads,
+                        dilation=dilation,
+                        kernel_size=kernel_size,
                         num_levels=1,
-                        num_points=num_points,
                         im2col_step=im2col_step,
                     ),
                     embed_dims=embed_dims,
@@ -109,7 +106,7 @@ class BEVFormerEncoder(nn.Module):
         for img_meta in img_metas:
             lidar2img.append(img_meta["lidar2img"])
         lidar2img = np.asarray(lidar2img)
-        lidar2img = reference_points.new_tensor(lidar2img)  # Expected: (B, N, 4, 4)
+        lidar2img = reference_points.new_tensor(lidar2img)  # (B, N, 4, 4)
         reference_points = reference_points.clone()
 
         reference_points[..., 0:1] = reference_points[..., 0:1] * (pc_range[3] - pc_range[0]) + pc_range[0]
@@ -120,19 +117,7 @@ class BEVFormerEncoder(nn.Module):
 
         reference_points = reference_points.permute(1, 0, 2, 3)
         D, B, num_query = reference_points.size()[:3]
-
-        # lidar2img should be (B, num_cam, 4, 4)
-        # If it's (num_cam, 4, 4) without batch dim, need to handle correctly
-        if lidar2img.dim() == 3:
-            # Shape is (num_cam, 4, 4), need to unsqueeze and repeat for batch
-            num_cam = lidar2img.size(0)
-            lidar2img = lidar2img.unsqueeze(0).expand(B, -1, -1, -1)  # (B, num_cam, 4, 4)
-        else:
-            num_cam = lidar2img.size(1)
-            # Verify batch size matches
-            if lidar2img.size(0) != B:
-                lidar2img = lidar2img.expand(B, -1, -1, -1)  # Expand to batch size
-
+        num_cam = lidar2img.size(1)
         reference_points = reference_points.view(D, B, 1, num_query, 4).repeat(1, 1, num_cam, 1, 1).unsqueeze(-1)
         lidar2img = lidar2img.view(1, B, num_cam, 1, 4, 4).repeat(D, 1, 1, num_query, 1, 1)
         reference_points_cam = torch.matmul(lidar2img.to(torch.float32), reference_points.to(torch.float32)).squeeze(-1)
@@ -179,23 +164,19 @@ class BEVFormerEncoder(nn.Module):
         output = bev_query
         intermediate = []
 
-        # Note: bev_query comes in as (num_bev, bs, embed_dims), permute happens later
-        # So use size(1) for bs before permute
-        batch_size = bev_query.size(1)
-
         ref_3d = self.get_reference_points(
             bev_h,
             bev_w,
             self.pc_range[5] - self.pc_range[2],
             self.num_points_in_pillar,
             dim="3d",
-            bs=batch_size,
+            bs=bev_query.size(1),
             device=bev_query.device,
             dtype=bev_query.dtype,
         )
 
         ref_2d = self.get_reference_points(
-            bev_h, bev_w, dim="2d", bs=batch_size, device=bev_query.device, dtype=bev_query.dtype
+            bev_h, bev_w, dim="2d", bs=bev_query.size(1), device=bev_query.device, dtype=bev_query.dtype
         )
 
         reference_points_cam, bev_mask = self.point_sampling(ref_3d, self.pc_range, kwargs["img_metas"])
@@ -256,43 +237,18 @@ class BEVFormerLayer(nn.Module):
         index = 0
         for operation_name in self.operation_order:
             if operation_name in ["self_attn", "cross_attn"]:
-                cfg = attn_cfgs[index]
-                if "batch_first" not in cfg:
-                    cfg["batch_first"] = self.batch_first
-
-                if cfg["type"] == "TemporalSelfAttention":
-                    # Build TemporalSelfAttention
-                    # Checkpoint uses num_heads=8, num_levels=1, num_points=4
-                    attention = TemporalSelfAttention(
-                        embed_dims=cfg.get("embed_dims", 256),
-                        num_heads=cfg.get("num_heads", 8),
-                        num_levels=cfg.get("num_levels", 1),
-                        num_points=cfg.get("num_points", 4),
-                        num_bev_queue=cfg.get("num_bev_queue", 2),
-                        batch_first=cfg.get("batch_first", True),
-                    )
-                elif cfg["type"] == "SpatialCrossAttention":
-                    # Build MSDeformableAttention3D (as used in BEVFormer checkpoint)
-                    deform_cfg = cfg.get("attention", {})
-                    deformable_attention = MSDeformableAttention3D(
-                        embed_dims=deform_cfg.get("embed_dims", 256),
-                        num_heads=deform_cfg.get("num_heads", 8),
-                        num_levels=deform_cfg.get("num_levels", 1),
-                        num_points=deform_cfg.get("num_points", 8),
-                        im2col_step=deform_cfg.get("im2col_step", 64),
-                        batch_first=deform_cfg.get("batch_first", True),
-                    )
-                    # Build SpatialCrossAttention with MSDeformableAttention3D
-                    attention = SpatialCrossAttention(
-                        embed_dims=cfg.get("embed_dims", 256),
-                        num_cams=cfg.get("num_cams", 6),
-                        pc_range=cfg.get("pc_range"),
-                        batch_first=cfg.get("batch_first", True),
-                    )
-                    # Replace default attention with configured one
-                    attention.deformable_attention = deformable_attention
+                if "batch_first" in attn_cfgs[index]:
+                    assert self.batch_first == attn_cfgs[index]["batch_first"]
                 else:
-                    raise ValueError(f"Unknown attention type: {cfg['type']}")
+                    attn_cfgs[index]["batch_first"] = self.batch_first
+                if attn_cfgs[index]["type"] == "TemporalSelfAttention":
+                    type = attn_cfgs[index].pop("type")
+                    attention = TemporalSelfAttention(**attn_cfgs[index])
+                    attn_cfgs[index]["type"] = "TemporalSelfAttention"
+                elif attn_cfgs[index]["type"] == "SpatialCrossAttention":
+                    type = attn_cfgs[index].pop("type")
+                    attention = SpatialCrossAttention(**attn_cfgs[index])
+                    attn_cfgs[index]["type"] = "SpatialCrossAttention"
 
                 self.attentions.append(attention)
                 index += 1
@@ -317,7 +273,7 @@ class BEVFormerLayer(nn.Module):
         num_ffns = operation_order.count("ffn")
 
         for ffn_index in range(num_ffns):
-            self.ffns.append(FFN(self.embed_dims, feedforward_channels=self.feedforward_channels))
+            self.ffns.append(FFN(self.embed_dims))
 
         self.norms = nn.ModuleList()
         num_norms = operation_order.count("norm")
