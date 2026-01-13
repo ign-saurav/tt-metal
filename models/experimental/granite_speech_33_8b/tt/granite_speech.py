@@ -16,7 +16,7 @@ from models.experimental.granite_speech_33_8b.tt.ttnn_encoder_block import Grani
 from models.experimental.granite_speech_33_8b.tt.ttnn_projector_block import GraniteSpeechEncoderProjectorTTNN
 
 
-class GraniteSpeech:
+class GraniteSpeechTTNN:
     """TTNN implementation of GraniteSpeech."""
 
     def __init__(
@@ -86,15 +86,14 @@ class GraniteSpeech:
         )
 
     def forward(self, input_ids, input_features, input_features_mask):
-        global_batch_size = 1
-
-        """Get the audio features to merged into the multimodal embeddings."""
         if not self.use_torch_audio_feat:
             input_features = ttnn.from_torch(
                 input_features, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.mesh_device
             )
         else:
             input_features = input_features.to(torch.bfloat16)
+
+        """Get the audio features to merged into the multimodal embeddings."""
         encoder_embeds = self.encoder(input_features)
         audio_features = self.projector(encoder_embeds)
 
@@ -120,10 +119,9 @@ class GraniteSpeech:
             special_audio_mask,
             audio_features,
         )
-        inputs_embeds = inputs_embeds * 12.0  # embedding multiplier
+        inputs_embeds = inputs_embeds * self.config.text_config.embedding_multiplier  # embedding multiplier
 
         input_tokens_prefill_pt = inputs_embeds
-        prefill_lens = [inputs_embeds.shape[-2]]
         decoding_pos = [inputs_embeds.shape[-2]]
         max_encoded_prompt_len = inputs_embeds.shape[-2]
         assert self.max_generated_tokens + max_encoded_prompt_len <= self.max_seq_len
@@ -154,12 +152,12 @@ class GraniteSpeech:
         logger.info(f"Prefill finished")
 
         # Keep track of generated outputs to print out every iteration
-        all_outputs = [[]] * global_batch_size
-        for user in range(global_batch_size):
+        all_outputs = [[]] * self.global_batch_size
+        for user in range(self.global_batch_size):
             user_tok = int(prefilled_token[user].item())
             all_outputs[user].append(user_tok)
 
-        user_done = [False] * global_batch_size  # Keeps track when a user reaches EoD token
+        user_done = [False] * self.global_batch_size  # Keeps track when a user reaches EoD token
 
         sampling_params = {"temperature": 0, "top_p": 0.08, "top_k": 32}
         device_sampling_params = (
@@ -184,9 +182,9 @@ class GraniteSpeech:
             sampling_params["top_p"] = sampling_params["top_p"][0]
 
         # Initial positions
-        current_pos = torch.tensor([decoding_pos[b] for b in range(global_batch_size)])
+        current_pos = torch.tensor([decoding_pos[b] for b in range(self.global_batch_size)])
 
-        user_done = [False] * global_batch_size  # Keeps track when a user reaches EoD token
+        user_done = [False] * self.global_batch_size  # Keeps track when a user reaches EoD token
         stop_at_eos = True
 
         # Start decoding
@@ -226,7 +224,7 @@ class GraniteSpeech:
             current_pos += 1
 
             # Save output token to print out later
-            for user in range(global_batch_size):
+            for user in range(self.global_batch_size):
                 user_tok = out_tok[user].item()
                 if (
                     user_tok not in self.tokenizer.stop_tokens and user_done[user] == False
@@ -242,7 +240,7 @@ class GraniteSpeech:
                             users_decoding = False
 
             # Print out generated outputs for each user at the end of every iteration
-            for user in range(global_batch_size):
+            for user in range(self.global_batch_size):
                 text = "".join(self.tokenizer.decode(all_outputs[user]))
                 if len(text) > 100:
                     text = "..." + text[-97:]
