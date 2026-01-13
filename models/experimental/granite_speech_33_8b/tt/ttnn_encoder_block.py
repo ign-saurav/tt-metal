@@ -60,7 +60,6 @@ class GraniteSpeechConformerFeedForwardTTNN:
         )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-
         # 1. LayerNorm (pre_norm)
         hidden_states = ttnn.layer_norm(
             hidden_states,
@@ -145,7 +144,6 @@ class GraniteSpeechConformerAttentionTTNN:
         self.rel_pos_emb_weight = rel_pos_emb_weight
 
     def forward(self, hidden_states, dist):
-
         hidden_states = ttnn.layer_norm(
             hidden_states,
             weight=self.pre_norm_weight,
@@ -190,7 +188,8 @@ class GraniteSpeechConformerAttentionTTNN:
 
         # Shaw's relative positional embedding
         rel_pos_emb = torch.nn.functional.embedding(dist, weight=self.rel_pos_emb_weight)
-        query_states_torch = ttnn.to_torch(query_states)
+        composer = ttnn.concat_mesh_to_tensor_composer(self.device, dim=1)
+        query_states_torch = ttnn.to_torch(query_states, mesh_composer=composer)
         query_states_torch = query_states_torch.reshape(
             num_blocks, query_states_torch.shape[-3], query_states_torch.shape[-2], query_states_torch.shape[-1]
         )
@@ -205,7 +204,7 @@ class GraniteSpeechConformerAttentionTTNN:
             pos_attn_sdpa = pos_attn[:, :1, :, :]
 
         ttnn_mask = ttnn.from_torch(pos_attn_sdpa, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
-        
+
         # Pad sequence length to multiple of 32 for SDPA
         if query_states.shape[2] % 32 != 0:
             pad_size = 32 - (query_states.shape[2] % 32)
@@ -347,7 +346,6 @@ class GraniteSpeechConformerConvModuleTTNN:
         self.depth_conv.prepare_weights(depth_conv_weights)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-
         # 1. LayerNorm
         hidden_states = ttnn.layer_norm(
             hidden_states,
@@ -487,7 +485,6 @@ class GraniteSpeechConformerDepthWiseConv1dTTNN:
         self.weight_tensor = ttnn.from_torch(torch_weights, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-
         batch_size, length, channels = hidden_states.shape
 
         # Call TTNN conv1d
@@ -597,16 +594,10 @@ class GraniteSpeechConformerBlockTTNN:
         # Prepare layer norm weights
         if self.include_layernorm:
             self.weight_tensor = ttnn.from_torch(
-                post_norm.weight,
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=self.device
+                post_norm.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
             )
             self.bias_tensor = ttnn.from_torch(
-                post_norm.bias,
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=self.device
+                post_norm.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
             )
 
     def forward(self, hidden_states: ttnn.Tensor, attention_dists: torch.Tensor) -> ttnn.Tensor:
@@ -634,7 +625,7 @@ class GraniteSpeechConformerBlockTTNN:
                 bias=self.bias_tensor,
                 epsilon=1e-5,
                 compute_kernel_config=self.layernorm_compute_config,
-                program_config=self.layernorm_config
+                program_config=self.layernorm_config,
             )
 
         return hidden_states
@@ -679,52 +670,33 @@ class GraniteSpeechCTCEncoderTTNN:
             encoder.input_linear.weight.transpose(-1, -2),
             dtype=ttnn.bfloat16,
             layout=ttnn.TILE_LAYOUT,
-            device=self.device
+            device=self.device,
         )
         self.input_bias = ttnn.from_torch(
-            encoder.input_linear.bias,
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device
+            encoder.input_linear.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
 
         # Output linear layer weights
         self.out_weight = ttnn.from_torch(
-            encoder.out.weight.transpose(-1, -2),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device
+            encoder.out.weight.transpose(-1, -2), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
         self.out_bias = ttnn.from_torch(
-            encoder.out.bias,
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device
+            encoder.out.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
 
         # Mid linear layer weights
         self.out_mid_weight = ttnn.from_torch(
-            encoder.out_mid.weight.transpose(-1, -2),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device
+            encoder.out_mid.weight.transpose(-1, -2), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
         self.out_mid_bias = ttnn.from_torch(
-            encoder.out_mid.bias,
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device
+            encoder.out_mid.bias, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
 
         # Prepare conformer block weights
         for i, layer in enumerate(self.layers):
             torch_layer = encoder.layers[i]
             layer.prepare_weights(
-                torch_layer.ff1,
-                torch_layer.ff2,
-                torch_layer.attn,
-                torch_layer.conv,
-                torch_layer.post_norm
+                torch_layer.ff1, torch_layer.ff2, torch_layer.attn, torch_layer.conv, torch_layer.post_norm
             )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -733,10 +705,7 @@ class GraniteSpeechCTCEncoderTTNN:
 
         # Input linear projection
         tt_hidden_states = ttnn.linear(
-            hidden_states,
-            self.input_weight,
-            bias=self.input_bias,
-            compute_kernel_config=self.compute_config
+            hidden_states, self.input_weight, bias=self.input_bias, compute_kernel_config=self.compute_config
         )
 
         # Process through conformer blocks
@@ -749,10 +718,7 @@ class GraniteSpeechCTCEncoderTTNN:
 
                 # Apply output projection
                 tt_mid_out = ttnn.linear(
-                    tt_hidden_states_mid,
-                    self.out_weight,
-                    bias=self.out_bias,
-                    compute_kernel_config=self.compute_config
+                    tt_hidden_states_mid, self.out_weight, bias=self.out_bias, compute_kernel_config=self.compute_config
                 )
 
                 tt_softmax_out = ttnn.softmax(tt_mid_out, dim=-1)
@@ -762,7 +728,7 @@ class GraniteSpeechCTCEncoderTTNN:
                     tt_softmax_out,
                     self.out_mid_weight,
                     bias=self.out_mid_bias,
-                    compute_kernel_config=self.compute_config
+                    compute_kernel_config=self.compute_config,
                 )
 
                 # Add residual connection
