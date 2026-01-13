@@ -34,6 +34,8 @@ from models.tt_transformers.tt.generator import (
 )
 
 from models.tt_transformers.tt.common import PagedAttentionConfig
+from models.experimental.granite_speech_33_8b.tt.granite_transformer import GraniteSpeechTransformer
+from models.tt_transformers.tt.model_config import ModelArgs
 
 
 def create_tt_page_table(global_batch_size, data_parallel, paged_attention_config: PagedAttentionConfig):
@@ -61,9 +63,6 @@ def create_tt_model(
     state_dict=None,
     num_layers=None,
 ):
-    from models.experimental.granite_speech_33_8b.tt.granite_transformer import GraniteSpeech
-    from models.tt_transformers.tt.model_config import ModelArgs
-
     tt_model_args = ModelArgs(
         mesh_device,
         instruct=instruct,
@@ -78,7 +77,7 @@ def create_tt_model(
     if not state_dict:
         state_dict = tt_model_args.load_state_dict()
 
-    model = GraniteSpeech(
+    model = GraniteSpeechTransformer(
         args=tt_model_args,
         mesh_device=mesh_device,
         dtype=dtype,
@@ -361,9 +360,6 @@ class Generator:
         else:
             # Only paged attention is supported for prefill
             enable_trace = False
-
-        # we need this here becuase of tt-metal tests
-        # self.warmup_model_prefill(kv_cache, enable_trace)
 
         batch_size, batch_seq_len, emb_len = tokens.shape
         max_batch_size_per_model = self.model_args[0].max_batch_size
