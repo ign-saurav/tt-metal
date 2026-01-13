@@ -299,6 +299,9 @@ def master_only(func):
 def load(file_path, file_format=None):
     """Load data from json/yaml/pickle files.
 
+    Source: https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/fileio/io.py
+    Original implementation: mmcv.fileio.io.load
+
     This method provides a unified api for loading data from serialized files.
 
     Args:
@@ -326,7 +329,95 @@ def load(file_path, file_format=None):
             return json.load(f)
 
 
-mmcv.load = load
+# ============================================================================
+# MMCV FILEIO - load, dump, is_filepath, check_file_exist
+# Source: https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/fileio/io.py
+# These functions are extracted from mmcv v1.4.0 to avoid dependency on mmcv.
+# ============================================================================
+
+
+def is_filepath(filepath):
+    """Check if a path is a valid file path.
+
+    Source: Based on mmcv.utils.path.is_filepath
+    https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/path.py
+
+    Args:
+        filepath (str): Path to check
+
+    Returns:
+        bool: True if the path exists and is a file, False otherwise
+    """
+    return os.path.isfile(filepath)
+
+
+def dump(obj, file=None, file_format=None):
+    """Dump data to json/yaml/pickle strings or files.
+
+    Source: https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/fileio/io.py
+    Original implementation: mmcv.fileio.io.dump
+
+    This method provides a unified api for dumping data as strings or to files.
+
+    Args:
+        obj (any): The python object to be dumped.
+        file (str or None): If not None, dump to file. Otherwise return string.
+        file_format (str, optional): Same as :func:`load`.
+
+    Returns:
+        bool: True for success, False otherwise.
+    """
+    if file_format is None:
+        if isinstance(file, str):
+            file_format = file.split(".")[-1]
+        else:
+            raise ValueError("file_format must be specified if file is a file object")
+
+    if file_format not in ["json", "yaml", "yml", "pickle", "pkl"]:
+        raise TypeError("Unsupported format: {}".format(file_format))
+
+    if file_format in ["yaml", "yml"]:
+        if file is None:
+            return yaml.dump(obj)
+        else:
+            with open(file, "w") as f:
+                yaml.dump(obj, f)
+    elif file_format in ["pickle", "pkl"]:
+        if file is None:
+            return pickle.dumps(obj)
+        else:
+            with open(file, "wb") as f:
+                pickle.dump(obj, f)
+    else:  # json
+        if file is None:
+            return json.dumps(obj, indent=2)
+        else:
+            with open(file, "w") as f:
+                json.dump(obj, f, indent=2)
+    return True
+
+
+def check_file_exist(filename, msg_tmpl='file "{}" does not exist', raise_error=True):
+    """Check if a file exists.
+
+    Source: https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/path.py
+    Original implementation: mmcv.utils.path.check_file_exist
+
+    Args:
+        filename (str): File path to check.
+        msg_tmpl (str): Message template to show when file doesn't exist.
+        raise_error (bool): If True, raise FileNotFoundError when file doesn't exist.
+                           If False, return False instead of raising.
+
+    Returns:
+        bool: True if file exists, False if file doesn't exist and raise_error=False.
+    """
+    if not os.path.isfile(filename):
+        if raise_error:
+            raise FileNotFoundError(msg_tmpl.format(filename))
+        return False
+    return True
+
 
 # https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/datasets/samplers/group_sampler.py
 # ============================================================================
@@ -6849,13 +6940,53 @@ class LoadMultiViewImageFromFiles(object):
                 - scale_factor (float): Scale factor.
                 - img_norm_cfg (dict): Normalization configuration of images.
         """
-        filename = results["img_filename"]
+        filename = results.get("img_filename", [])
+        if not filename or len(filename) == 0:
+            # No images available - return empty results
+            results["filename"] = []
+            results["img"] = []
+            results["img_shape"] = None
+            results["ori_shape"] = None
+            results["pad_shape"] = None
+            results["scale_factor"] = 1.0
+            results["img_norm_cfg"] = dict(
+                mean=np.zeros(3, dtype=np.float32), std=np.ones(3, dtype=np.float32), to_rgb=False
+            )
+            return results
+
+        # Filter out non-existent files and load only existing ones
+        valid_filenames = []
+        valid_images = []
+        for name in filename:
+            if os.path.exists(name):
+                try:
+                    img_data = mmcv.imread(name, self.color_type)
+                    if img_data is not None:
+                        valid_filenames.append(name)
+                        valid_images.append(img_data)
+                except Exception as e:
+                    print(f"Warning: Failed to load image {name}: {e}")
+                    continue
+
+        if len(valid_images) == 0:
+            # No valid images found - return empty results
+            results["filename"] = []
+            results["img"] = []
+            results["img_shape"] = None
+            results["ori_shape"] = None
+            results["pad_shape"] = None
+            results["scale_factor"] = 1.0
+            results["img_norm_cfg"] = dict(
+                mean=np.zeros(3, dtype=np.float32), std=np.ones(3, dtype=np.float32), to_rgb=False
+            )
+            return results
+
         # img is of shape (h, w, c, num_views)
-        img = np.stack([mmcv.imread(name, self.color_type) for name in filename], axis=-1)
+        img = np.stack(valid_images, axis=-1)
 
         if self.to_float32:
             img = img.astype(np.float32)
-        results["filename"] = filename
+        results["filename"] = valid_filenames
         # unravel to list, see `DefaultFormatBundle` in formating.py
         # which will transpose each image separately and then stack into array
         results["img"] = [img[..., i] for i in range(img.shape[-1])]
@@ -7268,7 +7399,7 @@ class NuScenesDataset(Custom3DDataset):
 
     def load_annotations(self, ann_file):
         """Load annotations from ann_file."""
-        data = mmcv.load(ann_file)
+        data = load(ann_file)
         data_infos = list(sorted(data["infos"], key=lambda e: e["timestamp"]))
         data_infos = data_infos[:: self.load_interval]
         self.metadata = data["metadata"]
@@ -11985,6 +12116,50 @@ def bev_pool(feats, coords, B, D, H, W):
     x = QuickCumsumPytorch.apply(feats, coords, ranks, B, D, H, W)
     x = x.permute(0, 4, 1, 2, 3).contiguous()
     return x
+
+
+# ============================================================================
+# MMDET3D CORE BBOX - points_cam2img
+# Source: https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/bbox/box_np_ops.py
+# This function projects points from camera coordinates to image coordinates.
+# ============================================================================
+
+
+def points_cam2img(points_3d, proj_mat, with_depth=False):
+    """Project points in camera coordinates to image coordinates.
+
+    Args:
+        points_3d (np.ndarray): Points in shape (N, 3)
+        proj_mat (np.ndarray): Transformation matrix between coordinates.
+        with_depth (bool, optional): Whether to keep depth in the output.
+            Defaults to False.
+
+    Returns:
+        np.ndarray: Points in image coordinates with shape [N, 2].
+    """
+    points_shape = list(points_3d.shape)
+    points_shape[-1] = 1
+
+    assert len(proj_mat.shape) == 2, (
+        "The dimension of the projection" f" matrix should be 2 instead of {len(proj_mat.shape)}."
+    )
+    d1, d2 = proj_mat.shape[:2]
+    assert (d1 == 3 and d2 == 3) or (d1 == 3 and d2 == 4) or (d1 == 4 and d2 == 4), (
+        "The shape of the projection matrix" f" ({d1}*{d2}) is not supported."
+    )
+    if d1 == 3:
+        proj_mat_expanded = np.eye(4, dtype=proj_mat.dtype)
+        proj_mat_expanded[:d1, :d2] = proj_mat
+        proj_mat = proj_mat_expanded
+
+    points_4 = np.concatenate([points_3d, np.ones(points_shape)], axis=-1)
+    point_2d = points_4 @ proj_mat.T
+    point_2d_res = point_2d[..., :2] / point_2d[..., 2:3]
+
+    if with_depth:
+        points_2d_depth = np.concatenate([point_2d_res, point_2d[..., 2:3]], axis=-1)
+        return points_2d_depth
+    return point_2d_res
 
 
 # Import build_dataloader at the end of the file after all dependencies are defined to avoid circular import

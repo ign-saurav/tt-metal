@@ -1200,25 +1200,77 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
             input_dict["camera_intrinsics"] = []
             for cam_type, cam_info in info["cams"].items():
                 img_path = cam_info["data_path"]
-                # Fix path: use hardcoded base path
-                if not os.path.isabs(img_path):
-                    hardcoded_base = "models/experimental/MapTR/"
-                    img_path = os.path.join(hardcoded_base, img_path.lstrip("./"))
 
-                # Check if file exists, if not try to find alternative
-                if not os.path.exists(img_path):
-                    # Try to find any image in the same camera directory
-                    img_dir = os.path.dirname(img_path)
-                    if os.path.exists(img_dir):
-                        img_files = [f for f in os.listdir(img_dir) if f.endswith((".jpg", ".png", ".jpeg"))]
-                        if img_files:
-                            img_path = os.path.join(img_dir, img_files[0])
-                        else:
-                            continue
-                    else:
-                        continue
+                # Try multiple path resolution strategies
+                resolved_path = None
 
-                image_paths.append(img_path)
+                # Strategy 1: Use original path if it exists
+                if os.path.exists(img_path):
+                    resolved_path = img_path
+                else:
+                    # Strategy 2: Fix relative path with hardcoded base
+                    if not os.path.isabs(img_path):
+                        hardcoded_base = "models/experimental/MapTR/"
+                        test_path = os.path.join(hardcoded_base, img_path.lstrip("./"))
+                        if os.path.exists(test_path):
+                            resolved_path = test_path
+
+                    # Strategy 3: Try to find in camera directory using sample token
+                    if not resolved_path:
+                        # Extract sample token from lidar path or use sample_idx
+                        sample_token = input_dict.get("sample_idx", "")
+                        if not sample_token and "lidar_path" in input_dict:
+                            lidar_basename = os.path.basename(input_dict["lidar_path"])
+                            # Extract token from filename like: n008-2018-08-01-15-16-36-0400__LIDAR_TOP__1533151603547590.pcd.bin
+                            if "__" in lidar_basename:
+                                sample_token = lidar_basename.split("__")[0]
+
+                        # Try common base paths
+                        base_paths = [
+                            "models/experimental/MapTR/data/nuscenes/samples",
+                            "data/nuscenes/samples",
+                        ]
+
+                        for base_path in base_paths:
+                            if os.path.exists(base_path):
+                                cam_dir = os.path.join(base_path, cam_type)
+                                if os.path.exists(cam_dir):
+                                    # Try to find image matching sample token
+                                    if sample_token:
+                                        # Look for files starting with sample_token
+                                        for f in os.listdir(cam_dir):
+                                            if f.startswith(sample_token) and f.endswith((".jpg", ".png", ".jpeg")):
+                                                resolved_path = os.path.join(cam_dir, f)
+                                                break
+
+                                    # If not found, try any image in the directory
+                                    if not resolved_path:
+                                        img_files = [
+                                            f for f in os.listdir(cam_dir) if f.endswith((".jpg", ".png", ".jpeg"))
+                                        ]
+                                        if img_files:
+                                            # Prefer files matching the expected pattern
+                                            matching_files = (
+                                                [f for f in img_files if sample_token in f] if sample_token else []
+                                            )
+                                            if matching_files:
+                                                resolved_path = os.path.join(cam_dir, matching_files[0])
+                                            else:
+                                                resolved_path = os.path.join(cam_dir, img_files[0])
+
+                                    if resolved_path:
+                                        break
+
+                    # Strategy 4: Try original directory structure
+                    if not resolved_path:
+                        img_dir = os.path.dirname(img_path)
+                        if os.path.exists(img_dir):
+                            img_files = [f for f in os.listdir(img_dir) if f.endswith((".jpg", ".png", ".jpeg"))]
+                            if img_files:
+                                resolved_path = os.path.join(img_dir, img_files[0])
+
+                if resolved_path and os.path.exists(resolved_path):
+                    image_paths.append(resolved_path)
                 # obtain lidar to image transformation matrix
                 lidar2cam_r = np.linalg.inv(cam_info["sensor2lidar_rotation"])
                 lidar2cam_t = cam_info["sensor2lidar_translation"] @ lidar2cam_r.T
@@ -1252,14 +1304,26 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
                 camera_intrinsics[:3, :3] = cam_info["cam_intrinsic"]
                 input_dict["camera_intrinsics"].append(camera_intrinsics)
 
-            input_dict.update(
-                dict(
-                    img_filename=image_paths,
-                    lidar2img=lidar2img_rts,
-                    cam_intrinsic=cam_intrinsics,
-                    lidar2cam=lidar2cam_rts,
+            # Only update with image data if we have valid images
+            if len(image_paths) > 0:
+                input_dict.update(
+                    dict(
+                        img_filename=image_paths,
+                        lidar2img=lidar2img_rts,
+                        cam_intrinsic=cam_intrinsics,
+                        lidar2cam=lidar2cam_rts,
+                    )
                 )
-            )
+            else:
+                # Set empty lists to avoid KeyError in pipeline
+                input_dict.update(
+                    dict(
+                        img_filename=[],
+                        lidar2img=[],
+                        cam_intrinsic=[],
+                        lidar2cam=[],
+                    )
+                )
 
         if not self.test_mode:
             annos = self.get_ann_info(index)

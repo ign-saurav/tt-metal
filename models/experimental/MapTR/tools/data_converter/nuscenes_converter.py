@@ -14,8 +14,10 @@ from pyquaternion import Quaternion
 from shapely.geometry import MultiPoint, box
 from typing import List, Tuple, Union
 
-from mmdet3d.core.bbox.box_np_ops import points_cam2img
-from mmdet3d.datasets import NuScenesDataset
+from models.experimental.MapTR.dependency import points_cam2img
+from models.experimental.MapTR.dependency import NuScenesDataset
+from models.experimental.MapTR.dependency import track_iter_progress
+from models.experimental.MapTR.dependency import dump, load, is_filepath, check_file_exist
 
 nus_categories = (
     "car",
@@ -101,15 +103,15 @@ def create_nuscenes_infos(root_path, out_path, can_bus_root_path, info_prefix, v
         print("test sample: {}".format(len(train_nusc_infos)))
         data = dict(infos=train_nusc_infos, metadata=metadata)
         info_path = osp.join(out_path, "{}_infos_temporal_test.pkl".format(info_prefix))
-        mmcv.dump(data, info_path)
+        dump(data, info_path)
     else:
         print("train sample: {}, val sample: {}".format(len(train_nusc_infos), len(val_nusc_infos)))
         data = dict(infos=train_nusc_infos, metadata=metadata)
         info_path = osp.join(out_path, "{}_infos_temporal_train.pkl".format(info_prefix))
-        mmcv.dump(data, info_path)
+        dump(data, info_path)
         data["infos"] = val_nusc_infos
         info_val_path = osp.join(out_path, "{}_infos_temporal_val.pkl".format(info_prefix))
-        mmcv.dump(data, info_val_path)
+        dump(data, info_val_path)
 
 
 def get_available_scenes(nusc):
@@ -137,11 +139,12 @@ def get_available_scenes(nusc):
         while has_more_frames:
             lidar_path, boxes, _ = nusc.get_sample_data(sd_rec["token"])
             lidar_path = str(lidar_path)
-            if os.getcwd() in lidar_path:
-                # path from lyftdataset is absolute path
-                lidar_path = lidar_path.split(f"{os.getcwd()}/")[-1]
-                # relative path
-            if not mmcv.is_filepath(lidar_path):
+
+            # Hardcode LIDAR_TOP path to use the available directory
+            lidar_filename = osp.basename(lidar_path)
+            lidar_path = osp.join("models/experimental/MapTR/data/nuscenes/samples/LIDAR_TOP/", lidar_filename)
+
+            if not is_filepath(lidar_path):
                 scene_not_exist = True
                 break
             else:
@@ -196,7 +199,7 @@ def _fill_trainval_infos(nusc, nusc_can_bus, train_scenes, val_scenes, test=Fals
     train_nusc_infos = []
     val_nusc_infos = []
     frame_idx = 0
-    for sample in mmcv.track_iter_progress(nusc.sample):
+    for sample in track_iter_progress(nusc.sample):
         map_location = nusc.get("log", nusc.get("scene", sample["scene_token"])["log_token"])["location"]
 
         lidar_token = sample["data"]["LIDAR_TOP"]
@@ -205,7 +208,13 @@ def _fill_trainval_infos(nusc, nusc_can_bus, train_scenes, val_scenes, test=Fals
         pose_record = nusc.get("ego_pose", sd_rec["ego_pose_token"])
         lidar_path, boxes, _ = nusc.get_sample_data(lidar_token)
 
-        mmcv.check_file_exist(lidar_path)
+        # Hardcode LIDAR_TOP path to use the available directory
+        lidar_filename = osp.basename(str(lidar_path))
+        lidar_path = osp.join("models/experimental/MapTR/data/nuscenes/samples/LIDAR_TOP", lidar_filename)
+
+        # Skip sample if file doesn't exist
+        if not check_file_exist(lidar_path, raise_error=False):
+            continue
         can_bus = _get_can_bus_info(nusc, nusc_can_bus, sample)
         ##
         info = {
@@ -374,13 +383,13 @@ def export_2d_annotation(root_path, info_path, version, mono3d=True):
         "CAM_BACK_LEFT",
         "CAM_BACK_RIGHT",
     ]
-    nusc_infos = mmcv.load(info_path)["infos"]
+    nusc_infos = load(info_path)["infos"]
     nusc = NuScenes(version=version, dataroot=root_path, verbose=True)
     # info_2d_list = []
     cat2Ids = [dict(id=nus_categories.index(cat_name), name=cat_name) for cat_name in nus_categories]
     coco_ann_id = 0
     coco_2d_dict = dict(annotations=[], images=[], categories=cat2Ids)
-    for info in mmcv.track_iter_progress(nusc_infos):
+    for info in track_iter_progress(nusc_infos):
         for cam in camera_types:
             cam_info = info["cams"][cam]
             coco_infos = get_2d_boxes(
@@ -413,7 +422,7 @@ def export_2d_annotation(root_path, info_path, version, mono3d=True):
         json_prefix = f"{info_path[:-4]}_mono3d"
     else:
         json_prefix = f"{info_path[:-4]}"
-    mmcv.dump(coco_2d_dict, f"{json_prefix}.coco.json")
+        dump(coco_2d_dict, f"{json_prefix}.coco.json")
 
 
 def get_2d_boxes(nusc, sample_data_token: str, visibilities: List[str], mono3d=True):
