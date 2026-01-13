@@ -18,7 +18,7 @@ from ttnn.model_preprocessing import (
 )
 
 
-MAPTR_WEIGHTS_PATH = "models/experimental/mapTR/resources/data/weights/maptr_tiny_r50_24e.pth"
+MAPTR_WEIGHTS_PATH = "models/experimental/mapTR/resources/data/weights/maptr_tiny_r50_24e_bevformer.pth"
 
 # Layer prefix for temporal self attention in encoder layer 0
 # MapTR uses: pts_bbox_head.transformer.encoder.layers.0.attentions.0

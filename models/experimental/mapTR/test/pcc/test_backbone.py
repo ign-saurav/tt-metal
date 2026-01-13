@@ -18,7 +18,7 @@ from ttnn.model_preprocessing import (
 )
 
 
-MAPTR_WEIGHTS_PATH = "models/experimental/mapTR/resources/data/weights/maptr_tiny_r50_24e.pth"
+MAPTR_WEIGHTS_PATH = "models/experimental/mapTR/resources/data/weights/maptr_tiny_r50_24e_bevformer.pth"
 
 # Layer prefix for backbone (ResNet50) in mapTR
 # The backbone weights are prefixed with 'img_backbone.'

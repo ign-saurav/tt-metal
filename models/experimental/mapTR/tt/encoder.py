@@ -8,7 +8,7 @@ import copy
 import warnings
 import ttnn
 from models.experimental.mapTR.tt.temporal_self_attention import TtTemporalSelfAttention
-from models.experimental.mapTR.tt.geometry_kernel_attention import TtGeometrySpatialCrossAttention
+from models.experimental.mapTR.tt.spatial_cross_attention import TtSpatialCrossAttention
 from models.experimental.mapTR.tt.ffn import TtFFN
 
 
@@ -22,9 +22,8 @@ class TtBEVFormerEncoder:
         num_points_in_pillar=4,
         return_intermediate=False,
         embed_dims=256,
-        num_heads=4,
-        dilation=1,
-        kernel_size=(3, 5),
+        num_heads=8,
+        num_points=8,
         im2col_step=192,
         feedforward_channels=512,
         ffn_dropout=0.1,
@@ -48,9 +47,8 @@ class TtBEVFormerEncoder:
                     attention=dict(
                         embed_dims=embed_dims,
                         num_heads=num_heads,
-                        dilation=dilation,
-                        kernel_size=kernel_size,
                         num_levels=1,
+                        num_points=num_points,
                         im2col_step=im2col_step,
                     ),
                     embed_dims=embed_dims,
@@ -346,7 +344,7 @@ class TtBEVFormerLayer:
                     attn_cfgs[index]["type"] = "TemporalSelfAttention"
                 elif attn_cfgs[index]["type"] == "SpatialCrossAttention":
                     type = attn_cfgs[index].pop("type")
-                    attention = TtGeometrySpatialCrossAttention(device, params.attentions[f"attn1"], **attn_cfgs[index])
+                    attention = TtSpatialCrossAttention(device, params.attentions[f"attn1"], **attn_cfgs[index])
                     attn_cfgs[index]["type"] = "SpatialCrossAttention"
 
                 self.attentions.append(attention)

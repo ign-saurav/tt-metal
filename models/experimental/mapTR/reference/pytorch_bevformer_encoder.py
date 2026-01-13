@@ -10,9 +10,9 @@ import warnings
 
 # Use local MapTR implementations
 from models.experimental.mapTR.reference.pytorch_temporal_self_attention import TemporalSelfAttention
-from models.experimental.mapTR.reference.modules.geometry_kernel_attention import (
-    GeometrySpatialCrossAttention,
-    GeometryKernelAttention,
+from models.experimental.mapTR.reference.pytorch_spatial_cross_attention import (
+    SpatialCrossAttention,
+    MSDeformableAttention3D,
 )
 from models.experimental.mapTR.reference.pytorch_custom_base_transformer_layer import FFN
 
@@ -25,9 +25,8 @@ class BEVFormerEncoder(nn.Module):
         num_points_in_pillar=4,
         return_intermediate=False,
         embed_dims=256,
-        num_heads=4,
-        dilation=1,
-        kernel_size=(3, 5),
+        num_heads=8,
+        num_points=8,
         im2col_step=192,
         feedforward_channels=512,
         ffn_dropout=0.1,
@@ -42,17 +41,16 @@ class BEVFormerEncoder(nn.Module):
 
         transformer_layers = dict(
             attn_cfgs=[
-                # TemporalSelfAttention uses num_heads=8 (fixed by checkpoint weights)
+                # TemporalSelfAttention uses num_heads=8
                 dict(type="TemporalSelfAttention", embed_dims=embed_dims, num_heads=8, num_levels=1),
                 dict(
                     type="SpatialCrossAttention",
                     pc_range=pc_range,
                     attention=dict(
                         embed_dims=embed_dims,
-                        num_heads=4,  # GeometryKernelAttention uses 4 heads (checkpoint: 60 = 1*15*4)
-                        dilation=dilation,
-                        kernel_size=kernel_size,
+                        num_heads=num_heads,  # MSDeformableAttention3D uses 8 heads
                         num_levels=1,
+                        num_points=num_points,
                         im2col_step=im2col_step,
                     ),
                     embed_dims=embed_dims,
@@ -274,25 +272,25 @@ class BEVFormerLayer(nn.Module):
                         batch_first=cfg.get("batch_first", True),
                     )
                 elif cfg["type"] == "SpatialCrossAttention":
-                    # Build GeometryKernelAttention (as used in MapTR checkpoint)
+                    # Build MSDeformableAttention3D (as used in BEVFormer checkpoint)
                     deform_cfg = cfg.get("attention", {})
-                    kernel_size = deform_cfg.get("kernel_size", (3, 5))  # Default for MapTR
-                    deformable_attention = GeometryKernelAttention(
+                    deformable_attention = MSDeformableAttention3D(
                         embed_dims=deform_cfg.get("embed_dims", 256),
-                        num_heads=deform_cfg.get("num_heads", 4),
+                        num_heads=deform_cfg.get("num_heads", 8),
                         num_levels=deform_cfg.get("num_levels", 1),
-                        kernel_size=kernel_size,
-                        dilation=deform_cfg.get("dilation", 1),
+                        num_points=deform_cfg.get("num_points", 8),
+                        im2col_step=deform_cfg.get("im2col_step", 64),
                         batch_first=deform_cfg.get("batch_first", True),
                     )
-                    # Build GeometrySpatialCrossAttention with the kernel attention
-                    attention = GeometrySpatialCrossAttention(
+                    # Build SpatialCrossAttention with MSDeformableAttention3D
+                    attention = SpatialCrossAttention(
                         embed_dims=cfg.get("embed_dims", 256),
                         num_cams=cfg.get("num_cams", 6),
                         pc_range=cfg.get("pc_range"),
-                        deformable_attention=deformable_attention,
                         batch_first=cfg.get("batch_first", True),
                     )
+                    # Replace default attention with configured one
+                    attention.deformable_attention = deformable_attention
                 else:
                     raise ValueError(f"Unknown attention type: {cfg['type']}")
 

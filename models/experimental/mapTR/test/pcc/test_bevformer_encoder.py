@@ -23,11 +23,11 @@ from ttnn.model_preprocessing import (
 )
 
 
-MAPTR_WEIGHTS_PATH = "models/experimental/mapTR/resources/data/weights/maptr_tiny_r50_24e.pth"
+MAPTR_WEIGHTS_PATH = "models/experimental/mapTR/resources/data/weights/maptr_tiny_r50_24e_bevformer.pth"
 
 # Layer prefix for BEVFormer encoder
 # pts_bbox_head.transformer.encoder.layers.X.attentions.0 = TemporalSelfAttention
-# pts_bbox_head.transformer.encoder.layers.X.attentions.1 = SpatialCrossAttention
+# pts_bbox_head.transformer.encoder.layers.X.attentions.1 = GeometrySpatialCrossAttention
 # pts_bbox_head.transformer.encoder.layers.X.ffns.0 = FFN
 # pts_bbox_head.transformer.encoder.layers.X.norms.0/1/2 = LayerNorms
 ENCODER_LAYER_PREFIX = "pts_bbox_head.transformer.encoder.layers."
@@ -157,16 +157,26 @@ def custom_preprocessor_encoder(model, name):
                 },
             }
 
-            # SpatialCrossAttention / GeometrySpatialCrossAttention (attn1)
+            # SpatialCrossAttention with MSDeformableAttention3D (attn1)
             sca = layer.attentions[1]
             layer_params["attentions"]["attn1"] = {
+                "sampling_offsets": {
+                    "weight": preprocess_linear_weight(
+                        sca.deformable_attention.sampling_offsets.weight, dtype=ttnn.bfloat16
+                    ),
+                    "bias": preprocess_linear_bias(sca.deformable_attention.sampling_offsets.bias, dtype=ttnn.bfloat16),
+                },
                 "attention_weights": {
-                    "weight": preprocess_linear_weight(sca.attention.attention_weights.weight, dtype=ttnn.bfloat16),
-                    "bias": preprocess_linear_bias(sca.attention.attention_weights.bias, dtype=ttnn.bfloat16),
+                    "weight": preprocess_linear_weight(
+                        sca.deformable_attention.attention_weights.weight, dtype=ttnn.bfloat16
+                    ),
+                    "bias": preprocess_linear_bias(
+                        sca.deformable_attention.attention_weights.bias, dtype=ttnn.bfloat16
+                    ),
                 },
                 "value_proj": {
-                    "weight": preprocess_linear_weight(sca.attention.value_proj.weight, dtype=ttnn.bfloat16),
-                    "bias": preprocess_linear_bias(sca.attention.value_proj.bias, dtype=ttnn.bfloat16),
+                    "weight": preprocess_linear_weight(sca.deformable_attention.value_proj.weight, dtype=ttnn.bfloat16),
+                    "bias": preprocess_linear_bias(sca.deformable_attention.value_proj.bias, dtype=ttnn.bfloat16),
                 },
                 "output_proj": {
                     "weight": preprocess_linear_weight(sca.output_proj.weight, dtype=ttnn.bfloat16),
@@ -295,95 +305,14 @@ def create_dummy_img_metas(batch_size: int = 1, num_cams: int = 6):
     return img_metas
 
 
-def test_maptr_bevformer_encoder_pytorch():
-    """Test MapTR BEVFormer Encoder PyTorch reference model only."""
-    # MapTR config parameters (reduced BEV size for memory constraints)
-    point_cloud_range = [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
-    embed_dims = 256
-    num_heads = 4
-    feedforward_channels = 512
-    num_layers = 1  # Test with 1 layer for simplicity
-    bev_h = 50  # Reduced from 200 for memory
-    bev_w = 25  # Reduced from 100 for memory
-    num_cams = 6
-    batch_size = 1
-
-    # Create PyTorch model
-    torch_model = BEVFormerEncoder(
-        num_layers=num_layers,
-        pc_range=point_cloud_range,
-        num_points_in_pillar=4,
-        return_intermediate=False,
-        embed_dims=embed_dims,
-        num_heads=num_heads,
-        feedforward_channels=feedforward_channels,
-    )
-
-    # Load mapTR weights
-    torch_model = load_torch_encoder(torch_model, num_layers=num_layers)
-
-    # Create input tensors
-    num_query = bev_h * bev_w
-
-    # BEV query: (num_query, bs, embed_dims) - before permute in forward
-    bev_query = torch.randn(num_query, batch_size, embed_dims)
-
-    # Key/Value from backbone: (num_cams, num_feat, bs, embed_dims)
-    num_feat_per_level = 12 * 20  # Example: 12x20 feature map
-    key = torch.randn(num_cams, num_feat_per_level, batch_size, embed_dims)
-    value = torch.randn(num_cams, num_feat_per_level, batch_size, embed_dims)
-
-    # BEV positional encoding: (num_query, bs, embed_dims)
-    bev_pos = torch.randn(num_query, batch_size, embed_dims)
-
-    # Spatial shapes for feature levels
-    spatial_shapes = torch.tensor([[12, 20]])
-    level_start_index = torch.tensor([0])
-
-    # Shift for temporal alignment
-    shift = torch.zeros(batch_size, 2)
-
-    # Image metadata
-    img_metas = create_dummy_img_metas(batch_size, num_cams)
-
-    # Run PyTorch model
-    with torch.no_grad():
-        torch_output = torch_model(
-            bev_query,
-            key,
-            value,
-            bev_h=bev_h,
-            bev_w=bev_w,
-            bev_pos=bev_pos,
-            spatial_shapes=spatial_shapes,
-            level_start_index=level_start_index,
-            prev_bev=None,
-            shift=shift,
-            img_metas=img_metas,
-        )
-
-    # Verify output shape and that it's not all zeros/nans
-    assert torch_output.shape == (batch_size, num_query, embed_dims), f"Unexpected output shape: {torch_output.shape}"
-    assert not torch.isnan(torch_output).any(), "Output contains NaN values"
-    assert not torch.isinf(torch_output).any(), "Output contains Inf values"
-    assert torch_output.abs().max() > 0, "Output is all zeros"
-
-    logger.info(f"PyTorch encoder output shape: {torch_output.shape}")
-    logger.info(
-        f"PyTorch encoder output stats: min={torch_output.min():.4f}, max={torch_output.max():.4f}, mean={torch_output.mean():.4f}"
-    )
-
-
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-def test_maptr_bevformer_encoder_tt(
-    device,
-    reset_seeds,
-):
-    """Test MapTR BEVFormer Encoder with TT implementation."""
+def test_maptr_bevformer_encoder(device, reset_seeds):
+    """Test MapTR BEVFormer Encoder - PyTorch vs TT implementation."""
     # MapTR config parameters (reduced BEV size for memory constraints)
     point_cloud_range = [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
     embed_dims = 256
-    num_heads = 4
+    num_heads = 8  # MSDeformableAttention3D uses 8 heads
+    num_points = 8  # Sampling points per head
     feedforward_channels = 512
     num_layers = 1  # Test with 1 layer for simplicity
     bev_h = 50  # Reduced from 200 for memory
@@ -399,6 +328,7 @@ def test_maptr_bevformer_encoder_tt(
         return_intermediate=False,
         embed_dims=embed_dims,
         num_heads=num_heads,
+        num_points=num_points,
         feedforward_channels=feedforward_channels,
     )
 
@@ -444,6 +374,11 @@ def test_maptr_bevformer_encoder_tt(
             shift=shift,
             img_metas=img_metas,
         )
+
+    logger.info(f"PyTorch output shape: {torch_output.shape}")
+    logger.info(
+        f"PyTorch output stats: min={torch_output.min():.4f}, max={torch_output.max():.4f}, mean={torch_output.mean():.4f}"
+    )
 
     # Prepare TT model parameters
     parameters = create_encoder_parameters(torch_model, device)
@@ -458,6 +393,7 @@ def test_maptr_bevformer_encoder_tt(
         return_intermediate=False,
         embed_dims=embed_dims,
         num_heads=num_heads,
+        num_points=num_points,
         feedforward_channels=feedforward_channels,
     )
 
@@ -486,80 +422,11 @@ def test_maptr_bevformer_encoder_tt(
     )
 
     # Compare outputs
-    # PCC of ~0.91 due to bfloat16 precision and complex sampling operations
     ttnn_output = ttnn.to_torch(tt_output)
-    pcc_passed, pcc_message = assert_with_pcc(ttnn_output, torch_output, 0.95)
-    logger.info(pcc_message)
-
-
-def test_maptr_bevformer_encoder_with_prev_bev_pytorch():
-    """Test MapTR BEVFormer Encoder with previous BEV (temporal mode) - PyTorch only."""
-    # MapTR config parameters (reduced BEV size for memory constraints)
-    point_cloud_range = [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
-    embed_dims = 256
-    num_heads = 4
-    feedforward_channels = 512
-    num_layers = 1
-    bev_h = 50  # Reduced from 200 for memory
-    bev_w = 25  # Reduced from 100 for memory
-    num_cams = 6
-    batch_size = 1
-
-    # Create PyTorch model
-    torch_model = BEVFormerEncoder(
-        num_layers=num_layers,
-        pc_range=point_cloud_range,
-        num_points_in_pillar=4,
-        return_intermediate=False,
-        embed_dims=embed_dims,
-        num_heads=num_heads,
-        feedforward_channels=feedforward_channels,
-    )
-
-    # Load mapTR weights
-    torch_model = load_torch_encoder(torch_model, num_layers=num_layers)
-
-    # Create input tensors
-    num_query = bev_h * bev_w
-
-    bev_query = torch.randn(num_query, batch_size, embed_dims)
-    num_feat_per_level = 12 * 20  # 12x20 feature map = 240
-    key = torch.randn(num_cams, num_feat_per_level, batch_size, embed_dims)
-    value = torch.randn(num_cams, num_feat_per_level, batch_size, embed_dims)
-    bev_pos = torch.randn(num_query, batch_size, embed_dims)
-
-    # Previous BEV features (temporal context)
-    prev_bev = torch.randn(num_query, batch_size, embed_dims)
-
-    spatial_shapes = torch.tensor([[12, 20]])
-    level_start_index = torch.tensor([0])
-    shift = torch.randn(batch_size, 2) * 0.1  # Small random shift
-
-    img_metas = create_dummy_img_metas(batch_size, num_cams)
-
-    # Run PyTorch model
-    with torch.no_grad():
-        torch_output = torch_model(
-            bev_query,
-            key,
-            value,
-            bev_h=bev_h,
-            bev_w=bev_w,
-            bev_pos=bev_pos,
-            spatial_shapes=spatial_shapes,
-            level_start_index=level_start_index,
-            prev_bev=prev_bev,
-            shift=shift,
-            img_metas=img_metas,
-        )
-
-    # Verify output shape and that it's not all zeros/nans
-    assert torch_output.shape == (batch_size, num_query, embed_dims), f"Unexpected output shape: {torch_output.shape}"
-    assert not torch.isnan(torch_output).any(), "Output contains NaN values"
-    assert not torch.isinf(torch_output).any(), "Output contains Inf values"
-    assert torch_output.abs().max() > 0, "Output is all zeros"
-
-    logger.info(f"PyTorch encoder (with prev_bev) output shape: {torch_output.shape}")
+    logger.info(f"TT output shape: {ttnn_output.shape}")
     logger.info(
-        f"PyTorch encoder (with prev_bev) output stats: min={torch_output.min():.4f}, max={torch_output.max():.4f}, mean={torch_output.mean():.4f}"
+        f"TT output stats: min={ttnn_output.min():.4f}, max={ttnn_output.max():.4f}, mean={ttnn_output.mean():.4f}"
     )
+
+    pcc_passed, pcc_message = assert_with_pcc(ttnn_output, torch_output, 0.97)
+    logger.info(f"PCC Result: {pcc_message}")

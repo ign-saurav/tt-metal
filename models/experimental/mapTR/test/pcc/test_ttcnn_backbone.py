@@ -17,7 +17,7 @@ from models.experimental.mapTR.tt.ttcnn_backbone import TtResNet50
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
 
-MAPTR_WEIGHTS_PATH = "models/experimental/mapTR/resources/data/weights/maptr_tiny_r50_24e.pth"
+MAPTR_WEIGHTS_PATH = "models/experimental/mapTR/resources/data/weights/maptr_tiny_r50_24e_bevformer.pth"
 BACKBONE_LAYER = "img_backbone."
 
 
