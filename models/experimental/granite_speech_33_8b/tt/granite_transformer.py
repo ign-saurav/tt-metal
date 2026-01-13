@@ -10,7 +10,7 @@ from models.tt_transformers.tt.embedding import Embedding, ScaledEmbedding
 from models.tt_transformers.tt.model import Transformer
 
 
-class GraniteSpeech(Transformer):
+class GraniteSpeechTransformer(Transformer):
     def __init__(
         self,
         args,
@@ -78,7 +78,6 @@ class GraniteSpeech(Transformer):
 
         # self.embd expects that tokens are on device ; if trace is enabled, the tensors will be later on device, so we will do these 2 steps when we copy the tokens to the device
         if not trace_enabled:
-            # tokens_embd = self.embd(tokens)
             tokens_embd = ttnn.unsqueeze_to_4D(tokens)
 
         # Slice the rot mats to the prefill seqlen

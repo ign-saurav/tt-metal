@@ -3,7 +3,7 @@ import torch
 import torchaudio
 from huggingface_hub import hf_hub_download
 from transformers import AutoProcessor, AutoModelForSpeechSeq2Seq
-from models.experimental.granite_speech_33_8b.tt.granite_speech import GraniteSpeech
+from models.experimental.granite_speech_33_8b.tt.granite_speech import GraniteSpeechTTNN
 
 
 @pytest.mark.parametrize(
@@ -22,14 +22,14 @@ def test_model_output(mesh_device):
     processor = AutoProcessor.from_pretrained("ibm-granite/granite-speech-3.3-8b")
     tokenizer = processor.tokenizer
 
-    ttnn_model = GraniteSpeech(
+    ttnn_model = GraniteSpeechTTNN(
         mesh_device=mesh_device,
         config=config,
         tokenizer=tokenizer,
         torch_ref=torch_model,
         use_torch_audio_feat=False,
-        include_conformer_layernorm=True,
-        use_optimized_attention_projector=True,
+        include_conformer_layernorm=True,  # Valid only if use_torch_audio_feat is False
+        use_optimized_attention_projector=True,  # Valid only if use_torch_audio_feat is False
     )
 
     # load audio
