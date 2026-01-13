@@ -170,10 +170,12 @@ class GeometryKernelAttention(nn.Module):
         self.value_proj = nn.Linear(embed_dims, embed_dims)
 
         # Create fixed grid offsets
+        # Note: Use default indexing="ij" (not "xy") to match the checkpoint
         grid_h, grid_w = kernel_size
         y = (torch.arange(grid_h) - grid_h // 2) * dilation
         x = (torch.arange(grid_w) - grid_w // 2) * dilation
-        offsets = torch.stack(torch.meshgrid(x, y, indexing="xy")).permute(1, 2, 0).reshape(grid_h * grid_w, 2)
+        # Default indexing="ij" gives (len(x), len(y)) shaped grids
+        offsets = torch.stack(torch.meshgrid(x, y, indexing="ij")).permute(1, 2, 0).reshape(grid_h * grid_w, 2)
         self.register_buffer("grid_offsets", offsets.float(), persistent=False)
 
     def forward(

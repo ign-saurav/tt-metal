@@ -42,7 +42,8 @@ class BEVFormerEncoder(nn.Module):
 
         transformer_layers = dict(
             attn_cfgs=[
-                dict(type="TemporalSelfAttention", embed_dims=embed_dims, num_heads=num_heads, num_levels=1),
+                # TemporalSelfAttention uses num_heads=8 (fixed by checkpoint weights)
+                dict(type="TemporalSelfAttention", embed_dims=embed_dims, num_heads=8, num_levels=1),
                 dict(
                     type="SpatialCrossAttention",
                     pc_range=pc_range,
