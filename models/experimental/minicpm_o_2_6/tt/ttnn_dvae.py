@@ -298,7 +298,7 @@ class TtnnDVAE:
             "hidden_dim": 256,
             "num_mel_bins": 100,
             "bn_dim": 128,  # Production: 128
-            "enable_gfsq": False,  # Enable/disable GFSQ quantization
+            "enable_gfsq": True,  # Enable/disable GFSQ quantization
         }
 
     def _load_weights(self, weights: Dict[str, torch.Tensor]):

@@ -60,7 +60,7 @@ def test_dvae_forward_pcc(device):
     num_mel_bins = 100
     batch_size = 1
     time_steps = 64  # Short sequence for testing
-    enable_gfsq = False  # Test with GFSQ disabled (bypass)
+    enable_gfsq = True  # Test with GFSQ disabled (bypass)
 
     logger.info("Testing TTNN DVAE forward pass...")
     logger.info(f"GFSQ quantization: {'ENABLED' if enable_gfsq else 'DISABLED'}")
@@ -76,7 +76,7 @@ def test_dvae_forward_pcc(device):
     # for k in weights:
     #     print(k)
 
-    weights = torch.load("dvae_weights.pt")
+    weights = torch.load("models/experimental/minicpm_o_2_6/tests/dvae_weights.pt")
     # og_weights = torch.load("models/experimental/minicpm_o_2_6/tests/dvae_weights.pt")
     # for k in og_weights:
     #     print(k)

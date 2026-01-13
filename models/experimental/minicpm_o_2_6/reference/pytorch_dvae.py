@@ -9,6 +9,51 @@ Simplified implementation focusing on encoder/decoder architecture.
 
 import torch
 import torch.nn as nn
+from typing import List
+import math
+from vector_quantize_pytorch import GroupedResidualFSQ
+
+
+class GFSQ(nn.Module):
+    def __init__(
+        self,
+        dim: int,
+        levels: List[int],
+        G: int,
+        R: int,
+        eps=1e-5,
+        transpose=True,
+    ):
+        super(GFSQ, self).__init__()
+        self.quantizer = GroupedResidualFSQ(
+            dim=dim,
+            levels=list(levels),
+            num_quantizers=R,
+            groups=G,
+        )
+        self.n_ind = math.prod(levels)
+        self.eps = eps
+        self.transpose = transpose
+        self.G = G
+        self.R = R
+
+    def _embed(self, x: torch.Tensor):
+        if self.transpose:
+            x = x.transpose(1, 2)
+        x = x.view(x.size(0), x.size(1), self.G, self.R).permute(2, 0, 1, 3)
+        feat = self.quantizer.get_output_from_indices(x)
+        return feat.transpose_(1, 2) if self.transpose else feat
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        return super().__call__(x)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self.transpose:
+            x.transpose_(1, 2)
+        _, ind = self.quantizer(x)
+        ind = ind.permute(1, 2, 0, 3).contiguous()
+        ind = ind.view(ind.size(0), ind.size(1), -1)
+        return ind.transpose_(1, 2) if self.transpose else ind
 
 
 class PyTorchDVAE(nn.Module):
@@ -90,6 +135,13 @@ class PyTorchDVAE(nn.Module):
         # Decoder output (Production: 512 -> num_mel_bins)
         self.decoder_output = nn.Conv2d(512, num_mel_bins, (1, 3), padding=(0, 1))
 
+        self.vq_layer = GFSQ(
+            dim=1024,
+            levels=(5, 5, 5, 5),
+            G=2,
+            R=2,
+        )
+
     def forward(self, mel_spectrogram: torch.Tensor) -> torch.Tensor:
         """
         Forward pass.
@@ -110,7 +162,7 @@ class PyTorchDVAE(nn.Module):
         # Apply GFSQ quantization (or bypass if disabled)
         if self.enable_gfsq:
             # Apply GFSQ quantization (simplified - pass through for now)
-            quantized = encoded
+            quantized = self.vq_layer(encoded)
         else:
             # Bypass quantization - pass through unchanged
             quantized = encoded
@@ -123,8 +175,6 @@ class PyTorchDVAE(nn.Module):
             .flatten(3)
             .permute(0, 1, 3, 2)
         )
-
-        print(quantized.shape)
 
         # Decoder
         reconstructed = self._decode(quantized)
