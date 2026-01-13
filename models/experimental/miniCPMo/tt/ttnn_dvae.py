@@ -22,12 +22,19 @@ try:
         get_activations_memory_config,
         torch_to_ttnn,
     )
+    from ..reference.pytorch_dvae import GFSQ, GFSQ_AVAILABLE
 except ImportError:
     from common import (
         get_weights_memory_config,
         get_activations_memory_config,
         torch_to_ttnn,
     )
+
+    try:
+        from models.experimental.miniCPMo.reference.pytorch_dvae import GFSQ, GFSQ_AVAILABLE
+    except ImportError:
+        GFSQ_AVAILABLE = False
+        GFSQ = None
 
 
 class TtnnGFSQ:
@@ -255,20 +262,24 @@ class TtnnDVAE:
         self.out_conv = None
         self.coef = None
 
-        # Initialize GFSQ quantizer (MiniCPM-o-2_6 configuration)
-        if self.enable_gfsq:
-            self.vq_layer = TtnnGFSQ(
-                device=device,  # Pass device to GFSQ
-                dim=1024,  # Encoder output dimension
-                levels=[5, 5, 5, 5],  # 4-level quantization per group
-                G=2,  # 2 groups
-                R=2,  # 2 residual levels
-            )
-
-            # Load GFSQ weights immediately after initialization
-            self.vq_layer.load_weights({})  # Empty dict for now - uses random codebooks
+        # Initialize GFSQ quantizer using PyTorch fallback
+        if self.config["enable_gfsq"]:
+            if GFSQ_AVAILABLE and GFSQ is not None:
+                # Use PyTorch GFSQ as torch fallback
+                self.gfsq_torch = GFSQ(
+                    dim=1024,  # Encoder output dimension
+                    levels=[8, 5, 5, 5],  # 8*5*5*5 = 1000 codebook entries
+                    G=2,  # 2 groups
+                    R=2,  # 2 residual quantizers
+                    eps=1e-5,
+                    transpose=True,
+                )
+                logger.info("GFSQ: Using PyTorch fallback for quantization")
+            else:
+                logger.warning("GFSQ not available - quantization will be bypassed")
+                self.gfsq_torch = None
         else:
-            self.vq_layer = None
+            self.gfsq_torch = None
 
         # Create conv config (shared for all conv operations)
         self.conv_config = ttnn.Conv2dConfig(
@@ -298,7 +309,7 @@ class TtnnDVAE:
             "hidden_dim": 256,
             "num_mel_bins": 100,
             "bn_dim": 128,  # Production: 128
-            "enable_gfsq": True,  # Enable/disable GFSQ quantization
+            "enable_gfsq": False,  # Enable/disable GFSQ quantization
         }
 
     def _load_weights(self, weights: Dict[str, torch.Tensor]):
@@ -345,24 +356,24 @@ class TtnnDVAE:
         self.downsample_conv = [
             {
                 "weight": ttnn.from_torch(
-                    weights_dict["downsample_conv.0.weight"],
+                    weights_dict["downsample_conv.0.weight"].unsqueeze(-2),
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
                 "bias": ttnn.from_torch(
-                    weights_dict["downsample_conv.0.bias"],
+                    weights_dict["downsample_conv.0.bias"].view(1, 1, 1, -1),
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
             },
             {
                 "weight": ttnn.from_torch(
-                    weights_dict["downsample_conv.2.weight"],
+                    weights_dict["downsample_conv.2.weight"].unsqueeze(-2),
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
                 "bias": ttnn.from_torch(
-                    weights_dict["downsample_conv.2.bias"],
+                    weights_dict["downsample_conv.2.bias"].view(1, 1, 1, -1),
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
@@ -373,24 +384,24 @@ class TtnnDVAE:
         self.encoder_conv_in = [
             {
                 "weight": ttnn.from_torch(
-                    weights_dict["encoder.conv_in.0.weight"],
+                    weights_dict["encoder.conv_in.0.weight"].unsqueeze(-2),
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
                 "bias": ttnn.from_torch(
-                    weights_dict["encoder.conv_in.0.bias"],
+                    weights_dict["encoder.conv_in.0.bias"].view(1, 1, 1, -1),
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
             },
             {
                 "weight": ttnn.from_torch(
-                    weights_dict["encoder.conv_in.2.weight"],
+                    weights_dict["encoder.conv_in.2.weight"].unsqueeze(-2),
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
                 "bias": ttnn.from_torch(
-                    weights_dict["encoder.conv_in.2.bias"],
+                    weights_dict["encoder.conv_in.2.bias"].view(1, 1, 1, -1),
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
@@ -403,14 +414,21 @@ class TtnnDVAE:
             block_weights = {
                 "dwconv": {
                     "weight": torch_to_ttnn(
-                        weights_dict[f"encoder.decoder_block.{i}.dwconv.weight"],
+                        # Conv1D [out, 1, W] -> Conv2D [out, 1, 1, W]
+                        weights_dict[f"encoder.decoder_block.{i}.dwconv.weight"].unsqueeze(-2),
                         self.device,
                         memory_config=get_weights_memory_config(),
                         layout=ttnn.ROW_MAJOR_LAYOUT,
                     ),
-                    "bias": None,  # Disable bias for testing
+                    "bias": torch_to_ttnn(
+                        weights_dict[f"encoder.decoder_block.{i}.dwconv.bias"].view(1, 1, 1, -1),
+                        self.device,
+                        memory_config=get_weights_memory_config(),
+                        layout=ttnn.ROW_MAJOR_LAYOUT,
+                    ),
                 },
                 "norm": {
+                    # LayerNorm weights are 1D [hidden_dim]
                     "weight": torch_to_ttnn(
                         weights_dict[f"encoder.decoder_block.{i}.norm.weight"],
                         self.device,
@@ -432,7 +450,11 @@ class TtnnDVAE:
                         self.device,
                         memory_config=get_weights_memory_config(),
                     ),
-                    "bias": None,  # Disable bias for testing
+                    "bias": torch_to_ttnn(
+                        weights_dict[f"encoder.decoder_block.{i}.pwconv1.bias"],
+                        self.device,
+                        memory_config=get_weights_memory_config(),
+                    ),
                 },
                 "pwconv2": {
                     "weight": torch_to_ttnn(
@@ -442,7 +464,11 @@ class TtnnDVAE:
                         self.device,
                         memory_config=get_weights_memory_config(),
                     ),
-                    "bias": None,  # Disable bias for testing
+                    "bias": torch_to_ttnn(
+                        weights_dict[f"encoder.decoder_block.{i}.pwconv2.bias"],
+                        self.device,
+                        memory_config=get_weights_memory_config(),
+                    ),
                 },
             }
             self.encoder_blocks.append(block_weights)
@@ -450,7 +476,7 @@ class TtnnDVAE:
         # Encoder output convolution
         # Weights should be in DRAM for conv2d operations
         self.encoder_conv_out = ttnn.from_torch(
-            weights_dict["encoder.conv_out.weight"],
+            weights_dict["encoder.conv_out.weight"].unsqueeze(-2),
             dtype=ttnn.bfloat16,
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
@@ -459,24 +485,24 @@ class TtnnDVAE:
         self.decoder_conv_in = [
             {
                 "weight": ttnn.from_torch(
-                    weights_dict["decoder.conv_in.0.weight"],
+                    weights_dict["decoder.conv_in.0.weight"].unsqueeze(-2),
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
                 "bias": ttnn.from_torch(
-                    weights_dict["decoder.conv_in.0.bias"],
+                    weights_dict["decoder.conv_in.0.bias"].view(1, 1, 1, -1),
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
             },
             {
                 "weight": ttnn.from_torch(
-                    weights_dict["decoder.conv_in.2.weight"],
+                    weights_dict["decoder.conv_in.2.weight"].unsqueeze(-2),
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
                 "bias": ttnn.from_torch(
-                    weights_dict["decoder.conv_in.2.bias"],
+                    weights_dict["decoder.conv_in.2.bias"].view(1, 1, 1, -1),
                     dtype=ttnn.bfloat16,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 ),
@@ -489,14 +515,21 @@ class TtnnDVAE:
             block_weights = {
                 "dwconv": {
                     "weight": torch_to_ttnn(
-                        weights_dict[f"decoder.decoder_block.{i}.dwconv.weight"],
+                        # Conv1D [out, 1, W] -> Conv2D [out, 1, 1, W]
+                        weights_dict[f"decoder.decoder_block.{i}.dwconv.weight"].unsqueeze(-2),
                         self.device,
                         memory_config=get_weights_memory_config(),
                         layout=ttnn.ROW_MAJOR_LAYOUT,
                     ),
-                    "bias": None,  # Disable bias for testing
+                    "bias": torch_to_ttnn(
+                        weights_dict[f"decoder.decoder_block.{i}.dwconv.bias"].view(1, 1, 1, -1),
+                        self.device,
+                        memory_config=get_weights_memory_config(),
+                        layout=ttnn.ROW_MAJOR_LAYOUT,
+                    ),
                 },
                 "norm": {
+                    # LayerNorm weights are 1D [hidden_dim]
                     "weight": torch_to_ttnn(
                         weights_dict[f"decoder.decoder_block.{i}.norm.weight"],
                         self.device,
@@ -518,7 +551,11 @@ class TtnnDVAE:
                         self.device,
                         memory_config=get_weights_memory_config(),
                     ),
-                    "bias": None,  # Disable bias for testing
+                    "bias": torch_to_ttnn(
+                        weights_dict[f"decoder.decoder_block.{i}.pwconv1.bias"],
+                        self.device,
+                        memory_config=get_weights_memory_config(),
+                    ),
                 },
                 "pwconv2": {
                     "weight": torch_to_ttnn(
@@ -528,7 +565,11 @@ class TtnnDVAE:
                         self.device,
                         memory_config=get_weights_memory_config(),
                     ),
-                    "bias": None,  # Disable bias for testing
+                    "bias": torch_to_ttnn(
+                        weights_dict[f"decoder.decoder_block.{i}.pwconv2.bias"],
+                        self.device,
+                        memory_config=get_weights_memory_config(),
+                    ),
                 },
             }
             self.decoder_blocks.append(block_weights)
@@ -536,7 +577,7 @@ class TtnnDVAE:
         # Decoder projection - NEW: hidden_dim -> 512 channels (1x1 conv)
         # Weights should NOT be on device for conv2d
         self.decoder_proj = ttnn.from_torch(
-            weights_dict["decoder.proj.weight"],
+            weights_dict["decoder.conv_out.weight"].unsqueeze(-2),
             dtype=ttnn.bfloat16,
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
@@ -544,7 +585,7 @@ class TtnnDVAE:
         # Output convolution - weights should NOT be on device for conv2d
         self.out_conv = {
             "weight": ttnn.from_torch(
-                weights_dict["out_conv.weight"],
+                weights_dict["out_conv.weight"].unsqueeze(-2),
                 dtype=ttnn.bfloat16,
                 layout=ttnn.ROW_MAJOR_LAYOUT,
             ),
@@ -570,20 +611,34 @@ class TtnnDVAE:
 
         # Encoder
         encoded = self._encode(x, debug_ops)
+        # encoded shape: [batch, 1, seq, 1024] (NHWC)
 
-        # Reshape from [batch, 1, seq, dim] to [batch, seq, dim] for quantization
         batch, _, seq, dim = encoded.shape
-        encoded_flat = ttnn.reshape(encoded, [batch, seq, dim])
 
-        # Apply GFSQ quantization (or bypass if disabled)
-        if self.enable_gfsq:
-            quantized, quant_indices = self.vq_layer.quantize(encoded_flat)
+        # Apply GFSQ quantization using PyTorch fallback (or bypass if disabled)
+        if self.enable_gfsq and self.gfsq_torch is not None:
+            # Convert TTNN to torch for GFSQ: [B, 1, T, 1024] -> [B, 1024, T]
+            encoded_torch = ttnn.to_torch(encoded)  # [B, 1, T, 1024]
+            encoded_3d = encoded_torch.squeeze(1).permute(0, 2, 1)  # [B, 1024, T]
+
+            # GFSQ round-trip: quantize and embed (PyTorch fallback)
+            quantized_3d = self.gfsq_torch.quantize_and_embed(encoded_3d)  # [B, 1024, T]
         else:
-            # Bypass quantization - pass through unchanged
-            quantized = encoded_flat
+            # Bypass quantization - convert to 3D
+            encoded_torch = ttnn.to_torch(encoded)  # [B, 1, T, 1024]
+            quantized_3d = encoded_torch.squeeze(1).permute(0, 2, 1)  # [B, 1024, T]
 
-        # Reshape back to [batch, 1, seq, dim] for decoder
-        quantized_4d = ttnn.reshape(quantized, [batch, 1, seq, dim])
+        # Reshape from [B, 1024, T] to [B, 1, T*2, 512] using interleaved reshape (on torch)
+        quantized_torch = (
+            quantized_3d.view(batch, 2, 512, -1)  # [B, 2, 512, T]
+            .permute(0, 2, 1, 3)  # [B, 512, 2, T]
+            .reshape(batch, 512, -1)  # [B, 512, T*2]
+            .permute(0, 2, 1)  # [B, T*2, 512]
+            .unsqueeze(1)  # [B, 1, T*2, 512] (NHWC)
+        )
+
+        # Convert back to TTNN
+        quantized_4d = torch_to_ttnn(quantized_torch, self.device)
 
         # Decoder
         reconstructed = self._decode(quantized_4d, debug_ops)
@@ -667,7 +722,7 @@ class TtnnDVAE:
                 )
             # Convert to TILE_LAYOUT for ReLU
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-            x = ttnn.relu(x)
+            x = ttnn.gelu(x)
             # Convert back to ROW_MAJOR_LAYOUT for next conv2d
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
 
@@ -696,6 +751,12 @@ class TtnnDVAE:
                     memory_config=get_activations_memory_config(),
                     return_output_dim=True,
                 )
+
+                # Convert to TILE_LAYOUT for GELU
+                x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+                x = ttnn.gelu(x)
+                # Convert back to ROW_MAJOR_LAYOUT for next conv2d
+                x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
             else:
                 # Weight: [hidden_dim, bn_dim, 1, 3]
                 # Output: [batch, 1, time_steps//2, hidden_dim]
@@ -718,11 +779,6 @@ class TtnnDVAE:
                     memory_config=get_activations_memory_config(),
                     return_output_dim=True,
                 )
-            # Convert to TILE_LAYOUT for GELU
-            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-            x = ttnn.gelu(x)
-            # Convert back to ROW_MAJOR_LAYOUT for next conv2d
-            x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
 
         # Encoder ConvNeXt blocks (PRODUCTION: 12 blocks enabled)
         for block_weights in self.encoder_blocks:
@@ -819,6 +875,12 @@ class TtnnDVAE:
                     memory_config=get_activations_memory_config(),
                     return_output_dim=True,
                 )
+
+                # Convert to TILE_LAYOUT for GELU
+                x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+                x = ttnn.gelu(x)
+                # Convert back to ROW_MAJOR_LAYOUT for next conv2d
+                x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
             else:
                 # Weight: [hidden_dim, bn_dim, 1, 3]
                 # Output: [batch, 1, time_steps//2, hidden_dim]
@@ -841,11 +903,6 @@ class TtnnDVAE:
                     memory_config=get_activations_memory_config(),
                     return_output_dim=True,
                 )
-            # Convert to TILE_LAYOUT for GELU
-            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-            x = ttnn.gelu(x)
-            # Convert back to ROW_MAJOR_LAYOUT for next conv2d
-            x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
 
         # Decoder ConvNeXt blocks (PRODUCTION: 12 blocks enabled)
         for block_weights in self.decoder_blocks:
@@ -976,7 +1033,7 @@ class TtnnDVAE:
             x = ttnn.linear(
                 x,
                 weights["pwconv1"]["weight"],
-                bias=None,  # Disable bias for testing
+                bias=weights["pwconv1"]["bias"],
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)  # Convert back to ROW_MAJOR
@@ -1000,7 +1057,7 @@ class TtnnDVAE:
             x = ttnn.linear(
                 x,
                 weights["pwconv2"]["weight"],
-                bias=None,  # Disable bias for testing
+                bias=weights["pwconv2"]["bias"],
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
             x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)  # Convert back to ROW_MAJOR
