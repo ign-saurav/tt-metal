@@ -161,20 +161,28 @@ class PyTorchDVAE(nn.Module):
 
         # Apply GFSQ quantization (or bypass if disabled)
         if self.enable_gfsq:
-            # Apply GFSQ quantization (simplified - pass through for now)
-            quantized = self.vq_layer(encoded)
+            # Convert 4D NHWC [B, 1, T, C] to 3D [B, C, T] for GFSQ
+            encoded_3d = encoded.squeeze(1).permute(0, 2, 1)  # [B, 1, T, 1024] -> [B, 1024, T]
+
+            # GFSQ returns indices [B, G*R, T] = [B, 4, T]
+            indices = self.vq_layer(encoded_3d)
+
+            # Convert indices back to features using _embed
+            vq_feats = self.vq_layer._embed(indices)  # [B, 1024, T]
+
+            # Reshape features for decoder: [B, 1024, T] -> [B, 512, T*2]
+            # Following reference: view as [B, 2, 512, T], permute to [B, 512, T, 2], flatten last dims
+            vq_feats = (
+                vq_feats.view(vq_feats.size(0), 2, vq_feats.size(1) // 2, vq_feats.size(2))
+                .permute(0, 2, 3, 1)
+                .flatten(2)
+            )  # [B, 512, T*2]
+
+            # Convert back to 4D NHWC for decoder: [B, 512, T*2] -> [B, 1, T*2, 512]
+            quantized = vq_feats.permute(0, 2, 1).unsqueeze(1)  # [B, 1, T*2, 512]
         else:
             # Bypass quantization - pass through unchanged
             quantized = encoded
-
-        quantized = (
-            quantized.view(
-                (1, 1, quantized.size(2), 2, quantized.size(3) // 2),
-            )
-            .permute(0, 1, 4, 2, 3)
-            .flatten(3)
-            .permute(0, 1, 3, 2)
-        )
 
         # Decoder
         reconstructed = self._decode(quantized)

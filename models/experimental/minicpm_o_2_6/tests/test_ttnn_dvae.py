@@ -76,7 +76,7 @@ def test_dvae_forward_pcc(device):
     # for k in weights:
     #     print(k)
 
-    weights = torch.load("models/experimental/minicpm_o_2_6/tests/dvae_weights.pt")
+    weights = torch.load("./dvae_weights.pt")
     # og_weights = torch.load("models/experimental/minicpm_o_2_6/tests/dvae_weights.pt")
     # for k in og_weights:
     #     print(k)
