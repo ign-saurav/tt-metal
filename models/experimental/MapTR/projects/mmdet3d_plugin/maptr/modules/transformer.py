@@ -350,7 +350,14 @@ class MapTRPerceptionTransformer(BaseModule):
             bev_pos=bev_pos,
             prev_bev=prev_bev,
             **kwargs,
-        )  # bev_embed shape: bs, bev_h*bev_w, embed_dims
+        )
+        import os
+
+        img_metas = kwargs.get("img_metas", [])
+        batch_id = str(img_metas[0].get("sample_idx", "unknown")) if img_metas else "unknown"
+        save_dir = "models/experimental/MapTR/numpy_feats/encoder"
+        os.makedirs(save_dir, exist_ok=True)
+        np.save(os.path.join(save_dir, f"encoder_{batch_id}.npy"), bev_embed.detach().cpu().numpy())
 
         bs = mlvl_feats[0].size(0)
         query_pos, query = torch.split(object_query_embed, self.embed_dims, dim=1)
@@ -359,9 +366,6 @@ class MapTRPerceptionTransformer(BaseModule):
         reference_points = self.reference_points(query_pos)
         reference_points = reference_points.sigmoid()
         init_reference_out = reference_points
-
-        # Debug: Reference points initialization
-        import os
 
         debug_enabled = os.environ.get("MAPTR_DEBUG_EVAL", "0") == "1"
         if debug_enabled:
@@ -387,6 +391,9 @@ class MapTRPerceptionTransformer(BaseModule):
             level_start_index=torch.tensor([0], device=query.device),
             **kwargs,
         )
+        save_dir = "models/experimental/MapTR/numpy_feats/decoder"
+        os.makedirs(save_dir, exist_ok=True)
+        np.save(os.path.join(save_dir, f"decoder_{batch_id}.npy"), inter_states.detach().cpu().numpy())
 
         inter_references_out = inter_references
 

@@ -82,6 +82,10 @@ class MapTR(MVXTwoStageDetector):
 
     def extract_img_feat(self, img, img_metas, len_queue=None):
         """Extract features of images."""
+        import numpy as np
+        import os
+
+        batch_id = str(img_metas[0].get("sample_idx", "unknown")) if img_metas else "unknown"
         if img is not None:
             # Convert from HWC [B, H, W, C] to CHW [B, C, H, W] if needed
             if img.dim() == 4 and img.shape[-1] == 3:
@@ -106,14 +110,44 @@ class MapTR(MVXTwoStageDetector):
                 img = img.reshape(B * N, C, H, W)
             if self.use_grid_mask:
                 img = self.grid_mask(img)
+            # Save input img before processing
+            # if "img" in kwargs and kwargs["img"] is not None:
+            print("Saving input img before processing", img.shape)
+            import numpy as np
+            import os
+
+            batch_id = str(img_metas[0].get("sample_idx", "unknown"))
+            os.makedirs("models/experimental/MapTR/numpy_feats/input", exist_ok=True)
+            img = img
+            img_np = img.detach().cpu().numpy() if isinstance(img, torch.Tensor) else np.array(img)
+            np.save(f"models/experimental/MapTR/numpy_feats/input/input_{batch_id}.npy", img_np)
+
+            ####################################################
+            img = np.load(
+                f"models/experimental/MapTR/numpy_feats_working/input/backbone_input_3e8750f331d7499e9b5123e9eb70f2e2.npy"
+            )
+            # Convert to torch tensor
+            device = torch.device("cpu")
+            dtype = torch.float32
+            img = torch.from_numpy(img).to(device=device, dtype=dtype)
+            print("Saving input img after processing", img.shape)
+            ####################################################
 
             img_feats = self.img_backbone(img)
+            save_dir = "models/experimental/MapTR/numpy_feats/backbone"
+            os.makedirs(save_dir, exist_ok=True)
+            backbone_feat = img_feats[0] if isinstance(img_feats, (list, tuple)) else img_feats
+            np.save(os.path.join(save_dir, f"backbone_{batch_id}.npy"), backbone_feat.detach().cpu().numpy())
             if isinstance(img_feats, dict):
                 img_feats = list(img_feats.values())
         else:
             return None
         if self.with_img_neck:
             img_feats = self.img_neck(img_feats)
+            save_dir = "models/experimental/MapTR/numpy_feats/neck"
+            os.makedirs(save_dir, exist_ok=True)
+            neck_feat = img_feats[0] if isinstance(img_feats, (list, tuple)) else img_feats
+            np.save(os.path.join(save_dir, f"neck_{batch_id}.npy"), neck_feat.detach().cpu().numpy())
 
         img_feats_reshaped = []
         for img_feat in img_feats:
@@ -169,13 +203,22 @@ class MapTR(MVXTwoStageDetector):
         list[list[dict]]), with the outer list indicating test time
         augmentations.
         """
+        # # Save input img before processing
+        # if "img" in kwargs and kwargs["img"] is not None:
+        #     import numpy as np
+        #     import os
+        #     batch_id = str(kwargs.get('sample_idx', 'unknown'))
+        #     os.makedirs('models/experimental/MapTR/numpy_feats/input', exist_ok=True)
+        #     img = kwargs["img"]
+        #     img_np = img.detach().cpu().numpy() if isinstance(img, torch.Tensor) else np.array(img)
+        #     np.save(f'models/experimental/MapTR/numpy_feats/input/input_{batch_id}.npy', img_np)
+
         if return_loss:
             return self.forward_train(**kwargs)
         else:
             # img_metas is not in kwargs - metadata fields are directly in kwargs
             # Construct img_metas from the individual metadata fields
             # Determine number of cameras first
-            import numpy as np
 
             num_cams = 6  # default
             if "img" in kwargs and kwargs["img"] is not None:
