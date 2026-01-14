@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 
+import time
+
 import torch
 from loguru import logger
 from tqdm import tqdm
@@ -396,6 +398,7 @@ class Transformer(LightweightModule):
                 get_last_token=get_last_token,
                 kv_cache=kv_cache,
             )
+            end_ts = time.time()  # <-- ADD THIS LINE
             logger.info(f"Exiting Transformer.ttnn_prefill_forward (elapsed={end_ts - start_ts:.3f}s)")
             return out
         except Exception as e:

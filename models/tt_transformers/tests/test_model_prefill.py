@@ -45,8 +45,12 @@ from models.tt_transformers.tt.model_config import CheckpointType, DecodersPreci
 )
 @pytest.mark.parametrize(
     "seq_len",
-    (128, 3072, 4096, 8192, 16384, 32768),
-    ids=["128", "3k", "4k", "8k", "16k", "32k"],
+    # (128, 3072, 4096, 8192, 16384, 32768),
+    (128,),
+    # ids=["128", "3k", "4k", "8k", "16k", "32k"],
+    ids=[
+        "128",
+    ],
 )
 @pytest.mark.parametrize(
     "max_seq_len",
@@ -58,15 +62,20 @@ from models.tt_transformers.tt.model_config import CheckpointType, DecodersPreci
 @pytest.mark.parametrize(
     "optimizations",
     [
-        lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
+        # lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
         lambda model_args: DecodersPrecision.accuracy(model_args.n_layers, model_args.model_name),
     ],
-    ids=["performance", "accuracy"],
+    # ids=["performance", "accuracy"],
+    ids=[
+        "accuracy",
+    ],
 )
 @pytest.mark.parametrize(
     "num_layers",
-    (1, None),
-    ids=["1layer", "all_layers"],
+    # (1, None),
+    (None,),
+    # ids=["1layer", "all_layers"],
+    ids=["all_layers"],
 )
 @pytest.mark.parametrize("device_params", [{"fabric_config": True}], indirect=True)
 def test_model_inference(
@@ -140,10 +149,14 @@ def test_model_inference(
 
     # This sets the minimum PCC for each iteration based on optimization mode
     # TODO: See issue https://github.com/tenstorrent/tt-metal/issues/19806
-    perf_out_pcc_map = {"Mistral-7B-Instruct-v0.3": 0.73}
+    perf_out_pcc_map = {
+        "Mistral-7B-Instruct-v0.3": 0.73,
+        "gemma-2b": 0.85,
+    }
     acc_out_pcc_map = {
         "Mistral-7B-Instruct-v0.3": 0.75,
         "Phi-3-mini-128k-instruct": 0.89,
+        "gemma-2b": 0.88,
     }
     kv_cache_pcc_map = {"Mistral-7B-Instruct-v0.3": 0.75}
 

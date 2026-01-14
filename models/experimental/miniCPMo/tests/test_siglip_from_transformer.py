@@ -9,6 +9,7 @@ from transformers.models.siglip.modeling_siglip import SiglipVisionTransformer
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.experimental.miniCPMo.tests.test_siglip_vision_emb import create_siglip_vision_embedding_preprocessor
 from models.experimental.miniCPMo.tt.ttnn_siglip_vision import TtSiglipVisionTransformer
+from transformers import AutoModel
 
 
 def create_tensor(shape, dtype):
@@ -18,6 +19,19 @@ def create_tensor(shape, dtype):
 @pytest.mark.parametrize("input_dtype", [ttnn.bfloat16])
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
 def test_siglip_vision_transformer_alone(device, input_dtype, weight_dtype):
+    model_name = "openbmb/MiniCPM-o-2_6"
+    model = AutoModel.from_pretrained(
+        model_name,
+        trust_remote_code=True,
+        attn_implementation="sdpa",
+        torch_dtype=torch.bfloat16,
+        init_vision=True,
+        init_audio=False,
+        init_tts=False,
+    )
+
+    model = model.eval()
+    vpm_old = model.vpm
     # Create SigLIP vision configuration
     config = SiglipVisionConfig(
         image_size=224,
@@ -30,8 +44,8 @@ def test_siglip_vision_transformer_alone(device, input_dtype, weight_dtype):
 
     # Create the reference PyTorch model
     vpm = SiglipVisionTransformer(config)
-    # vpm.head = None  # Remove classification head
     vpm.use_head = False
+    vpm.head = None  # Remove classification head
 
     # Load weights (assuming you have siglip_weights.pth)
     state_dict = torch.load("siglip_weights.pth", map_location="cpu")

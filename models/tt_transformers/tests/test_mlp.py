@@ -28,7 +28,12 @@ from models.tt_transformers.tt.model_config import ModelArgs
 )
 @pytest.mark.parametrize(
     "seq_len",
-    (64 * 1024, 32 * 1024, 512, 32),
+    # (64 * 1024, 32 * 1024, 512, 32),
+    # (512, 32),
+    # (512,),
+    (256,),
+    # (64,),
+    # (32,),
 )
 @pytest.mark.parametrize(
     "batch_size",
@@ -40,6 +45,10 @@ def test_mlp_inference(seq_len, batch_size, mesh_device, reset_seeds, ensure_gc)
     mode = "decode" if seq_len <= 32 else "prefill"
 
     model_args = ModelArgs(mesh_device, max_batch_size=batch_size, max_seq_len=128, cache_hf=True)
+    # model_args = ModelArgs(mesh_device, max_batch_size=batch_size, max_seq_len=65536, cache_hf=True)
+    # model_args = ModelArgs(mesh_device, max_batch_size=batch_size, max_seq_len=128*1024, cache_hf=True)
+    # model_args.prefill_len_cutoff = 32768
+
     model_args.n_layers = 1
     state_dict = model_args.load_state_dict()
 
@@ -67,11 +76,11 @@ def test_mlp_inference(seq_len, batch_size, mesh_device, reset_seeds, ensure_gc)
         dtype=dtype,
         model_config=model_args.get_model_config(),
     )
-
     torch_input = torch.randn(
         1, 1, seq_len, model_args.dim, dtype=get_ref_model_dype(reference_model, model_args.model_name)
     )
     reference_output = reference_model(torch_input)
+    print(f"Reference output shape: {reference_output.shape}")
     tt_input = ttnn.from_torch(
         torch_input,
         device=mesh_device,

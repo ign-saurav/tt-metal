@@ -55,14 +55,15 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
     )
 
     vpm = SiglipVisionTransformer(config)
+    vpm.use_head = False
 
-    # vpm = model.vpm
+    vpm_old = model.vpm
     state_dict = torch.load("siglip_weights.pth", map_location="cpu")
     # Remove "vision_model." prefix
     new_state_dict = {}
     for k, v in state_dict.items():
         if k.startswith("vision_model."):
-            new_state_dict[k.replace("vision_model.", "", 1)] = v
+            new_state_dict[k.replace("vision_model.", "", 1)] = v.to(torch.bfloat16) if v.is_floating_point() else v
     vpm.head = None
     import pdb
 
@@ -72,11 +73,12 @@ def test_mini_cpm_o(device, input_dtype, weight_dtype):
     torch_output = vpm.forward(all_pixel_values, patch_attn_mask, tgt_sizes)
 
     # Get the state dict of vpm
+    vpm = vpm.to(torch.bfloat16)
     vpm_state_dict = vpm.state_dict()
 
     # embeddings_model = model.vpm.embeddings
     parameters = preprocess_model_parameters(
-        initialize_model=lambda: embeddings_model,
+        initialize_model=lambda: vpm.embeddings,
         custom_preprocessor=create_siglip_vision_embedding_preprocessor(device, weight_dtype),
         device=device,
     )

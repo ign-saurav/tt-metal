@@ -107,13 +107,14 @@ class ModelOptimizations:
                 or base_model_name.startswith("Mistral-7B")
                 or base_model_name.startswith("Phi-3-mini")
                 or base_model_name.startswith("phi-4")
+                or base_model_name.startswith("gemma")
             ):
                 if model_name.startswith("phi-4"):
                     logger.info(
                         f"Model {model_name} is running out of DRAM memory for weight fetching under standard accuracy settings, using BFP8 for WQKV"
                     )
                 logger.info(
-                    f"Llama 3, Mistral 7B and Phi3-mini models test insensitive to attention precision, using BFP8 attention and kv-cache with FP16 MLP accumulation even in accuracy mode"
+                    f"Llama 3, Mistral 7B, Phi3-mini and Gemma models test insensitive to attention precision, using BFP8 attention and kv-cache with FP16 MLP accumulation even in accuracy mode"
                 )
                 settings = {
                     "TensorPrecision": {
@@ -437,6 +438,7 @@ class ModelArgs:
     }
 
     LOCAL_HF_PARAMS = {
+        "google/gemma-2b": "models/tt_transformers/model_params/gemma-2b",
         "Llama-3.1-8B-Instruct": "models/tt_transformers/model_params/Llama-3.1-8B-Instruct",
         "Llama-3.1-70B-Instruct": "models/tt_transformers/model_params/Llama-3.1-70B-Instruct",
         "Llama-3.2-1B-Instruct": "models/tt_transformers/model_params/Llama-3.2-1B-Instruct",
@@ -582,6 +584,7 @@ class ModelArgs:
             # TODO Improve this to be more general to more devices and models
             MAX_PREFILL_CHUNK_SIZES_DIV1024 = {
                 "gemma-3-4b": {"N150": 8, "N300": 128, "T3K": 128, "TG": 128, "P150x4": 128},
+                "gemma-2b": {"N150": 8, "N300": 128, "T3K": 128, "TG": 128, "P150x4": 128},
                 "Llama-3.2-1B": {"N150": 128, "N300": 128, "T3K": 128, "TG": 128, "P150x4": 128},
                 "Llama-3.2-3B": {"N150": 8, "N300": 128, "T3K": 128, "TG": 128, "P150x4": 128},
                 "Llama-3.1-8B": {"N150": 4, "N300": 64, "T3K": 128, "TG": 128, "P150x4": 128},
@@ -1485,7 +1488,17 @@ class ModelArgs:
             "swish": ttnn.UnaryOpType.SILU,
         }
 
-        hidden_activation = config.get("hidden_act") or config.get("hidden_activation")
+        # For Gemma models, HuggingFace uses hidden_activation instead of hidden_act
+        # and defaults to gelu_pytorch_tanh even if config shows gelu
+        hidden_activation = config.get("hidden_activation") or config.get("hidden_act")
+
+        # Special handling for Gemma: if model_type is gemma and we have gelu, use gelu_pytorch_tanh
+        if not hidden_activation and config.get("model_type") == "gemma":
+            hidden_activation = "gelu_pytorch_tanh"
+        elif config.get("model_type") == "gemma" and hidden_activation == "gelu":
+            # Gemma models always use gelu_pytorch_tanh, not plain gelu
+            hidden_activation = "gelu_pytorch_tanh"
+
         if not hidden_activation:
             # Default to SILU if no activation is specified
             return ttnn.UnaryOpType.SILU
@@ -1761,6 +1774,14 @@ class ModelArgs:
                 )
 
             config = self.hf_config.to_dict()
+            # For Gemma models, HuggingFace automatically sets hidden_activation to gelu_pytorch_tanh
+            # even if config.json shows hidden_act: gelu. We need to ensure this is in the config dict.
+            if "gemma" in self.model_name.lower() and "hidden_activation" not in config:
+                if hasattr(self.hf_config, "hidden_activation"):
+                    config["hidden_activation"] = self.hf_config.hidden_activation
+                elif hasattr(self.hf_config, "hidden_act"):
+                    # If only hidden_act is present, Gemma uses gelu_pytorch_tanh
+                    config["hidden_activation"] = "gelu_pytorch_tanh"
         else:
             config_file = os.path.join(checkpoint_dir, "config.json")
             assert os.path.exists(config_file), f"config.json file not found at {config_file}"
@@ -1892,22 +1913,18 @@ class ModelArgs:
         return self.model_config
 
     def get_hf_model_cls(self):
-        import logging
+        from transformers import AutoModelForCausalLM, AutoModelForVision2Seq
 
-        from transformers import AutoModelForCausalLM, AutoModelForImageTextToText, AutoModelForVision2Seq
-
-        logger = logging.getLogger(__name__)
-
-        # Handle MiniCPMOConfig specially - treat as standard Qwen (no multimodal class)
-        if type(self.hf_config).__name__ == "MiniCPMOConfig":
-            logger.info("Detected MiniCPMOConfig - using AutoModelForCausalLM (base Qwen)")
-            return AutoModelForCausalLM
+        try:
+            from transformers import AutoModelForImageTextToText
+        except ImportError:
+            AutoModelForImageTextToText = None
 
         if not self.is_multimodal:
             return AutoModelForCausalLM
 
         for model_cls in (AutoModelForVision2Seq, AutoModelForImageTextToText):
-            if type(self.hf_config) in model_cls._model_mapping:
+            if model_cls and type(self.hf_config) in model_cls._model_mapping:
                 return model_cls
 
         raise ValueError(f"Unknown model for config {type(self.hf_config)}")

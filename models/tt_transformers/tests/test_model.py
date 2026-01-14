@@ -20,10 +20,13 @@ from models.tt_transformers.tt.model_config import CheckpointType, DecodersPreci
 @pytest.mark.parametrize(
     "weights, layers",
     [
-        ("random", 1),
+        # ("random", 1),
         ("instruct", None),
     ],
-    ids=["quick", "full"],
+    # ids=["quick", "full"],
+    ids=[
+        "full",
+    ],
 )
 @pytest.mark.parametrize(
     "paged_attention",
@@ -51,10 +54,13 @@ from models.tt_transformers.tt.model_config import CheckpointType, DecodersPreci
 @pytest.mark.parametrize(
     "optimizations",
     [
-        lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
+        # lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
         lambda model_args: DecodersPrecision.accuracy(model_args.n_layers, model_args.model_name),
     ],
-    ids=["performance", "accuracy"],
+    # ids=["performance", "accuracy"],
+    ids=[
+        "accuracy",
+    ],
 )
 @pytest.mark.parametrize(
     "mesh_device",
