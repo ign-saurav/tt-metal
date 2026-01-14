@@ -1,4 +1,5 @@
 import copy
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -82,72 +83,48 @@ class MapTR(MVXTwoStageDetector):
 
     def extract_img_feat(self, img, img_metas, len_queue=None):
         """Extract features of images."""
-        import numpy as np
-        import os
-
-        batch_id = str(img_metas[0].get("sample_idx", "unknown")) if img_metas else "unknown"
-        if img is not None:
-            # Convert from HWC [B, H, W, C] to CHW [B, C, H, W] if needed
-            if img.dim() == 4 and img.shape[-1] == 3:
-                img = img.permute(0, 3, 1, 2)
-
-            # Match model dtype (convert to half if model is half)
-            if hasattr(self.img_backbone, "parameters"):
-                model_dtype = next(self.img_backbone.parameters()).dtype
-                if model_dtype != img.dtype:
-                    img = img.to(model_dtype)
-
-            B = img.size(0)
-            # input_shape = img.shape[-2:]
-            # # update real input shape of each single img
-            # for img_meta in img_metas:
-            #     img_meta.update(input_shape=input_shape)
-
-            if img.dim() == 5 and img.size(0) == 1:
-                img.squeeze_()
-            elif img.dim() == 5 and img.size(0) > 1:
-                B, N, C, H, W = img.size()
-                img = img.reshape(B * N, C, H, W)
-            if self.use_grid_mask:
-                img = self.grid_mask(img)
-            # Save input img before processing
-            # if "img" in kwargs and kwargs["img"] is not None:
-            print("Saving input img before processing", img.shape)
-            import numpy as np
-            import os
-
-            batch_id = str(img_metas[0].get("sample_idx", "unknown"))
-            os.makedirs("models/experimental/MapTR/numpy_feats/input", exist_ok=True)
-            img = img
-            img_np = img.detach().cpu().numpy() if isinstance(img, torch.Tensor) else np.array(img)
-            np.save(f"models/experimental/MapTR/numpy_feats/input/input_{batch_id}.npy", img_np)
-
-            ####################################################
-            img = np.load(
-                f"models/experimental/MapTR/numpy_feats_working/input/backbone_input_3e8750f331d7499e9b5123e9eb70f2e2.npy"
-            )
-            # Convert to torch tensor
-            device = torch.device("cpu")
-            dtype = torch.float32
-            img = torch.from_numpy(img).to(device=device, dtype=dtype)
-            print("Saving input img after processing", img.shape)
-            ####################################################
-
-            img_feats = self.img_backbone(img)
-            save_dir = "models/experimental/MapTR/numpy_feats/backbone"
-            os.makedirs(save_dir, exist_ok=True)
-            backbone_feat = img_feats[0] if isinstance(img_feats, (list, tuple)) else img_feats
-            np.save(os.path.join(save_dir, f"backbone_{batch_id}.npy"), backbone_feat.detach().cpu().numpy())
-            if isinstance(img_feats, dict):
-                img_feats = list(img_feats.values())
-        else:
+        if img is None:
             return None
+        if img.dim() == 4:
+            img = img.unsqueeze(0)
+        B = img.size(0)
+        if img.dim() == 5 and img.size(0) == 1:
+            img.squeeze_()
+        elif img.dim() == 5 and img.size(0) > 1:
+            B, N, C, H, W = img.size()
+            img = img.reshape(B * N, C, H, W)
+        if self.use_grid_mask:
+            img = self.grid_mask(img)
+
+        # batch_id = str(img_metas[0].get("sample_idx", "unknown"))
+        # os.makedirs("models/experimental/MapTR/numpy_feats/input", exist_ok=True)
+        # img_np = img.detach().cpu().numpy() if isinstance(img, torch.Tensor) else np.array(img)
+        # np.save(f"models/experimental/MapTR/numpy_feats/input/input_{batch_id}.npy", img_np)
+
+        ####################################################
+        # img = np.load(
+        #     f"models/experimental/MapTR/numpy_feats_working/input/backbone_input_3e8750f331d7499e9b5123e9eb70f2e2.npy"
+        # )
+        # device = torch.device("cpu")
+        # dtype = torch.float32
+        # img = torch.from_numpy(img).to(device=device, dtype=dtype)
+        # print("Saving input img after processing", img.shape)
+        ####################################################
+
+        img = img.to(dtype=next(self.img_backbone.parameters()).dtype)
+        img_feats = self.img_backbone(img)
+        # save_dir = "models/experimental/MapTR/numpy_feats/backbone"
+        # os.makedirs(save_dir, exist_ok=True)
+        # backbone_feat = img_feats[0] if isinstance(img_feats, (list, tuple)) else img_feats
+        # np.save(os.path.join(save_dir, f"backbone_{batch_id}.npy"), backbone_feat.detach().cpu().numpy())
+        if isinstance(img_feats, dict):
+            img_feats = list(img_feats.values())
         if self.with_img_neck:
             img_feats = self.img_neck(img_feats)
-            save_dir = "models/experimental/MapTR/numpy_feats/neck"
-            os.makedirs(save_dir, exist_ok=True)
-            neck_feat = img_feats[0] if isinstance(img_feats, (list, tuple)) else img_feats
-            np.save(os.path.join(save_dir, f"neck_{batch_id}.npy"), neck_feat.detach().cpu().numpy())
+            # save_dir = "models/experimental/MapTR/numpy_feats/neck"
+            # os.makedirs(save_dir, exist_ok=True)
+            # neck_feat = img_feats[0] if isinstance(img_feats, (list, tuple)) else img_feats
+            # np.save(os.path.join(save_dir, f"neck_{batch_id}.npy"), neck_feat.detach().cpu().numpy())
 
         img_feats_reshaped = []
         for img_feat in img_feats:
@@ -215,86 +192,55 @@ class MapTR(MVXTwoStageDetector):
 
         if return_loss:
             return self.forward_train(**kwargs)
-        else:
-            # img_metas is not in kwargs - metadata fields are directly in kwargs
-            # Construct img_metas from the individual metadata fields
-            # Determine number of cameras first
 
-            num_cams = 6  # default
-            if "img" in kwargs and kwargs["img"] is not None:
-                img = kwargs["img"]
-                if isinstance(img, list):
-                    num_cams = len(img)
-                elif isinstance(img, torch.Tensor):
-                    # img shape: [B, N, C, H, W] or [B, C, H, W]
-                    if img.dim() == 5:
-                        num_cams = img.shape[1]
-                    else:
-                        num_cams = 1
+        # Handle MultiScaleFlipAug3D output structure
+        aug_data = kwargs.pop("aug_data", None)
+        if aug_data is not None:
+            while isinstance(aug_data, (list, tuple)) and len(aug_data) > 0:
+                if isinstance(aug_data[0], dict):
+                    kwargs.update(aug_data[0])
+                    break
+                aug_data = aug_data[0]
 
-            # Get lidar2img from kwargs or create default identity matrices
-            lidar2img = kwargs.get("lidar2img", None)
-            if lidar2img is None:
-                # Create default identity 4x4 matrices for each camera
-                lidar2img = [np.eye(4, dtype=np.float32) for _ in range(num_cams)]
+        # Extract img from DataContainer
+        img = kwargs.get("img", None)
+        if img is not None:
+            if hasattr(img, "data"):
+                img = img.data[0] if len(img.data) > 0 else None
+            elif isinstance(img, (list, tuple)) and len(img) > 0 and hasattr(img[0], "data"):
+                img = img[0].data[0] if len(img[0].data) > 0 else None
+        kwargs["img"] = img
 
-            # Get img_shape and ensure it's in the correct format (list of [H, W] per camera)
-            img_shape = kwargs.get("img_shape", None)
-            if img_shape is None:
-                # Try to infer from img tensor
-                if "img" in kwargs and kwargs["img"] is not None:
-                    img = kwargs["img"]
-                    if isinstance(img, torch.Tensor):
-                        if img.dim() == 5:  # [B, N, C, H, W]
-                            h, w = img.shape[3], img.shape[4]
-                            img_shape = [[h, w] for _ in range(img.shape[1])]  # One per camera
-                        elif img.dim() == 4:  # [B, C, H, W]
-                            h, w = img.shape[2], img.shape[3]
-                            img_shape = [[h, w]]
-                        else:
-                            img_shape = [[900, 1600] for _ in range(num_cams)]  # default
-                    else:
-                        img_shape = [[900, 1600] for _ in range(num_cams)]  # default
-                else:
-                    img_shape = [[900, 1600] for _ in range(num_cams)]  # default
-            elif not isinstance(img_shape, list) or (len(img_shape) > 0 and not isinstance(img_shape[0], list)):
-                # Convert single shape to list format
-                if isinstance(img_shape, (tuple, list)) and len(img_shape) >= 2:
-                    img_shape = [[img_shape[0], img_shape[1]] for _ in range(num_cams)]
-                else:
-                    img_shape = [[900, 1600] for _ in range(num_cams)]  # default
+        # Extract img_metas from DataContainer
+        img_metas = kwargs.pop("img_metas", None)
+        if img_metas is not None:
+            if hasattr(img_metas, "data"):
+                img_metas = img_metas.data
+            elif isinstance(img_metas, (list, tuple)) and len(img_metas) > 0 and hasattr(img_metas[0], "data"):
+                img_metas = img_metas[0].data
 
+        # Build default img_metas if not available
+        if img_metas is None or (isinstance(img_metas, (list, tuple)) and len(img_metas) == 0):
+            num_cams = 6
+            if img is not None and isinstance(img, torch.Tensor):
+                num_cams = img.shape[1] if img.dim() == 5 else img.shape[0]
+            lidar2img = kwargs.get("lidar2img", [np.eye(4, dtype=np.float32) for _ in range(num_cams)])
+            can_bus = kwargs.get("can_bus", np.zeros(18, dtype=np.float32))
             img_metas = [
                 {
                     "scene_token": kwargs.get("scene_token", ""),
-                    "can_bus": kwargs.get("can_bus", [0.0, 0.0, 0.0, 0.0]),
-                    "img_shape": img_shape,
-                    "ori_shape": kwargs.get("ori_shape", img_shape),
-                    "pad_shape": kwargs.get("pad_shape", img_shape),
-                    "scale_factor": kwargs.get("scale_factor", None),
-                    "img_norm_cfg": kwargs.get("img_norm_cfg", None),
+                    "can_bus": can_bus,
                     "sample_idx": kwargs.get("sample_idx", None),
-                    "pts_filename": kwargs.get("pts_filename", None),
-                    "lidar_path": kwargs.get("lidar_path", None),
-                    "timestamp": kwargs.get("timestamp", None),
-                    "frame_idx": kwargs.get("frame_idx", None),
-                    "map_location": kwargs.get("map_location", None),
                     "lidar2img": lidar2img,
                 }
             ]
-            # Wrap in double list structure as expected by forward_test
+
+        if not isinstance(img_metas, list):
+            img_metas = [img_metas]
+        if len(img_metas) > 0 and not isinstance(img_metas[0], list):
             img_metas = [img_metas]
 
-            # Fix img format: convert from HWC [B, H, W, C] to CHW [B, C, H, W]
-            if "img" in kwargs and kwargs["img"] is not None:
-                img = kwargs["img"]
-                if isinstance(img, list):
-                    img = torch.stack(img)
-                if isinstance(img, torch.Tensor) and img.dim() == 4 and img.shape[-1] == 3:
-                    img = img.permute(0, 3, 1, 2)
-                kwargs["img"] = img
-
-            return self.forward_test(img_metas, **kwargs)
+        return self.forward_test(img_metas, **kwargs)
 
     def obtain_history_bev(self, imgs_queue, img_metas_list):
         """Obtain history BEV features iteratively. To save GPU memory, gradients are not calculated."""
@@ -419,22 +365,16 @@ class MapTR(MVXTwoStageDetector):
         for var, name in [(img_metas, "img_metas")]:
             if not isinstance(var, list):
                 raise TypeError("{} must be a list, but got {}".format(name, type(var)))
-        # Convert img from HWC to CHW if needed before wrapping in list
-        if img is not None and isinstance(img, torch.Tensor) and img.dim() == 4 and img.shape[-1] == 3:
-            img = img.permute(0, 3, 1, 2)
-        img = [img] if img is None else img
-        points = [points] if points is None else points
+        img = [img] if not isinstance(img, list) else img
+        points = [points] if not isinstance(points, list) else points
+
         if img_metas[0][0]["scene_token"] != self.prev_frame_info["scene_token"]:
-            # the first sample of each scene is truncated
             self.prev_frame_info["prev_bev"] = None
-        # update idx
         self.prev_frame_info["scene_token"] = img_metas[0][0]["scene_token"]
 
-        # do not use temporal information
         if not self.video_test_mode:
             self.prev_frame_info["prev_bev"] = None
 
-        # Get the delta of ego position and angle between two timestamps.
         tmp_pos = copy.deepcopy(img_metas[0][0]["can_bus"][:3])
         tmp_angle = copy.deepcopy(img_metas[0][0]["can_bus"][-1])
         if self.prev_frame_info["prev_bev"] is not None:
@@ -447,7 +387,6 @@ class MapTR(MVXTwoStageDetector):
         new_prev_bev, bbox_results = self.simple_test(
             img_metas[0], img[0], points[0], prev_bev=self.prev_frame_info["prev_bev"], **kwargs
         )
-        # During inference, we save the BEV features and ego motion of each timestamp.
         self.prev_frame_info["prev_pos"] = tmp_pos
         self.prev_frame_info["prev_angle"] = tmp_angle
         self.prev_frame_info["prev_bev"] = new_prev_bev
