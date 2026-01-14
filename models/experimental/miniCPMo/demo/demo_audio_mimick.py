@@ -20,12 +20,16 @@ import os
 import sys
 import librosa
 import torch
-from huggingface_hub import hf_hub_download
 from transformers import AutoModel, AutoTokenizer
 from loguru import logger
 
 from models.experimental.miniCPMo.tt.tt_model_wrapper import enable_tt_acceleration
-from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
+from models.experimental.miniCPMo.tt.model_setup import (
+    ensure_model_files,
+    ensure_audio_assets,
+    get_audio_asset_path,
+    REFERENCE_DIR,
+)
 
 
 def main():
@@ -38,8 +42,9 @@ def main():
     device = ttnn.open_device(device_id=0, l1_small_size=24576)
 
     try:
-        # Ensure model files are downloaded
+        # Ensure model files and audio assets are downloaded
         ensure_model_files()
+        ensure_audio_assets()
 
         logger.info(f"Loading model from local reference: {REFERENCE_DIR}")
 
@@ -66,11 +71,9 @@ def main():
 
         tokenizer = AutoTokenizer.from_pretrained(str(REFERENCE_DIR), trust_remote_code=True)
 
-        audio_file = hf_hub_download(
-            repo_id="openbmb/MiniCPM-o-2_6", filename="assets/input_examples/Trump_WEF_2018_10s.mp3", repo_type="model"
-        )
+        audio_file = get_audio_asset_path("Trump_WEF_2018_10s.mp3")
 
-        logger.info(f"Loading audio to mimick")
+        logger.info(f"Loading audio to mimick: {audio_file}")
         audio_input, _ = librosa.load(audio_file, sr=16000, mono=True)
 
         mimick_prompt = "Please repeat each user's speech, including voice style and speech content."
