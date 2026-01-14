@@ -4,19 +4,23 @@
 """
 TT Model Wrapper utilities for MiniCPM-o.
 
-Provides helper functions to enable TT acceleration on HuggingFace models
-by replacing PyTorch components with TT implementations.
+Provides helper functions to enable TT acceleration on models loaded from
+the local reference folder by replacing PyTorch components with TT implementations.
 
 Usage:
     from transformers import AutoModel
     from models.experimental.miniCPMo.tt.tt_model_wrapper import enable_tt_acceleration
+    from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
 
-    # Load model from HuggingFace URL
-    model = AutoModel.from_pretrained('openbmb/MiniCPM-o-2_6', trust_remote_code=True, ...)
-    model = model.eval().cuda()
+    # Ensure model files are downloaded to local reference folder
+    ensure_model_files()
 
-    # Enable TT acceleration for specific components
-    model = enable_tt_acceleration(model, device, components=['audio', 'tts'])
+    # Load model from local reference folder
+    model = AutoModel.from_pretrained(str(REFERENCE_DIR), trust_remote_code=True, ...)
+    model = model.eval()
+
+    # Enable TT acceleration for specific components (model_path is required)
+    model = enable_tt_acceleration(model, device, components=['audio', 'tts'], model_path=str(REFERENCE_DIR))
 
     # Now use model as normal - TT components are drop-in replacements
     result = model.chat(msgs=msgs, tokenizer=tokenizer, ...)
@@ -30,7 +34,7 @@ def enable_tt_acceleration(
     model,
     device,
     components: Optional[List[str]] = None,
-    model_path: str = "openbmb/MiniCPM-o-2_6",
+    model_path: str = None,
 ):
     """
     Replace model components with TT implementations.
@@ -49,7 +53,8 @@ def enable_tt_acceleration(
                    - 'tts': Replace tts (ChatTTS decoder)
                    - 'dvae': Replace tts.dvae (DVAE decoder for mel spectrogram)
                    Default: all available components
-        model_path: HuggingFace model path for weight loading
+        model_path: Path to the local reference folder containing model files (required).
+                   Use str(REFERENCE_DIR) from model_setup.py.
 
     Returns:
         The same model with components replaced by TT implementations.
@@ -58,21 +63,25 @@ def enable_tt_acceleration(
         >>> import ttnn
         >>> from transformers import AutoModel
         >>> from models.experimental.miniCPMo.tt.tt_model_wrapper import enable_tt_acceleration
+        >>> from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
         >>>
-        >>> # Load from HuggingFace
+        >>> # Ensure model files are downloaded to local reference folder
+        >>> ensure_model_files()
+        >>>
+        >>> # Load from local reference folder
         >>> model = AutoModel.from_pretrained(
-        ...     'openbmb/MiniCPM-o-2_6',
+        ...     str(REFERENCE_DIR),
         ...     trust_remote_code=True,
         ...     torch_dtype=torch.bfloat16,
         ...     init_audio=True,
         ...     init_tts=True,
         ... )
-        >>> model = model.eval().cuda()
+        >>> model = model.eval()
         >>> model.init_tts()
         >>>
         >>> # Enable TT acceleration for LLM (main bottleneck)
         >>> device = ttnn.open_device(device_id=0)
-        >>> model = enable_tt_acceleration(model, device, ['llm'])
+        >>> model = enable_tt_acceleration(model, device, ['llm'], model_path=str(REFERENCE_DIR))
         >>>
         >>> # Use model normally - LLM runs on TT hardware
         >>> result = model.chat(msgs=[...], tokenizer=tokenizer, ...)
@@ -84,6 +93,14 @@ def enable_tt_acceleration(
         DropInQwen2LLM,
         DropInDVAE,
     )
+
+    # model_path is required to ensure we use local reference folder, not HuggingFace cache
+    if model_path is None:
+        raise ValueError(
+            "model_path is required. Use str(REFERENCE_DIR) from model_setup.py, e.g.:\n"
+            "  from models.experimental.miniCPMo.tt.model_setup import REFERENCE_DIR\n"
+            "  enable_tt_acceleration(model, device, components=[...], model_path=str(REFERENCE_DIR))"
+        )
 
     # Auto-detect available components if not specified
     if components is None:
@@ -163,7 +180,7 @@ def enable_tt_acceleration(
 
 
 def load_minicpmo_with_tt(
-    model_name: str = "openbmb/MiniCPM-o-2_6",
+    model_path: str = None,
     device=None,
     init_vision: bool = False,
     init_audio: bool = True,
@@ -176,7 +193,7 @@ def load_minicpmo_with_tt(
     Convenience function to load MiniCPM-o with TT acceleration in one call.
 
     Args:
-        model_name: HuggingFace model name or path
+        model_path: Path to local reference folder (required). Use str(REFERENCE_DIR) from model_setup.py.
         device: TT device
         init_vision: Whether to initialize vision module
         init_audio: Whether to initialize audio module
@@ -189,8 +206,11 @@ def load_minicpmo_with_tt(
         Tuple of (model, tokenizer) with TT acceleration enabled.
 
     Example:
+        >>> from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
+        >>> ensure_model_files()
         >>> device = ttnn.open_device(device_id=0)
         >>> model, tokenizer = load_minicpmo_with_tt(
+        ...     model_path=str(REFERENCE_DIR),
         ...     device=device,
         ...     init_audio=True,
         ...     init_tts=True,
@@ -200,14 +220,21 @@ def load_minicpmo_with_tt(
     import torch
     from transformers import AutoModel, AutoTokenizer
 
+    if model_path is None:
+        raise ValueError(
+            "model_path is required. Use str(REFERENCE_DIR) from model_setup.py, e.g.:\n"
+            "  from models.experimental.miniCPMo.tt.model_setup import REFERENCE_DIR\n"
+            "  load_minicpmo_with_tt(model_path=str(REFERENCE_DIR), device=device, ...)"
+        )
+
     if torch_dtype is None:
         torch_dtype = torch.bfloat16
 
-    logger.info(f"Loading MiniCPM-o from {model_name}...")
+    logger.info(f"Loading MiniCPM-o from {model_path}...")
 
-    # Load model from HuggingFace
+    # Load model from local reference folder
     model = AutoModel.from_pretrained(
-        model_name,
+        model_path,
         trust_remote_code=True,
         attn_implementation="sdpa",
         torch_dtype=torch_dtype,
@@ -216,7 +243,7 @@ def load_minicpmo_with_tt(
         init_tts=init_tts,
         **kwargs,
     )
-    model = model.eval().cuda()
+    model = model.eval()
 
     # Initialize TTS components if needed
     if init_tts:
@@ -225,10 +252,10 @@ def load_minicpmo_with_tt(
 
     # Enable TT acceleration
     if device is not None:
-        model = enable_tt_acceleration(model, device, tt_components)
+        model = enable_tt_acceleration(model, device, tt_components, model_path=model_path)
 
     # Load tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 
     logger.info("✅ MiniCPM-o loaded with TT acceleration")
     return model, tokenizer
