@@ -5,15 +5,15 @@
 Demo: MiniCPM-o vision understanding.
 
 This demo demonstrates vision understanding:
-1. Load model from HuggingFace (auto-cached)
+1. Load model from local reference folder (downloaded from HuggingFace on first run)
 2. Enable TT acceleration for vision encoder
 3. Process image input and generate text response
 
-Model and weights are loaded from HuggingFace URL 'openbmb/MiniCPM-o-2_6'.
+Model and weights are loaded from local reference folder.
 TT implementations are used as drop-in replacements for accelerated inference.
 
 Usage:
-    python models/experimental/miniCPMo/demo/test_mini_cpm_o.py
+    python models/experimental/miniCPMo/demo/demo_image.py
 """
 
 import ttnn
@@ -25,6 +25,7 @@ from transformers import AutoModel, AutoTokenizer
 from loguru import logger
 
 from models.experimental.miniCPMo.tt.tt_model_wrapper import enable_tt_acceleration
+from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
 
 
 def main():
@@ -37,11 +38,13 @@ def main():
     device = ttnn.open_device(device_id=0, l1_small_size=24576)
 
     try:
-        model_name = "openbmb/MiniCPM-o-2_6"
-        logger.info(f"Loading model from HuggingFace: {model_name}")
+        # Ensure model files are downloaded
+        ensure_model_files()
+
+        logger.info(f"Loading model from local reference: {REFERENCE_DIR}")
 
         model = AutoModel.from_pretrained(
-            model_name,
+            str(REFERENCE_DIR),
             trust_remote_code=True,
             attn_implementation="sdpa",
             torch_dtype=torch.bfloat16,
@@ -55,7 +58,7 @@ def main():
         logger.info("Enabling TT acceleration for vision encoder...")
         model = enable_tt_acceleration(model, device, components=["vision", "llm"])
 
-        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(str(REFERENCE_DIR), trust_remote_code=True)
 
         image_file = "cat_img.jpg"
         question = "What is in the image?"

@@ -5,11 +5,11 @@
 Demo: MiniCPM-o audio understanding with TT-accelerated LLM.
 
 This demo demonstrates audio understanding:
-1. Load model from HuggingFace (auto-cached)
+1. Load model from local reference folder (downloaded from HuggingFace on first run)
 2. Enable TT acceleration for LLM (main computational bottleneck)
 3. Process audio input and generate text response
 
-Model and weights are loaded from HuggingFace URL 'openbmb/MiniCPM-o-2_6'.
+Model and weights are loaded from local reference folder.
 TT implementations are used as drop-in replacements for accelerated inference.
 
 Usage:
@@ -25,6 +25,7 @@ from transformers import AutoModel, AutoTokenizer
 from loguru import logger
 
 from models.experimental.miniCPMo.tt.tt_model_wrapper import enable_tt_acceleration
+from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
 
 
 def main():
@@ -37,11 +38,13 @@ def main():
     device = ttnn.open_device(device_id=0, l1_small_size=24576)
 
     try:
-        model_name = "openbmb/MiniCPM-o-2_6"
-        logger.info(f"Loading model from HuggingFace: {model_name}")
+        # Ensure model files are downloaded
+        ensure_model_files()
+
+        logger.info(f"Loading model from local reference: {REFERENCE_DIR}")
 
         model = AutoModel.from_pretrained(
-            model_name,
+            str(REFERENCE_DIR),
             trust_remote_code=True,
             attn_implementation="sdpa",
             torch_dtype=torch.bfloat16,
@@ -54,9 +57,9 @@ def main():
         # This replaces model.llm with TT-accelerated DropInQwen2LLM
         # The LLM is the main computational bottleneck - this provides the biggest speedup
         logger.info("Enabling TT acceleration for LLM...")
-        model = enable_tt_acceleration(model, device, components=["audio", "llm"], model_path=model_name)
+        model = enable_tt_acceleration(model, device, components=["audio", "llm"], model_path=str(REFERENCE_DIR))
 
-        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(str(REFERENCE_DIR), trust_remote_code=True)
 
         task_prompt = "Please listen to the audio snippet carefully and describe what you hear.\n"
 

@@ -9,6 +9,7 @@ from loguru import logger
 from transformers import AutoModel
 from models.experimental.miniCPMo.tt.ttnn_chattts_decoder import TtnnChatTTSDecoder
 from models.experimental.miniCPMo.tt.common import torch_to_ttnn, get_activations_memory_config
+from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
@@ -20,11 +21,11 @@ def test_tts_decoder(device, input_dtype, weight_dtype):
     """
     torch.manual_seed(42)
 
-    model_name = "openbmb/MiniCPM-o-2_6"
-    logger.info(f"Loading model from HuggingFace: {model_name}")
+    ensure_model_files()
+    logger.info(f"Loading model from local reference: {REFERENCE_DIR}")
 
     model = AutoModel.from_pretrained(
-        model_name,
+        str(REFERENCE_DIR),
         trust_remote_code=True,
         attn_implementation="sdpa",
         torch_dtype=torch.bfloat16,

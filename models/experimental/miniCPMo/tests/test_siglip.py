@@ -11,6 +11,7 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from transformers import AutoModel
 
 from models.experimental.miniCPMo.tt.ttnn_siglip_vision import TtSiglipVisionTransformer
+from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
 
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.experimental.miniCPMo.tests.test_siglip_vision_emb import create_siglip_vision_embedding_preprocessor
@@ -23,11 +24,11 @@ def create_tensor(shape, dtype):
 @pytest.mark.parametrize("input_dtype", [ttnn.bfloat16])
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
 def test_mini_cpm_o(device, input_dtype, weight_dtype):
-    model_name = "openbmb/MiniCPM-o-2_6"
-    logger.info(f"Loading model from HuggingFace: {model_name}")
+    ensure_model_files()
+    logger.info(f"Loading model from local reference: {REFERENCE_DIR}")
 
     model = AutoModel.from_pretrained(
-        model_name,
+        str(REFERENCE_DIR),
         trust_remote_code=True,
         attn_implementation="sdpa",
         torch_dtype=torch.bfloat16,

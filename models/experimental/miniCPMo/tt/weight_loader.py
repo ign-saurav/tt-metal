@@ -27,11 +27,17 @@ except ImportError:
 class DiskBasedWeightLoader:
     """Load MiniCPM-o-2_6 weights from disk with lazy loading to avoid memory issues"""
 
-    def __init__(self, cache_dir: str = "model_cache"):
-        self.cache_dir = Path(cache_dir)
+    def __init__(self, cache_dir: str = None):
+        # Default to local reference folder which contains the model files
+        if cache_dir is None:
+            # Use local reference folder (relative to this file)
+            self.model_dir = Path(__file__).parent.parent / "reference"
+        else:
+            self.cache_dir = Path(cache_dir)
+            self.model_dir = self.cache_dir / "minicpm_o_2_6"
+            self.model_dir.mkdir(parents=True, exist_ok=True)
+
         self.model_name = "openbmb/MiniCPM-o-2_6"
-        self.model_dir = self.cache_dir / "minicpm_o_2_6"
-        self.model_dir.mkdir(parents=True, exist_ok=True)
         self._index_cache = None
         self._file_handles = {}  # Cache opened safetensors files
         self._loaded_weights_cache = {}  # Cache loaded weights to avoid reloading

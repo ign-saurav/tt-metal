@@ -13,6 +13,7 @@ from loguru import logger
 from transformers import AutoModel
 
 from models.experimental.miniCPMo.tt.ttnn_dvae import TtnnDVAE
+from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 
@@ -26,9 +27,13 @@ def device():
 
 @pytest.fixture(scope="module")
 def dvae_model():
-    """Load MiniCPM-o model and extract DVAE."""
+    """Load MiniCPM-o model from local reference folder and extract DVAE."""
+    # Ensure all required model files are downloaded
+    ensure_model_files()
+
+    # Load from local reference folder (patched, no flash_attn needed)
     model = AutoModel.from_pretrained(
-        "openbmb/MiniCPM-o-2_6",
+        str(REFERENCE_DIR),
         trust_remote_code=True,
         attn_implementation="sdpa",
         torch_dtype=torch.bfloat16,

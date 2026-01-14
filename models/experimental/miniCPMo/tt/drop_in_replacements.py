@@ -506,6 +506,7 @@ class DropInQwen2LLM(nn.Module):
         from transformers import AutoTokenizer
         from models.experimental.miniCPMo.tt.tt_qwen2_for_causal_lm import TTQwen2ForCausalLM
         from models.experimental.miniCPMo.tt.minicpm_weight_bridge import MiniCPMWeightBridge
+        from models.experimental.miniCPMo.tt.model_setup import REFERENCE_DIR
         from models.experimental.miniCPMo.tt_transformers.common import create_tt_model
 
         super().__init__()
@@ -522,7 +523,7 @@ class DropInQwen2LLM(nn.Module):
 
         logger.info("Initializing TT Qwen2 LLM...")
 
-        # Load weights from MiniCPM checkpoint
+        # Load weights from MiniCPM checkpoint (uses local reference folder)
         bridge = MiniCPMWeightBridge(model_path)
         qwen_weights = bridge.get_qwen_weights()
         logger.info(f"Loaded {len(qwen_weights)} weight tensors from MiniCPM checkpoint")
@@ -541,8 +542,8 @@ class DropInQwen2LLM(nn.Module):
         )
         logger.info(f"TT Model: {tt_model_args.n_layers} layers, dim={tt_model_args.dim}")
 
-        # Load tokenizer
-        tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+        # Load tokenizer from local reference folder
+        tokenizer = AutoTokenizer.from_pretrained(str(REFERENCE_DIR), trust_remote_code=True)
 
         # Create TTQwen2ForCausalLM wrapper
         self.tt_llm = TTQwen2ForCausalLM.from_tt_model(

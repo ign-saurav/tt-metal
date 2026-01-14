@@ -539,7 +539,11 @@ class ModelArgs:
         # Load model params
         if HF_MODEL:
             self.checkpoint_type = CheckpointType.HuggingFace
-            if self.base_model_name in ["Phi-3-mini-128k-instruct", "MiniCPM-o-2_6"]:
+            # Enable trust_remote_code for models that have custom code
+            if self.base_model_name in ["Phi-3-mini-128k-instruct", "MiniCPM-o-2_6", "reference"]:
+                self.trust_remote_code_hf = True
+            # Also check if this is a local MiniCPM-o path
+            if "miniCPMo" in str(self.CKPT_DIR) or "MiniCPM" in str(self.CKPT_DIR):
                 self.trust_remote_code_hf = True
             self._set_hf_params(self.CKPT_DIR)
         elif not dummy_weights:
