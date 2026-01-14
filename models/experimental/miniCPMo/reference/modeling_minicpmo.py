@@ -28,16 +28,6 @@ from typing import Optional
 from typing import Tuple
 from typing import Union
 
-# Optional TT (Tenstorrent) imports - only available when running with TT hardware
-try:
-    from models.common.utility_functions import tt2torch_tensor
-    from models.experimental.miniCPMo.tt.common import torch_to_ttnn, get_activations_memory_config
-
-    _tt_deps = True
-except ImportError:
-    _tt_deps = False
-
-
 import numpy as np
 import soundfile as sf
 import torch
@@ -48,11 +38,7 @@ from huggingface_hub import hf_hub_download
 from PIL import Image
 from torch.nn.utils.parametrizations import weight_norm
 from tqdm import tqdm
-
-# from transformers import AutoImageProcessor
-
-from .processing_minicpmo import MiniCPMOProcessor
-from .image_processing_minicpmv import MiniCPMVImageProcessor
+from transformers import AutoProcessor
 from transformers import BertTokenizerFast
 from transformers import LlamaConfig
 from transformers import LlamaModel
@@ -70,7 +56,7 @@ from transformers.cache_utils import StaticCache
 from transformers.modeling_outputs import BaseModelOutputWithPast
 from transformers.modeling_outputs import ModelOutput
 from transformers.models.whisper.modeling_whisper import ACT2FN
-from transformers.models.whisper.modeling_whisper import WhisperAttention
+from transformers.models.whisper.modeling_whisper import WHISPER_ATTENTION_CLASSES
 from transformers.models.whisper.modeling_whisper import WhisperConfig
 from transformers.models.whisper.modeling_whisper import WhisperEncoder
 
@@ -93,9 +79,6 @@ from .utils import VoiceChecker
 
 logger = logging.getLogger(__name__)
 
-if _tt_deps:
-    from models.experimental.miniCPMo.tt.ttnn_chattts_decoder import TtnnChatTTSDecoder
-
 
 @dataclass
 class OmniOutput(ModelOutput):
@@ -112,10 +95,7 @@ class MiniCPMOPreTrainedModel(Qwen2PreTrainedModel):
 class MiniCPMO(MiniCPMOPreTrainedModel):
     def __init__(self, config):
         super().__init__(config)
-        # gets killed without meta
-        # with torch.device("meta"):
         self.llm = Qwen2ForCausalLM(config)
-        print("QWEN INITIALIZED")
         self.llm.prepare_inputs_for_generation = types.MethodType(prepare_inputs_for_generation, self.llm)  # patch llm
 
         self.embed_dim = self.llm.config.hidden_size
@@ -139,52 +119,7 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
             assert _tts_deps, "please make sure vector_quantize_pytorch and vocos are installed."
             self.tts = self.init_tts_module()
 
-        # Load processor directly from local files to avoid cache resolution
-        # Get the local path from config or use a default
-        local_path = getattr(self.config, "_name_or_path", None)
-        if local_path is None or not os.path.isdir(local_path):
-            # Fallback: try to construct path relative to this file
-            current_dir = os.path.dirname(os.path.abspath(__file__))
-            local_path = current_dir
-
-        # Load image processor config directly from JSON file
-        preprocessor_config_path = os.path.join(local_path, "preprocessor_config.json")
-        with open(preprocessor_config_path, "r") as f:
-            image_processor_config = json.load(f)
-        # Filter out non-constructor parameters (auto_map, processor_class, image_processor_type)
-        constructor_params = {
-            k: v
-            for k, v in image_processor_config.items()
-            if k not in ["auto_map", "processor_class", "image_processor_type"]
-        }
-        # Instantiate image processor directly with config parameters
-        image_processor = MiniCPMVImageProcessor(**constructor_params)
-
-        # Load tokenizer from local files using from_pretrained to get config (chat_template, etc.)
-        # Using local path with local_files_only=True won't trigger cache resolution
-        from .tokenization_minicpmo_fast import MiniCPMOTokenizerFast
-
-        tokenizer = MiniCPMOTokenizerFast.from_pretrained(local_path, local_files_only=True)
-
-        # Load feature extractor (WhisperFeatureExtractor) for audio processing
-        # Even if audio is not initialized, the processor still requires it
-        # Load directly from local whisper_preprocessor_config.json file
-        from transformers import WhisperFeatureExtractor
-
-        whisper_config_path = os.path.join(local_path, "whisper_preprocessor_config.json")
-        with open(whisper_config_path, "r") as f:
-            whisper_config = json.load(f)
-        # Filter out non-constructor parameters
-        whisper_constructor_params = {
-            k: v for k, v in whisper_config.items() if k not in ["processor_class", "feature_extractor_type"]
-        }
-        # Instantiate feature extractor directly with config parameters
-        feature_extractor = WhisperFeatureExtractor(**whisper_constructor_params)
-
-        # Instantiate processor directly
-        self.processor = MiniCPMOProcessor(
-            image_processor=image_processor, feature_extractor=feature_extractor, tokenizer=tokenizer
-        )
+        self.processor = AutoProcessor.from_pretrained(self.config._name_or_path, trust_remote_code=True)
 
         self.terminators = ["<|im_end|>", "<|endoftext|>"]
 
@@ -229,13 +164,6 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
 
         assert os.path.exists(vocos_ckpt_path)
         self.vocos = self.initialize_vocos(vocos_ckpt_path)
-
-    def init_tt_device(self, device):
-        """Initialize TT device and TT-specific models."""
-        self.tt_device = device
-        # Initialize TT model in TTS module if TTS is enabled
-        if hasattr(self, "tts") and self.tts is not None:
-            self.tts.init_tt_model(device, self.embed_dim)
 
     def initialize_vocos(self, ckpt_path):
         feature_extractor = instantiate_class(
@@ -964,41 +892,7 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
 
         if processor is None:
             if self.processor is None:
-                # Processor should already be initialized in __init__, but if not, create it here
-                # Use the same logic as in __init__ to avoid cache resolution
-                local_path = getattr(self.config, "_name_or_path", None)
-                if local_path is None or not os.path.isdir(local_path):
-                    current_dir = os.path.dirname(os.path.abspath(__file__))
-                    local_path = current_dir
-
-                preprocessor_config_path = os.path.join(local_path, "preprocessor_config.json")
-                with open(preprocessor_config_path, "r") as f:
-                    image_processor_config = json.load(f)
-                constructor_params = {
-                    k: v
-                    for k, v in image_processor_config.items()
-                    if k not in ["auto_map", "processor_class", "image_processor_type"]
-                }
-                image_processor = MiniCPMVImageProcessor(**constructor_params)
-
-                from .tokenization_minicpmo_fast import MiniCPMOTokenizerFast
-
-                tokenizer = MiniCPMOTokenizerFast.from_pretrained(local_path, local_files_only=True)
-
-                # Load feature extractor directly from local file
-                from transformers import WhisperFeatureExtractor
-
-                whisper_config_path = os.path.join(local_path, "whisper_preprocessor_config.json")
-                with open(whisper_config_path, "r") as f:
-                    whisper_config = json.load(f)
-                whisper_constructor_params = {
-                    k: v for k, v in whisper_config.items() if k not in ["processor_class", "feature_extractor_type"]
-                }
-                feature_extractor = WhisperFeatureExtractor(**whisper_constructor_params)
-
-                self.processor = MiniCPMOProcessor(
-                    image_processor=image_processor, feature_extractor=feature_extractor, tokenizer=tokenizer
-                )
+                self.processor = AutoProcessor.from_pretrained(self.config._name_or_path, trust_remote_code=True)
             processor = self.processor
 
         assert (
@@ -1508,12 +1402,12 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
                     + self.tts.use_speaker_embedding * self.tts.num_spk_embs,
                     condition_length - 1,
                 )
+
             if end - begin > 0:
                 text_input_ids = tts_input_ids[:, begin:end]
                 position_ids = torch.arange(begin, end, dtype=torch.long, device=self.tts.device).unsqueeze(0)
 
                 if begin == 0:
-                    print("xyx")
                     past_key_values = self.tts.prefill_text(
                         input_ids=text_input_ids,
                         position_ids=position_ids,
@@ -1521,27 +1415,9 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
                         lm_spk_emb_last_hidden_states=spk_embeds,
                     )
                 else:
-                    print("yyy", begin)
                     past_key_values = self.tts.prefill_text(
                         input_ids=text_input_ids, position_ids=position_ids, past_key_values=past_key_values
                     )
-
-            # Save inputs for debugging
-            import os
-
-            save_dir = "_debug_generate_inputs"
-            if not os.path.exists(save_dir):
-                os.makedirs(save_dir)
-                torch.save(audio_input_ids, f"{save_dir}/audio_input_ids.pt")
-                torch.save([(k.clone(), v.clone()) for k, v in past_key_values], f"{save_dir}/past_key_values.pt")
-                torch.save(streaming_tts_text_mask, f"{save_dir}/streaming_tts_text_mask.pt")
-                torch.save(torch.tensor([0.1, 0.3, 0.1, 0.3], dtype=torch.float), f"{save_dir}/temperature.pt")
-                torch.save(torch.tensor([625], dtype=torch.long), f"{save_dir}/eos_token.pt")
-                torch.save(output_chunk_size, f"{save_dir}/max_new_token.pt")
-                print(f"Saved generate inputs to {save_dir}/")
-                import pytest
-
-                pytest.skip("Saved generate inputs for debugging")
 
             outputs = self.tts.generate(
                 input_ids=audio_input_ids,
@@ -2001,45 +1877,8 @@ class MiniCPMO(MiniCPMOPreTrainedModel):
                 yield res
 
     def decode_mel_to_audio(self, mel_spec, output_path=""):
-        # Validate mel_spec before decoding
-        if torch.isnan(mel_spec).any() or torch.isinf(mel_spec).any():
-            nan_count = torch.isnan(mel_spec).sum().item()
-            inf_count = torch.isinf(mel_spec).sum().item()
-            logger.error(
-                f"Mel spectrogram contains invalid values before vocos decode: {nan_count} NaN, {inf_count} Inf"
-            )
-            # Replace NaN and Inf with zeros
-            mel_spec = torch.nan_to_num(mel_spec, nan=0.0, posinf=0.0, neginf=0.0)
-            logger.warning("Replaced NaN/Inf values with zeros before vocos decode")
-
-        # Check for extremely large values that might cause issues
-        if mel_spec.abs().max() > 1e6:
-            logger.warning(
-                f"Mel spectrogram contains very large values: max={mel_spec.abs().max()}. Clamping to reasonable range"
-            )
-            mel_spec = torch.clamp(mel_spec, -100.0, 100.0)
-
         with torch.inference_mode():
-            try:
-                wav_numpy = self.vocos.decode(mel_spec.float()).cpu().squeeze()
-                # Validate output audio
-                if torch.isnan(wav_numpy).any() or torch.isinf(wav_numpy).any():
-                    logger.error("Generated audio contains NaN/Inf values")
-                    wav_numpy = torch.nan_to_num(wav_numpy, nan=0.0, posinf=0.0, neginf=0.0)
-            except AssertionError as e:
-                logger.error(f"Vocos decode failed with assertion error: {e}")
-                logger.error(
-                    f"Mel spec stats: shape={mel_spec.shape}, min={mel_spec.min()}, max={mel_spec.max()}, mean={mel_spec.mean()}, std={mel_spec.std()}"
-                )
-                # Return silence as fallback
-                wav_numpy = torch.zeros(mel_spec.shape[-1] * 256, dtype=torch.float32)  # Approximate length
-                logger.warning("Returning silence due to vocos decode failure")
-            except Exception as e:
-                logger.error(f"Vocos decode failed with error: {e}")
-                logger.error(
-                    f"Mel spec stats: shape={mel_spec.shape}, min={mel_spec.min()}, max={mel_spec.max()}, mean={mel_spec.mean()}, std={mel_spec.std()}"
-                )
-                raise
+            wav_numpy = self.vocos.decode(mel_spec.float()).cpu().squeeze()
             sr = 24000
         if output_path:
             sf.write(output_path, wav_numpy.numpy(), samplerate=sr)
@@ -2052,9 +1891,7 @@ class MiniCPMWhisperEncoderLayer(nn.Module):
     def __init__(self, config: WhisperConfig, layer_idx: int = None):
         super().__init__()
         self.embed_dim = config.d_model
-        #  import ERR
-        #  unused as of now
-        self.self_attn = WhisperAttention(
+        self.self_attn = WHISPER_ATTENTION_CLASSES[config._attn_implementation](
             embed_dim=self.embed_dim,
             num_heads=config.encoder_attention_heads,
             dropout=config.attention_dropout,
@@ -2898,28 +2735,6 @@ class ConditionalChatTTS(PreTrainedModel):
 
         model = LlamaModel(model_config)
         self.model = model
-        self.tt_model = None  # Initialized later via init_tt_model()
-
-    def init_tt_model(self, device, llm_embed_dim):
-        """Initialize the TT model after the device is available."""
-        if not _tt_deps:
-            raise RuntimeError("TT dependencies (ttnn) not available. Cannot initialize TT model.")
-        self.tt_device = device
-        self.tt_model = TtnnChatTTSDecoder(
-            device=self.tt_device,
-            llm_dim=llm_embed_dim,
-            hidden_size=self.config.hidden_size,
-            num_attention_heads=self.config.num_attention_heads,
-            num_hidden_layers=self.config.num_hidden_layers,
-            intermediate_size=self.config.intermediate_size,
-            num_text_tokens=self.emb_text.num_embeddings,
-            num_audio_tokens=self.num_audio_tokens,
-            num_vq=self.num_vq,
-            num_spk_embs=self.num_spk_embs,
-            max_position_embeddings=self.config.max_position_embeddings,
-        )
-        # Load weights from the reference model
-        self.tt_model.load_weights(self.state_dict())
 
     @torch.inference_mode()
     def merge_inputs_embeds(
@@ -3003,35 +2818,20 @@ class ConditionalChatTTS(PreTrainedModel):
                     past_key_values[i][1][:, :, : position_ids[:, 0], :].clone(),
                 )
             )
-        # Model forward
-        # outputs_prefill: BaseModelOutputWithPast = self.model(
-        #     attention_mask=None,  # because for text, it is standard causal attention mask, do nothing
-        #     position_ids=position_ids,  # position_ids denotes the position of new text tokens in the sequence
-        #     past_key_values=past_key_values_for_prefill,  # `past_key_values` will be updated by the model
-        #     inputs_embeds=inputs_embeds,  # contains text and language model embedding
-        #     use_cache=True,
-        #     output_attentions=False,
-        #     cache_position=position_ids,  # which new positions will use this cache, basically the same as position_ids
-        # )
 
-        # Use TT model for all prefill cases (both first prefill and incremental prefill)
-        print(
-            f"[TT PREFILL] seq_len={inputs_embeds.shape[1]}, positions={position_ids[0, 0].item()}-{position_ids[0, -1].item()}"
-        )
-        inputs_embeds_ttnn = torch_to_ttnn(
-            inputs_embeds,
-            self.tt_device,
-            memory_config=get_activations_memory_config(),
-        )
-        hidden_states_tt, past_key_values_tt = self.tt_model.forward(
-            inputs_embeds=inputs_embeds_ttnn,
-            attention_mask=None,
-            position_ids=position_ids,
-            past_key_values=past_key_values_for_prefill,
+        # Model forward
+        outputs_prefill: BaseModelOutputWithPast = self.model(
+            attention_mask=None,  # because for text, it is standard causal attention mask, do nothing
+            position_ids=position_ids,  # position_ids denotes the position of new text tokens in the sequence
+            past_key_values=past_key_values_for_prefill,  # `past_key_values` will be updated by the model
+            inputs_embeds=inputs_embeds,  # contains text and language model embedding
             use_cache=True,
-            cache_position=position_ids,
+            output_attentions=False,
+            cache_position=position_ids,  # which new positions will use this cache, basically the same as position_ids
         )
-        past_key_values_for_prefill_updated = [(tt2torch_tensor(k), tt2torch_tensor(v)) for k, v in past_key_values_tt]
+
+        # Get model updated KV Cache
+        past_key_values_for_prefill_updated = outputs_prefill.past_key_values
 
         # Update generated KV Cache to input `past_key_values`
         for layer_idx in range(len(past_key_values)):
@@ -3105,7 +2905,8 @@ class ConditionalChatTTS(PreTrainedModel):
             output_attentions=False,
             cache_position=cache_position,
         )
-        return outputs.past_key_values
+        past_key_values = outputs.past_key_values
+        return past_key_values
 
     @torch.inference_mode()
     def generate(
@@ -3221,29 +3022,24 @@ class ConditionalChatTTS(PreTrainedModel):
                 streaming_text_chunk_size=self.streaming_text_chunk_size,
             )
 
-            # Model forward - use TT for decode
-            if i == 0:
-                print(f"[TT DECODE] Starting decode loop")
-            inputs_embeds_ttnn = torch_to_ttnn(
-                inputs_embeds,
-                self.tt_device,
-                memory_config=get_activations_memory_config(),
-            )
-            hidden_states_tt, past_key_values_tt = self.tt_model.forward(
-                inputs_embeds=inputs_embeds_ttnn,
+            # Model forward
+            outputs: BaseModelOutputWithPast = self.model(
                 attention_mask=causal_mask,
                 position_ids=position_ids,
                 past_key_values=past_key_values,
+                inputs_embeds=inputs_embeds,
                 use_cache=True,
+                output_attentions=False,
                 cache_position=cache_position,
             )
-            hidden_states = tt2torch_tensor(hidden_states_tt).float()
-            past_key_values = [(tt2torch_tensor(k), tt2torch_tensor(v)) for k, v in past_key_values_tt]
 
             del position_ids
             del inputs_embeds
             del cache_position
             del causal_mask
+
+            hidden_states = outputs.last_hidden_state
+            past_key_values = outputs.past_key_values
 
             with P.cached():
                 logits = torch.empty(
