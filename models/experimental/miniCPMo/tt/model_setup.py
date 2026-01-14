@@ -34,6 +34,8 @@ REQUIRED_FILES = [
     "model-00002-of-00004.safetensors",
     "model-00003-of-00004.safetensors",
     "model-00004-of-00004.safetensors",
+    # Model index file
+    "model.safetensors.index.json",
     # Tokenizer files (~10MB total)
     "tokenizer.json",
     "vocab.json",
