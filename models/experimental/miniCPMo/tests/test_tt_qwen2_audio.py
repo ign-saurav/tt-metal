@@ -32,10 +32,12 @@ from transformers import AutoTokenizer
 from models.experimental.miniCPMo.tt.tt_qwen2_for_causal_lm import TTQwen2ForCausalLM
 from models.experimental.miniCPMo.tt.minicpm_weight_bridge import MiniCPMWeightBridge
 from models.experimental.miniCPMo.tt_transformers.common import create_tt_model
+from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
 
 
 # --- Configuration ---
-MODEL_PATH = "openbmb/MiniCPM-o-2_6"
+# Use local REFERENCE_DIR to avoid flash_attn dependency from HuggingFace
+MODEL_PATH = str(REFERENCE_DIR)
 
 # Default terminators for MiniCPM-o
 DEFAULT_TERMINATORS = [151645, 151643]
@@ -207,6 +209,9 @@ def test_diagnostic_prefill_comparison(mesh_device):
     logger.info("=" * 60)
     logger.info("DIAGNOSTIC: Comparing PyTorch vs TT Prefill")
     logger.info("=" * 60)
+
+    # Ensure model files are downloaded to local reference folder
+    ensure_model_files()
 
     # Set HF_MODEL environment variable
     if not os.environ.get("HF_MODEL"):
@@ -418,6 +423,9 @@ def test_tt_qwen2_audio_generate(mesh_device):
     logger.info("Testing TTQwen2ForCausalLM with Audio Embeddings")
     logger.info("=" * 60)
 
+    # Ensure model files are downloaded to local reference folder
+    ensure_model_files()
+
     # Set HF_MODEL environment variable
     if not os.environ.get("HF_MODEL"):
         os.environ["HF_MODEL"] = MODEL_PATH
@@ -574,6 +582,9 @@ def test_tt_qwen2_decode_interface(mesh_device):
     logger.info("Testing TTQwen2ForCausalLM._decode() Interface")
     logger.info("=" * 60)
 
+    # Ensure model files are downloaded to local reference folder
+    ensure_model_files()
+
     # Set HF_MODEL environment variable
     if not os.environ.get("HF_MODEL"):
         os.environ["HF_MODEL"] = MODEL_PATH
@@ -664,6 +675,9 @@ def test_tt_qwen2_single_forward(mesh_device):
     logger.info("=" * 60)
     logger.info("Testing TTQwen2ForCausalLM Single Forward Pass")
     logger.info("=" * 60)
+
+    # Ensure model files are downloaded to local reference folder
+    ensure_model_files()
 
     # Set HF_MODEL environment variable
     if not os.environ.get("HF_MODEL"):
