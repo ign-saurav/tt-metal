@@ -60,7 +60,7 @@ def main():
 
         tokenizer = AutoTokenizer.from_pretrained(str(REFERENCE_DIR), trust_remote_code=True)
 
-        image_file = "cat_img.jpg"
+        image_file = "models/sample_data/huggingface_cat_image.jpg"
         question = "What is in the image?"
 
         if not os.path.exists(image_file):
