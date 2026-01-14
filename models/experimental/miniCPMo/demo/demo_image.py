@@ -17,12 +17,15 @@ Usage:
 """
 
 import ttnn
-import os
 import sys
 import torch
+from pathlib import Path
 from PIL import Image
 from transformers import AutoModel, AutoTokenizer
 from loguru import logger
+
+# Path to sample_data folder (relative to this script)
+SAMPLE_DATA_DIR = Path(__file__).parent.parent.parent.parent / "sample_data"
 
 from models.experimental.miniCPMo.tt.tt_model_wrapper import enable_tt_acceleration
 from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
@@ -54,28 +57,28 @@ def main():
         )
         model = model.eval()
 
-        # This replaces model.vpm with TT-accelerated DropInVisionEncoder
-        logger.info("Enabling TT acceleration for vision encoder...")
+        # This replaces model.vpm and model.llm with TT-accelerated versions
+        logger.info("Enabling TT acceleration for vision encoder and LLM...")
         model = enable_tt_acceleration(model, device, components=["vision", "llm"], model_path=str(REFERENCE_DIR))
 
         tokenizer = AutoTokenizer.from_pretrained(str(REFERENCE_DIR), trust_remote_code=True)
 
-        image_file = "models/sample_data/huggingface_cat_image.jpg"
+        image_file = SAMPLE_DATA_DIR / "huggingface_cat_image.jpg"
         question = "What is in the image?"
 
-        if not os.path.exists(image_file):
-            logger.warning(f"Image file {image_file} not found, using text-only prompt")
-            msgs = [{"role": "user", "content": "Describe a typical house cat."}]
-        else:
-            logger.info(f"Loading image: {image_file}")
-            image = Image.open(image_file).convert("RGB")
-            msgs = [{"role": "user", "content": [image, question]}]
+        if not image_file.exists():
+            logger.error(f"Image file {image_file} not found")
+            raise FileNotFoundError(f"Required image file not found: {image_file}")
+
+        logger.info(f"Loading image: {image_file}")
+        image = Image.open(image_file).convert("RGB")
+        msgs = [{"role": "user", "content": [image, question]}]
 
         logger.info("Running model.chat (vision understanding)...")
         res = model.chat(
             msgs=msgs,
             tokenizer=tokenizer,
-            sampling=True,
+            sampling=False,
             max_new_tokens=128,
         )
 

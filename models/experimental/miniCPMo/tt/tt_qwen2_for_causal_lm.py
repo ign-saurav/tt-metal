@@ -171,10 +171,14 @@ class TTQwen2ForCausalLM(nn.Module):
         ttnn.deallocate(tt_out)
 
         # Extract last token's logits
+        # The slice returns a 32-token chunk starting at get_last_token
+        # We need to extract the correct token within this chunk
+        last_token_offset = (seq_len - 1) % 32
         while logits.dim() > 2:
             logits = logits.squeeze(0) if logits.shape[0] == 1 else logits.squeeze(1)
         if logits.dim() == 2:
-            logits = logits[-1:]  # Last token only
+            logits = logits[last_token_offset : last_token_offset + 1]  # Get correct token within the slice
+        logger.info(f"Extracting token at offset {last_token_offset} within 32-token slice (seq_len={seq_len})")
 
         # Get first generated token
         first_token = torch.argmax(logits, dim=-1).unsqueeze(0)  # [1, 1]
