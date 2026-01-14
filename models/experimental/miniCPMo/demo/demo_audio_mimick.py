@@ -8,11 +8,11 @@ This demo demonstrates the mimick task which reflects the model's end-to-end
 speech modeling capability. The model takes audio input and outputs an ASR
 transcription, then reconstructs the original audio with high similarity.
 
-Model and weights are loaded from HuggingFace URL 'openbmb/MiniCPM-o-2_6'.
+Model and weights are loaded from local reference folder (downloaded from HuggingFace on first run).
 TT implementations are used as drop-in replacements for accelerated inference.
 
 Usage:
-    python models/experimental/miniCPMo/demo/test_mini_cpm_o_audio_tts.py
+    python models/experimental/miniCPMo/demo/demo_audio_mimick.py
 """
 
 import ttnn
@@ -25,6 +25,7 @@ from transformers import AutoModel, AutoTokenizer
 from loguru import logger
 
 from models.experimental.miniCPMo.tt.tt_model_wrapper import enable_tt_acceleration
+from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
 
 
 def main():
@@ -37,11 +38,13 @@ def main():
     device = ttnn.open_device(device_id=0, l1_small_size=24576)
 
     try:
-        model_name = "openbmb/MiniCPM-o-2_6"
-        logger.info(f"Loading model from HuggingFace: {model_name}")
+        # Ensure model files are downloaded
+        ensure_model_files()
+
+        logger.info(f"Loading model from local reference: {REFERENCE_DIR}")
 
         model = AutoModel.from_pretrained(
-            model_name,
+            str(REFERENCE_DIR),
             trust_remote_code=True,
             attn_implementation="sdpa",
             torch_dtype=torch.bfloat16,
@@ -59,7 +62,7 @@ def main():
         logger.info("Enabling TT acceleration for TTS decoder...")
         model = enable_tt_acceleration(model, device, components=["tts", "dvae", "llm", "audio"])
 
-        tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        tokenizer = AutoTokenizer.from_pretrained(str(REFERENCE_DIR), trust_remote_code=True)
 
         audio_file = hf_hub_download(
             repo_id="openbmb/MiniCPM-o-2_6", filename="assets/input_examples/Trump_WEF_2018_10s.mp3", repo_type="model"

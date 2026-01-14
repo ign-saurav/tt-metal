@@ -11,6 +11,7 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 from transformers import AutoModel
 
 from models.experimental.miniCPMo.tt.tt_resampler import TTResampler
+from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
 
 from ttnn.model_preprocessing import preprocess_model_parameters, preprocess_linear_weight
 from models.experimental.miniCPMo.tests.test_multi_head_attn import create_self_attn_preprocessor
@@ -76,11 +77,11 @@ def create_resampler_preprocessor(device, weight_dtype=ttnn.bfloat16):
 @pytest.mark.parametrize("input_dtype", [ttnn.bfloat16])
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
 def test_mini_cpm_o(device, input_dtype, weight_dtype):
-    model_name = "openbmb/MiniCPM-o-2_6"
-    logger.info(f"Loading model from HuggingFace: {model_name}")
+    ensure_model_files()
+    logger.info(f"Loading model from local reference: {REFERENCE_DIR}")
 
     model = AutoModel.from_pretrained(
-        model_name,
+        str(REFERENCE_DIR),
         trust_remote_code=True,
         attn_implementation="sdpa",
         torch_dtype=torch.bfloat16,

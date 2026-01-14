@@ -14,6 +14,7 @@ from pathlib import Path
 # Add reference_pytorch to path
 sys.path.insert(0, str(Path(__file__).parent.parent / "tt"))
 from weight_loader import DiskBasedWeightLoader
+from model_setup import ensure_model_files
 
 
 class MiniCPMWeightBridge:
@@ -30,7 +31,9 @@ class MiniCPMWeightBridge:
     """
 
     def __init__(self, model_name: str = "openbmb/MiniCPM-o-2_6"):
-        self.weight_loader = DiskBasedWeightLoader()
+        # Ensure model files are downloaded to reference folder
+        ensure_model_files()
+        self.weight_loader = DiskBasedWeightLoader()  # Uses reference folder by default
         self.model_name = model_name
 
     def _reverse_permute(self, tensor, n_heads, dim1, dim2):

@@ -10,17 +10,18 @@ from models.common.utility_functions import (
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 from models.experimental.miniCPMo.tt.ttnn_whisper_encoder import TtnnWhisperEncoder
+from models.experimental.miniCPMo.tt.model_setup import ensure_model_files, REFERENCE_DIR
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
 @pytest.mark.parametrize("input_dtype", [ttnn.bfloat16])
 @pytest.mark.parametrize("weight_dtype", [ttnn.bfloat16])
 def test_ttnn_whisper_encoder(device, input_dtype, weight_dtype):
-    model_name = "openbmb/MiniCPM-o-2_6"
-    logger.info(f"Loading model from HuggingFace: {model_name}")
+    ensure_model_files()
+    logger.info(f"Loading model from local reference: {REFERENCE_DIR}")
 
     model = AutoModel.from_pretrained(
-        model_name,
+        str(REFERENCE_DIR),
         trust_remote_code=True,
         attn_implementation="sdpa",
         torch_dtype=torch.bfloat16,
