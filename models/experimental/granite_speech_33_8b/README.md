@@ -12,6 +12,7 @@ Granite Speech is a state-of-the-art speech-to-text model developed by IBM, capa
 - Login to huggingface with: `huggingface-cli login` or by setting the token with the command `export HF_TOKEN=<token>`
    - To obtain a huggingface token visit: https://huggingface.co/docs/hub/security-tokens
 - Model repository: [ibm-granite/granite-speech-3.3-8b](https://huggingface.co/ibm-granite/granite-speech-3.3-8b)
+- Install `torchaudio==2.7.1+cpu` in python_env
 
 ## How to Run
 - Use the following command to run the `Granite-speech-3.3-8b` model:
