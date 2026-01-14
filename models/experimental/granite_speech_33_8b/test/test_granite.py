@@ -22,6 +22,7 @@ def test_model_output(mesh_device):
     processor = AutoProcessor.from_pretrained("ibm-granite/granite-speech-3.3-8b")
     tokenizer = processor.tokenizer
 
+    # TODO: Include LoRA Adapters in tt_transformers.
     ttnn_model = GraniteSpeechTTNN(
         mesh_device=mesh_device,
         config=config,

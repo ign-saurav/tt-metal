@@ -39,8 +39,8 @@ def calculate_pcc(tensor1: torch.Tensor, tensor2: torch.Tensor) -> float:
 def test_blip_intermediate(device):
     """Test Blip2QFormerIntermediate TTNN implementation against PyTorch."""
     # Initialize models
-    torch_model = (
-        AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        "ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16
     )
     config = torch_model.config
     torch_model = torch_model.projector.qformer.encoder.layer[0].intermediate_query
@@ -52,6 +52,7 @@ def test_blip_intermediate(device):
     ttnn_model.prepare_weights(torch_model.dense.weight, torch_model.dense.bias)
 
     # Create test input
+    torch.manual_seed(0)
     batch_size, seq_len, hidden_dim = 57, 3, 1024
     torch_input = torch.randn(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)
 
@@ -77,8 +78,8 @@ def test_blip_intermediate(device):
 def test_blip_output(device):
     """Test Blip2QFormerOutput TTNN implementation against PyTorch."""
     # Initialize models
-    torch_model = (
-        AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        "ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16
     )
     config = torch_model.config
     torch_model = torch_model.projector.qformer.encoder.layer[0].output_query
@@ -92,6 +93,7 @@ def test_blip_output(device):
     )
 
     # Create test input
+    torch.manual_seed(0)
     batch_size, seq_len, hidden_dim, input_dim = 57, 3, 4096, 1024
     torch_hidden_input = torch.randn(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)
     torch_input = torch.randn(batch_size, seq_len, input_dim, dtype=torch.bfloat16)
@@ -119,8 +121,8 @@ def test_blip_output(device):
 def test_blip_self_output(device):
     """Test Blip2QFormerSelfOutput TTNN implementation against PyTorch."""
     # Initialize models
-    torch_model = (
-        AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        "ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16
     )
     config = torch_model.config
     torch_model = torch_model.projector.qformer.encoder.layer[0].attention.output
@@ -134,6 +136,7 @@ def test_blip_self_output(device):
     )
 
     # Create test input
+    torch.manual_seed(0)
     batch_size, seq_len, hidden_dim = 57, 3, 1024
     torch_hidden_input = torch.randn(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)
     torch_input = torch.randn(batch_size, seq_len, hidden_dim, dtype=torch.bfloat16)
@@ -161,8 +164,8 @@ def test_blip_self_output(device):
 def test_blip_multi_head_attention_output(device):
     """Test Blip2QFormerMultiHeadAttention TTNN implementation against PyTorch."""
     # Initialize models
-    torch_model = (
-        AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        "ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16
     )
     config = torch_model.config
     torch_model = torch_model.projector.qformer.encoder.layer[0].attention.attention
@@ -225,8 +228,8 @@ def test_blip_multi_head_attention_output(device):
 def test_blip_multi_head_cross_attention_output(device):
     """Test Blip2QFormerMultiHeadAttention cross-attention TTNN implementation against PyTorch."""
     # Initialize models
-    torch_model = (
-        AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        "ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16
     )
     config = torch_model.config
     torch_model = torch_model.projector.qformer.encoder.layer[0].crossattention.attention
@@ -307,8 +310,8 @@ def test_blip_multi_head_cross_attention_output(device):
 def test_blip_attention_output(device):
     """Test Blip2QFormerAttention TTNN implementation against PyTorch."""
     # Initialize models
-    torch_model = (
-        AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        "ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16
     )
     config = torch_model.config
     torch_model = torch_model.projector.qformer.encoder.layer[0].attention
@@ -364,8 +367,8 @@ def test_blip_attention_output(device):
 def test_blip_cross_attention_output(device):
     """Test Blip2QFormerAttention cross-attention TTNN implementation against PyTorch."""
     # Initialize models
-    torch_model = (
-        AutoModelForSpeechSeq2Seq.from_pretrained("ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16)
+    torch_model = AutoModelForSpeechSeq2Seq.from_pretrained(
+        "ibm-granite/granite-speech-3.3-8b", torch_dtype=torch.bfloat16
     )
     config = torch_model.config
     torch_model = torch_model.projector.qformer.encoder.layer[0].crossattention

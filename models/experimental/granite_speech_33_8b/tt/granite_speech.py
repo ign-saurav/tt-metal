@@ -25,7 +25,7 @@ class GraniteSpeechTTNN:
         config,
         tokenizer=None,
         torch_ref=None,
-        use_torch_audio_feat=True,
+        use_torch_audio_feat=False,
         include_conformer_layernorm=True,
         use_optimized_attention_projector=True,
     ):
