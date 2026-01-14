@@ -2,24 +2,33 @@
 # SPDX-License-Identifier: Apache-2.0
 
 """
-MapTR Full Inference Pipeline
+MapTR Inference and Visualization Pipeline
+
+Based on official MapTR repository: https://github.com/hustvl/MapTR
+Visualization code adapted from: https://github.com/hustvl/MapTR/blob/main/tools/maptr/vis_pred.py
 
 This script runs the complete MapTR inference pipeline with:
 - Image loading and preprocessing
 - Model weight loading
 - Multi-camera inference
-- Result visualization
-
-Based on official MapTR repository: https://github.com/hustvl/MapTR
+- Result visualization (BEV map, surround view cameras)
 
 Usage:
+    # Demo mode (generates dummy data):
+    python models/experimental/mapTR/inference/run_inference.py --demo
+
+    # With checkpoint and images:
     python models/experimental/mapTR/inference/run_inference.py \
         --checkpoint /path/to/checkpoint.pth \
-        --images /path/to/images/ \
-        --output /path/to/output/
+        --image_dir /path/to/images/ \
+        --show-dir /path/to/output/
 
-    # Or with demo mode (generates dummy data):
-    python models/experimental/mapTR/inference/run_inference.py --demo
+    # With nuScenes dataset:
+    python models/experimental/mapTR/inference/run_inference.py \
+        --checkpoint /path/to/checkpoint.pth \
+        --nuscenes /path/to/nuscenes/ \
+        --show-dir /path/to/output/ \
+        --score-thresh 0.4
 """
 
 import sys
@@ -31,10 +40,27 @@ import numpy as np
 from PIL import Image
 from typing import Dict, List, Optional, Any, Tuple
 from pathlib import Path
+import os
+import os.path as osp
 
 # Add project root to path
 project_root = Path(__file__).parent.parent.parent.parent.parent
 sys.path.insert(0, str(project_root))
+
+
+def inverse_sigmoid(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+    """Inverse function of sigmoid.
+
+    Args:
+        x: Tensor with values in [0, 1]
+        eps: Small value to prevent numerical instability
+
+    Returns:
+        Tensor with values in (-inf, inf)
+    """
+    x = x.clamp(min=eps, max=1 - eps)
+    return torch.log(x / (1 - x))
+
 
 # Import MapTR components
 from models.experimental.mapTR.reference.pytorch_resnet import ResNet, Bottleneck
@@ -44,6 +70,65 @@ from models.experimental.mapTR.reference.pytorch_maptr_head import MapTRHead
 from models.experimental.mapTR.reference.pytorch_maptr import MapTR
 from models.experimental.mapTR.reference.pytorch_bevformer_encoder import BEVFormerEncoder
 from models.experimental.mapTR.reference.pytorch_temporal_self_attention import multi_scale_deformable_attn_pytorch
+
+
+# ============================================================================
+# Constants (from official vis_pred.py)
+# ============================================================================
+
+# Camera names in nuScenes order (matching official MapTR)
+CAMS = [
+    "CAM_FRONT_LEFT",
+    "CAM_FRONT",
+    "CAM_FRONT_RIGHT",
+    "CAM_BACK_LEFT",
+    "CAM_BACK",
+    "CAM_BACK_RIGHT",
+]
+
+# Candidate samples for visualization (challenging samples from nuScenes)
+# From: https://github.com/hustvl/MapTR/blob/main/tools/maptr/vis_pred.py
+CANDIDATE = [
+    "n008-2018-08-01-15-16-36-0400_1533151184047036",
+    "n008-2018-08-01-15-16-36-0400_1533151200646853",
+    "n008-2018-08-01-15-16-36-0400_1533151274047332",
+    "n008-2018-08-01-15-16-36-0400_1533151369947807",
+    "n008-2018-08-01-15-16-36-0400_1533151581047647",
+    "n008-2018-08-01-15-16-36-0400_1533151585447531",
+    "n008-2018-08-01-15-16-36-0400_1533151741547700",
+    "n008-2018-08-01-15-16-36-0400_1533151854947676",
+    "n008-2018-08-22-15-53-49-0400_1534968048946931",
+    "n008-2018-08-22-15-53-49-0400_1534968255947662",
+    "n008-2018-08-01-15-16-36-0400_1533151616447606",
+    "n015-2018-07-18-11-41-49+0800_1531885617949602",
+    "n008-2018-08-28-16-43-51-0400_1535489136547616",
+    "n008-2018-08-28-16-43-51-0400_1535489145446939",
+    "n008-2018-08-28-16-43-51-0400_1535489152948944",
+    "n008-2018-08-28-16-43-51-0400_1535489299547057",
+    "n008-2018-08-28-16-43-51-0400_1535489317946828",
+    "n008-2018-09-18-15-12-01-0400_1537298038950431",
+    "n008-2018-09-18-15-12-01-0400_1537298047650680",
+    "n008-2018-09-18-15-12-01-0400_1537298056450495",
+    "n008-2018-09-18-15-12-01-0400_1537298074700410",
+    "n008-2018-09-18-15-12-01-0400_1537298088148941",
+    "n008-2018-09-18-15-12-01-0400_1537298101700395",
+    "n015-2018-11-21-19-21-35+0800_1542799330198603",
+    "n015-2018-11-21-19-21-35+0800_1542799345696426",
+    "n015-2018-11-21-19-21-35+0800_1542799353697765",
+    "n015-2018-11-21-19-21-35+0800_1542799525447813",
+    "n015-2018-11-21-19-21-35+0800_1542799676697935",
+    "n015-2018-11-21-19-21-35+0800_1542799758948001",
+]
+
+# Colors for map elements (matching official MapTR visualization)
+# Class order: divider (0), ped_crossing (1), boundary (2)
+COLORS_PLT = {
+    0: "orange",  # divider
+    1: "blue",  # ped_crossing
+    2: "green",  # boundary
+}
+
+CLASS_NAMES = ["divider", "ped_crossing", "boundary"]
 
 
 # ============================================================================
@@ -124,7 +209,7 @@ class MapTRConfig:
         - 512 FFN channels
         """
         return cls(
-            img_height=480,
+            img_height=448,  # Official: 900*0.5=450, padded to divisor 32 = 448
             img_width=800,
             num_cameras=6,
             num_classes=3,
@@ -187,24 +272,23 @@ class MapTRTransformerWithBEVFormer(nn.Module):
         self.num_cams = num_cams
         self.pc_range = pc_range or [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
 
-        # BEVFormer Encoder - checkpoint uses 512 FFN channels
+        # BEVFormer Encoder
         self.encoder = BEVFormerEncoder(
             num_layers=num_encoder_layers,
             pc_range=self.pc_range,
             num_points_in_pillar=num_points_in_pillar,
             embed_dims=embed_dims,
             num_heads=num_heads,
-            feedforward_channels=512,  # Matches checkpoint
+            feedforward_channels=512,
         )
 
-        # Decoder - using proper deformable attention (matches checkpoint)
-        # Note: checkpoint uses 512 FFN channels for decoder
+        # Decoder
         self.decoder = MapTRDecoder(
             embed_dims=embed_dims,
             num_layers=num_decoder_layers,
             num_heads=num_heads,
-            feedforward_channels=512,  # Matches checkpoint: 512 not 2048
-            num_points=4,  # Matches checkpoint
+            feedforward_channels=512,
+            num_points=4,
             return_intermediate=True,
         )
 
@@ -262,7 +346,7 @@ class MapTRTransformerWithBEVFormer(nn.Module):
         for lvl, feat in enumerate(mlvl_feats):
             bs_f, num_cam, c, h, w = feat.shape
             spatial_shape = (h, w)
-            feat = feat.flatten(3).permute(1, 0, 3, 2)  # (num_cam, bs, h*w, c)
+            feat = feat.flatten(3).permute(1, 0, 3, 2)
             if self.cams_embeds is not None:
                 feat = feat + self.cams_embeds[:num_cam, None, None, :].to(feat.dtype)
             if lvl < len(self.level_embeds):
@@ -273,7 +357,7 @@ class MapTRTransformerWithBEVFormer(nn.Module):
         feat_flatten = torch.cat(feat_flatten, 2)
         spatial_shapes = torch.as_tensor(spatial_shapes, dtype=torch.long, device=bev_pos.device)
         level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
-        feat_flatten = feat_flatten.permute(0, 2, 1, 3)  # (num_cam, h*w, bs, c)
+        feat_flatten = feat_flatten.permute(0, 2, 1, 3)
 
         # Run BEVFormer encoder
         bev_embed = self.encoder(
@@ -290,34 +374,38 @@ class MapTRTransformerWithBEVFormer(nn.Module):
             img_metas=img_metas,
         )
 
-        # Prepare decoder queries
-        query_embeds = object_query_embeds
-        query = query_embeds[..., : self.embed_dims]
-        query_pos = query_embeds[..., self.embed_dims :]
+        # Prepare decoder queries - CRITICAL: query_pos is FIRST half, query is SECOND half
+        query_pos, query = torch.split(object_query_embeds, self.embed_dims, dim=1)
+        query_pos = query_pos.unsqueeze(0).expand(bs, -1, -1)
+        query = query.unsqueeze(0).expand(bs, -1, -1)
 
-        query = query.unsqueeze(0).repeat(bs, 1, 1)
-        query_pos = query_pos.unsqueeze(0).repeat(bs, 1, 1)
-
-        # Reference points
+        # Reference points computed from query_pos
         reference_points = self.reference_points(query_pos).sigmoid()
         init_reference_out = reference_points
+
+        # Permute to (seq_len, batch, embed_dims) format for decoder
+        query = query.permute(1, 0, 2)
+        query_pos = query_pos.permute(1, 0, 2)
+        bev_embed = bev_embed.permute(1, 0, 2)
 
         # Spatial shapes for decoder attention
         spatial_shapes = torch.tensor([[bev_h, bev_w]], device=query.device)
         level_start_index = torch.tensor([0], device=query.device)
 
-        # Run decoder with deformable attention
+        # Run decoder with reg_branches for iterative refinement
         hs, inter_references = self.decoder(
             query=query,
-            key=bev_embed,
+            key=None,
             value=bev_embed,
             query_pos=query_pos,
             reference_points=reference_points,
+            reg_branches=reg_branches,
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
         )
 
-        return bev_embed.permute(1, 0, 2), hs, init_reference_out, inter_references
+        # bev_embed is already in (seq_len, batch, embed_dims) format
+        return bev_embed, hs, init_reference_out, inter_references
 
     def get_bev_features(
         self,
@@ -337,90 +425,8 @@ class MapTRTransformerWithBEVFormer(nn.Module):
         return bev_embed
 
 
-class DeformableSelfAttention(nn.Module):
-    """Deformable Self Attention for decoder (matches MapTR checkpoint structure).
-
-    This uses the same deformable attention mechanism as the encoder's temporal
-    self-attention but without the BEV queue for historical frames.
-
-    Based on: https://github.com/hustvl/MapTR
-    """
-
-    def __init__(
-        self,
-        embed_dims: int = 256,
-        num_heads: int = 8,
-        num_levels: int = 1,
-        num_points: int = 4,
-        batch_first: bool = True,
-    ):
-        super().__init__()
-        if embed_dims % num_heads != 0:
-            raise ValueError(f"embed_dims must be divisible by num_heads, but got {embed_dims} and {num_heads}")
-
-        self.batch_first = batch_first
-        self.embed_dims = embed_dims
-        self.num_levels = num_levels
-        self.num_heads = num_heads
-        self.num_points = num_points
-
-        self.sampling_offsets = nn.Linear(embed_dims, num_heads * num_levels * num_points * 2)
-        self.attention_weights = nn.Linear(embed_dims, num_heads * num_levels * num_points)
-        self.value_proj = nn.Linear(embed_dims, embed_dims)
-        self.output_proj = nn.Linear(embed_dims, embed_dims)
-
-    def forward(
-        self,
-        query: torch.Tensor,
-        key: torch.Tensor = None,
-        value: torch.Tensor = None,
-        identity: torch.Tensor = None,
-        query_pos: torch.Tensor = None,
-        reference_points: torch.Tensor = None,
-        spatial_shapes: torch.Tensor = None,
-        level_start_index: torch.Tensor = None,
-        **kwargs,
-    ) -> torch.Tensor:
-        """Forward function."""
-        if value is None:
-            value = query
-        if identity is None:
-            identity = query
-        if query_pos is not None:
-            query = query + query_pos
-
-        bs, num_query, _ = query.shape
-        bs, num_value, _ = value.shape
-
-        value = self.value_proj(value)
-        value = value.view(bs, num_value, self.num_heads, -1)
-
-        sampling_offsets = self.sampling_offsets(query).view(
-            bs, num_query, self.num_heads, self.num_levels, self.num_points, 2
-        )
-        attention_weights = self.attention_weights(query).view(
-            bs, num_query, self.num_heads, self.num_levels * self.num_points
-        )
-        attention_weights = attention_weights.softmax(-1)
-        attention_weights = attention_weights.view(bs, num_query, self.num_heads, self.num_levels, self.num_points)
-
-        if reference_points.shape[-1] == 2:
-            offset_normalizer = torch.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
-            sampling_locations = (
-                reference_points[:, :, None, :, None, :]
-                + sampling_offsets / offset_normalizer[None, None, None, :, None, :]
-            )
-        else:
-            raise ValueError(f"reference_points last dim must be 2, got {reference_points.shape[-1]}")
-
-        output = multi_scale_deformable_attn_pytorch(value, spatial_shapes, sampling_locations, attention_weights)
-        output = self.output_proj(output)
-
-        return output + identity
-
-
 class CustomMSDeformableAttention(nn.Module):
-    """Cross attention using deformable attention for decoder (matches checkpoint)."""
+    """Cross attention using deformable attention for decoder."""
 
     def __init__(
         self,
@@ -476,7 +482,6 @@ class CustomMSDeformableAttention(nn.Module):
         attention_weights = attention_weights.softmax(-1)
         attention_weights = attention_weights.view(bs, num_query, self.num_heads, self.num_levels, self.num_points)
 
-        # Handle reference points
         if reference_points.shape[-1] == 2:
             offset_normalizer = torch.stack([spatial_shapes[..., 1], spatial_shapes[..., 0]], -1)
             sampling_locations = (
@@ -492,17 +497,19 @@ class CustomMSDeformableAttention(nn.Module):
         return output + identity
 
 
+class SelfAttnWrapper(nn.Module):
+    """Wrapper for MultiheadAttention to match checkpoint key structure."""
+
+    def __init__(self, embed_dims: int, num_heads: int):
+        super().__init__()
+        self.attn = nn.MultiheadAttention(embed_dims, num_heads, batch_first=True)
+
+    def forward(self, query, key, value):
+        return self.attn(query, key, value)[0]
+
+
 class MapTRDecoderLayer(nn.Module):
-    """MapTR Decoder layer matching checkpoint structure.
-
-    Based on official MapTR: https://github.com/hustvl/MapTR
-
-    Checkpoint structure (decoder.layers.X):
-    - attentions.0 = Standard MultiheadAttention (self-attention) with attn.in_proj_*, attn.out_proj.*
-    - attentions.1 = Deformable Attention (cross-attention) with sampling_offsets, attention_weights, etc.
-    - ffns.0.layers.0.0/1 = FFN layers
-    - norms.0/1/2 = LayerNorms
-    """
+    """MapTR Decoder layer matching checkpoint structure."""
 
     def __init__(
         self,
@@ -514,11 +521,7 @@ class MapTRDecoderLayer(nn.Module):
         super().__init__()
         self.embed_dims = embed_dims
 
-        # Self attention - Standard MultiheadAttention (matches checkpoint: attentions.0.attn.*)
-        # We wrap it to match checkpoint key structure: self_attn.attn.*
         self.self_attn = SelfAttnWrapper(embed_dims, num_heads)
-
-        # Cross attention - Deformable (matches checkpoint: attentions.1.*)
         self.cross_attn = CustomMSDeformableAttention(
             embed_dims=embed_dims,
             num_heads=num_heads,
@@ -526,14 +529,12 @@ class MapTRDecoderLayer(nn.Module):
             num_points=num_points,
         )
 
-        # FFN - matches checkpoint ffns.0.layers.0.0/1.*
         self.ffn = nn.Sequential(
             nn.Linear(embed_dims, feedforward_channels),
             nn.ReLU(inplace=True),
             nn.Linear(feedforward_channels, embed_dims),
         )
 
-        # Layer norms - matches checkpoint norms.0/1/2.*
         self.norm1 = nn.LayerNorm(embed_dims)
         self.norm2 = nn.LayerNorm(embed_dims)
         self.norm3 = nn.LayerNorm(embed_dims)
@@ -549,50 +550,40 @@ class MapTRDecoderLayer(nn.Module):
         level_start_index: torch.Tensor = None,
         **kwargs,
     ) -> torch.Tensor:
-        # Self attention (standard MultiheadAttention)
+        # Input is sequence-first (num_query, bs, embed_dims)
+        # Self-attention uses sequence-first format
         q = k = query + query_pos if query_pos is not None else query
         query2 = self.self_attn(q, k, query)
         query = self.norm1(query + query2)
 
-        # Cross attention (deformable)
-        query = self.cross_attn(
-            query=query,
-            key=value,
-            value=value,
-            query_pos=query_pos,
+        # Cross-attention expects batch-first (bs, num_query, embed_dims)
+        query_bf = query.permute(1, 0, 2)  # (num_q, bs, dim) -> (bs, num_q, dim)
+        value_bf = value.permute(1, 0, 2)  # (num_v, bs, dim) -> (bs, num_v, dim)
+        query_pos_bf = query_pos.permute(1, 0, 2) if query_pos is not None else None
+
+        # reference_points: (bs, num_query, num_levels, 2)
+        query_bf = self.cross_attn(
+            query=query_bf,
+            key=value_bf,
+            value=value_bf,
+            query_pos=query_pos_bf,
             reference_points=reference_points,
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
         )
+
+        # Convert back to sequence-first
+        query = query_bf.permute(1, 0, 2)
         query = self.norm2(query)
 
-        # FFN
         query = query + self.ffn(query)
         query = self.norm3(query)
 
         return query
 
 
-class SelfAttnWrapper(nn.Module):
-    """Wrapper for MultiheadAttention to match checkpoint key structure.
-
-    Checkpoint has: decoder.layers.X.attentions.0.attn.in_proj_weight, etc.
-    This creates: self_attn.attn.in_proj_weight (after remapping attentions.0 -> self_attn)
-    """
-
-    def __init__(self, embed_dims: int, num_heads: int):
-        super().__init__()
-        self.attn = nn.MultiheadAttention(embed_dims, num_heads, batch_first=True)
-
-    def forward(self, query, key, value):
-        return self.attn(query, key, value)[0]
-
-
 class MapTRDecoder(nn.Module):
-    """MapTR Decoder with iterative refinement (matches checkpoint).
-
-    Based on official MapTR: https://github.com/hustvl/MapTR
-    """
+    """MapTR Decoder with iterative refinement."""
 
     def __init__(
         self,
@@ -632,14 +623,12 @@ class MapTRDecoder(nn.Module):
         level_start_index: torch.Tensor = None,
         **kwargs,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Forward function with iterative refinement."""
         output = query
         intermediate = []
         intermediate_reference_points = []
 
         for lid, layer in enumerate(self.layers):
-            # Prepare reference points for attention
-            reference_points_input = reference_points[..., :2].unsqueeze(2)  # (bs, num_query, 1, 2)
+            reference_points_input = reference_points[..., :2].unsqueeze(2)
 
             output = layer(
                 query=output,
@@ -652,8 +641,25 @@ class MapTRDecoder(nn.Module):
                 **kwargs,
             )
 
+            # Permute for reg_branches: (num_query, bs, embed_dims) -> (bs, num_query, embed_dims)
+            output = output.permute(1, 0, 2)
+
+            # CRITICAL: Iterative refinement - update reference points using reg_branches
+            if reg_branches is not None:
+                tmp = reg_branches[lid](output)
+                assert reference_points.shape[-1] == 2
+                new_reference_points = torch.zeros_like(reference_points)
+                new_reference_points[..., :2] = tmp[..., :2] + inverse_sigmoid(reference_points[..., :2])
+                new_reference_points = new_reference_points.sigmoid()
+                reference_points = new_reference_points.detach()
+
+            # Permute back: (bs, num_query, embed_dims) -> (num_query, bs, embed_dims)
+            output = output.permute(1, 0, 2)
+
             if self.return_intermediate:
-                intermediate.append(output.permute(1, 0, 2))  # (num_query, bs, embed_dims)
+                # Official decoder stores output in (num_query, bs, embed_dims) format
+                # Head will permute it to (bs, num_query, embed_dims)
+                intermediate.append(output)
                 intermediate_reference_points.append(reference_points)
 
         if self.return_intermediate:
@@ -663,19 +669,10 @@ class MapTRDecoder(nn.Module):
 
 
 def build_maptr_model(config: MapTRConfig, device: torch.device = None) -> MapTR:
-    """Build MapTR model from config.
-
-    Args:
-        config: Model configuration.
-        device: Target device.
-
-    Returns:
-        MapTR model.
-    """
+    """Build MapTR model from config."""
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # Build backbone (ResNet50 by default)
     if config.backbone_depth == 50:
         layers = [3, 4, 6, 3]
     elif config.backbone_depth == 101:
@@ -686,17 +683,15 @@ def build_maptr_model(config: MapTRConfig, device: torch.device = None) -> MapTR
     backbone = ResNet(
         block=Bottleneck,
         layers=layers,
-        out_indices=(3,),  # Output from layer4 (2048 channels) to match checkpoint
+        out_indices=(3,),
     )
 
-    # Build FPN
     fpn = FPN(
-        in_channels=[2048],  # layer4 output has 2048 channels
+        in_channels=[2048],
         out_channels=config.fpn_out_channels,
         num_outs=1,
     )
 
-    # Build transformer with BEVFormer encoder
     transformer = MapTRTransformerWithBEVFormer(
         embed_dims=config.embed_dims,
         num_encoder_layers=config.num_encoder_layers,
@@ -710,31 +705,28 @@ def build_maptr_model(config: MapTRConfig, device: torch.device = None) -> MapTR
         feedforward_channels=config.feedforward_channels,
     )
 
-    # Build positional encoding
     pos_enc = LearnedPositionalEncoding(
         num_feats=config.embed_dims // 2,
         row_num_embed=config.bev_h,
         col_num_embed=config.bev_w,
     )
 
-    # Build head
     head = MapTRHead(
         transformer=transformer,
         positional_encoding=pos_enc,
         embed_dims=config.embed_dims,
         num_classes=config.num_classes,
         num_reg_fcs=2,
-        code_size=2,  # (x, y) per point
+        code_size=2,
         bev_h=config.bev_h,
         bev_w=config.bev_w,
         pc_range=config.pc_range,
         num_vec=config.num_vec,
         num_pts_per_vec=config.num_pts_per_vec,
-        query_embed_type="instance_pts",  # Match checkpoint: separate instance and pts embeddings
+        query_embed_type="instance_pts",
         transform_method="minmax",
     )
 
-    # Build full model
     model = MapTR(
         img_backbone=backbone,
         img_neck=fpn,
@@ -744,6 +736,271 @@ def build_maptr_model(config: MapTRConfig, device: torch.device = None) -> MapTR
     )
 
     return model.to(device)
+
+
+# ============================================================================
+# Visualization (adapted from official vis_pred.py)
+# ============================================================================
+
+
+class MapTRVisualizer:
+    """Visualizer for MapTR predictions.
+
+    Based on: https://github.com/hustvl/MapTR/blob/main/tools/maptr/vis_pred.py
+    """
+
+    def __init__(self, pc_range: List[float], car_img_path: str = None):
+        """Initialize visualizer.
+
+        Args:
+            pc_range: Point cloud range [x_min, y_min, z_min, x_max, y_max, z_max].
+            car_img_path: Path to car icon image for BEV visualization.
+        """
+        self.pc_range = pc_range
+        self.car_img = None
+
+        if car_img_path and osp.exists(car_img_path):
+            self.car_img = Image.open(car_img_path)
+        else:
+            # Create a simple car icon
+            self.car_img = self._create_car_icon()
+
+    def _create_car_icon(self) -> np.ndarray:
+        """Create a simple car icon for BEV visualization."""
+        # Create 60x30 car icon
+        car = np.ones((60, 30, 4), dtype=np.uint8) * 255
+        # Body (gray)
+        car[5:55, 3:27, :3] = [100, 100, 100]
+        # Windshield (blue)
+        car[8:20, 5:25, :3] = [50, 50, 150]
+        # Rear window
+        car[40:50, 5:25, :3] = [50, 50, 150]
+        return car
+
+    def create_surround_view(
+        self,
+        cam_images: Dict[str, np.ndarray],
+        output_path: str,
+        jpeg_quality: int = 70,
+    ):
+        """Create surround view by concatenating camera images.
+
+        Args:
+            cam_images: Dictionary mapping camera name to image array.
+            output_path: Path to save the surround view image.
+            jpeg_quality: JPEG compression quality.
+        """
+        try:
+            import cv2
+        except ImportError:
+            print("cv2 not available, skipping surround view creation")
+            return
+
+        # Row 1: Front left, Front, Front right
+        row_1_list = []
+        for cam in CAMS[:3]:
+            if cam in cam_images:
+                row_1_list.append(cam_images[cam])
+            else:
+                # Create placeholder
+                row_1_list.append(np.zeros((480, 800, 3), dtype=np.uint8))
+
+        # Row 2: Back left, Back, Back right
+        row_2_list = []
+        for cam in CAMS[3:]:
+            if cam in cam_images:
+                row_2_list.append(cam_images[cam])
+            else:
+                row_2_list.append(np.zeros((480, 800, 3), dtype=np.uint8))
+
+        if row_1_list and row_2_list:
+            row_1_img = cv2.hconcat(row_1_list)
+            row_2_img = cv2.hconcat(row_2_list)
+            cams_img = cv2.vconcat([row_1_img, row_2_img])
+            cv2.imwrite(output_path, cams_img, [cv2.IMWRITE_JPEG_QUALITY, jpeg_quality])
+            print(f"✓ Surround view saved: {output_path}")
+
+    def visualize_predictions(
+        self,
+        results: Dict,
+        output_path: str,
+        score_thresh: float = 0.4,
+        vis_format: str = "fixed_num_pts",
+        dpi: int = 1200,
+    ):
+        """Visualize model predictions in BEV.
+
+        Based on official vis_pred.py visualization.
+
+        Args:
+            results: Detection results dictionary with boxes_3d, scores_3d, labels_3d, pts_3d.
+            output_path: Path to save the visualization.
+            score_thresh: Score threshold for filtering predictions.
+            vis_format: Visualization format ('fixed_num_pts', 'bbox', 'polyline_pts').
+            dpi: DPI for output image.
+        """
+        try:
+            import matplotlib.pyplot as plt
+            from matplotlib.patches import Rectangle
+        except ImportError:
+            print("matplotlib not installed. Install with: pip install matplotlib")
+            return
+
+        pc_range = self.pc_range
+
+        # Create figure (2:4 aspect ratio like official code)
+        plt.figure(figsize=(2, 4))
+        plt.xlim(pc_range[0], pc_range[3])
+        plt.ylim(pc_range[1], pc_range[4])
+        plt.axis("off")
+
+        # Extract predictions
+        boxes_3d = results.get("boxes_3d", results.get("bboxes", None))
+        scores_3d = results.get("scores_3d", results.get("scores", None))
+        labels_3d = results.get("labels_3d", results.get("labels", None))
+        pts_3d = results.get("pts_3d", results.get("pts", None))
+
+        if boxes_3d is None or scores_3d is None:
+            print("No predictions to visualize")
+            plt.close()
+            return
+
+        # Convert to numpy if tensors
+        if torch.is_tensor(boxes_3d):
+            boxes_3d = boxes_3d.cpu().numpy()
+        if torch.is_tensor(scores_3d):
+            scores_3d = scores_3d.cpu().numpy()
+        if torch.is_tensor(labels_3d):
+            labels_3d = labels_3d.cpu().numpy()
+        if pts_3d is not None and torch.is_tensor(pts_3d):
+            pts_3d = pts_3d.cpu().numpy()
+
+        # Apply score threshold
+        keep = scores_3d > score_thresh
+
+        # Draw predictions
+        for i, (score, bbox, label) in enumerate(zip(scores_3d[keep], boxes_3d[keep], labels_3d[keep])):
+            color = COLORS_PLT.get(int(label), "white")
+
+            if vis_format in ["fixed_num_pts", "polyline_pts"] and pts_3d is not None:
+                # Draw polyline with points
+                pts = pts_3d[keep][i] if len(pts_3d[keep]) > i else None
+                if pts is not None:
+                    pts_x = pts[:, 0]
+                    pts_y = pts[:, 1]
+                    plt.plot(pts_x, pts_y, color=color, linewidth=1, alpha=0.8, zorder=-1)
+                    plt.scatter(pts_x, pts_y, color=color, s=1, alpha=0.8, zorder=-1)
+
+            if vis_format == "bbox":
+                # Draw bounding box
+                xy = (bbox[0], bbox[1])
+                width = bbox[2] - bbox[0]
+                height = bbox[3] - bbox[1]
+                plt.gca().add_patch(Rectangle(xy, width, height, linewidth=0.4, edgecolor=color, facecolor="none"))
+
+        # Add car icon at center
+        if self.car_img is not None:
+            try:
+                plt.imshow(self.car_img, extent=[-1.2, 1.2, -1.5, 1.5])
+            except Exception:
+                pass
+
+        # Save figure
+        plt.savefig(output_path, bbox_inches="tight", format="png", dpi=dpi)
+        plt.close()
+        print(f"✓ Prediction map saved: {output_path}")
+
+    def visualize_with_legend(
+        self,
+        results: Dict,
+        output_path: str,
+        score_thresh: float = 0.4,
+        title: str = "MapTR HD Map Prediction",
+    ):
+        """Visualize predictions with legend and labels.
+
+        Args:
+            results: Detection results dictionary.
+            output_path: Path to save the visualization.
+            score_thresh: Score threshold for filtering predictions.
+            title: Title for the plot.
+        """
+        try:
+            import matplotlib.pyplot as plt
+            import matplotlib.patches as mpatches
+        except ImportError:
+            print("matplotlib not installed")
+            return
+
+        pc_range = self.pc_range
+
+        # Create figure
+        fig, ax = plt.subplots(1, 1, figsize=(10, 16))
+        ax.set_xlim(pc_range[0], pc_range[3])
+        ax.set_ylim(pc_range[1], pc_range[4])
+        ax.set_aspect("equal")
+        ax.set_facecolor("#f0f0f0")
+        ax.grid(True, alpha=0.3, linestyle="--")
+
+        # Extract predictions
+        boxes_3d = results.get("boxes_3d", results.get("bboxes", None))
+        scores_3d = results.get("scores_3d", results.get("scores", None))
+        labels_3d = results.get("labels_3d", results.get("labels", None))
+        pts_3d = results.get("pts_3d", results.get("pts", None))
+
+        if boxes_3d is None:
+            plt.close()
+            return
+
+        # Convert to numpy
+        if torch.is_tensor(boxes_3d):
+            boxes_3d = boxes_3d.cpu().numpy()
+        if torch.is_tensor(scores_3d):
+            scores_3d = scores_3d.cpu().numpy()
+        if torch.is_tensor(labels_3d):
+            labels_3d = labels_3d.cpu().numpy()
+        if pts_3d is not None and torch.is_tensor(pts_3d):
+            pts_3d = pts_3d.cpu().numpy()
+
+        keep = scores_3d > score_thresh
+        class_counts = {0: 0, 1: 0, 2: 0}
+
+        # Draw predictions
+        for i, (score, bbox, label) in enumerate(zip(scores_3d[keep], boxes_3d[keep], labels_3d[keep])):
+            label_int = int(label)
+            color = COLORS_PLT.get(label_int, "gray")
+            class_counts[label_int] = class_counts.get(label_int, 0) + 1
+
+            if pts_3d is not None and len(pts_3d[keep]) > i:
+                pts = pts_3d[keep][i]
+                pts_x = pts[:, 0]
+                pts_y = pts[:, 1]
+                ax.plot(pts_x, pts_y, color=color, linewidth=2, alpha=0.8)
+                ax.scatter(pts_x, pts_y, color=color, s=8, alpha=0.8)
+
+        # Draw ego vehicle
+        ego_rect = plt.Rectangle(
+            (-1, -2.25), 2, 4.5, fill=True, facecolor="yellow", edgecolor="black", linewidth=2, zorder=10
+        )
+        ax.add_patch(ego_rect)
+
+        # Create legend
+        legend_handles = []
+        for label_id, color in COLORS_PLT.items():
+            if label_id < len(CLASS_NAMES):
+                count = class_counts.get(label_id, 0)
+                patch = mpatches.Patch(color=color, label=f"{CLASS_NAMES[label_id]} ({count})")
+                legend_handles.append(patch)
+
+        ax.legend(handles=legend_handles, loc="upper right", fontsize=10)
+        ax.set_xlabel("X (meters)", fontsize=12)
+        ax.set_ylabel("Y (meters)", fontsize=12)
+        ax.set_title(title, fontsize=14, fontweight="bold")
+
+        plt.tight_layout()
+        plt.savefig(output_path, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"✓ Visualization with legend saved: {output_path}")
 
 
 # ============================================================================
@@ -773,26 +1030,15 @@ class ImageProcessor:
         return np.array(img)
 
     def preprocess(self, images: List[np.ndarray]) -> torch.Tensor:
-        """Preprocess images for model input.
-
-        Args:
-            images: List of images as numpy arrays (H, W, C) in RGB format.
-
-        Returns:
-            Tensor of shape (1, num_cams, 3, H, W).
-        """
+        """Preprocess images for model input."""
         processed = []
         for img in images:
-            # Normalize
             img = img.astype(np.float32)
             img = (img - np.array(self.mean)) / np.array(self.std)
-            # HWC -> CHW
             img = img.transpose(2, 0, 1)
             processed.append(img)
 
-        # Stack cameras: (num_cams, 3, H, W)
         imgs = np.stack(processed, axis=0)
-        # Add batch dimension: (1, num_cams, 3, H, W)
         imgs = imgs[np.newaxis, ...]
         return torch.from_numpy(imgs).float()
 
@@ -817,19 +1063,13 @@ class CameraCalibration:
         img_height: int = 900,
         img_width: int = 1600,
     ) -> Dict[str, np.ndarray]:
-        """Create dummy camera calibration for testing.
-
-        Returns:
-            Dictionary with calibration matrices.
-        """
-        # Create identity transforms for dummy data
+        """Create dummy camera calibration."""
         lidar2img = np.eye(4)[np.newaxis, :, :].repeat(self.num_cameras, axis=0)
         camera2ego = np.eye(4)[np.newaxis, :, :].repeat(self.num_cameras, axis=0)
         camera_intrinsics = np.eye(4)[np.newaxis, :, :].repeat(self.num_cameras, axis=0)
         img_aug_matrix = np.eye(4)[np.newaxis, :, :].repeat(self.num_cameras, axis=0)
         lidar2ego = np.eye(4)
 
-        # Set reasonable intrinsics
         fx, fy = 1000.0, 1000.0
         cx, cy = img_width / 2, img_height / 2
         for i in range(self.num_cameras):
@@ -861,42 +1101,13 @@ class CameraCalibration:
 
 
 # ============================================================================
-# nuScenes Data Loader (Official MapTR approach)
+# nuScenes Data Loader
 # ============================================================================
 
 
 class NuScenesDataLoader:
-    """nuScenes data loader following official MapTR repository approach.
+    """nuScenes data loader following official MapTR approach."""
 
-    Based on: https://github.com/hustvl/MapTR
-
-    This loader handles:
-    - Loading images from all 6 cameras
-    - Loading camera calibration from nuScenes metadata
-    - Loading CAN bus data for temporal fusion
-    - Proper image preprocessing
-
-    Directory structure expected:
-        data_root/
-        ├── nuscenes/
-        │   ├── samples/
-        │   │   ├── CAM_FRONT/
-        │   │   ├── CAM_FRONT_LEFT/
-        │   │   ├── CAM_FRONT_RIGHT/
-        │   │   ├── CAM_BACK/
-        │   │   ├── CAM_BACK_LEFT/
-        │   │   └── CAM_BACK_RIGHT/
-        │   ├── v1.0-mini/ (or v1.0-trainval)
-        │   └── maps/
-        └── can_bus/
-            ├── scene-0001/
-            │   ├── pose.json
-            │   ├── ms_imu.json
-            │   └── ...
-            └── ...
-    """
-
-    # Camera names in nuScenes order
     CAMERA_NAMES = [
         "CAM_FRONT",
         "CAM_FRONT_RIGHT",
@@ -915,16 +1126,6 @@ class NuScenesDataLoader:
         mean: List[float] = None,
         std: List[float] = None,
     ):
-        """Initialize nuScenes data loader.
-
-        Args:
-            data_root: Root directory containing nuscenes/ and can_bus/ folders.
-            version: nuScenes version ('v1.0-mini', 'v1.0-trainval', 'v1.0-test').
-            img_height: Target image height after resize.
-            img_width: Target image width after resize.
-            mean: Image normalization mean (default: ImageNet).
-            std: Image normalization std (default: ImageNet).
-        """
         self.data_root = Path(data_root)
         self.version = version
         self.img_height = img_height
@@ -932,11 +1133,9 @@ class NuScenesDataLoader:
         self.mean = mean or [123.675, 116.28, 103.53]
         self.std = std or [58.395, 57.12, 57.375]
 
-        # Paths
         self.nuscenes_root = self.data_root / "nuscenes"
         self.canbus_root = self.data_root / "can_bus"
 
-        # Initialize nuScenes API if available
         self.nusc = None
         self._init_nuscenes()
 
@@ -947,7 +1146,6 @@ class NuScenesDataLoader:
 
             nuscenes_dataroot = str(self.nuscenes_root)
             if (self.nuscenes_root / self.version).exists():
-                # Standard structure
                 self.nusc = NuScenes(
                     version=self.version,
                     dataroot=nuscenes_dataroot,
@@ -956,59 +1154,34 @@ class NuScenesDataLoader:
                 print(f"✓ Loaded nuScenes {self.version} with {len(self.nusc.sample)} samples")
             else:
                 print(f"⚠ nuScenes metadata not found at {self.nuscenes_root / self.version}")
-                print("  Will use manual file loading mode.")
-
         except ImportError:
             print("⚠ nuscenes-devkit not installed. Install with: pip install nuscenes-devkit")
-            print("  Will use manual file loading mode.")
         except Exception as e:
             print(f"⚠ Could not initialize nuScenes: {e}")
-            print("  Will use manual file loading mode.")
 
     def load_can_bus(self, scene_token: str, sample_token: str) -> np.ndarray:
-        """Load CAN bus data for a sample.
-
-        CAN bus data contains 18 values:
-        - [0:3]: translation (x, y, z)
-        - [3:7]: rotation quaternion (w, x, y, z)
-        - [7:10]: velocity (vx, vy, vz)
-        - [10:13]: acceleration (ax, ay, az)
-        - [13:16]: angular velocity (wx, wy, wz)
-        - [16]: steering angle
-        - [17]: yaw rate
-
-        Args:
-            scene_token: Scene token.
-            sample_token: Sample token.
-
-        Returns:
-            CAN bus data array of shape (18,).
-        """
+        """Load CAN bus data for a sample."""
         can_bus = np.zeros(18)
-
         if self.nusc is None:
             return can_bus
 
         try:
-            # Get scene name from token
             scene = self.nusc.get("scene", scene_token)
             scene_name = scene["name"]
-
-            # Load pose data from can_bus folder
-            pose_file = self.canbus_root / scene_name / "pose.json"
+            # Try both path formats: scene-0001_pose.json and scene-0001/pose.json
+            pose_file = self.canbus_root / f"{scene_name}_pose.json"
+            if not pose_file.exists():
+                pose_file = self.canbus_root / scene_name / "pose.json"
 
             if pose_file.exists():
                 with open(pose_file, "r") as f:
                     pose_data = json.load(f)
 
-                # Get sample timestamp
                 sample = self.nusc.get("sample", sample_token)
                 timestamp = sample["timestamp"]
 
-                # Find closest pose by timestamp
                 closest_pose = None
                 min_diff = float("inf")
-
                 for pose in pose_data:
                     diff = abs(pose["utime"] - timestamp)
                     if diff < min_diff:
@@ -1016,47 +1189,15 @@ class NuScenesDataLoader:
                         closest_pose = pose
 
                 if closest_pose:
-                    # Translation
                     can_bus[0] = closest_pose.get("pos", [0, 0, 0])[0]
                     can_bus[1] = closest_pose.get("pos", [0, 0, 0])[1]
                     can_bus[2] = closest_pose.get("pos", [0, 0, 0])[2]
 
-                    # Rotation (quaternion to euler yaw)
                     orientation = closest_pose.get("orientation", [1, 0, 0, 0])
-                    # Convert quaternion to yaw
                     w, x, y, z = orientation
                     yaw = np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
-                    can_bus[16] = yaw  # steering angle proxy
-                    can_bus[17] = closest_pose.get("rotation_rate", [0, 0, 0])[2]  # yaw rate
-
-            # Load IMU data
-            imu_file = self.canbus_root / scene_name / "ms_imu.json"
-
-            if imu_file.exists():
-                with open(imu_file, "r") as f:
-                    imu_data = json.load(f)
-
-                sample = self.nusc.get("sample", sample_token)
-                timestamp = sample["timestamp"]
-
-                # Find closest IMU reading
-                closest_imu = None
-                min_diff = float("inf")
-
-                for imu in imu_data:
-                    diff = abs(imu["utime"] - timestamp)
-                    if diff < min_diff:
-                        min_diff = diff
-                        closest_imu = imu
-
-                if closest_imu:
-                    # Linear acceleration
-                    accel = closest_imu.get("linear_accel", [0, 0, 0])
-                    can_bus[10:13] = accel[:3]
-
-                    # Angular velocity
-                    rot_rate = closest_imu.get("rotation_rate", [0, 0, 0])
-                    can_bus[13:16] = rot_rate[:3]
+                    can_bus[16] = yaw
+                    can_bus[17] = closest_pose.get("rotation_rate", [0, 0, 0])[2]
 
         except Exception as e:
             print(f"⚠ Could not load CAN bus data: {e}")
@@ -1064,30 +1205,18 @@ class NuScenesDataLoader:
         return can_bus
 
     def get_lidar2img(self, sample_token: str) -> np.ndarray:
-        """Get lidar to image projection matrices for all cameras.
-
-        Args:
-            sample_token: Sample token.
-
-        Returns:
-            Array of shape (6, 4, 4) with lidar2img matrices for each camera.
-        """
+        """Get lidar to image projection matrices."""
         lidar2img_list = []
 
         if self.nusc is None:
-            # Return identity matrices if nuScenes not available
             return np.tile(np.eye(4), (6, 1, 1))
 
         try:
             sample = self.nusc.get("sample", sample_token)
-
-            # Get lidar pose
             lidar_token = sample["data"]["LIDAR_TOP"]
             lidar_data = self.nusc.get("sample_data", lidar_token)
             lidar_calib = self.nusc.get("calibrated_sensor", lidar_data["calibrated_sensor_token"])
-            lidar_ego = self.nusc.get("ego_pose", lidar_data["ego_pose_token"])
 
-            # Lidar to ego
             lidar2ego = np.eye(4)
             lidar2ego[:3, :3] = self._quat_to_rot(lidar_calib["rotation"])
             lidar2ego[:3, 3] = lidar_calib["translation"]
@@ -1096,19 +1225,27 @@ class NuScenesDataLoader:
                 cam_token = sample["data"][cam_name]
                 cam_data = self.nusc.get("sample_data", cam_token)
                 cam_calib = self.nusc.get("calibrated_sensor", cam_data["calibrated_sensor_token"])
-                cam_ego = self.nusc.get("ego_pose", cam_data["ego_pose_token"])
 
-                # Camera intrinsics
                 intrinsic = np.eye(4)
-                intrinsic[:3, :3] = np.array(cam_calib["camera_intrinsic"])
+                cam_intrinsic = np.array(cam_calib["camera_intrinsic"])
 
-                # Camera to ego
+                # Scale intrinsics for resized images
+                # Original nuScenes image size is 1600x900
+                original_w, original_h = 1600, 900
+                scale_w = self.img_width / original_w
+                scale_h = self.img_height / original_h
+
+                # Scale fx, cx by width ratio; fy, cy by height ratio
+                cam_intrinsic[0, :] *= scale_w  # fx, 0, cx
+                cam_intrinsic[1, :] *= scale_h  # 0, fy, cy
+
+                intrinsic[:3, :3] = cam_intrinsic
+
                 cam2ego = np.eye(4)
                 cam2ego[:3, :3] = self._quat_to_rot(cam_calib["rotation"])
                 cam2ego[:3, 3] = cam_calib["translation"]
                 ego2cam = np.linalg.inv(cam2ego)
 
-                # Compute lidar2img
                 lidar2cam = ego2cam @ lidar2ego
                 lidar2img = intrinsic @ lidar2cam
                 lidar2img_list.append(lidar2img)
@@ -1120,14 +1257,7 @@ class NuScenesDataLoader:
         return np.stack(lidar2img_list, axis=0)
 
     def _quat_to_rot(self, quat: List[float]) -> np.ndarray:
-        """Convert quaternion to rotation matrix.
-
-        Args:
-            quat: Quaternion [w, x, y, z].
-
-        Returns:
-            3x3 rotation matrix.
-        """
+        """Convert quaternion to rotation matrix."""
         w, x, y, z = quat
         return np.array(
             [
@@ -1137,16 +1267,14 @@ class NuScenesDataLoader:
             ]
         )
 
-    def load_sample_images(self, sample_token: str) -> List[np.ndarray]:
+    def load_sample_images(self, sample_token: str) -> Tuple[List[np.ndarray], Dict[str, np.ndarray]]:
         """Load all camera images for a sample.
 
-        Args:
-            sample_token: Sample token.
-
         Returns:
-            List of 6 images as numpy arrays (H, W, 3).
+            Tuple of (list of images, dict mapping cam name to image)
         """
         images = []
+        cam_images = {}
 
         if self.nusc is not None:
             sample = self.nusc.get("sample", sample_token)
@@ -1157,69 +1285,46 @@ class NuScenesDataLoader:
                 img_path = self.nuscenes_root / cam_data["filename"]
 
                 img = Image.open(img_path).convert("RGB")
-                img = img.resize((self.img_width, self.img_height), Image.BILINEAR)
-                images.append(np.array(img))
-        else:
-            # Manual mode - try to find images by pattern
-            print("⚠ Using manual image loading mode")
-            samples_dir = self.nuscenes_root / "samples"
+                img_resized = img.resize((self.img_width, self.img_height), Image.BILINEAR)
+                img_array = np.array(img_resized)
+                images.append(img_array)
 
+                # Also store BGR for OpenCV visualization
+                cam_images[cam_name] = img_array[:, :, ::-1].copy()
+        else:
+            samples_dir = self.nuscenes_root / "samples"
             for cam_name in self.CAMERA_NAMES:
                 cam_dir = samples_dir / cam_name
                 if cam_dir.exists():
-                    # Get first image in directory
                     img_files = list(cam_dir.glob("*.jpg")) + list(cam_dir.glob("*.png"))
                     if img_files:
                         img = Image.open(img_files[0]).convert("RGB")
-                        img = img.resize((self.img_width, self.img_height), Image.BILINEAR)
-                        images.append(np.array(img))
+                        img_resized = img.resize((self.img_width, self.img_height), Image.BILINEAR)
+                        img_array = np.array(img_resized)
+                        images.append(img_array)
+                        cam_images[cam_name] = img_array[:, :, ::-1].copy()
                     else:
-                        # Create dummy image
                         images.append(np.zeros((self.img_height, self.img_width, 3), dtype=np.uint8))
                 else:
                     images.append(np.zeros((self.img_height, self.img_width, 3), dtype=np.uint8))
 
-        return images
+        return images, cam_images
 
     def preprocess_images(self, images: List[np.ndarray]) -> torch.Tensor:
-        """Preprocess images for model input.
-
-        Args:
-            images: List of images as numpy arrays (H, W, C) in RGB.
-
-        Returns:
-            Tensor of shape (1, num_cams, 3, H, W).
-        """
+        """Preprocess images for model input."""
         processed = []
         for img in images:
-            # Normalize
             img = img.astype(np.float32)
             img = (img - np.array(self.mean)) / np.array(self.std)
-            # HWC -> CHW
             img = img.transpose(2, 0, 1)
             processed.append(img)
 
-        # Stack cameras: (num_cams, 3, H, W)
         imgs = np.stack(processed, axis=0)
-        # Add batch dimension: (1, num_cams, 3, H, W)
         imgs = imgs[np.newaxis, ...]
         return torch.from_numpy(imgs).float()
 
-    def create_img_metas(
-        self,
-        sample_token: str = None,
-        scene_token: str = None,
-    ) -> List[Dict]:
-        """Create image metadata for inference.
-
-        Args:
-            sample_token: Sample token (optional).
-            scene_token: Scene token (optional).
-
-        Returns:
-            List of metadata dictionaries.
-        """
-        # Get calibration
+    def create_img_metas(self, sample_token: str = None, scene_token: str = None) -> List[Dict]:
+        """Create image metadata for inference."""
         if sample_token and self.nusc:
             lidar2img = self.get_lidar2img(sample_token)
             can_bus = self.load_can_bus(scene_token, sample_token) if scene_token else np.zeros(18)
@@ -1239,13 +1344,8 @@ class NuScenesDataLoader:
         return [meta]
 
     def get_sample_list(self) -> List[Dict]:
-        """Get list of all samples in dataset.
-
-        Returns:
-            List of dicts with 'sample_token' and 'scene_token'.
-        """
+        """Get list of all samples in dataset."""
         samples = []
-
         if self.nusc is not None:
             for sample in self.nusc.sample:
                 samples.append(
@@ -1254,35 +1354,21 @@ class NuScenesDataLoader:
                         "scene_token": sample["scene_token"],
                     }
                 )
-        else:
-            # Manual mode - return empty list
-            print("⚠ nuScenes API not available, cannot enumerate samples")
-
         return samples
 
-    def load_sample(self, sample_token: str, scene_token: str = None) -> Tuple[torch.Tensor, List[Dict]]:
-        """Load a complete sample for inference.
-
-        Args:
-            sample_token: Sample token.
-            scene_token: Scene token (optional, will be looked up if not provided).
-
-        Returns:
-            Tuple of (images_tensor, img_metas).
-        """
-        # Get scene token if not provided
+    def load_sample(
+        self, sample_token: str, scene_token: str = None
+    ) -> Tuple[torch.Tensor, List[Dict], Dict[str, np.ndarray]]:
+        """Load a complete sample for inference."""
         if scene_token is None and self.nusc:
             sample = self.nusc.get("sample", sample_token)
             scene_token = sample["scene_token"]
 
-        # Load and preprocess images
-        images = self.load_sample_images(sample_token)
+        images, cam_images = self.load_sample_images(sample_token)
         images_tensor = self.preprocess_images(images)
-
-        # Create metadata
         img_metas = self.create_img_metas(sample_token, scene_token)
 
-        return images_tensor, img_metas
+        return images_tensor, img_metas, cam_images
 
 
 # ============================================================================
@@ -1291,65 +1377,35 @@ class NuScenesDataLoader:
 
 
 def remap_checkpoint_keys(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torch.Tensor]:
-    """Remap checkpoint keys to match model key names.
-
-    Based on official MapTR checkpoint structure: https://github.com/hustvl/MapTR
-
-    Args:
-        state_dict: Original checkpoint state dict.
-
-    Returns:
-        Remapped state dict with keys matching the model.
-    """
+    """Remap checkpoint keys to match model key names."""
     remapped = {}
 
     for k, v in state_dict.items():
         new_key = k
 
-        # ============================================================
-        # FPN keys - checkpoint uses ModuleList index, our model doesn't
-        # ============================================================
-        # Checkpoint: img_neck.fpn_convs.0.conv.weight -> Model: img_neck.fpn_convs.conv.weight
         if "img_neck.fpn_convs.0." in new_key:
             new_key = new_key.replace("img_neck.fpn_convs.0.", "img_neck.fpn_convs.")
         if "img_neck.lateral_convs.0." in new_key:
             new_key = new_key.replace("img_neck.lateral_convs.0.", "img_neck.lateral_convs.")
 
-        # ============================================================
-        # Encoder keys - BEVFormerLayer structure
-        # ============================================================
-        # The encoder uses: attentions[0]=TemporalSelfAttention, attentions[1]=SpatialCrossAttention
-        # Checkpoint has: layers.X.attentions.0.* (temporal) and layers.X.attentions.1.* (spatial)
-
-        # Encoder FFN: checkpoint uses ffns.0.layers.0.0/1 -> our FFN uses layers.0/2
+        # Encoder FFN: checkpoint uses ffns.0.layers.0/2, model uses ffns.0.layers.0.0/1
         if "encoder.layers" in new_key and "ffns.0.layers" in new_key:
-            new_key = new_key.replace("ffns.0.layers.0.0.", "ffns.0.layers.0.")
-            new_key = new_key.replace("ffns.0.layers.1.", "ffns.0.layers.2.")
-
-        # ============================================================
-        # Decoder keys - deformable attention structure
-        # ============================================================
-        # Checkpoint decoder: decoder.layers.X.attentions.0.* (self attn - done first in MapTR)
-        #                     decoder.layers.X.attentions.1.* (cross attn)
-        # Our decoder: decoder.layers.X.self_attn.* and decoder.layers.X.cross_attn.*
+            # Must do .2 first to avoid double replacement
+            new_key = new_key.replace("ffns.0.layers.2.", "ffns.0.layers.1.")
+            if "ffns.0.layers.0." in new_key and "ffns.0.layers.0.0" not in new_key:
+                new_key = new_key.replace("ffns.0.layers.0.", "ffns.0.layers.0.0.")
 
         if "decoder.layers" in new_key:
-            # Self attention (attentions.0.attn.* in checkpoint) -> self_attn.attn.*
-            # Standard MultiheadAttention with in_proj_*, out_proj.*
             if ".attentions.0." in new_key:
                 new_key = new_key.replace(".attentions.0.", ".self_attn.")
-            # Cross attention (attentions.1.* in checkpoint) -> cross_attn.*
-            # Deformable attention with sampling_offsets, attention_weights, etc.
             elif ".attentions.1." in new_key:
                 new_key = new_key.replace(".attentions.1.", ".cross_attn.")
 
-            # FFN structure: ffns.0.layers.0.0 -> ffn.0, ffns.0.layers.1 -> ffn.2
             if "ffns.0.layers.0.0." in new_key:
                 new_key = new_key.replace("ffns.0.layers.0.0.", "ffn.0.")
             elif "ffns.0.layers.1." in new_key:
                 new_key = new_key.replace("ffns.0.layers.1.", "ffn.2.")
 
-            # Norms
             if ".norms.0." in new_key:
                 new_key = new_key.replace(".norms.0.", ".norm1.")
             elif ".norms.1." in new_key:
@@ -1357,10 +1413,6 @@ def remap_checkpoint_keys(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torc
             elif ".norms.2." in new_key:
                 new_key = new_key.replace(".norms.2.", ".norm3.")
 
-        # ============================================================
-        # Transformer-level keys
-        # ============================================================
-        # CAN bus MLP norm
         if "transformer.can_bus_mlp.norm." in new_key:
             new_key = new_key.replace("transformer.can_bus_mlp.norm.", "transformer.can_bus_mlp.4.")
 
@@ -1370,21 +1422,11 @@ def remap_checkpoint_keys(state_dict: Dict[str, torch.Tensor]) -> Dict[str, torc
 
 
 def load_weights(model: nn.Module, checkpoint_path: str, strict: bool = False) -> nn.Module:
-    """Load model weights from checkpoint.
-
-    Args:
-        model: Model to load weights into.
-        checkpoint_path: Path to checkpoint file.
-        strict: Whether to strictly enforce weight matching.
-
-    Returns:
-        Model with loaded weights.
-    """
+    """Load model weights from checkpoint."""
     print(f"Loading weights from: {checkpoint_path}")
 
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
 
-    # Handle different checkpoint formats
     if "state_dict" in checkpoint:
         state_dict = checkpoint["state_dict"]
     elif "model" in checkpoint:
@@ -1392,17 +1434,14 @@ def load_weights(model: nn.Module, checkpoint_path: str, strict: bool = False) -
     else:
         state_dict = checkpoint
 
-    # Remove 'module.' prefix if present (from DataParallel)
     new_state_dict = {}
     for k, v in state_dict.items():
         if k.startswith("module."):
             k = k[7:]
         new_state_dict[k] = v
 
-    # Remap checkpoint keys to match model structure
     new_state_dict = remap_checkpoint_keys(new_state_dict)
 
-    # Check for size mismatches and filter them out if not strict
     model_state = model.state_dict()
     filtered_state_dict = {}
     size_mismatches = []
@@ -1412,89 +1451,23 @@ def load_weights(model: nn.Module, checkpoint_path: str, strict: bool = False) -
             if v.shape != model_state[k].shape:
                 size_mismatches.append(f"  {k}: checkpoint {v.shape} vs model {model_state[k].shape}")
                 if not strict:
-                    continue  # Skip mismatched weights
+                    continue
         filtered_state_dict[k] = v
 
     if size_mismatches:
         print(f"\n⚠ Size mismatches found ({len(size_mismatches)}):")
         for msg in size_mismatches[:10]:
             print(msg)
-        if len(size_mismatches) > 10:
-            print(f"  ... and {len(size_mismatches) - 10} more")
-        print("\nHINT: Make sure to use the correct config for your checkpoint:")
-        print("  --config maptr_tiny   for maptr_tiny_r50_24e.pth (BEV: 200x100)")
-        print("  --config nuScenes     for full nuScenes config (BEV: 200x100)")
-        print("  --config small        for testing without weights (BEV: 50x50)")
 
-    # Load weights
     missing_keys, unexpected_keys = model.load_state_dict(filtered_state_dict, strict=False)
 
+    print(f"\n✓ Weights loaded: {len(filtered_state_dict)} keys matched")
     if missing_keys:
-        print(f"\nMissing keys ({len(missing_keys)}) - Keys expected by MODEL but NOT in checkpoint:")
-        print("-" * 80)
-        for key in sorted(missing_keys):
-            print(f"  - {key}")
-
+        print(f"  Missing: {len(missing_keys)} keys")
     if unexpected_keys:
-        print(f"\nUnexpected keys ({len(unexpected_keys)}) - Keys in CHECKPOINT but NOT in model:")
-        print("-" * 80)
-        for key in sorted(unexpected_keys):
-            print(f"  - {key}")
+        print(f"  Unexpected: {len(unexpected_keys)} keys")
 
-    # Print summary comparison
-    print("\n" + "=" * 80)
-    print("WEIGHT KEY COMPARISON SUMMARY")
-    print("=" * 80)
-    model_keys = set(model_state.keys())
-    checkpoint_keys = set(filtered_state_dict.keys())
-    matched_keys = model_keys & checkpoint_keys
-    print(f"Model keys:       {len(model_keys)}")
-    print(f"Checkpoint keys:  {len(checkpoint_keys)}")
-    print(f"Matched keys:     {len(matched_keys)}")
-    print(f"Missing keys:     {len(missing_keys)} (model expects, checkpoint missing)")
-    print(f"Unexpected keys:  {len(unexpected_keys)} (checkpoint has, model missing)")
-
-    print("\n✓ Weights loaded successfully!")
     return model
-
-
-def convert_mmcv_checkpoint(checkpoint_path: str, output_path: str):
-    """Convert MMCV checkpoint to pure PyTorch format.
-
-    Args:
-        checkpoint_path: Path to MMCV checkpoint.
-        output_path: Path to save converted checkpoint.
-    """
-    print(f"Converting checkpoint: {checkpoint_path}")
-
-    checkpoint = torch.load(checkpoint_path, map_location="cpu")
-
-    if "state_dict" in checkpoint:
-        state_dict = checkpoint["state_dict"]
-    else:
-        state_dict = checkpoint
-
-    # Key mapping from MMCV to PyTorch
-    key_mapping = {
-        # Backbone
-        "img_backbone.": "img_backbone.",
-        # Neck
-        "img_neck.": "img_neck.",
-        # Head
-        "pts_bbox_head.": "pts_bbox_head.",
-    }
-
-    new_state_dict = {}
-    for k, v in state_dict.items():
-        new_key = k
-        for old_prefix, new_prefix in key_mapping.items():
-            if k.startswith(old_prefix):
-                new_key = new_prefix + k[len(old_prefix) :]
-                break
-        new_state_dict[new_key] = v
-
-    torch.save({"state_dict": new_state_dict}, output_path)
-    print(f"Converted checkpoint saved to: {output_path}")
 
 
 # ============================================================================
@@ -1503,7 +1476,7 @@ def convert_mmcv_checkpoint(checkpoint_path: str, output_path: str):
 
 
 class MapTRInference:
-    """MapTR inference pipeline."""
+    """MapTR inference pipeline with visualization."""
 
     def __init__(
         self,
@@ -1516,25 +1489,22 @@ class MapTRInference:
 
         print(f"Using device: {self.device}")
 
-        # Build model
         print("Building model...")
         self.model = build_maptr_model(config, self.device)
 
-        # Load weights if provided
         if checkpoint_path is not None:
             self.model = load_weights(self.model, checkpoint_path, strict=False)
 
         self.model.eval()
 
-        # Initialize processors
         self.image_processor = ImageProcessor(
             img_height=config.img_height,
             img_width=config.img_width,
         )
         self.calibration = CameraCalibration(num_cameras=config.num_cameras)
+        self.visualizer = MapTRVisualizer(pc_range=config.pc_range)
 
-        # Class names
-        self.class_names = ["divider", "ped_crossing", "boundary"]
+        self.class_names = CLASS_NAMES
 
     def create_img_metas(
         self,
@@ -1561,65 +1531,21 @@ class MapTRInference:
         images: torch.Tensor,
         img_metas: List[List[Dict]],
     ) -> List[Dict]:
-        """Run inference on images.
-
-        Args:
-            images: Input images tensor of shape (1, num_cams, 3, H, W).
-            img_metas: Image metadata.
-
-        Returns:
-            List of detection results.
-        """
+        """Run inference on images."""
         images = images.to(self.device)
         results = self.model(img_metas=img_metas, img=images)
         return results
 
-    def predict_from_paths(
-        self,
-        image_paths: List[str],
-        calibration: Optional[Dict[str, np.ndarray]] = None,
-    ) -> List[Dict]:
-        """Run inference on images from file paths.
-
-        Args:
-            image_paths: List of paths to camera images.
-            calibration: Camera calibration (uses dummy if None).
-
-        Returns:
-            List of detection results.
-        """
-        # Load and preprocess images
-        images = [self.image_processor.load_image(p) for p in image_paths]
-        images_tensor = self.image_processor.preprocess(images)
-
-        # Use dummy calibration if not provided
-        if calibration is None:
-            calibration = self.calibration.create_dummy_calibration(self.config.img_height, self.config.img_width)
-
-        img_metas = self.create_img_metas(calibration)
-
-        return self.predict(images_tensor, img_metas)
-
     def predict_demo(self) -> List[Dict]:
-        """Run inference on dummy data for demo/testing."""
+        """Run inference on dummy data."""
         images = self.image_processor.generate_dummy_images(self.config.num_cameras)
         calibration = self.calibration.create_dummy_calibration(self.config.img_height, self.config.img_width)
         img_metas = self.create_img_metas(calibration)
         return self.predict(images, img_metas)
 
     def format_results(self, results: List[Dict]) -> Dict[str, Any]:
-        """Format results for output.
-
-        Args:
-            results: Raw model output.
-
-        Returns:
-            Formatted results dictionary.
-        """
-        formatted = {
-            "num_detections": 0,
-            "detections": [],
-        }
+        """Format results for output."""
+        formatted = {"num_detections": 0, "detections": []}
 
         for i, result in enumerate(results):
             if "pts_bbox" not in result:
@@ -1649,293 +1575,81 @@ class MapTRInference:
 
         return formatted
 
-    def print_results(self, results: List[Dict]):
+    def print_results(self, results: List[Dict], score_thresh: float = 0.0):
         """Print detection results."""
-        formatted = self.format_results(results)
-
         print("\n" + "=" * 60)
         print("Detection Results")
         print("=" * 60)
-        print(f"Total detections: {formatted['num_detections']}")
 
-        for det in formatted["detections"][:10]:  # Print first 10
-            print(f"\n  Class: {det['class']}")
-            print(f"  Score: {det['score']:.4f}")
-            print(f"  BBox: {det['bbox']}")
-            print(f"  Points: {len(det['points'])} vertices")
-
-        if len(formatted["detections"]) > 10:
-            print(f"\n  ... and {len(formatted['detections']) - 10} more detections")
-
-    def visualize_hd_map(
-        self,
-        results: List[Dict],
-        output_path: str = None,
-        score_threshold: float = 0.0,
-        show: bool = False,
-    ):
-        """Visualize HD map output as polylines in BEV view.
-
-        Args:
-            results: Detection results from predict().
-            output_path: Path to save the visualization.
-            score_threshold: Minimum score to display.
-            show: Whether to display the plot.
-        """
-        try:
-            import matplotlib.pyplot as plt
-            import matplotlib.patches as mpatches
-        except ImportError:
-            print("matplotlib not installed. Install with: pip install matplotlib")
-            return
-
-        formatted = self.format_results(results)
-
-        # Color map for different classes
-        colors = {
-            "divider": "#FF6B6B",  # Red
-            "ped_crossing": "#4ECDC4",  # Teal
-            "boundary": "#45B7D1",  # Blue
-        }
-
-        # Create figure
-        fig, ax = plt.subplots(1, 1, figsize=(12, 10))
-
-        # Set BEV range from pc_range
-        x_min, y_min = self.config.pc_range[0], self.config.pc_range[1]
-        x_max, y_max = self.config.pc_range[3], self.config.pc_range[4]
-
-        ax.set_xlim(x_min, x_max)
-        ax.set_ylim(y_min, y_max)
-        ax.set_aspect("equal")
-        ax.set_facecolor("#1a1a2e")
-
-        # Draw grid
-        ax.grid(True, alpha=0.3, color="white", linestyle="--")
-
-        # Draw ego vehicle (rectangle at origin)
-        ego_width, ego_length = 2.0, 4.5
-        ego = plt.Rectangle(
-            (-ego_width / 2, -ego_length / 2),
-            ego_width,
-            ego_length,
-            fill=True,
-            facecolor="#FFD93D",
-            edgecolor="white",
-            linewidth=2,
-            zorder=10,
-        )
-        ax.add_patch(ego)
-
-        # Track counts per class
-        class_counts = {name: 0 for name in colors.keys()}
-
-        # Draw polylines for each detection
-        for det in formatted["detections"]:
-            if det["score"] < score_threshold:
+        for result in results:
+            if "pts_bbox" not in result:
                 continue
 
-            class_name = det["class"]
-            points = np.array(det["points"])
+            pts_bbox = result["pts_bbox"]
+            scores = pts_bbox["scores_3d"]
+            labels = pts_bbox["labels_3d"]
 
-            if len(points) < 2:
-                continue
+            if torch.is_tensor(scores):
+                scores = scores.cpu().numpy()
+            if torch.is_tensor(labels):
+                labels = labels.cpu().numpy()
 
-            color = colors.get(class_name, "#FFFFFF")
+            keep = scores > score_thresh
+            print(f"Total detections (score > {score_thresh}): {keep.sum()}")
+
+            class_counts = {}
+            for label in labels[keep]:
+                label_int = int(label)
+                class_name = self.class_names[label_int] if label_int < len(self.class_names) else f"class_{label_int}"
             class_counts[class_name] = class_counts.get(class_name, 0) + 1
 
-            # Draw polyline
-            ax.plot(
-                points[:, 0],
-                points[:, 1],
-                color=color,
-                linewidth=2.5,
-                alpha=0.8,
-                marker="o",
-                markersize=3,
-                markerfacecolor=color,
-            )
-
-        # Create legend
-        legend_handles = []
-        for class_name, color in colors.items():
-            count = class_counts.get(class_name, 0)
-            if count > 0:
-                patch = mpatches.Patch(color=color, label=f"{class_name} ({count})")
-                legend_handles.append(patch)
-
-        ax.legend(handles=legend_handles, loc="upper right", fontsize=10)
-
-        # Labels
-        ax.set_xlabel("X (meters)", fontsize=12, color="white")
-        ax.set_ylabel("Y (meters)", fontsize=12, color="white")
-        ax.set_title("MapTR HD Map Output (BEV)", fontsize=14, fontweight="bold", color="white")
-        ax.tick_params(colors="white")
-
-        # Style spines
-        for spine in ax.spines.values():
-            spine.set_color("white")
-
-        plt.tight_layout()
-
-        if output_path:
-            plt.savefig(output_path, dpi=150, bbox_inches="tight", facecolor="#1a1a2e")
-            print(f"\n✓ HD Map saved to: {output_path}")
-
-        if show:
-            plt.show()
-        else:
-            plt.close()
-
-        return fig
-
-    def print_hd_map_polylines(self, results: List[Dict], score_threshold: float = 0.0):
-        """Print HD map polylines in a readable format.
-
-        Args:
-            results: Detection results from predict().
-            score_threshold: Minimum score to display.
-        """
-        formatted = self.format_results(results)
-
-        print("\n" + "=" * 60)
-        print("HD Map Polylines (Vectorized Output)")
-        print("=" * 60)
-
-        # Group by class
-        by_class = {}
-        for det in formatted["detections"]:
-            if det["score"] < score_threshold:
-                continue
-            class_name = det["class"]
-            if class_name not in by_class:
-                by_class[class_name] = []
-            by_class[class_name].append(det)
-
-        for class_name, detections in by_class.items():
-            print(f"\n{'─' * 50}")
-            print(f"  {class_name.upper()} ({len(detections)} instances)")
-            print(f"{'─' * 50}")
-
-            for i, det in enumerate(detections[:5]):  # Show first 5 per class
-                points = np.array(det["points"])
-                print(f"\n  [{i+1}] Score: {det['score']:.3f}")
-                print(f"      Vertices: {len(points)} points")
-                print(f"      Coordinates (x, y):")
-                for j, pt in enumerate(points):
-                    print(f"        P{j+1}: ({pt[0]:7.2f}, {pt[1]:7.2f})")
-
-            if len(detections) > 5:
-                print(f"\n      ... and {len(detections) - 5} more {class_name} instances")
+            for class_name, count in class_counts.items():
+                print(f"  {class_name}: {count}")
 
 
 # ============================================================================
-# Main
+# Main (based on official vis_pred.py)
 # ============================================================================
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MapTR Inference Pipeline")
+    parser = argparse.ArgumentParser(description="MapTR Inference and Visualization Pipeline")
 
-    parser.add_argument(
-        "--checkpoint",
-        type=str,
-        default=None,
-        help="Path to model checkpoint",
-    )
-    parser.add_argument(
-        "--images",
-        type=str,
-        nargs="+",
-        default=None,
-        help="Paths to input images (one per camera)",
-    )
-    parser.add_argument(
-        "--image_dir",
-        type=str,
-        default=None,
-        help="Directory containing camera images",
-    )
-    parser.add_argument(
-        "--calibration",
-        type=str,
-        default=None,
-        help="Path to calibration JSON file",
-    )
-    parser.add_argument(
-        "--output",
-        type=str,
-        default=None,
-        help="Path to save results",
-    )
-    parser.add_argument(
-        "--demo",
-        action="store_true",
-        help="Run demo with dummy data",
-    )
+    # Core arguments
+    parser.add_argument("--checkpoint", type=str, default=None, help="Path to model checkpoint")
     parser.add_argument(
         "--config",
         type=str,
-        default="small",
+        default="maptr_tiny",
         choices=["small", "nuScenes", "maptr_tiny"],
-        help="Model configuration preset (use 'maptr_tiny' for maptr_tiny_r50_24e.pth checkpoint)",
+        help="Model configuration preset",
     )
+    parser.add_argument("--device", type=str, default="auto", help="Device (cuda, cpu, or auto)")
+
+    # Input arguments
+    parser.add_argument("--demo", action="store_true", help="Run demo with dummy data")
+    parser.add_argument("--image_dir", type=str, default=None, help="Directory containing camera images")
+    parser.add_argument("--nuscenes", type=str, default=None, help="Path to nuScenes data root")
     parser.add_argument(
-        "--device",
+        "--nuscenes_version", type=str, default="v1.0-mini", choices=["v1.0-mini", "v1.0-trainval", "v1.0-test"]
+    )
+    parser.add_argument("--sample_idx", type=int, default=0, help="Sample index to process")
+    parser.add_argument("--num_samples", type=int, default=1, help="Number of samples to process")
+
+    # Visualization arguments (matching official vis_pred.py)
+    parser.add_argument("--score-thresh", default=0.4, type=float, help="Score threshold for visualization")
+    parser.add_argument("--show-dir", type=str, default=None, help="Directory for visualization outputs")
+    parser.add_argument("--show-cam", action="store_true", help="Save surround camera view")
+    parser.add_argument(
+        "--gt-format",
         type=str,
-        default="auto",
-        help="Device to use (cuda, cpu, or auto)",
-    )
-    parser.add_argument(
-        "--visualize",
-        type=str,
-        default=None,
-        help="Path to save HD map visualization (e.g., hd_map.png)",
-    )
-    parser.add_argument(
-        "--show_polylines",
-        action="store_true",
-        help="Print detailed polyline coordinates",
-    )
-    parser.add_argument(
-        "--score_threshold",
-        type=float,
-        default=0.0,
-        help="Minimum score threshold for detections",
+        nargs="+",
+        default=["fixed_num_pts"],
+        help="Visualization format: fixed_num_pts, bbox, polyline_pts, se_pts",
     )
 
-    # nuScenes dataset arguments
-    parser.add_argument(
-        "--nuscenes",
-        type=str,
-        default=None,
-        help="Path to nuScenes data root (containing nuscenes/ and can_bus/ folders)",
-    )
-    parser.add_argument(
-        "--nuscenes_version",
-        type=str,
-        default="v1.0-mini",
-        choices=["v1.0-mini", "v1.0-trainval", "v1.0-test"],
-        help="nuScenes dataset version",
-    )
-    parser.add_argument(
-        "--sample_token",
-        type=str,
-        default=None,
-        help="Specific sample token to process (nuScenes mode)",
-    )
-    parser.add_argument(
-        "--sample_idx",
-        type=int,
-        default=0,
-        help="Sample index to process (nuScenes mode, default: 0)",
-    )
-    parser.add_argument(
-        "--num_samples",
-        type=int,
-        default=1,
-        help="Number of samples to process (nuScenes mode)",
-    )
+    # Output arguments
+    parser.add_argument("--output", type=str, default=None, help="Path to save JSON results")
 
     args = parser.parse_args()
 
@@ -1954,13 +1668,18 @@ def main():
         config = MapTRConfig.from_small()
 
     print("\n" + "=" * 60)
-    print("MapTR Inference Pipeline")
+    print("MapTR Inference and Visualization Pipeline")
+    print("Based on: https://github.com/hustvl/MapTR")
     print("=" * 60)
     print(f"Config: {args.config}")
     print(f"Device: {device}")
-    print(f"BEV size: {config.bev_h} x {config.bev_w}")
-    print(f"Num vectors: {config.num_vec}")
-    print(f"Points per vector: {config.num_pts_per_vec}")
+    print(f"Score threshold: {args.score_thresh}")
+
+    # Create output directory
+    if args.show_dir is None:
+        args.show_dir = "./work_dirs/vis_pred"
+    os.makedirs(args.show_dir, exist_ok=True)
+    print(f"Output directory: {args.show_dir}")
 
     # Create inference pipeline
     inference = MapTRInference(
@@ -1971,16 +1690,11 @@ def main():
 
     # Run inference
     if args.nuscenes:
-        # ============================================================
-        # nuScenes Dataset Mode (Official MapTR approach)
-        # ============================================================
+        # nuScenes dataset mode
         print(f"\n{'='*60}")
         print("nuScenes Dataset Mode")
         print(f"{'='*60}")
-        print(f"Data root: {args.nuscenes}")
-        print(f"Version: {args.nuscenes_version}")
 
-        # Initialize nuScenes data loader
         nuscenes_loader = NuScenesDataLoader(
             data_root=args.nuscenes,
             version=args.nuscenes_version,
@@ -1988,136 +1702,132 @@ def main():
             img_width=config.img_width,
         )
 
-        # Get samples to process
-        if args.sample_token:
-            # Process specific sample
-            samples_to_process = [{"sample_token": args.sample_token, "scene_token": None}]
+        all_samples = nuscenes_loader.get_sample_list()
+        if all_samples:
+            start_idx = args.sample_idx
+            end_idx = min(start_idx + args.num_samples, len(all_samples))
+            samples_to_process = all_samples[start_idx:end_idx]
+            print(f"Processing samples {start_idx} to {end_idx-1}")
         else:
-            # Get sample list
-            all_samples = nuscenes_loader.get_sample_list()
-            if all_samples:
-                start_idx = args.sample_idx
-                end_idx = min(start_idx + args.num_samples, len(all_samples))
-                samples_to_process = all_samples[start_idx:end_idx]
-                print(f"Processing samples {start_idx} to {end_idx-1} ({len(samples_to_process)} samples)")
-            else:
-                print("⚠ No samples found in dataset")
-                samples_to_process = []
+            print("⚠ No samples found")
+            samples_to_process = []
 
-        # Process each sample
-        all_results = []
         for i, sample_info in enumerate(samples_to_process):
             sample_token = sample_info["sample_token"]
             scene_token = sample_info.get("scene_token")
 
             print(f"\n--- Sample {i+1}/{len(samples_to_process)} ---")
-            print(
-                f"Sample token: {sample_token[:20]}..." if len(sample_token) > 20 else f"Sample token: {sample_token}"
-            )
+            print(f"Token: {sample_token[:30]}...")
 
-            # Load sample data with CAN bus
-            images_tensor, img_metas = nuscenes_loader.load_sample(sample_token, scene_token)
+            # Create sample output directory
+            sample_dir = osp.join(args.show_dir, f"sample_{i:04d}")
+            os.makedirs(sample_dir, exist_ok=True)
+
+            # Load sample
+            images_tensor, img_metas, cam_images = nuscenes_loader.load_sample(sample_token, scene_token)
             images_tensor = images_tensor.to(inference.device)
 
-            # Show CAN bus info
-            can_bus = img_metas[0].get("can_bus", np.zeros(18))
-            print(f"CAN bus - Position: ({can_bus[0]:.2f}, {can_bus[1]:.2f}, {can_bus[2]:.2f})")
-            print(f"CAN bus - Yaw: {can_bus[16]:.4f} rad, Yaw rate: {can_bus[17]:.4f}")
+            # Save camera images
+            if args.show_cam and cam_images:
+                for cam_name, cam_img in cam_images.items():
+                    try:
+                        import cv2
+
+                        cam_path = osp.join(sample_dir, f"{cam_name}.jpg")
+                        cv2.imwrite(cam_path, cam_img)
+                    except ImportError:
+                        pass
+
+                # Create surround view
+                surround_path = osp.join(sample_dir, "surround_view.jpg")
+                inference.visualizer.create_surround_view(cam_images, surround_path)
 
             # Run inference
             results = inference.predict(images_tensor, [img_metas])
-            all_results.append(
-                {
-                    "sample_token": sample_token,
-                    "results": results,
-                }
-            )
 
-            # Print results for this sample
-            inference.print_results(results)
+            # Print results
+            inference.print_results(results, score_thresh=args.score_thresh)
 
-            # Visualize if requested
-            if args.visualize:
-                if len(samples_to_process) == 1:
-                    viz_path = args.visualize
-                else:
-                    # Add sample index to filename
-                    viz_base = Path(args.visualize)
-                    viz_path = str(viz_base.parent / f"{viz_base.stem}_{i:04d}{viz_base.suffix}")
+            # Visualize predictions
+            if results and "pts_bbox" in results[0]:
+                pts_bbox = results[0]["pts_bbox"]
 
-                inference.visualize_hd_map(
-                    results,
-                    output_path=viz_path,
-                    score_threshold=args.score_threshold,
+                # Save prediction map (matching official format)
+                for vis_format in args.gt_format:
+                    pred_map_path = osp.join(sample_dir, f"PRED_MAP_{vis_format}.png")
+                    inference.visualizer.visualize_predictions(
+                        pts_bbox,
+                        pred_map_path,
+                        score_thresh=args.score_thresh,
+                        vis_format=vis_format,
+                        dpi=1200,
+                    )
+
+                # Save visualization with legend
+                legend_path = osp.join(sample_dir, "PRED_MAP_legend.png")
+                inference.visualizer.visualize_with_legend(
+                    pts_bbox,
+                    legend_path,
+                    score_thresh=args.score_thresh,
                 )
 
-        # Summary
         print(f"\n{'='*60}")
-        print(f"Processed {len(all_results)} samples from nuScenes dataset")
+        print(f"Processed {len(samples_to_process)} samples")
+        print(f"Results saved to: {args.show_dir}")
         print(f"{'='*60}")
-
-        # Use last result for final output
-        results = all_results[-1]["results"] if all_results else []
 
     elif args.demo:
         print("\nRunning demo inference with dummy data...")
         results = inference.predict_demo()
+        inference.print_results(results)
 
-    elif args.images:
-        print(f"\nRunning inference on {len(args.images)} images...")
-        calibration = None
-        if args.calibration:
-            calibration = inference.calibration.load_calibration(args.calibration)
-        results = inference.predict_from_paths(args.images, calibration)
+        if results and "pts_bbox" in results[0]:
+            pts_bbox = results[0]["pts_bbox"]
+            demo_path = osp.join(args.show_dir, "demo_pred.png")
+            inference.visualizer.visualize_with_legend(pts_bbox, demo_path)
 
     elif args.image_dir:
-        # Load all images from directory
+        print(f"\nLoading images from: {args.image_dir}")
         image_dir = Path(args.image_dir)
-        image_extensions = [".jpg", ".jpeg", ".png"]
         image_paths = []
-        for ext in image_extensions:
+        for ext in [".jpg", ".jpeg", ".png", ".JPG", ".JPEG", ".PNG"]:
             image_paths.extend(sorted(image_dir.glob(f"*{ext}")))
-            image_paths.extend(sorted(image_dir.glob(f"*{ext.upper()}")))
 
         if len(image_paths) < config.num_cameras:
-            print(f"Warning: Found only {len(image_paths)} images, expected {config.num_cameras}")
+            print(f"⚠ Found only {len(image_paths)} images, expected {config.num_cameras}")
 
         image_paths = [str(p) for p in image_paths[: config.num_cameras]]
-        print(f"\nRunning inference on images from {args.image_dir}...")
-        calibration = None
-        if args.calibration:
-            calibration = inference.calibration.load_calibration(args.calibration)
-        results = inference.predict_from_paths(image_paths, calibration)
+        images = [inference.image_processor.load_image(p) for p in image_paths]
+        images_tensor = inference.image_processor.preprocess(images)
+
+        calibration = inference.calibration.create_dummy_calibration(config.img_height, config.img_width)
+        img_metas = inference.create_img_metas(calibration)
+
+        results = inference.predict(images_tensor, img_metas)
+        inference.print_results(results, score_thresh=args.score_thresh)
+
+        if results and "pts_bbox" in results[0]:
+            pts_bbox = results[0]["pts_bbox"]
+            pred_path = osp.join(args.show_dir, "pred_map.png")
+            inference.visualizer.visualize_with_legend(
+                pts_bbox,
+                pred_path,
+                score_thresh=args.score_thresh,
+            )
 
     else:
         print("\nNo input provided, running demo mode...")
         results = inference.predict_demo()
-
-    # Print results (skip if already printed in nuScenes mode)
-    if not args.nuscenes:
         inference.print_results(results)
 
-    # Print detailed polyline coordinates if requested
-    if args.show_polylines:
-        inference.print_hd_map_polylines(results, score_threshold=args.score_threshold)
-
-    # Visualize HD map if path provided (skip if already done in nuScenes mode)
-    if args.visualize and not args.nuscenes:
-        inference.visualize_hd_map(
-            results,
-            output_path=args.visualize,
-            score_threshold=args.score_threshold,
-        )
-
-    # Save results if output path provided
-    if args.output:
+    # Save JSON results
+    if args.output and results:
         formatted = inference.format_results(results)
         output_path = Path(args.output)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-
         with open(output_path, "w") as f:
             json.dump(formatted, f, indent=2)
-        print(f"\nResults saved to: {output_path}")
+        print(f"\n✓ Results saved to: {output_path}")
 
     print("\n✓ Inference complete!")
 
