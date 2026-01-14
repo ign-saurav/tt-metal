@@ -701,8 +701,6 @@ class GraniteSpeechCTCEncoderTTNN:
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Forward pass with mid-layer residual connection."""
-        batch_size, seq_len, input_dim = hidden_states.shape
-
         # Input linear projection
         tt_hidden_states = ttnn.linear(
             hidden_states, self.input_weight, bias=self.input_bias, compute_kernel_config=self.compute_config
