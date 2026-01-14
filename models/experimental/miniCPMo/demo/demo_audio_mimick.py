@@ -60,7 +60,9 @@ def main():
         model = model.eval()
 
         logger.info("Enabling TT acceleration for TTS decoder...")
-        model = enable_tt_acceleration(model, device, components=["tts", "dvae", "llm", "audio"])
+        model = enable_tt_acceleration(
+            model, device, components=["tts", "dvae", "llm", "audio"], model_path=str(REFERENCE_DIR)
+        )
 
         tokenizer = AutoTokenizer.from_pretrained(str(REFERENCE_DIR), trust_remote_code=True)
 
