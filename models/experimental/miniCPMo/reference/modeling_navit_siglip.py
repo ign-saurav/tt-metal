@@ -143,11 +143,14 @@ SIGLIP_PRETRAINED_MODEL_ARCHIVE_LIST = [
 ]
 
 if is_flash_attn_2_available():
-    from flash_attn import flash_attn_func
-    from flash_attn import flash_attn_varlen_func
-    from flash_attn.bert_padding import index_first_axis  # noqa
-    from flash_attn.bert_padding import pad_input
-    from flash_attn.bert_padding import unpad_input
+    try:
+        from flash_attn import flash_attn_func
+        from flash_attn import flash_attn_varlen_func
+        from flash_attn.bert_padding import index_first_axis  # noqa
+        from flash_attn.bert_padding import pad_input
+        from flash_attn.bert_padding import unpad_input
+    except ImportError:
+        pass
 
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
