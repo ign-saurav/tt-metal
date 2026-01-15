@@ -122,26 +122,33 @@ class TtCustomMSDeformableAttention:
 
         bs, num_query, _ = query.shape
         bs, num_value, _ = value.shape
-        # Verify spatial shapes - convert to torch for assertion
-        spatial_shapes_torch = ttnn.to_torch(spatial_shapes)
-        assert (spatial_shapes_torch[:, 0] * spatial_shapes_torch[:, 1]).sum() == num_value
+        # Verify spatial shapes using native TTNN operations (more efficient)
+        assert (ttnn.sum(spatial_shapes[:, 0] * spatial_shapes[:, 1])) == num_value
         value = ttnn.to_layout(value, ttnn.TILE_LAYOUT)
 
         value = ttnn.linear(value, params.value_proj.weight, bias=params.value_proj.bias)
+        # Deallocate value_proj parameters after use
+        ttnn.deallocate(params.value_proj.weight)
+        ttnn.deallocate(params.value_proj.bias)
         if key_padding_mask is not None:
             mask = key_padding_mask[..., None]
             value = ttnn.where(mask, ttnn.zeros_like(value), value)
         value = ttnn.reshape(value, (bs, num_value, self.num_heads, -1))
 
         query = ttnn.to_layout(query, ttnn.TILE_LAYOUT)
+        # Compute both linear operations using query before deallocating
         sampling_offsets = ttnn.linear(query, params.sampling_offsets.weight, bias=params.sampling_offsets.bias)
-        sampling_offsets = ttnn.reshape(
-            sampling_offsets, (bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
-        )
         attention_weights = ttnn.linear(query, params.attention_weights.weight, bias=params.attention_weights.bias)
+        # Now safe to deallocate query and weight parameters
+        ttnn.deallocate(params.sampling_offsets.weight)
+        ttnn.deallocate(params.sampling_offsets.bias)
         ttnn.deallocate(params.attention_weights.weight)
         ttnn.deallocate(params.attention_weights.bias)
         ttnn.deallocate(query)
+        # Reshape after deallocation
+        sampling_offsets = ttnn.reshape(
+            sampling_offsets, (bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
+        )
         attention_weights = ttnn.reshape(
             attention_weights, (bs, num_query, self.num_heads, self.num_levels * self.num_points)
         )
@@ -160,7 +167,6 @@ class TtCustomMSDeformableAttention:
             )
             sampling_offsets = ttnn.to_layout(sampling_offsets, ttnn.TILE_LAYOUT)
             offset_normalizer_xy = ttnn.to_layout(offset_normalizer_xy, ttnn.TILE_LAYOUT)
-            reference_xy = ttnn.to_layout(reference_xy, ttnn.TILE_LAYOUT)
             sampling_offsets = ttnn.squeeze(sampling_offsets, 0)
             sampling_offsets = ttnn.squeeze(sampling_offsets, 2)
             offset_normalizer_xy = ttnn.squeeze(offset_normalizer_xy, 0)
