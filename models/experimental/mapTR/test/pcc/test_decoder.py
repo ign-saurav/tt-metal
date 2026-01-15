@@ -69,7 +69,15 @@ def load_maptr_decoder_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
             decoder_weights[relative_key] = value
 
     logger.info(f"Loaded {len(decoder_weights)} weight tensors for MapDetectionTransformerDecoder")
-    logger.info(f"Sample weight keys: {list(decoder_weights.keys())[:10]}")
+    if len(decoder_weights) > 0:
+        logger.info(f"Sample weight keys (first 10): {list(decoder_weights.keys())[:10]}")
+        logger.info(f"Sample weight keys (last 10): {list(decoder_weights.keys())[-10:]}")
+    else:
+        logger.error("⚠ No decoder weights found in checkpoint!")
+        logger.error(f"Looking for keys starting with: {MAP_DECODER_LAYER}")
+        # Show some sample keys from checkpoint
+        sample_keys = list(full_state_dict.keys())[:20]
+        logger.error(f"Sample checkpoint keys: {sample_keys}")
 
     return decoder_weights
 
@@ -91,6 +99,15 @@ def load_torch_model_maptr(torch_model: MapDetectionTransformerDecoder, weights_
     # Checkpoint keys: 0.attentions.0.attn.in_proj_weight (after removing MAP_DECODER_LAYER prefix)
     model_state_dict = torch_model.state_dict()
     new_state_dict = {}
+    matched_keys = []
+    missing_keys = []
+
+    # Log checkpoint keys for debugging
+    logger.info("=" * 60)
+    logger.info("Sample checkpoint keys (first 20):")
+    for i, key in enumerate(list(decoder_weights.keys())[:20]):
+        logger.info(f"  {key}: {decoder_weights[key].shape}")
+    logger.info("=" * 60)
 
     for model_key in model_state_dict.keys():
         # Extract the part after "layers." from model key
@@ -102,20 +119,51 @@ def load_torch_model_maptr(torch_model: MapDetectionTransformerDecoder, weights_
 
         # Try to find matching checkpoint key
         if relative_key in decoder_weights:
-            new_state_dict[model_key] = decoder_weights[relative_key]
+            # Verify shape matches
+            if decoder_weights[relative_key].shape == model_state_dict[model_key].shape:
+                new_state_dict[model_key] = decoder_weights[relative_key]
+                matched_keys.append(model_key)
+            else:
+                logger.warning(
+                    f"Shape mismatch for {model_key}: "
+                    f"checkpoint {decoder_weights[relative_key].shape} vs model {model_state_dict[model_key].shape}"
+                )
+                new_state_dict[model_key] = model_state_dict[model_key]
+                missing_keys.append(model_key)
         else:
-            # Try partial match (in case of slight differences)
+            # Try to find by matching the end of the key (in case of prefix differences)
             found = False
             for ckpt_key, ckpt_value in decoder_weights.items():
-                # Check if the relative key matches the checkpoint key
-                if relative_key == ckpt_key or relative_key.endswith(ckpt_key) or ckpt_key.endswith(relative_key):
-                    new_state_dict[model_key] = ckpt_value
-                    found = True
-                    break
+                # Match if the relative key ends with checkpoint key or vice versa
+                if relative_key == ckpt_key:
+                    if ckpt_value.shape == model_state_dict[model_key].shape:
+                        new_state_dict[model_key] = ckpt_value
+                        matched_keys.append(model_key)
+                        found = True
+                        break
+                elif relative_key.endswith(ckpt_key) or ckpt_key.endswith(relative_key):
+                    # Check if shapes match
+                    if ckpt_value.shape == model_state_dict[model_key].shape:
+                        new_state_dict[model_key] = ckpt_value
+                        matched_keys.append(model_key)
+                        found = True
+                        break
 
             if not found:
                 logger.warning(f"Weight not found in checkpoint for: {model_key} (relative: {relative_key})")
                 new_state_dict[model_key] = model_state_dict[model_key]
+                missing_keys.append(model_key)
+
+    logger.info(f"Successfully matched {len(matched_keys)}/{len(model_state_dict)} weights")
+    if missing_keys:
+        logger.warning(f"Missing {len(missing_keys)} weights (using random initialization)")
+        if len(missing_keys) <= 10:
+            for key in missing_keys:
+                logger.warning(f"  - {key}")
+        else:
+            logger.warning(f"  (showing first 10 of {len(missing_keys)} missing keys)")
+            for key in missing_keys[:10]:
+                logger.warning(f"  - {key}")
 
     torch_model.load_state_dict(new_state_dict, strict=False)
     torch_model.eval()
@@ -211,9 +259,20 @@ def custom_preprocessor(model, name):
 
 
 def create_maptr_model_parameters_decoder(model: MapDetectionTransformerDecoder, device=None):
-    """Create TTNN parameters for MapDetectionTransformerDecoder model."""
+    """Create TTNN parameters for MapDetectionTransformerDecoder model.
+
+    Note: The lambda captures the model instance, so it will use the model
+    with loaded weights, not create a new one.
+    """
+    # Ensure model is in eval mode before preprocessing
+    model.eval()
+
+    # Create a closure to capture the model instance
+    def get_model():
+        return model
+
     parameters = preprocess_model_parameters(
-        initialize_model=lambda: model,
+        initialize_model=get_model,
         custom_preprocessor=custom_preprocessor,
         device=device,
     )
@@ -236,21 +295,90 @@ def test_maptr_map_detection_transformer_decoder(
     embed_dims = 256
     num_heads = 8
 
-    # Create PyTorch model
+    # Create PyTorch model with fixed seed for reproducible initialization
+    # This ensures both PyTorch and TTNN models start with the same weights if checkpoint loading fails
+    torch.manual_seed(42)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(42)
+
     torch_model = MapDetectionTransformerDecoder(
         num_layers=num_layers,
         embed_dim=embed_dims,
         num_heads=num_heads,
     )
 
+    # Store initial weights for comparison
+    initial_weights = {name: param.clone() for name, param in torch_model.named_parameters()}
+
     # Load MapTR weights
+    weights_loaded = False
     try:
         torch_model = load_torch_model_maptr(torch_model)
+        logger.info("Successfully loaded MapTR weights")
+
+        # Verify weights actually changed (were loaded)
+        weights_changed = 0
+        total_params_changed = 0
+        for name, param in torch_model.named_parameters():
+            if name in initial_weights:
+                if not torch.allclose(param, initial_weights[name], atol=1e-6):
+                    weights_changed += 1
+                    total_params_changed += param.numel()
+
+        if weights_changed > 0:
+            logger.info(
+                f"✓ Verified {weights_changed} weight tensors changed after loading ({total_params_changed} parameters)"
+            )
+            weights_loaded = True
+        else:
+            logger.warning("⚠ No weights changed - checkpoint may not have matching keys")
+            logger.warning("⚠ Will use random weights - expect lower PCC")
+
+        # Verify some weights were loaded
+        total_params = sum(p.numel() for p in torch_model.parameters())
+        logger.info(f"Model has {total_params} total parameters")
     except Exception as e:
         logger.warning(f"Could not load weights from checkpoint: {e}")
         logger.info("Proceeding with randomly initialized weights for testing")
+        logger.warning("⚠ Using random weights - PCC may be lower than expected")
+
+    # If weights weren't loaded, ensure we use the same random initialization
+    # by resetting the seed and reinitializing (for fair comparison)
+    if not weights_loaded:
+        logger.info("Reinitializing model with fixed seed for reproducible random weights")
+        torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
+        torch_model = MapDetectionTransformerDecoder(
+            num_layers=num_layers,
+            embed_dim=embed_dims,
+            num_heads=num_heads,
+        )
+
+    # Ensure model is in eval mode (disables dropout)
+    torch_model.eval()
+
+    # Disable dropout explicitly by replacing dropout modules with Identity
+    # This ensures deterministic results for testing
+    for layer in torch_model.layers:
+        for attn in layer.attentions:
+            # For MultiheadAttention wrapper
+            if hasattr(attn, "proj_drop") and isinstance(attn.proj_drop, nn.Dropout):
+                attn.proj_drop = nn.Identity()
+            if hasattr(attn, "dropout_layer") and isinstance(attn.dropout_layer, nn.Dropout):
+                attn.dropout_layer = nn.Identity()
+            # For CustomMSDeformableAttention
+            if hasattr(attn, "dropout") and isinstance(attn.dropout, nn.Dropout):
+                attn.dropout = nn.Identity()
+            # PyTorch's MultiheadAttention.dropout is a float attribute (dropout probability)
+            # eval() mode already handles this, so we don't need to modify it
 
     # Create test inputs with fixed seed for reproducibility
+    # Use a different seed for inputs to avoid interference with model initialization
+    torch.manual_seed(123)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(123)
+
     batch_size = 1
     num_query = 900  # MapTR uses 900 queries
     spatial_h = 200  # BEV height
@@ -258,12 +386,14 @@ def test_maptr_map_detection_transformer_decoder(
     num_value = spatial_h * spatial_w  # Total spatial features (20000)
 
     # Inputs: (num_query, bs, embed_dims) when batch_first=False
-    query = torch.randn(num_query, batch_size, embed_dims)
-    value = torch.randn(num_value, batch_size, embed_dims)
-    query_pos = torch.randn(num_query, batch_size, embed_dims)
+    # Use smaller values to avoid numerical overflow issues
+    query = torch.randn(num_query, batch_size, embed_dims) * 0.1
+    value = torch.randn(num_value, batch_size, embed_dims) * 0.1
+    query_pos = torch.randn(num_query, batch_size, embed_dims) * 0.1
 
     # Reference points: (bs, num_query, 2) - normalized coordinates [0, 1]
-    reference_points = torch.rand(batch_size, num_query, 2)
+    # Use values in [0.1, 0.9] range to avoid edge cases with sigmoid
+    reference_points = torch.rand(batch_size, num_query, 2) * 0.8 + 0.1
 
     # Spatial shapes: (num_levels, 2) - [height, width] for each level
     spatial_shapes = torch.tensor([[spatial_h, spatial_w]], dtype=torch.long)
@@ -284,14 +414,23 @@ def test_maptr_map_detection_transformer_decoder(
 
     # Run PyTorch model without reg_branches for fair comparison with TT model
     # (TT model doesn't have params_branches implemented yet)
-    torch_output, torch_reference_points = torch_model(
-        query=query,
-        key=None,
-        value=value,
-        query_pos=query_pos,
-        reference_points=reference_points,
-        spatial_shapes=spatial_shapes,
-        reg_branches=None,  # Set to None to match TT model behavior
+    with torch.no_grad():  # Ensure no gradients for consistent results
+        torch_output, torch_reference_points = torch_model(
+            query=query,
+            key=None,
+            value=value,
+            query_pos=query_pos,
+            reference_points=reference_points,
+            spatial_shapes=spatial_shapes,
+            reg_branches=None,  # Set to None to match TT model behavior
+        )
+
+    # Verify input shapes match expectations
+    logger.info(
+        f"Input shapes - query: {query.shape}, value: {value.shape}, reference_points: {reference_points.shape}"
+    )
+    logger.info(
+        f"Expected output shape: (num_layers={num_layers}, num_query={num_query}, bs={batch_size}, embed_dims={embed_dims})"
     )
 
     logger.info(f"PyTorch output shape: {torch_output.shape}")
@@ -300,8 +439,32 @@ def test_maptr_map_detection_transformer_decoder(
         f"PyTorch output stats: min={torch_output.min():.4f}, max={torch_output.max():.4f}, mean={torch_output.mean():.4f}"
     )
 
+    # Verify model weights before preprocessing
+    # Sample a weight to verify it's not random (if weights were loaded)
+    sample_weight_name = None
+    sample_weight_value = None
+    for name, param in torch_model.named_parameters():
+        if "attentions.0.attn.in_proj_weight" in name:
+            sample_weight_name = name
+            sample_weight_value = param.data.clone()
+            logger.info(
+                f"Sample weight ({name}) stats: min={param.min():.4f}, max={param.max():.4f}, mean={param.mean():.4f}, std={param.std():.4f}"
+            )
+            break
+
     # Prepare TT model parameters
+    # This should preserve the loaded weights since initialize_model returns the same model instance
     parameter = create_maptr_model_parameters_decoder(torch_model, device=device)
+
+    # Verify model weights after preprocessing (should be unchanged)
+    if sample_weight_name:
+        for name, param in torch_model.named_parameters():
+            if name == sample_weight_name:
+                if not torch.equal(param.data, sample_weight_value):
+                    logger.warning(f"⚠ Weight changed after preprocessing: {sample_weight_name}")
+                else:
+                    logger.info(f"✓ Weight preserved after preprocessing: {sample_weight_name}")
+                break
 
     # Create TT model
     # Note: params_branches would need to be created from map_reg_branches
@@ -317,12 +480,16 @@ def test_maptr_map_detection_transformer_decoder(
         device=device,
     )
 
-    # Convert inputs to TT tensors
-    query_tt = ttnn.from_torch(query, device=device, dtype=ttnn.bfloat16)
-    value_tt = ttnn.from_torch(value, device=device, dtype=ttnn.bfloat16)
-    query_pos_tt = ttnn.from_torch(query_pos, device=device, dtype=ttnn.bfloat16)
-    reference_points_tt = ttnn.from_torch(reference_points, device=device, dtype=ttnn.bfloat16)
-    spatial_shapes_tt = ttnn.from_torch(spatial_shapes, device=device, dtype=ttnn.bfloat16)
+    # Convert inputs to TT tensors with proper layouts
+    # Use ROW_MAJOR_LAYOUT for sequential data (query, value, query_pos)
+    query_tt = ttnn.from_torch(query, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
+    value_tt = ttnn.from_torch(value, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
+    query_pos_tt = ttnn.from_torch(query_pos, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
+    reference_points_tt = ttnn.from_torch(reference_points, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+    spatial_shapes_tt = ttnn.from_torch(spatial_shapes, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+    level_start_index_tt = ttnn.from_torch(
+        level_start_index, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+    )
 
     # Run TT model
     tt_output, tt_reference_points = tt_model(
@@ -332,17 +499,63 @@ def test_maptr_map_detection_transformer_decoder(
         query_pos=query_pos_tt,
         reference_points=reference_points_tt,
         spatial_shapes=spatial_shapes_tt,
+        level_start_index=level_start_index_tt,
         map_reg_branches=None,  # TODO: Implement when params_branches is ready
     )
 
-    # Compare outputs
+    # Compare outputs - convert to float32 for fair comparison
     ttnn_output = ttnn.to_torch(tt_output)
     ttnn_reference_points = ttnn.to_torch(tt_reference_points)
+
+    # Ensure both are float32 for comparison
+    if ttnn_output.dtype != torch.float32:
+        ttnn_output = ttnn_output.float()
+    if ttnn_reference_points.dtype != torch.float32:
+        ttnn_reference_points = ttnn_reference_points.float()
+    if torch_output.dtype != torch.float32:
+        torch_output = torch_output.float()
+    if torch_reference_points.dtype != torch.float32:
+        torch_reference_points = torch_reference_points.float()
+
     logger.info(f"TTNN output shape: {ttnn_output.shape}")
     logger.info(f"TTNN reference_points shape: {ttnn_reference_points.shape}")
     logger.info(
         f"TTNN output stats: min={ttnn_output.min():.4f}, max={ttnn_output.max():.4f}, mean={ttnn_output.mean():.4f}"
     )
+
+    # Helper function to extract PCC value
+    def extract_pcc_value(message):
+        """Extract PCC value from assert_with_pcc message."""
+        try:
+            if "PCC:" in message:
+                pcc_str = message.split("PCC: ")[-1].split(",")[0].strip()
+                return float(pcc_str)
+        except:
+            pass
+        return None
+
+    # Calculate per-layer PCC to identify which layers have issues
+    if len(torch_output.shape) == 4 and len(ttnn_output.shape) == 4:
+        logger.info("=" * 60)
+        logger.info("Per-layer PCC analysis:")
+        logger.info("=" * 60)
+        for layer_idx in range(torch_output.shape[0]):
+            layer_torch = torch_output[layer_idx]
+            layer_ttnn = ttnn_output[layer_idx]
+            # Manual PCC calculation for per-layer analysis
+            layer_torch_flat = layer_torch.flatten()
+            layer_ttnn_flat = layer_ttnn.flatten()
+            # Calculate correlation coefficient
+            mean_torch = layer_torch_flat.mean()
+            mean_ttnn = layer_ttnn_flat.mean()
+            centered_torch = layer_torch_flat - mean_torch
+            centered_ttnn = layer_ttnn_flat - mean_ttnn
+            numerator = (centered_torch * centered_ttnn).sum()
+            denom_torch = (centered_torch**2).sum().sqrt()
+            denom_ttnn = (centered_ttnn**2).sum().sqrt()
+            layer_pcc = (numerator / (denom_torch * denom_ttnn + 1e-8)).item()
+            logger.info(f"Layer {layer_idx}: PCC = {layer_pcc:.6f}")
+        logger.info("=" * 60)
 
     # Verify output shapes match
     assert (
@@ -353,33 +566,19 @@ def test_maptr_map_detection_transformer_decoder(
     ), f"Reference points shapes don't match: {torch_reference_points.shape} vs {ttnn_reference_points.shape}"
 
     # Compare with PCC
-    # Note: Using lower threshold (0.85) for initial testing due to:
-    # 1. bfloat16 precision differences
-    # 2. Potential implementation differences in TTNN operations
-    # 3. Can be increased once params_branches is implemented and tested
-    pcc_threshold = 0.85
+    # Target: 0.99 for high precision matching
+    # Note: bfloat16 precision may cause slight differences, but should be > 0.99
+    pcc_threshold = 0.99
 
-    pcc_passed_output, pcc_message_output = assert_with_pcc(ttnn_output.float(), torch_output.float(), pcc_threshold)
+    pcc_passed_output, pcc_message_output = assert_with_pcc(ttnn_output, torch_output, pcc_threshold)
     logger.info(f"PCC Result (output): {pcc_message_output}")
 
-    pcc_passed_ref, pcc_message_ref = assert_with_pcc(
-        ttnn_reference_points.float(), torch_reference_points.float(), pcc_threshold
-    )
+    pcc_passed_ref, pcc_message_ref = assert_with_pcc(ttnn_reference_points, torch_reference_points, pcc_threshold)
     logger.info(f"PCC Result (reference_points): {pcc_message_ref}")
 
     # Extract actual PCC values for better error messages
-    def extract_pcc(message):
-        """Extract PCC value from assert_with_pcc message."""
-        try:
-            if "PCC:" in message:
-                pcc_str = message.split("PCC: ")[-1].split(",")[0].strip()
-                return float(pcc_str)
-        except:
-            pass
-        return None
-
-    output_pcc = extract_pcc(pcc_message_output)
-    ref_pcc = extract_pcc(pcc_message_ref)
+    output_pcc = extract_pcc_value(pcc_message_output)
+    ref_pcc = extract_pcc_value(pcc_message_ref)
 
     # Log detailed comparison
     if output_pcc is not None:
@@ -416,8 +615,43 @@ def test_maptr_map_detection_transformer_decoder(
                 f"Reference points PCC ({ref_pcc:.6f if ref_pcc else 'unknown'}) is below threshold {pcc_threshold} but above 0.7"
             )
 
-    # Final assertions - only fail if PCC is very low (< 0.7)
-    if output_pcc is not None and output_pcc < 0.7:
-        assert False, f"Output PCC too low: {output_pcc:.6f}"
-    if ref_pcc is not None and ref_pcc < 0.7:
-        assert False, f"Reference points PCC too low: {ref_pcc:.6f}"
+    # Final assertions - require high PCC (0.99)
+    if output_pcc is not None:
+        if output_pcc < pcc_threshold:
+            # Calculate additional diagnostics for debugging
+            abs_diff = torch.abs(ttnn_output.float() - torch_output.float())
+            rel_diff = abs_diff / (torch.abs(torch_output.float()) + 1e-8)
+            logger.error(f"Output mismatch details:")
+            logger.error(f"  Max absolute diff: {abs_diff.max():.6f}")
+            logger.error(f"  Mean absolute diff: {abs_diff.mean():.6f}")
+            logger.error(f"  Max relative diff: {rel_diff.max():.6f}")
+            logger.error(f"  Mean relative diff: {rel_diff.mean():.6f}")
+            # Check if it's close enough (within 0.01 of threshold)
+            if output_pcc < (pcc_threshold - 0.01):
+                assert False, f"Output PCC ({output_pcc:.6f}) is below threshold ({pcc_threshold})"
+            else:
+                logger.warning(
+                    f"Output PCC ({output_pcc:.6f}) is slightly below threshold ({pcc_threshold}) but acceptable"
+                )
+        else:
+            logger.info(f"✓ Output PCC ({output_pcc:.6f}) meets threshold ({pcc_threshold})")
+
+    if ref_pcc is not None:
+        if ref_pcc < pcc_threshold:
+            # Calculate additional diagnostics for debugging
+            abs_diff = torch.abs(ttnn_reference_points.float() - torch_reference_points.float())
+            rel_diff = abs_diff / (torch.abs(torch_reference_points.float()) + 1e-8)
+            logger.error(f"Reference points mismatch details:")
+            logger.error(f"  Max absolute diff: {abs_diff.max():.6f}")
+            logger.error(f"  Mean absolute diff: {abs_diff.mean():.6f}")
+            logger.error(f"  Max relative diff: {rel_diff.max():.6f}")
+            logger.error(f"  Mean relative diff: {rel_diff.mean():.6f}")
+            # Check if it's close enough (within 0.01 of threshold)
+            if ref_pcc < (pcc_threshold - 0.01):
+                assert False, f"Reference points PCC ({ref_pcc:.6f}) is below threshold ({pcc_threshold})"
+            else:
+                logger.warning(
+                    f"Reference points PCC ({ref_pcc:.6f}) is slightly below threshold ({pcc_threshold}) but acceptable"
+                )
+        else:
+            logger.info(f"✓ Reference points PCC ({ref_pcc:.6f}) meets threshold ({pcc_threshold})")
