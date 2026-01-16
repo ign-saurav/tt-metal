@@ -13,7 +13,6 @@ import torch.utils.checkpoint as cp
 from mmcv.cnn import build_conv_layer, build_norm_layer, build_plugin_layer
 from mmengine.model import BaseModule
 from torch.nn.modules.batchnorm import _BatchNorm
-from models.experimental.BevDepth.reference.registry import MODELS
 from models.experimental.BevDepth.reference.res_layer import ResLayer
 from models.experimental.BevDepth.reference.builder import BACKBONES, MODELS
 

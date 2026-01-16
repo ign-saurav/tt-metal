@@ -6,7 +6,7 @@
 ########################################################
 
 from torch import nn
-from models.experimental.BevDepth.reference.registry import CONV_LAYERS
+from models.experimental.BevDepth.reference.builder import CONV_LAYERS
 
 CONV_LAYERS.register_module("Conv1d", module=nn.Conv1d)
 CONV_LAYERS.register_module("Conv2d", module=nn.Conv2d)
