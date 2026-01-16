@@ -446,6 +446,7 @@ class Generator:
             if self.data_parallel > 1:
                 out_list.append(logits)
             else:
+                logits = ttnn.from_device(logits)
                 output_logits[idx] = self.model[model_id].process_output_prefill(
                     logits, last_token_idx=(last_token_idx % 32)
                 )
@@ -1166,7 +1167,7 @@ class Generator:
         Input tt_out is a list of ttnn device tensors
         """
         if not async_read:
-            return [out.cpu() for out in tt_out]
+            return [out[0].cpu() for out in tt_out]
 
         host_outputs = []
         read_events = []

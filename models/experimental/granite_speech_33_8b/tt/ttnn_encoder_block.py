@@ -482,35 +482,72 @@ class GraniteSpeechConformerDepthWiseConv1dTTNN:
         """Load and convert PyTorch weights to TTNN format."""
         # PyTorch weights: [out_channels, in_channels, kernel_size]
         # For depthwise: [chan_out, 1, kernel_size] with groups=chan_in
-        self.weight_tensor = ttnn.from_torch(torch_weights, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
+        self.weight_tensor = ttnn.from_torch(
+            torch_weights, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         batch_size, length, channels = hidden_states.shape
 
-        # Call TTNN conv1d
-        [tt_output_tensor, out_length, [weights_device, _]] = ttnn.conv1d(
-            input_tensor=hidden_states,
-            weight_tensor=self.weight_tensor,
-            in_channels=self.chan_in,
-            out_channels=self.chan_out,
-            device=self.device,
-            bias_tensor=None,
-            kernel_size=self.kernel_size,
-            stride=1,
-            padding=self.padding,
-            batch_size=batch_size,
-            input_length=length,
-            conv_config=self.conv_config,
-            compute_config=self.compute_config,
-            groups=self.chan_in,
-            dtype=ttnn.bfloat16,
-            return_output_dim=True,
-            return_weights_and_bias=True,
-        )
+        # Split hidden_states along last dimension (channels) into num_splits pieces
+        num_splits = 16
+        hidden_states_splits = ttnn.chunk(hidden_states, num_splits, dim=-1)
 
-        tt_output_tensor = ttnn.from_device(tt_output_tensor)
+        # Split weight_tensor along first dimension (output channels) into num_splits pieces
+        weight_splits = ttnn.chunk(self.weight_tensor, num_splits, dim=0)
+
+        # Calculate channels per split
+        channels_per_split = channels // num_splits
+        chan_out_per_split = self.chan_out // num_splits
+
+        # Run conv1d num_splits times with split tensors
+        output_splits = []
+        for i in range(num_splits):
+            hidden_states_split = hidden_states_splits[i]
+            weight_split = weight_splits[i]
+
+            [tt_output_tensor, out_length, [weights_device, _]] = ttnn.conv1d(
+                input_tensor=hidden_states_split,
+                weight_tensor=weight_split,
+                in_channels=channels_per_split,
+                out_channels=chan_out_per_split,
+                device=self.device,
+                bias_tensor=None,
+                kernel_size=self.kernel_size,
+                stride=1,
+                padding=self.padding,
+                batch_size=batch_size,
+                input_length=length,
+                conv_config=self.conv_config,
+                compute_config=self.compute_config,
+                groups=channels_per_split,
+                dtype=ttnn.bfloat16,
+                return_output_dim=True,
+                return_weights_and_bias=True,
+                # memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
+
+            # Process output tensor
+            tt_output_tensor = ttnn.from_device(tt_output_tensor)
+            tt_output_tensor = ttnn.reshape(tt_output_tensor, (batch_size, out_length, chan_out_per_split))
+            tt_output_tensor = ttnn.to_device(tt_output_tensor, self.device)
+            tt_output_tensor = ttnn.permute(tt_output_tensor, (0, 2, 1))
+            output_splits.append(tt_output_tensor)
+
+        # Combine all num_splits outputs into single tensor along channel dimension
+        # First, permute back to (batch_size, length, channels) format for concatenation
+        output_splits_reshaped = []
+        for output_split in output_splits:
+            # output_split is (batch_size, chan_out_per_split, out_length)
+            # Reshape to (batch_size, out_length, chan_out_per_split) for concat
+            output_reshaped = ttnn.permute(output_split, (0, 2, 1))
+            output_splits_reshaped.append(output_reshaped)
+
+        # Concatenate along channel dimension (dim=-1)
+        tt_output_tensor = ttnn.concat(output_splits_reshaped, dim=-1)
+
+        # Final reshape and permute to match original output format
         tt_output_tensor = ttnn.reshape(tt_output_tensor, (batch_size, out_length, self.chan_out))
-        tt_output_tensor = ttnn.to_device(tt_output_tensor, self.device)
         tt_output_tensor = ttnn.permute(tt_output_tensor, (0, 2, 1))
         return tt_output_tensor
 
