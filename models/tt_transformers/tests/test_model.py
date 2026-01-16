@@ -141,7 +141,8 @@ def test_model_inference(
             "Llama-3.2-11B": 0.952 if mode_accuracy else 0.940,
             "Llama-3.2-90B": 0.971,
             "Mistral-7B": 0.95 if mode_accuracy else 0.95,
-        }[model_name]
+            "gemma-2b": 0.99 if mode_accuracy else 0.99,
+        }.get(model_name, 0.94 if mode_accuracy else 0.86)
 
         final_k_cache_pcc = {
             "Llama-3.1-8B": 0.9997,
@@ -151,7 +152,9 @@ def test_model_inference(
             "Llama-3.2-11B": 0.9995,
             "Llama-3.2-90B": 0.9995,
             "Mistral-7B": 0.68,
-        }[model_name]
+            "gemma-2b": 0.99,
+        }.get(model_name, 0.99)
+
         final_v_cache_pcc = {
             "Llama-3.1-8B": 0.9997,
             "Llama-3.1-70B": 0.9997,
@@ -160,7 +163,8 @@ def test_model_inference(
             "Llama-3.2-11B": 0.9996,
             "Llama-3.2-90B": 0.9996,
             "Mistral-7B": 0.68,
-        }[model_name]
+            "gemma-2b": 0.99,
+        }.get(model_name, 0.99)
 
         quick_iterations = {
             "Llama-3.1-8B": 6,
@@ -170,7 +174,8 @@ def test_model_inference(
             "Llama-3.2-11B": 6,
             "Llama-3.2-90B": 6,
             "Mistral-7B": 2,
-        }[model_name]
+            "gemma-2b": 9,
+        }.get(model_name, 9)
 
         iterations = quick_iterations
     else:

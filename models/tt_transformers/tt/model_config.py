@@ -1471,6 +1471,12 @@ class ModelArgs:
 
         # Support input on device
         if torch.is_tensor(x):  # Input on host -> Use torch
+            #######################this is done by me n ned to revisit this
+            # For models like Gemma that scale embeddings, apply scaling to pre-embedded inputs
+            # This matches what the reference model does in its forward pass
+            if self.embed_scale is not None and self.embed_scale != 1.0:
+                x = x * self.embed_scale
+
             x = x.transpose(0, 1).unsqueeze(1)  # [seq_len, 1, batch, dim]
             # Pad small batches to 32
             if batch < 32:
@@ -1504,6 +1510,10 @@ class ModelArgs:
         S: sequence len
         H: dim
         """
+        # For models like Gemma that scale embeddings, apply scaling to pre-embedded inputs
+        # This matches what the reference model does in its forward pass
+        if torch.is_tensor(x_bsh) and self.embed_scale is not None and self.embed_scale != 1.0:
+            x_bsh = x_bsh * self.embed_scale
 
         x_1BSH = x_bsh.unsqueeze(0)
         dims = (None, None) if force_replicated else (None, -1)
