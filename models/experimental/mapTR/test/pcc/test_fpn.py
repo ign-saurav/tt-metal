@@ -116,22 +116,22 @@ def test_maptr_fpn(device, reset_seeds):
     fpn_input_h = input_height
     fpn_input_w = input_width
 
-    lateral_weight_torch = torch_model.lateral_convs[0].conv.weight.data
+    lateral_weight_torch = torch_model.lateral_convs.conv.weight.data
     lateral_weight_ttnn = ttnn.from_torch(lateral_weight_torch, dtype=ttnn.float32)
     lateral_bias_ttnn = None
-    if torch_model.lateral_convs[0].conv.bias is not None:
-        lateral_bias_torch = torch_model.lateral_convs[0].conv.bias.data
+    if torch_model.lateral_convs.conv.bias is not None:
+        lateral_bias_torch = torch_model.lateral_convs.conv.bias.data
         lateral_bias_ttnn = ttnn.from_torch(lateral_bias_torch.reshape(1, 1, 1, -1), dtype=ttnn.float32)
 
-    fpn_weight_torch = torch_model.fpn_convs[0].conv.weight.data
+    fpn_weight_torch = torch_model.fpn_convs.conv.weight.data
     fpn_weight_ttnn = ttnn.from_torch(fpn_weight_torch, dtype=ttnn.float32)
     fpn_bias_ttnn = None
-    if torch_model.fpn_convs[0].conv.bias is not None:
-        fpn_bias_torch = torch_model.fpn_convs[0].conv.bias.data
+    if torch_model.fpn_convs.conv.bias is not None:
+        fpn_bias_torch = torch_model.fpn_convs.conv.bias.data
         fpn_bias_ttnn = ttnn.from_torch(fpn_bias_torch.reshape(1, 1, 1, -1), dtype=ttnn.float32)
 
     lateral_conv_config = create_conv_config_from_conv(
-        conv=torch_model.lateral_convs[0].conv,
+        conv=torch_model.lateral_convs.conv,
         input_height=lateral_input_h,
         input_width=lateral_input_w,
         batch_size=batch_size,
@@ -141,7 +141,7 @@ def test_maptr_fpn(device, reset_seeds):
     )
 
     fpn_conv_config = create_conv_config_from_conv(
-        conv=torch_model.fpn_convs[0].conv,
+        conv=torch_model.fpn_convs.conv,
         input_height=fpn_input_h,
         input_width=fpn_input_w,
         batch_size=batch_size,

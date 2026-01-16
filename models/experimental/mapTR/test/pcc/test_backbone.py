@@ -9,7 +9,7 @@ from loguru import logger
 import ttnn
 from models.experimental.mapTR.reference import pytorch_resnet as backbone
 from models.experimental.mapTR.reference.pytorch_resnet import ResNet
-from models.experimental.mapTR.tt import backbone as tt_backbone
+from models.experimental.mapTR.tt import ttcnn_backbone as tt_backbone
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (
     infer_ttnn_module_args,
@@ -181,7 +181,7 @@ def test_maptr_backbone(
     parameter = create_maptr_model_parameters(torch_model, torch_input, device=device)
 
     # Create TT model
-    ttnn_model = tt_backbone.TtResnet50(parameter.conv_args, parameter.res_model, device)
+    ttnn_model = tt_backbone.TtResNet50(parameter.conv_args, parameter.res_model, device)
 
     # Run TT model
     ttnn_output = ttnn_model(ttnn_input_tensor, batch_size=6)[0]
