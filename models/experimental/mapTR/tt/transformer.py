@@ -10,6 +10,7 @@ import torch
 import torch.nn as nn
 import numpy as np
 from typing import List, Optional, Tuple
+from torchvision.transforms.functional import rotate as torch_rotate
 
 
 class TtConvFuser(nn.Module):
@@ -224,9 +225,16 @@ class TtMapTRPerceptionTransformer(nn.Module):
                 prev_bev = ttnn.permute(prev_bev, [1, 0, 2])
 
             if self.rotate_prev_bev:
-                # Rotation logic would need custom TTNN implementation
-                # For now, keeping same structure
-                pass
+                # Rotate previous BEV features based on ego motion
+                # Fallback to PyTorch
+                prev_bev_torch = ttnn.to_torch(prev_bev)  # (bev_h*bev_w, bs, embed_dims)
+                for i in range(bs):
+                    rotation_angle = img_metas[i].get("can_bus", np.zeros(18))[-1]
+                    tmp_prev_bev = prev_bev_torch[:, i].reshape(bev_h, bev_w, -1).permute(2, 0, 1)
+                    tmp_prev_bev = torch_rotate(tmp_prev_bev, rotation_angle, center=self.rotate_center)
+                    tmp_prev_bev = tmp_prev_bev.permute(1, 2, 0).reshape(bev_h * bev_w, 1, -1)
+                    prev_bev_torch[:, i] = tmp_prev_bev[:, 0]
+                prev_bev = ttnn.from_torch(prev_bev_torch, dtype=ttnn.bfloat16, device=self.device)
 
         # Process CAN bus signals
         can_bus_torch = torch.stack([each.get("can_bus", np.zeros(18)) for each in img_metas])

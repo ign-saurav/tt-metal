@@ -190,9 +190,8 @@ class MapTRHead(nn.Module):
         # Number of prediction layers
         # Last reg_branch is used to generate proposal from encode feature map
         # when as_two_stage is True.
-        num_pred = (
-            (self.transformer.decoder.num_layers + 1) if self.as_two_stage else self.transformer.decoder.num_layers
-        )
+        num_decoder_layers = len(self.transformer.decoder.layers)
+        num_pred = (num_decoder_layers + 1) if self.as_two_stage else num_decoder_layers
 
         if self.with_box_refine:
             self.cls_branches = _get_clones(fc_cls, num_pred)
