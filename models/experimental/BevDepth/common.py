@@ -16,7 +16,7 @@ from models.experimental.BevDepth.tt.ttnn_bevdepth import TtBEVDepth
 def download_bevdepth_weights():
     """Download BEVDepth pretrained weights"""
     url = "https://github.com/Megvii-BaseDetection/BEVDepth/releases/download/v0.0.2/bev_depth_lss_r50_256x704_128x128_24e_2key.pth"
-    weights_path = "models/experimental/BevDepth/resources/checkpoints/bevdepth_weights.pth"
+    weights_path = "models/experimental/BevDepth/resources/bevdepth_weights.pth"
 
     if not os.path.exists(weights_path):
         logger.info(f"Downloading weights from {url}")

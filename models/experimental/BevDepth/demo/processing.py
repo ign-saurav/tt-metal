@@ -520,12 +520,16 @@ def load_lidar_points(info):
         info: Sample information dictionary containing LiDAR info
 
     Returns:
-        points: LiDAR points in ego frame [N, 4]
+        points: LiDAR points in ego frame [N, 4], or None if LIDAR file not found
     """
     lidar_path = info["lidar_infos"]["LIDAR_TOP"]["filename"]
-    lidar_points = np.fromfile(os.path.join(RESOURCES_DIR, lidar_path), dtype=np.float32, count=-1).reshape(-1, 5)[
-        ..., :4
-    ]
+    lidar_full_path = os.path.join(RESOURCES_DIR, lidar_path)
+
+    # Return None if LIDAR file doesn't exist (optional for visualization)
+    if not os.path.exists(lidar_full_path):
+        return None
+
+    lidar_points = np.fromfile(lidar_full_path, dtype=np.float32, count=-1).reshape(-1, 5)[..., :4]
     lidar_calibrated_sensor = info["lidar_infos"]["LIDAR_TOP"]["calibrated_sensor"]
 
     pts = LidarPointCloud(lidar_points.T)
@@ -809,6 +813,60 @@ def get_gt_corners(info, ego2global_rotation, ego2global_translation, show_range
     return gt_corners
 
 
+def draw_ego_vehicle(ax):
+    """
+    Draw ego vehicle marker and reference elements on BEV plot.
+
+    Args:
+        ax: Matplotlib axis to draw on
+    """
+    import matplotlib.pyplot as plt
+    from matplotlib.patches import Polygon
+
+    # Draw ego vehicle as a car shape (top-down view)
+    # Car dimensions: ~4.5m long, ~2m wide
+    car_length = 4.5
+    car_width = 2.0
+    car_vertices = [
+        (-car_width / 2, -car_length / 2),  # rear left
+        (-car_width / 2, car_length / 2),  # front left
+        (0, car_length / 2 + 0.5),  # front center (hood point)
+        (car_width / 2, car_length / 2),  # front right
+        (car_width / 2, -car_length / 2),  # rear right
+    ]
+    ego_car = Polygon(car_vertices, closed=True, facecolor="lime", edgecolor="darkgreen", linewidth=2, zorder=10)
+    ax.add_patch(ego_car)
+
+    # Draw direction arrow
+    ax.annotate("", xy=(0, 8), xytext=(0, 3), arrowprops=dict(arrowstyle="->", color="darkgreen", lw=2), zorder=11)
+
+    # Draw FOV lines for cameras (approximate 6-camera surround view)
+    fov_length = 35  # meters
+    # Front cameras FOV
+    ax.plot([0, -15], [0, fov_length], "g--", alpha=0.3, linewidth=1)
+    ax.plot([0, 15], [0, fov_length], "g--", alpha=0.3, linewidth=1)
+    # Rear cameras FOV
+    ax.plot([0, -15], [0, -fov_length], "g--", alpha=0.3, linewidth=1)
+    ax.plot([0, 15], [0, -fov_length], "g--", alpha=0.3, linewidth=1)
+    # Side cameras FOV
+    ax.plot([0, -fov_length], [0, 10], "g--", alpha=0.3, linewidth=1)
+    ax.plot([0, -fov_length], [0, -10], "g--", alpha=0.3, linewidth=1)
+    ax.plot([0, fov_length], [0, 10], "g--", alpha=0.3, linewidth=1)
+    ax.plot([0, fov_length], [0, -10], "g--", alpha=0.3, linewidth=1)
+
+    # Add grid for distance reference
+    ax.grid(True, alpha=0.3, linestyle="--")
+
+    # Add distance circles
+    for radius in [10, 20, 30]:
+        circle = plt.Circle((0, 0), radius, fill=False, color="gray", linestyle=":", alpha=0.5)
+        ax.add_patch(circle)
+        ax.text(radius + 1, 1, f"{radius}m", fontsize=8, color="gray", alpha=0.7)
+
+    # Label ego vehicle
+    ax.text(0, -5, "EGO", fontsize=9, ha="center", color="darkgreen", fontweight="bold")
+
+
 def visualize_results(
     info,
     pts,
@@ -887,7 +945,11 @@ def visualize_results(
         ax_bev_torch.set_xlim(-40, 40)
         ax_bev_torch.set_ylim(-40, 40)
 
-        ax_bev_torch.scatter(-pts[:, 1], pts[:, 0], s=0.01, c=pts[:, -1], cmap="gray")
+        if pts is not None:
+            ax_bev_torch.scatter(-pts[:, 1], pts[:, 0], s=0.01, c=pts[:, -1], cmap="gray")
+
+        # Draw ego vehicle and reference elements
+        draw_ego_vehicle(ax_bev_torch)
 
         for corners in gt_corners:
             lines = get_bev_lines(corners)
@@ -945,7 +1007,11 @@ def visualize_results(
         ax_bev_ttnn.set_xlim(-40, 40)
         ax_bev_ttnn.set_ylim(-40, 40)
 
-        ax_bev_ttnn.scatter(-pts[:, 1], pts[:, 0], s=0.01, c=pts[:, -1], cmap="gray")
+        if pts is not None:
+            ax_bev_ttnn.scatter(-pts[:, 1], pts[:, 0], s=0.01, c=pts[:, -1], cmap="gray")
+
+        # Draw ego vehicle and reference elements
+        draw_ego_vehicle(ax_bev_ttnn)
 
         # Always show ground truth in TTNN visualization
         for corners in gt_corners:

@@ -6,7 +6,7 @@
 # Copyright (c) Megvii Inc. All rights reserved.
 ########################################################
 
-from pytorch_lightning.core import LightningModule
+from pytorch_lightning import LightningModule
 from models.experimental.BevDepth.reference.base_bev_depth import BaseBEVDepth
 
 H = 900

@@ -37,8 +37,7 @@ models/
 └── experimental/
     └── BevDepth/
         ├── resources/
-        │   ├── checkpoints/
-        │   │   └── bevdepth_weights.pth      # Model checkpoint (auto-downloaded)
+        │   └── bevdepth_weights.pth           # Model checkpoint (auto-downloaded)
         │   └── nuScenes/
         │       └── samples/                   # Sample camera images (6 cameras)
         │           ├── CAM_BACK/
@@ -105,7 +104,7 @@ BEVDepth pretrained weights are automatically downloaded when running the model.
 
 - **Model:** `bev_depth_lss_r50_256x704_128x128_24e_2key`
 - **Download URL:** <https://github.com/Megvii-BaseDetection/BEVDepth/releases/download/v0.0.2/bev_depth_lss_r50_256x704_128x128_24e_2key.pth>
-- **Checkpoint Location:** `resources/checkpoints/bevdepth_weights.pth` (auto-downloaded)
+- **Checkpoint Location:** `resources/bevdepth_weights.pth` (auto-downloaded)
 
 Note: The weights are trained on the nuScenes dataset.
 
