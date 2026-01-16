@@ -2,25 +2,21 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-TTNN FPN (Feature Pyramid Network) using the tt_cnn format.
-"""
-
 from typing import Tuple
 
 import ttnn
 
-from models.experimental.mapTR.tt.common import Conv2dConfig, TtConv2d
+from models.tt_cnn.tt.builder import TtConv2d, Conv2dConfiguration
 
 
 class TtConvModule:
-    """TTNN ConvModule wrapper for FPN using tt_cnn format."""
+    """TTNN ConvModule wrapper for FPN."""
 
-    def __init__(self, config: Conv2dConfig, device: ttnn.Device):
+    def __init__(self, config: Conv2dConfiguration, device: ttnn.Device):
         """Initialize the ConvModule.
 
         Args:
-            config: Conv2dConfig for the convolution layer
+            config: Conv2dConfiguration for the convolution layer
             device: TTNN device
         """
         self.device = device
@@ -35,17 +31,16 @@ class TtConvModule:
         Returns:
             Output tensor
         """
-        x, _, _ = self.conv(x)
-        return x
+        return self.conv(x)
 
 
 class TtFPN:
-    """TTNN FPN (Feature Pyramid Network) using tt_cnn format."""
+    """TTNN FPN (Feature Pyramid Network)."""
 
     def __init__(
         self,
-        lateral_conv_config: Conv2dConfig,
-        fpn_conv_config: Conv2dConfig,
+        lateral_conv_config: Conv2dConfiguration,
+        fpn_conv_config: Conv2dConfiguration,
         device: ttnn.Device,
     ):
         """Initialize the FPN.
