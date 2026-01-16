@@ -429,6 +429,8 @@ class MapTRHead(nn.Module):
         for i in range(num_samples):
             # Get scores and labels
             cls_score = cls_scores[i]  # (num_vec, num_classes)
+            # Apply sigmoid to convert logits to probabilities
+            cls_score = cls_score.sigmoid()
             scores, labels = cls_score.max(dim=-1)  # (num_vec,), (num_vec,)
 
             # Denormalize bboxes

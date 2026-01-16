@@ -59,16 +59,16 @@ class FPN(nn.Module):
         self.start_level = start_level
         self.end_level = end_level
         self.add_extra_convs = add_extra_convs
-        self.lateral_convs = nn.ModuleList()
-        self.fpn_convs = nn.ModuleList()
         self.fp16_enabled = True
-        self.lateral_convs = ConvModule(in_channels[0], out_channels, kernel_size=1, stride=1)
-        self.fpn_convs = ConvModule(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
+
+        # Use ModuleList to match checkpoint key structure: lateral_convs.0.conv.weight
+        self.lateral_convs = nn.ModuleList([ConvModule(in_channels[0], out_channels, kernel_size=1, stride=1)])
+        self.fpn_convs = nn.ModuleList([ConvModule(out_channels, out_channels, kernel_size=3, stride=1, padding=1)])
 
     def forward(self, inputs):
         assert len(inputs) == len(self.in_channels)
 
         # build the Laterals
-        laterals = self.lateral_convs(inputs[0])
-        outs = [self.fpn_convs(laterals)]
+        laterals = self.lateral_convs[0](inputs[0])
+        outs = [self.fpn_convs[0](laterals)]
         return tuple(outs)

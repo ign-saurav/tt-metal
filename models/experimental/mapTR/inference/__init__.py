@@ -6,8 +6,8 @@
 from .run_inference import (
     MapTRConfig,
     MapTRInference,
-    ImageProcessor,
-    CameraCalibration,
+    MapTRVisualizer,
+    NuScenesLoader,
     build_maptr_model,
     load_weights,
 )
@@ -15,8 +15,8 @@ from .run_inference import (
 __all__ = [
     "MapTRConfig",
     "MapTRInference",
-    "ImageProcessor",
-    "CameraCalibration",
+    "MapTRVisualizer",
+    "NuScenesLoader",
     "build_maptr_model",
     "load_weights",
 ]
