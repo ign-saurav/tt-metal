@@ -77,8 +77,6 @@ def test_self_attn(device, input_dtype, weight_dtype):
     value = torch.randn((999, 1, 3584), dtype=torch.bfloat16)
     key_padding_mask = torch.zeros((1, 999), dtype=torch.bool)
 
-    print(query.shape, key.shape, value.shape, key_padding_mask.shape)
-    print(query.dtype, key.dtype, value.dtype, key_padding_mask.dtype)
     # Access the attention module and its parameters
     attn_module = model.resampler.attn
 
