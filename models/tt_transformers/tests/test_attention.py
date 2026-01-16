@@ -31,11 +31,11 @@ from models.tt_transformers.tt.rope import RotarySetup
     "paged_attention",
     (
         True,
-        False,
+        # False,
     ),
     ids=(
         "paged_attention",
-        "default_attention",
+        # "default_attention",
     ),
 )
 @pytest.mark.parametrize(

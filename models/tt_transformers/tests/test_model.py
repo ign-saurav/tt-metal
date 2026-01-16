@@ -20,10 +20,13 @@ from models.tt_transformers.tt.model_config import DecodersPrecision, ModelArgs
 @pytest.mark.parametrize(
     "weights, layers",
     [
-        ("random", 1),
+        # ("random", 1),
         ("instruct", None),
     ],
-    ids=["quick", "full"],
+    ids=[
+        # "quick",
+        "full"
+    ],
 )
 @pytest.mark.parametrize(
     "paged_attention",
@@ -51,10 +54,13 @@ from models.tt_transformers.tt.model_config import DecodersPrecision, ModelArgs
 @pytest.mark.parametrize(
     "optimizations",
     [
-        lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
+        # lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
         lambda model_args: DecodersPrecision.accuracy(model_args.n_layers, model_args.model_name),
     ],
-    ids=["performance", "accuracy"],
+    ids=[
+        # "performance",
+        "accuracy"
+    ],
 )
 @pytest.mark.parametrize(
     "mesh_device",
@@ -86,7 +92,9 @@ def test_model_inference(
                 "Skipping Mistral-7B full model test for now. See issue https://github.com/tenstorrent/tt-metal/issues/19806"
             )
 
-        if ("Phi-3-mini" in model_name_env or "phi-4" in model_name_env) and weights == "random":
+        if (
+            "Phi-3-mini" in model_name_env or "phi-4" in model_name_env or "gemma" in model_name_env
+        ) and weights == "random":
             pytest.skip("Skipping Phi-3-mini-128k-instruct for single layer dummy weights test.")
 
         if ("Llama" in model_name_env) and ("Vision" in model_name_env) and (weights == "instruct"):

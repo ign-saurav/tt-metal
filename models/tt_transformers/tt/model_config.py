@@ -1663,6 +1663,14 @@ class ModelArgs:
         self.residual_multiplier = text_config.get("residual_multiplier", None)
         self.embed_scale = text_config.get("embedding_multiplier", self.embed_scale)
 
+        # Gemma models use RMSNorm with (1.0 + weight) scaling and embedding scaling
+        model_type = config.get("model_type", "").lower()
+        if model_type == "gemma" or "gemma" in self.model_name.lower():
+            self.rms_norm_add_unit_offset = True
+            # Gemma scales embeddings by sqrt(hidden_size)
+            if self.embed_scale is None:
+                self.embed_scale = self.dim**0.5
+
         # Sliding window attention
         self.sliding_window = text_config.get("sliding_window", None)
 

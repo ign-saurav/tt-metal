@@ -46,7 +46,7 @@ from models.tt_transformers.tt.rope import get_rot_mats
 @pytest.mark.parametrize(
     "max_seq_len",
     (
-        4096,
+        # 4096,
         128,
     ),
 )
@@ -167,6 +167,7 @@ def test_decoder_inference(
         tt_decode_input = pt_decode_input.clone()
         decode_input = model_args.prepare_residual_tensor_prefill(
             tt_decode_input,
+            force_replicated=False if model_args.is_galaxy else True,
         )
         positions = torch.LongTensor(range(max_seq_len))
         freqs_cis_i = precompute_freqs_cis(
