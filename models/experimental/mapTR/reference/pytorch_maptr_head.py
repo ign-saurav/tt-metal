@@ -6,171 +6,118 @@ import torch
 import torch.nn as nn
 from typing import Dict, List, Optional, Tuple
 
-
-def inverse_sigmoid(x: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
-    """Inverse function of sigmoid.
-
-    Args:
-        x: Tensor with values in range (0, 1).
-        eps: Small value for numerical stability.
-
-    Returns:
-        Tensor after inverse sigmoid.
-    """
-    x = x.clamp(min=0, max=1)
-    x1 = x.clamp(min=eps)
-    x2 = (1 - x).clamp(min=eps)
-    return torch.log(x1 / x2)
+from models.experimental.mapTR.reference.utils import (
+    inverse_sigmoid,
+    bbox_xyxy_to_cxcywh,
+    denormalize_2d_bbox,
+    denormalize_2d_pts,
+)
 
 
-def bbox_xyxy_to_cxcywh(bbox: torch.Tensor) -> torch.Tensor:
-    """Convert bbox coordinates from (x1, y1, x2, y2) to (cx, cy, w, h).
+# Placeholder loss modules for weight loading compatibility
+# These are not used during inference but are needed to match the original model structure
+class FocalLoss(nn.Module):
+    """Placeholder FocalLoss for weight loading compatibility."""
 
-    Args:
-        bbox: Bounding boxes with shape (..., 4) in (x1, y1, x2, y2) format.
+    def __init__(self, **kwargs):
+        super().__init__()
+        self.use_sigmoid = kwargs.get("use_sigmoid", True)
 
-    Returns:
-        Bounding boxes with shape (..., 4) in (cx, cy, w, h) format.
-    """
-    x1, y1, x2, y2 = bbox.unbind(-1)
-    cx = (x1 + x2) / 2
-    cy = (y1 + y2) / 2
-    w = x2 - x1
-    h = y2 - y1
-    return torch.stack([cx, cy, w, h], dim=-1)
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError("FocalLoss is only for weight loading, not inference")
 
 
-def bbox_cxcywh_to_xyxy(bbox: torch.Tensor) -> torch.Tensor:
-    """Convert bbox coordinates from (cx, cy, w, h) to (x1, y1, x2, y2).
+class L1Loss(nn.Module):
+    """Placeholder L1Loss for weight loading compatibility."""
 
-    Args:
-        bbox: Bounding boxes with shape (..., 4) in (cx, cy, w, h) format.
+    def __init__(self, **kwargs):
+        super().__init__()
 
-    Returns:
-        Bounding boxes with shape (..., 4) in (x1, y1, x2, y2) format.
-    """
-    cx, cy, w, h = bbox.unbind(-1)
-    x1 = cx - w / 2
-    y1 = cy - h / 2
-    x2 = cx + w / 2
-    y2 = cy + h / 2
-    return torch.stack([x1, y1, x2, y2], dim=-1)
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError("L1Loss is only for weight loading, not inference")
 
 
-def normalize_2d_bbox(bboxes: torch.Tensor, pc_range: List[float]) -> torch.Tensor:
-    """Normalize 2D bboxes to [0, 1] range.
+class GIoULoss(nn.Module):
+    """Placeholder GIoULoss for weight loading compatibility."""
 
-    Args:
-        bboxes: Bounding boxes in xyxy format.
-        pc_range: Point cloud range [x_min, y_min, z_min, x_max, y_max, z_max].
+    def __init__(self, **kwargs):
+        super().__init__()
 
-    Returns:
-        Normalized bounding boxes in cxcywh format.
-    """
-    patch_h = pc_range[4] - pc_range[1]
-    patch_w = pc_range[3] - pc_range[0]
-    cxcywh_bboxes = bbox_xyxy_to_cxcywh(bboxes)
-    cxcywh_bboxes[..., 0:1] = cxcywh_bboxes[..., 0:1] - pc_range[0]
-    cxcywh_bboxes[..., 1:2] = cxcywh_bboxes[..., 1:2] - pc_range[1]
-    factor = bboxes.new_tensor([patch_w, patch_h, patch_w, patch_h])
-    normalized_bboxes = cxcywh_bboxes / factor
-    return normalized_bboxes
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError("GIoULoss is only for weight loading, not inference")
 
 
-def normalize_2d_pts(pts: torch.Tensor, pc_range: List[float]) -> torch.Tensor:
-    """Normalize 2D points to [0, 1] range.
+class PtsL1Loss(nn.Module):
+    """Placeholder PtsL1Loss for weight loading compatibility."""
 
-    Args:
-        pts: Points with shape (..., 2).
-        pc_range: Point cloud range [x_min, y_min, z_min, x_max, y_max, z_max].
+    def __init__(self, **kwargs):
+        super().__init__()
 
-    Returns:
-        Normalized points.
-    """
-    patch_h = pc_range[4] - pc_range[1]
-    patch_w = pc_range[3] - pc_range[0]
-    new_pts = pts.clone()
-    new_pts[..., 0:1] = pts[..., 0:1] - pc_range[0]
-    new_pts[..., 1:2] = pts[..., 1:2] - pc_range[1]
-    factor = pts.new_tensor([patch_w, patch_h])
-    normalized_pts = new_pts / factor
-    return normalized_pts
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError("PtsL1Loss is only for weight loading, not inference")
 
 
-def denormalize_2d_bbox(bboxes: torch.Tensor, pc_range: List[float]) -> torch.Tensor:
-    """Denormalize 2D bboxes from [0, 1] range to original range.
+class PtsDirCosLoss(nn.Module):
+    """Placeholder PtsDirCosLoss for weight loading compatibility."""
 
-    Args:
-        bboxes: Normalized bounding boxes in cxcywh format.
-        pc_range: Point cloud range [x_min, y_min, z_min, x_max, y_max, z_max].
+    def __init__(self, **kwargs):
+        super().__init__()
 
-    Returns:
-        Denormalized bounding boxes in xyxy format.
-    """
-    bboxes = bbox_cxcywh_to_xyxy(bboxes)
-    bboxes[..., 0::2] = bboxes[..., 0::2] * (pc_range[3] - pc_range[0]) + pc_range[0]
-    bboxes[..., 1::2] = bboxes[..., 1::2] * (pc_range[4] - pc_range[1]) + pc_range[1]
-    return bboxes
-
-
-def denormalize_2d_pts(pts: torch.Tensor, pc_range: List[float]) -> torch.Tensor:
-    """Denormalize 2D points from [0, 1] range to original range.
-
-    Args:
-        pts: Normalized points with shape (..., 2).
-        pc_range: Point cloud range [x_min, y_min, z_min, x_max, y_max, z_max].
-
-    Returns:
-        Denormalized points.
-    """
-    new_pts = pts.clone()
-    new_pts[..., 0:1] = pts[..., 0:1] * (pc_range[3] - pc_range[0]) + pc_range[0]
-    new_pts[..., 1:2] = pts[..., 1:2] * (pc_range[4] - pc_range[1]) + pc_range[1]
-    return new_pts
+    def forward(self, *args, **kwargs):
+        raise NotImplementedError("PtsDirCosLoss is only for weight loading, not inference")
 
 
 class MapTRHead(nn.Module):
     """MapTR Head for map element detection (inference-only).
 
+    This is a standalone PyTorch implementation derived from the original
+    MapTRHead in projects/mmdet3d_plugin/maptr/dense_heads/maptr_head.py.
+
     Args:
-        transformer (nn.Module): The transformer module.
+        transformer (nn.Module): The transformer module (MapTRPerceptionTransformer).
         positional_encoding (nn.Module): Positional encoding module.
+        bbox_coder (nn.Module, optional): Bbox coder for decoding predictions.
         embed_dims (int): Embedding dimensions. Default: 256.
         num_classes (int): Number of classes. Default: 3.
         num_reg_fcs (int): Number of FC layers in regression branch. Default: 2.
         num_cls_fcs (int): Number of FC layers in classification branch. Default: 2.
-        code_size (int): Size of the output code. Default: 10.
-        bev_h (int): Height of BEV feature. Default: 30.
-        bev_w (int): Width of BEV feature. Default: 30.
+        code_size (int): Size of the output code (num_pts * 2). Default: 2.
+        bev_h (int): Height of BEV feature. Default: 200.
+        bev_w (int): Width of BEV feature. Default: 100.
         pc_range (List[float]): Point cloud range. Default: [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0].
-        num_vec (int): Number of vectors (instances). Default: 20.
-        num_pts_per_vec (int): Number of points per vector. Default: 2.
-        query_embed_type (str): Type of query embedding. Default: 'all_pts'.
+        num_vec (int): Number of vectors (instances). Default: 50.
+        num_pts_per_vec (int): Number of points per vector. Default: 20.
+        num_pts_per_gt_vec (int): Number of points per GT vector. Default: 20.
+        query_embed_type (str): Type of query embedding ('all_pts' or 'instance_pts'). Default: 'instance_pts'.
         transform_method (str): Method to transform points to bbox. Default: 'minmax'.
-        with_box_refine (bool): Whether to use box refinement. Default: False.
+        with_box_refine (bool): Whether to use box refinement. Default: True.
         as_two_stage (bool): Whether to use two-stage detection. Default: False.
         bev_encoder_type (str): Type of BEV encoder. Default: 'BEVFormerEncoder'.
+        dir_interval (int): Interval for direction loss. Default: 1.
     """
 
     def __init__(
         self,
         transformer: nn.Module,
         positional_encoding: nn.Module,
+        bbox_coder: Optional[nn.Module] = None,
         embed_dims: int = 256,
         num_classes: int = 3,
         num_reg_fcs: int = 2,
         num_cls_fcs: int = 2,
-        code_size: int = 10,
-        bev_h: int = 30,
-        bev_w: int = 30,
+        code_size: int = 2,
+        bev_h: int = 200,
+        bev_w: int = 100,
         pc_range: List[float] = None,
-        num_vec: int = 20,
-        num_pts_per_vec: int = 2,
-        query_embed_type: str = "all_pts",
+        num_vec: int = 50,
+        num_pts_per_vec: int = 20,
+        num_pts_per_gt_vec: int = 20,
+        query_embed_type: str = "instance_pts",
         transform_method: str = "minmax",
-        with_box_refine: bool = False,
+        with_box_refine: bool = True,
         as_two_stage: bool = False,
         bev_encoder_type: str = "BEVFormerEncoder",
+        dir_interval: int = 1,
     ):
         super().__init__()
 
@@ -179,6 +126,7 @@ class MapTRHead(nn.Module):
 
         self.transformer = transformer
         self.positional_encoding = positional_encoding
+        self.bbox_coder = bbox_coder
         self.embed_dims = embed_dims
         self.num_classes = num_classes
         self.cls_out_channels = num_classes
@@ -193,18 +141,33 @@ class MapTRHead(nn.Module):
 
         self.num_vec = num_vec
         self.num_pts_per_vec = num_pts_per_vec
+        self.num_pts_per_gt_vec = num_pts_per_gt_vec
         self.num_query = num_vec * num_pts_per_vec
         self.query_embed_type = query_embed_type
         self.transform_method = transform_method
         self.with_box_refine = with_box_refine
         self.as_two_stage = as_two_stage
         self.bev_encoder_type = bev_encoder_type
+        self.dir_interval = dir_interval
+
+        # Loss functions (placeholders for weight loading compatibility)
+        self.loss_cls = FocalLoss(use_sigmoid=True)
+        self.loss_bbox = L1Loss()
+        self.loss_iou = GIoULoss()
+        self.loss_pts = PtsL1Loss()
+        self.loss_dir = PtsDirCosLoss()
+
+        # Activation (for weight loading compatibility)
+        self.activate = nn.ReLU(inplace=True)
 
         self._init_layers()
 
     def _init_layers(self):
-        """Initialize classification branch and regression branch of head."""
-        # Classification branch
+        """Initialize classification branch and regression branch of head.
+
+        This follows the structure from the reference implementation.
+        """
+        # Classification branch (with LayerNorm as in reference)
         cls_branch = []
         for _ in range(self.num_reg_fcs):
             cls_branch.append(nn.Linear(self.embed_dims, self.embed_dims))
@@ -213,7 +176,7 @@ class MapTRHead(nn.Module):
         cls_branch.append(nn.Linear(self.embed_dims, self.cls_out_channels))
         fc_cls = nn.Sequential(*cls_branch)
 
-        # Regression branch
+        # Regression branch (without LayerNorm as in reference)
         reg_branch = []
         for _ in range(self.num_reg_fcs):
             reg_branch.append(nn.Linear(self.embed_dims, self.embed_dims))
@@ -225,6 +188,8 @@ class MapTRHead(nn.Module):
             return nn.ModuleList([copy.deepcopy(module) for _ in range(N)])
 
         # Number of prediction layers
+        # Last reg_branch is used to generate proposal from encode feature map
+        # when as_two_stage is True.
         num_pred = (
             (self.transformer.decoder.num_layers + 1) if self.as_two_stage else self.transformer.decoder.num_layers
         )
@@ -262,18 +227,24 @@ class MapTRHead(nn.Module):
 
         Args:
             mlvl_feats: Multi-level features from backbone, each is a 5D-tensor
-                with shape (B, N, C, H, W).
+                with shape (B, N, C, H, W) where N is the number of cameras.
             lidar_feat: LiDAR features (optional).
-            img_metas: Image meta information.
+            img_metas: Image meta information containing 'can_bus' for temporal fusion.
             prev_bev: Previous BEV features for temporal fusion. Default: None.
             only_bev: Only compute BEV features with encoder. Default: False.
 
         Returns:
             Dictionary containing:
-                - bev_embed: BEV embeddings.
-                - all_cls_scores: Classification scores from all decoder layers.
-                - all_bbox_preds: Bounding box predictions from all decoder layers.
-                - all_pts_preds: Point predictions from all decoder layers.
+                - bev_embed: BEV embeddings with shape (bs, bev_h*bev_w, embed_dims).
+                - all_cls_scores: Classification scores from all decoder layers
+                    with shape (num_dec, bs, num_vec, num_classes).
+                - all_bbox_preds: Bounding box predictions from all decoder layers
+                    with shape (num_dec, bs, num_vec, 4) in cxcywh format.
+                - all_pts_preds: Point predictions from all decoder layers
+                    with shape (num_dec, bs, num_vec, num_pts_per_vec, 2).
+                - enc_cls_scores: Encoder classification scores (None for single stage).
+                - enc_bbox_preds: Encoder bbox predictions (None for single stage).
+                - enc_pts_preds: Encoder pts predictions (None for single stage).
         """
         bs, num_cam, _, _, _ = mlvl_feats[0].shape
         dtype = mlvl_feats[0].dtype
@@ -327,7 +298,7 @@ class MapTRHead(nn.Module):
         )
 
         bev_embed, hs, init_reference, inter_references = outputs
-        hs = hs.permute(0, 2, 1, 3)
+        hs = hs.permute(0, 2, 1, 3)  # (num_dec, bs, num_query, embed_dims)
 
         outputs_classes = []
         outputs_coords = []
@@ -340,16 +311,17 @@ class MapTRHead(nn.Module):
                 reference = inter_references[lvl - 1]
             reference = inverse_sigmoid(reference)
 
-            # Classification
+            # Classification: aggregate over points per instance
+            # hs[lvl] shape: (bs, num_query, embed_dims) = (bs, num_vec * num_pts_per_vec, embed_dims)
             outputs_class = self.cls_branches[lvl](hs[lvl].view(bs, self.num_vec, self.num_pts_per_vec, -1).mean(2))
 
-            # Regression
+            # Regression: predict offset from reference points
             tmp = self.reg_branches[lvl](hs[lvl])
 
             # Add reference points
             assert reference.shape[-1] == 2
             tmp[..., 0:2] += reference[..., 0:2]
-            tmp = tmp.sigmoid()
+            tmp = tmp.sigmoid()  # Normalize to [0, 1]
 
             # Transform to bbox and pts
             outputs_coord, outputs_pts_coord = self.transform_box(tmp)
@@ -381,7 +353,8 @@ class MapTRHead(nn.Module):
         """Convert points set to bounding box.
 
         Args:
-            pts: Input points with shape (bs, num_query, code_size).
+            pts: Input points with shape (bs, num_query, code_size) where
+                code_size = 2 (x, y coordinates for each point).
             y_first: If True, point format is [y1, x1, y2, x2 ... yn, xn],
                 otherwise [x1, y1, x2, y2 ... xn, yn]. Default: False.
 
@@ -414,14 +387,33 @@ class MapTRHead(nn.Module):
     ) -> List[List]:
         """Generate bboxes from bbox head predictions.
 
+        This method uses the bbox_coder if available, otherwise decodes manually.
+
         Args:
-            preds_dicts: Prediction results dictionary.
+            preds_dicts: Prediction results dictionary from forward().
             img_metas: Image meta information.
             rescale: Whether to rescale predictions. Default: False.
 
         Returns:
-            List of [bboxes, scores, labels, pts] for each sample.
+            List of [bboxes, scores, labels, pts] for each sample in the batch.
         """
+        # Use bbox_coder if available (follows reference implementation pattern)
+        if self.bbox_coder is not None:
+            preds_dicts_decoded = self.bbox_coder.decode(preds_dicts)
+
+            num_samples = len(preds_dicts_decoded)
+            ret_list = []
+            for i in range(num_samples):
+                preds = preds_dicts_decoded[i]
+                bboxes = preds["bboxes"]
+                scores = preds["scores"]
+                labels = preds["labels"]
+                pts = preds["pts"]
+                ret_list.append([bboxes, scores, labels, pts])
+
+            return ret_list
+
+        # Manual decoding (fallback for when bbox_coder is not provided)
         # Get final predictions (last decoder layer)
         all_cls_scores = preds_dicts["all_cls_scores"]
         all_bbox_preds = preds_dicts["all_bbox_preds"]

@@ -170,13 +170,16 @@ def multi_scale_deformable_attn_pytorch(value, value_spatial_shapes, sampling_lo
 
 
 def inverse_sigmoid(x, eps=1e-5):
+    """Inverse function of sigmoid.
+
+    Args:
+        x (Tensor): The tensor to do the inverse sigmoid.
+        eps (float): Numerical stability epsilon. Default: 1e-5.
+
+    Returns:
+        Tensor: Result after inverse sigmoid.
+    """
     x = x.clamp(min=0, max=1)
     x1 = x.clamp(min=eps)
     x2 = (1 - x).clamp(min=eps)
     return torch.log(x1 / x2)
-
-
-def bbox_xyxy_to_cxcywh(bbox):
-    x1, y1, x2, y2 = bbox.split((1, 1, 1, 1), dim=-1)
-    bbox_new = [(x1 + x2) / 2, (y1 + y2) / 2, (x2 - x1), (y2 - y1)]
-    return torch.cat(bbox_new, dim=-1)
