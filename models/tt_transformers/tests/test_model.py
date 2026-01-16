@@ -327,8 +327,14 @@ def test_model_inference(
     for i in range(generation_length):
         logger.info(f"[Model] Generating token {i}")
 
+        # For Gemma models, the HuggingFace model internally scales embeddings by hidden_size**0.5
+        # The TT model expects the same scaled input, so we apply scaling here
+        scaled_tt_input = tt_decode_input
+        if model_args.embed_scale is not None:
+            scaled_tt_input = tt_decode_input * model_args.embed_scale
+
         decode_input = model_args.prepare_residual_tensor_decode(
-            tt_decode_input,
+            scaled_tt_input,
             model_args.model_config["DECODE_RESIDUAL_MEMCFG"],
         )
 
@@ -360,8 +366,8 @@ def test_model_inference(
             # In this test all users have the same position
             ref_output = reference_model(pt_decode_input, current_pos[0])
 
-        # Increment position
-        current_pos = torch.tensor([generation_start_pos + i for _ in range(batch)])
+        # Increment position for next iteration
+        current_pos = torch.tensor([generation_start_pos + i + 1 for _ in range(batch)])
         current_pos_tensor = ttnn.from_torch(
             current_pos,
             device=mesh_device,
@@ -380,9 +386,12 @@ def test_model_inference(
             if run_ref_pt:
                 all_outputs_ref.append(encoded_prompts[0][i])  # Update list of ref outputs
 
-            tt_decode_input = embd(encoded_prompts_tensor[:, i]).view(batch, seqlen, -1)
-            if run_ref_pt:
-                pt_decode_input = embd(encoded_prompts_tensor[:, i]).view(batch, seqlen, -1)
+            # Prepare input for NEXT iteration - get next prompt token if available
+            next_token_idx = i + 1
+            if next_token_idx < len(encoded_prompts[0]):
+                tt_decode_input = embd(encoded_prompts_tensor[:, next_token_idx]).view(batch, seqlen, -1)
+                if run_ref_pt:
+                    pt_decode_input = embd(encoded_prompts_tensor[:, next_token_idx]).view(batch, seqlen, -1)
         else:
             # Greedy decode (temperature = 0) the generated token and save it to print out later
             if run_ref_pt:
