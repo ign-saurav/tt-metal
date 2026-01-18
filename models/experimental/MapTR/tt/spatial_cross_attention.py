@@ -28,10 +28,26 @@ class TtSpatialCrossAttention:
         self.init_cfg = init_cfg
         self.pc_range = pc_range
         self.fp16_enabled = False
-        self.deformable_attention = TtMSDeformableAttention3D(device=self.device, params=params, num_levels=1)
         self.embed_dims = embed_dims
         self.num_cams = num_cams
         self.batch_first = batch_first
+
+        # Extract parameters from deformable_attention dict
+        deform_embed_dims = deformable_attention.get("embed_dims", embed_dims)
+        deform_num_levels = deformable_attention.get("num_levels", 1)
+        deform_num_heads = deformable_attention.get("num_heads", 8)
+        deform_num_points = deformable_attention.get("num_points", 8)
+        deform_im2col_step = deformable_attention.get("im2col_step", 64)
+
+        self.deformable_attention = TtMSDeformableAttention3D(
+            device=self.device,
+            params=params,
+            embed_dims=deform_embed_dims,
+            num_heads=deform_num_heads,
+            num_levels=deform_num_levels,
+            num_points=deform_num_points,
+            im2col_step=deform_im2col_step,
+        )
 
     def __call__(
         self,

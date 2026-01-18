@@ -234,6 +234,12 @@ def test_maptr_spatial_cross_attention(
         embed_dims=embed_dims,
         pc_range=point_cloud_range,
         batch_first=batch_first,
+        deformable_attention=dict(
+            type="MSDeformableAttention3D",
+            embed_dims=embed_dims,
+            num_levels=num_levels,
+            num_points=num_points,
+        ),
     )
 
     # Convert inputs to TT tensors
