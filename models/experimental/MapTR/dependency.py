@@ -1332,31 +1332,10 @@ def multi_scale_deformable_attn_pytorch(value, value_spatial_shapes, sampling_lo
     """
     import torch.nn.functional as F
 
-    # ===== ADD THESE DEBUG CHECKS =====
-    print(f"\n=== MSDeformAttn Debug ===")
-    print(f"value shape: {value.shape}, range: [{value.min():.4f}, {value.max():.4f}]")
-    print(f"value has NaN: {torch.isnan(value).any()}, has Inf: {torch.isinf(value).any()}")
-
-    print(f"sampling_locations shape: {sampling_locations.shape}")
-    print(f"sampling_locations range: [{sampling_locations.min():.4f}, {sampling_locations.max():.4f}]")
-    print(f"sampling_locations has NaN: {torch.isnan(sampling_locations).any()}")
-
-    print(f"attention_weights shape: {attention_weights.shape}")
-    print(f"attention_weights range: [{attention_weights.min():.4f}, {attention_weights.max():.4f}]")
-    print(f"attention_weights sum (per query): {attention_weights[0, 0, 0].sum():.4f}")
-    print(f"attention_weights has NaN: {torch.isnan(attention_weights).any()}")
-    # ===== END DEBUG =====
-
     bs, _, num_heads, embed_dims = value.shape
     _, num_queries, num_heads, num_levels, num_points, _ = sampling_locations.shape
     value_list = value.split([H_ * W_ for H_, W_ in value_spatial_shapes], dim=1)
     sampling_grids = 2 * sampling_locations - 1
-
-    # ===== ADD THIS CHECK =====
-    print(f"sampling_grids range: [{sampling_grids.min():.4f}, {sampling_grids.max():.4f}]")
-    # Should be in [-1, 1] for grid_sample to work correctly
-    if sampling_grids.min() < -1.5 or sampling_grids.max() > 1.5:
-        print(f"WARNING: sampling_grids out of expected range!")
     # ===== END CHECK =====
 
     sampling_value_list = []
@@ -1386,10 +1365,6 @@ def multi_scale_deformable_attn_pytorch(value, value_spatial_shapes, sampling_lo
         .sum(-1)
         .view(bs, num_heads * embed_dims, num_queries)
     )
-    # ===== ADD THIS =====
-    print(f"output range: [{output.min():.4f}, {output.max():.4f}]")
-    print(f"output has NaN: {torch.isnan(output).any()}")
-    # ===== END DEBUG =====
     return output.transpose(1, 2).contiguous()
 
 
