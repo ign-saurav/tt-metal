@@ -5,6 +5,10 @@
 
 This module provides a complete TTNN implementation of the MapTR detector,
 integrating the TTNN backbone (ResNet50), FPN neck, and MapTR head.
+
+Updated to support both:
+- Hybrid mode: PyTorch backbone/neck + TTNN head
+- Full TTNN mode: TTNN backbone + TTNN neck + TTNN head (like VADv2)
 """
 
 import copy
@@ -19,21 +23,30 @@ from models.experimental.mapTR.tt.head import TtMapTRHead
 class TtMapTR(nn.Module):
     """TTNN MapTR detector for map element detection (inference-only).
 
-    This is a hybrid implementation that uses:
-    - PyTorch backbone (ResNet50) for image feature extraction
-    - PyTorch FPN for feature pyramid
-    - TTNN head (TtMapTRHead) for efficient classification and regression
+    This implementation supports two modes:
+
+    1. Hybrid mode (use_ttnn_backbone=False):
+       - PyTorch backbone (ResNet50) for image feature extraction
+       - PyTorch FPN for feature pyramid
+       - TTNN head (TtMapTRHead) for efficient classification and regression
+
+    2. Full TTNN mode (use_ttnn_backbone=True):
+       - TTNN backbone (TtResNet50) for image feature extraction
+       - TTNN FPN (TtFPN) for feature pyramid
+       - TTNN head (TtMapTRHead) for classification and regression
 
     Args:
         device: TTNN device for tensor operations.
-        torch_backbone: PyTorch backbone module (ResNet50).
-        torch_neck: PyTorch FPN module.
+        params: Preprocessed parameters object (required for full TTNN mode).
+        torch_backbone: PyTorch backbone module (for hybrid mode).
+        torch_neck: PyTorch FPN module (for hybrid mode).
         head_params: Parameters for the TTNN detection head.
         transformer: PyTorch transformer module.
         positional_encoding: PyTorch positional encoding module.
         bbox_coder: Optional bbox coder for decoding predictions.
         use_grid_mask: Whether to use grid mask augmentation. Default: False.
         video_test_mode: Whether to use temporal information. Default: False.
+        use_ttnn_backbone: Whether to use TTNN backbone/neck. Default: False.
         embed_dims: Embedding dimensions. Default: 256.
         num_classes: Number of classes. Default: 3.
         bev_h: Height of BEV feature. Default: 200.
@@ -47,14 +60,16 @@ class TtMapTR(nn.Module):
     def __init__(
         self,
         device: ttnn.Device,
-        torch_backbone: nn.Module,
-        torch_neck: nn.Module,
-        head_params: dict,
-        transformer: nn.Module,
-        positional_encoding: nn.Module,
+        params=None,
+        torch_backbone: nn.Module = None,
+        torch_neck: nn.Module = None,
+        head_params: dict = None,
+        transformer: nn.Module = None,
+        positional_encoding: nn.Module = None,
         bbox_coder: Optional[nn.Module] = None,
         use_grid_mask: bool = False,
         video_test_mode: bool = False,
+        use_ttnn_backbone: bool = False,
         embed_dims: int = 256,
         num_classes: int = 3,
         bev_h: int = 200,
@@ -73,15 +88,55 @@ class TtMapTR(nn.Module):
         self.use_grid_mask = use_grid_mask
         self.video_test_mode = video_test_mode
         self.pc_range = pc_range
+        self.use_ttnn_backbone = use_ttnn_backbone
+        self.params = params
 
-        # PyTorch backbone and FPN (used for feature extraction)
-        self.img_backbone = torch_backbone
-        self.img_neck = torch_neck
-        self.with_img_neck = torch_neck is not None
+        if use_ttnn_backbone:
+            # Full TTNN mode - use TTNN backbone and neck
+            from models.experimental.mapTR.tt.ttcnn_backbone import TtResNet50
+            from models.experimental.mapTR.tt.fpn import TtFPN
+            from models.tt_cnn.tt.builder import Conv2dConfiguration, AutoShardedStrategyConfiguration
+
+            if params is None:
+                raise ValueError("params required for full TTNN mode")
+
+            self.img_backbone = TtResNet50(params.conv_args["img_backbone"], params.img_backbone, device)
+
+            # Build FPN configs from params
+            lateral_config = Conv2dConfiguration.from_model_args(
+                conv2d_args=params.conv_args["img_neck"].lateral_convs,
+                weights=params.img_neck["lateral_convs"]["conv"]["weight"],
+                bias=params.img_neck["lateral_convs"]["conv"]["bias"],
+                activation=None,
+                sharding_strategy=AutoShardedStrategyConfiguration(),
+            )
+            fpn_config = Conv2dConfiguration.from_model_args(
+                conv2d_args=params.conv_args["img_neck"].fpn_convs,
+                weights=params.img_neck["fpn_convs"]["conv"]["weight"],
+                bias=params.img_neck["fpn_convs"]["conv"]["bias"],
+                activation=None,
+                sharding_strategy=AutoShardedStrategyConfiguration(),
+            )
+
+            self.img_neck = TtFPN(lateral_config, fpn_config, device)
+            self.with_img_neck = True
+        else:
+            # Hybrid mode - use PyTorch backbone and neck
+            self.img_backbone = torch_backbone
+            self.img_neck = torch_neck
+            self.with_img_neck = torch_neck is not None
+
+        # Get head params - either from params object or from head_params dict
+        if params is not None and hasattr(params, "head"):
+            actual_head_params = params.head
+            use_vadv2_params = True
+        else:
+            actual_head_params = head_params
+            use_vadv2_params = False
 
         # Initialize TTNN Head
         self.pts_bbox_head = TtMapTRHead(
-            params=head_params,
+            params=actual_head_params if use_vadv2_params else head_params,
             device=device,
             transformer=transformer,
             positional_encoding=positional_encoding,
@@ -94,6 +149,7 @@ class TtMapTR(nn.Module):
             num_vec=num_vec,
             num_pts_per_vec=num_pts_per_vec,
             num_decoder_layers=num_decoder_layers,
+            use_vadv2_params=use_vadv2_params,
         )
 
         # Temporal state
@@ -103,6 +159,68 @@ class TtMapTR(nn.Module):
             "prev_pos": 0,
             "prev_angle": 0,
         }
+
+    def extract_img_feat_ttnn(
+        self,
+        img: ttnn.Tensor,
+        img_metas: Optional[List[Dict]] = None,
+        len_queue: Optional[int] = None,
+    ) -> Optional[List[ttnn.Tensor]]:
+        """Extract features from images using TTNN backbone and FPN.
+
+        This is the full TTNN mode, similar to VADv2's approach.
+
+        Args:
+            img: Input images as TTNN tensor.
+            img_metas: Image meta information.
+            len_queue: Length of temporal queue.
+
+        Returns:
+            List of TTNN feature tensors.
+        """
+        if img is None:
+            return None
+
+        B = img.shape[0]
+
+        # Handle input shape
+        if len(img.shape) == 5 and img.shape[0] == 1:
+            img = ttnn.squeeze(img, 0)
+        elif len(img.shape) == 4 and img.shape[0] > 1:
+            B, N, C, H, W = img.shape
+            img = ttnn.reshape(img, (B * N, C, H, W))
+
+        # Permute to NHWC format for TTNN conv
+        img = ttnn.permute(img, (0, 2, 3, 1))
+        N, H, W, C = img.shape
+        batch_size = N
+
+        # Flatten for backbone
+        img = ttnn.reshape(img, (1, 1, N * H * W, C))
+
+        # Backbone forward (TTNN)
+        img_feats = self.img_backbone(img, batch_size=batch_size)
+
+        # FPN forward (TTNN)
+        if self.with_img_neck:
+            img_feats = self.img_neck(img_feats)
+
+        # Reshape features
+        img_feats_reshaped = []
+        for img_feat in img_feats:
+            img_feat = ttnn.unsqueeze(img_feat, 0)
+            img_feat = ttnn.to_layout(img_feat, layout=ttnn.ROW_MAJOR_LAYOUT)
+            img_feat = ttnn.sharded_to_interleaved(img_feat)
+
+            # Reshape to (N, H, W, C) then permute to (N, C, H, W)
+            # For single-level FPN, output is typically (batch, feat_h, feat_w, channels)
+            feat_shape = img_feat.shape
+            if len(feat_shape) == 4:
+                img_feat = ttnn.permute(img_feat, (0, 3, 1, 2))
+
+            img_feats_reshaped.append(img_feat)
+
+        return img_feats_reshaped
 
     def extract_img_feat(
         self,
@@ -158,21 +276,24 @@ class TtMapTR(nn.Module):
 
     def extract_feat(
         self,
-        img: torch.Tensor,
+        img,
         img_metas: Optional[List[Dict]] = None,
         len_queue: Optional[int] = None,
-    ) -> Optional[List[torch.Tensor]]:
+    ):
         """Extract features from images.
 
         Args:
-            img: Input images.
+            img: Input images (torch tensor or TTNN tensor).
             img_metas: Image meta information.
             len_queue: Length of temporal queue.
 
         Returns:
-            List of feature maps in (B, N, C, H, W) format.
+            List of feature maps.
         """
-        return self.extract_img_feat(img, img_metas, len_queue=len_queue)
+        if self.use_ttnn_backbone:
+            return self.extract_img_feat_ttnn(img, img_metas, len_queue=len_queue)
+        else:
+            return self.extract_img_feat(img, img_metas, len_queue=len_queue)
 
     def forward(
         self,
