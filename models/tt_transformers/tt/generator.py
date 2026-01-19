@@ -430,11 +430,6 @@ class Generator:
                 )
 
         logger.info(f"Finished prefill for all users up to {batch_seq_len} tokens, Starting decode...")
-        end_time = time.time()
-        logger.info(
-            f"✅ Exiting prefill_forward_text successfully at {end_time:.3f} (elapsed {end_time - start_time:.3f}s)"
-        )
-        logger.info(f"Output: logits shape {output_logits.shape}")
         return output_logits
 
     def prefill_forward_single_user_text(
