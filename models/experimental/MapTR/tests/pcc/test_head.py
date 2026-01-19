@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Test file for MapTR Head - compares PyTorch reference vs TTNN implementation with PCC."""
 
 import os
 import pytest
@@ -19,6 +18,12 @@ from models.experimental.MapTR.tt.head import TtMapTRHead
 
 # Import utilities
 from models.common.utility_functions import comp_pcc
+from ttnn.model_preprocessing import (
+    preprocess_model_parameters,
+    preprocess_linear_weight,
+    preprocess_linear_bias,
+    preprocess_layernorm_parameter,
+)
 
 
 MAPTR_WEIGHTS_PATH = "models/experimental/MapTR/chkpt/maptr_tiny_r50_24e_bevformer.pth"
@@ -45,6 +50,26 @@ class ConfigDict(dict):
 
     def __delattr__(self, name):
         del self[name]
+
+
+class ParamsWrapper:
+    """Wrapper class to convert dict parameters to object attributes for TT models.
+
+    Allows both attribute-style (params.weight) and dict-style (params["0"]) access.
+    """
+
+    def __init__(self, d):
+        for k, v in d.items():
+            if isinstance(v, dict):
+                setattr(self, k, ParamsWrapper(v))
+            else:
+                setattr(self, k, v)
+
+    def __getitem__(self, key):
+        return getattr(self, str(key))
+
+    def __contains__(self, key):
+        return hasattr(self, str(key))
 
 
 def load_maptr_head_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
@@ -90,57 +115,110 @@ def load_maptr_head_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
     return head_weights
 
 
-def create_ttnn_params(torch_model: MapTRHead, head_weights: dict, device):
+def custom_preprocessor(model, name):
+    """Custom preprocessor for MapTRHead parameters"""
+    parameters = {}
+
+    def extract_sequential_branch(module_list, dtype):
+        """Extract parameters from sequential branch (cls_branches, reg_branches)."""
+        branch_params = {}
+
+        for i, mod in enumerate(module_list):
+            layer_params = {}
+            layer_index = 0
+
+            if isinstance(mod, nn.Sequential):
+                layers = mod
+            else:
+                layers = [mod]
+
+            for layer in layers:
+                if isinstance(layer, nn.Linear):
+                    layer_params[str(layer_index)] = {
+                        "weight": preprocess_linear_weight(layer.weight, dtype=dtype),
+                        "bias": preprocess_linear_bias(layer.bias, dtype=dtype),
+                    }
+                    layer_index += 1
+                elif isinstance(layer, nn.LayerNorm):
+                    layer_params[f"{layer_index}_norm"] = {
+                        "weight": preprocess_layernorm_parameter(layer.weight, dtype=dtype),
+                        "bias": preprocess_layernorm_parameter(layer.bias, dtype=dtype),
+                    }
+                    layer_index += 1
+
+            branch_params[str(i)] = layer_params
+
+        return branch_params
+
+    if isinstance(model, MapTRHead):
+        parameters["head"] = {}
+
+        # Positional encoding
+        if hasattr(model, "positional_encoding") and model.positional_encoding is not None:
+            parameters["head"]["positional_encoding"] = {}
+            pos_encoding = model.positional_encoding
+            parameters["head"]["positional_encoding"]["row_embed"] = {
+                "weight": ttnn.from_torch(pos_encoding.row_embed.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+            }
+            parameters["head"]["positional_encoding"]["col_embed"] = {
+                "weight": ttnn.from_torch(pos_encoding.col_embed.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+            }
+
+        # Embeddings
+        if hasattr(model, "bev_embedding") and model.bev_embedding is not None:
+            parameters["head"]["bev_embedding"] = {
+                "weight": ttnn.from_torch(model.bev_embedding.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+            }
+
+        if hasattr(model, "instance_embedding") and model.instance_embedding is not None:
+            parameters["head"]["instance_embedding"] = {
+                "weight": ttnn.from_torch(model.instance_embedding.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+            }
+
+        if hasattr(model, "pts_embedding") and model.pts_embedding is not None:
+            parameters["head"]["pts_embedding"] = {
+                "weight": ttnn.from_torch(model.pts_embedding.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+            }
+
+        if hasattr(model, "query_embedding") and model.query_embedding is not None:
+            parameters["head"]["query_embedding"] = {
+                "weight": ttnn.from_torch(model.query_embedding.weight, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+            }
+
+        # Branches
+        parameters["head"]["branches"] = {}
+
+        # Classification branches
+        parameters["head"]["branches"]["cls_branches"] = extract_sequential_branch(
+            model.cls_branches, dtype=ttnn.bfloat16
+        )
+
+        # Regression branches
+        parameters["head"]["branches"]["reg_branches"] = extract_sequential_branch(
+            model.reg_branches, dtype=ttnn.bfloat16
+        )
+
+    return parameters
+
+
+def create_maptr_model_parameters_head(model: MapTRHead, device=None):
     """Create TTNN parameters from PyTorch MapTRHead model.
 
     Args:
-        torch_model: The PyTorch MapTRHead model with loaded weights.
-        head_weights: Original head weights dict.
+        model: The PyTorch MapTRHead model with loaded weights.
         device: TTNN device.
 
     Returns:
-        Dictionary of TTNN parameters for TtMapTRHead.
+        ParamsWrapper with preprocessed parameters.
     """
-    params = {}
+    parameters = preprocess_model_parameters(
+        initialize_model=lambda: model,
+        custom_preprocessor=custom_preprocessor,
+        device=device,
+    )
 
-    # Classification branches
-    for layer_idx, branch in enumerate(torch_model.cls_branches):
-        for sublayer_idx, sublayer in enumerate(branch):
-            if isinstance(sublayer, nn.Linear):
-                w_key = f"cls_branches.{layer_idx}.{sublayer_idx}.weight"
-                b_key = f"cls_branches.{layer_idx}.{sublayer_idx}.bias"
-                params[w_key] = sublayer.weight.data.clone()
-                params[b_key] = sublayer.bias.data.clone()
-            elif isinstance(sublayer, nn.LayerNorm):
-                w_key = f"cls_branches.{layer_idx}.{sublayer_idx}.weight"
-                b_key = f"cls_branches.{layer_idx}.{sublayer_idx}.bias"
-                params[w_key] = sublayer.weight.data.clone()
-                params[b_key] = sublayer.bias.data.clone()
-
-    # Regression branches
-    for layer_idx, branch in enumerate(torch_model.reg_branches):
-        for sublayer_idx, sublayer in enumerate(branch):
-            if isinstance(sublayer, nn.Linear):
-                w_key = f"reg_branches.{layer_idx}.{sublayer_idx}.weight"
-                b_key = f"reg_branches.{layer_idx}.{sublayer_idx}.bias"
-                params[w_key] = sublayer.weight.data.clone()
-                params[b_key] = sublayer.bias.data.clone()
-
-    # Embeddings
-    if hasattr(torch_model, "bev_embedding") and torch_model.bev_embedding is not None:
-        params["bev_embedding.weight"] = torch_model.bev_embedding.weight.data.clone()
-
-    if hasattr(torch_model, "instance_embedding") and torch_model.instance_embedding is not None:
-        params["instance_embedding.weight"] = torch_model.instance_embedding.weight.data.clone()
-
-    if hasattr(torch_model, "pts_embedding") and torch_model.pts_embedding is not None:
-        params["pts_embedding.weight"] = torch_model.pts_embedding.weight.data.clone()
-
-    if hasattr(torch_model, "query_embedding") and torch_model.query_embedding is not None:
-        params["query_embedding.weight"] = torch_model.query_embedding.weight.data.clone()
-
-    logger.info(f"Created {len(params)} TTNN parameters from MapTRHead")
-    return params
+    # Wrap parameters for attribute-style access
+    return ParamsWrapper(parameters.get("head", {}))
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
@@ -327,7 +405,7 @@ def test_maptr_head(device, reset_seeds):
     )
 
     # Create TTNN model parameters from reference model
-    params = create_ttnn_params(torch_model, head_weights, device)
+    params = create_maptr_model_parameters_head(torch_model, device=device)
 
     # Create TT model
     logger.info("Creating TTNN TtMapTRHead model...")
@@ -348,7 +426,6 @@ def test_maptr_head(device, reset_seeds):
         num_decoder_layers=num_decoder_layers,
         query_embed_type="instance_pts",
         transform_method="minmax",
-        use_vadv2_params=False,  # Use legacy params
     )
 
     # Convert inputs to TTNN
@@ -389,61 +466,51 @@ def test_maptr_head(device, reset_seeds):
     ), f"pts_preds shapes don't match: {outputs_pts_coords_torch.shape} vs {tt_pts_preds.shape}"
 
     # Compare with PCC
-    pcc_threshold = 0.90  # Lower threshold due to accumulated errors in branches
+    pcc_threshold = 0.97
+
+    logger.info("=" * 60)
+    logger.info("PCC Comparison Results:")
+    logger.info("=" * 60)
 
     # Classification scores PCC
-    pcc_passed_cls, pcc_cls = comp_pcc(outputs_classes_torch, tt_cls_scores, pcc_threshold)
-    logger.info(f"PCC Result (all_cls_scores): PCC={pcc_cls:.6f}, threshold={pcc_threshold}, passed={pcc_passed_cls}")
+    pcc_cls_passed, pcc_cls = comp_pcc(outputs_classes_torch, tt_cls_scores, pcc_threshold)
+    logger.info(
+        f"Classification scores PCC: {pcc_cls:.6f} (threshold: {pcc_threshold}) {'✓ PASSED' if pcc_cls_passed else '✗ FAILED'}"
+    )
 
     # Bbox predictions PCC
-    pcc_passed_bbox, pcc_bbox = comp_pcc(outputs_coords_torch, tt_bbox_preds, pcc_threshold)
-    logger.info(f"PCC Result (all_bbox_preds): PCC={pcc_bbox:.6f}, threshold={pcc_threshold}, passed={pcc_passed_bbox}")
+    pcc_bbox_passed, pcc_bbox = comp_pcc(outputs_coords_torch, tt_bbox_preds, pcc_threshold)
+    logger.info(
+        f"Bbox predictions PCC:      {pcc_bbox:.6f} (threshold: {pcc_threshold}) {'✓ PASSED' if pcc_bbox_passed else '✗ FAILED'}"
+    )
 
     # Points predictions PCC
-    pcc_passed_pts, pcc_pts = comp_pcc(outputs_pts_coords_torch, tt_pts_preds, pcc_threshold)
-    logger.info(f"PCC Result (all_pts_preds): PCC={pcc_pts:.6f}, threshold={pcc_threshold}, passed={pcc_passed_pts}")
+    pcc_pts_passed, pcc_pts = comp_pcc(outputs_pts_coords_torch, tt_pts_preds, pcc_threshold)
+    logger.info(
+        f"Points predictions PCC:    {pcc_pts:.6f} (threshold: {pcc_threshold}) {'✓ PASSED' if pcc_pts_passed else '✗ FAILED'}"
+    )
+
+    logger.info("=" * 60)
 
     # Per-layer PCC analysis
-    logger.info("=" * 60)
     logger.info("Per-layer PCC analysis:")
-    logger.info("=" * 60)
-    for layer_idx in range(num_decoder_layers):
-        layer_cls_torch = outputs_classes_torch[layer_idx]
-        layer_cls_tt = tt_cls_scores[layer_idx]
-        _, layer_pcc_cls = comp_pcc(layer_cls_torch, layer_cls_tt, 0.0)
-
-        layer_bbox_torch = outputs_coords_torch[layer_idx]
-        layer_bbox_tt = tt_bbox_preds[layer_idx]
-        _, layer_pcc_bbox = comp_pcc(layer_bbox_torch, layer_bbox_tt, 0.0)
-
-        layer_pts_torch = outputs_pts_coords_torch[layer_idx]
-        layer_pts_tt = tt_pts_preds[layer_idx]
-        _, layer_pcc_pts = comp_pcc(layer_pts_torch, layer_pts_tt, 0.0)
-
-        logger.info(
-            f"Layer {layer_idx}: cls_PCC={layer_pcc_cls:.6f}, bbox_PCC={layer_pcc_bbox:.6f}, pts_PCC={layer_pcc_pts:.6f}"
-        )
+    logger.info("-" * 60)
+    for lvl in range(num_decoder_layers):
+        _, lvl_cls_pcc = comp_pcc(outputs_classes_torch[lvl], tt_cls_scores[lvl], 0.0)
+        _, lvl_bbox_pcc = comp_pcc(outputs_coords_torch[lvl], tt_bbox_preds[lvl], 0.0)
+        _, lvl_pts_pcc = comp_pcc(outputs_pts_coords_torch[lvl], tt_pts_preds[lvl], 0.0)
+        logger.info(f"Layer {lvl}: cls={lvl_cls_pcc:.6f}, bbox={lvl_bbox_pcc:.6f}, pts={lvl_pts_pcc:.6f}")
     logger.info("=" * 60)
 
-    # Summary
-    logger.info("=" * 60)
-    logger.info("PCC SUMMARY:")
-    logger.info(
-        f"  Classification scores PCC: {pcc_cls:.6f} (threshold: {pcc_threshold}, {'✓ PASSED' if pcc_passed_cls else '✗ FAILED'})"
-    )
-    logger.info(
-        f"  Bbox predictions PCC:      {pcc_bbox:.6f} (threshold: {pcc_threshold}, {'✓ PASSED' if pcc_passed_bbox else '✗ FAILED'})"
-    )
-    logger.info(
-        f"  Points predictions PCC:    {pcc_pts:.6f} (threshold: {pcc_threshold}, {'✓ PASSED' if pcc_passed_pts else '✗ FAILED'})"
-    )
-    logger.info("=" * 60)
-
-    all_passed = pcc_passed_cls and pcc_passed_bbox and pcc_passed_pts
-
+    # Assert all passed
+    all_passed = pcc_cls_passed and pcc_bbox_passed and pcc_pts_passed
     if all_passed:
         logger.info("✓ MapTR Head PCC test PASSED")
     else:
-        logger.warning("⚠ MapTR Head PCC test completed with warnings")
+        logger.error("✗ MapTR Head PCC test FAILED")
+
+    assert pcc_cls_passed, f"Classification scores PCC {pcc_cls:.6f} below threshold {pcc_threshold}"
+    assert pcc_bbox_passed, f"Bbox predictions PCC {pcc_bbox:.6f} below threshold {pcc_threshold}"
+    assert pcc_pts_passed, f"Points predictions PCC {pcc_pts:.6f} below threshold {pcc_threshold}"
 
     logger.info("=" * 60)
