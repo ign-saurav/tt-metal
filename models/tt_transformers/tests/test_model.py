@@ -227,7 +227,7 @@ def test_model_inference(
         )
     }
 
-    prompts = ["This is a test"] * model_args.max_batch_size
+    prompts = ["Capital of India is"] * model_args.max_batch_size
     if dummy_weights:
         # "This is a test" encoded prompt
         if model_name == "Mistral-7B":
@@ -392,6 +392,19 @@ def test_model_inference(
                 tt_decode_input = embd(encoded_prompts_tensor[:, next_token_idx]).view(batch, seqlen, -1)
                 if run_ref_pt:
                     pt_decode_input = embd(encoded_prompts_tensor[:, next_token_idx]).view(batch, seqlen, -1)
+            else:
+                # Last prompt token processed - sample first generated token for next iteration
+                # Also add this token to outputs (it's the first generated token!)
+                if run_ref_pt:
+                    _, pt_out_tok = sample_host(ref_output, temperature=0, top_p=0.8)
+                    pt_decode_input = embd(pt_out_tok)
+                    tt_decode_input = pt_decode_input
+                    all_outputs_ref.append(pt_out_tok.squeeze(1).tolist()[0])
+                    all_outputs.append(pt_out_tok.squeeze(1).tolist()[0])
+                else:
+                    _, tt_out_tok = sample_host(tt_output_torch, temperature=0, top_p=0.8)
+                    tt_decode_input = embd(tt_out_tok)
+                    all_outputs.append(tt_out_tok.squeeze(1).tolist()[0])
         else:
             # Greedy decode (temperature = 0) the generated token and save it to print out later
             if run_ref_pt:

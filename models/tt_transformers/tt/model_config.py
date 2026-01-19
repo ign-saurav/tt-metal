@@ -2539,7 +2539,8 @@ class ModelArgs:
                 except ValueError as e:
                     logger.warning(f"Failed to encode chat prompt, are you sure this is an instruct model? Error: {e}")
                     logger.warning(f"Falling back to base model encoding with no chat template")
-            return self.tokenizer.encode(prompt_text, add_special_tokens=False)
+            # add_special_tokens=True adds BOS token which is required for correct generation
+            return self.tokenizer.encode(prompt_text, add_special_tokens=True)
 
     def reference_lm_head(self):
         if self.checkpoint_type == CheckpointType.Meta:
