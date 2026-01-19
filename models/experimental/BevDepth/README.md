@@ -93,7 +93,8 @@ models/
         │   │   ├── test_resnet50_backbone.py  # ResNet-50 test
         │   │   └── test_secondfpn.py          # SECONDFPN test
         │   └── perf/                          # Performance tests
-        │       └── test_bevdepth_perf.py      # Device performance test
+        │       ├── test_bevdepth_perf.py      # Device performance test
+        │       └── test_e2e_performant.py     # End-to-end performance test with pipeline
         │
         ├── common.py                          # Common utilities
         └── README.md
@@ -144,7 +145,7 @@ pytest models/experimental/BevDepth/tests/pcc/test_bevdepth_backbone.py
 
 ### Run the Demo
 ```
-python3 models/experimental/BevDepth/demo/demo.py --mode ttnn --output bevdepth_output.png
+python3 models/experimental/BevDepth/demo/demo.py --mode ttnn --output bevdepth_demo_output.png
 ```
 
 **Options:**
@@ -153,16 +154,28 @@ python3 models/experimental/BevDepth/demo/demo.py --mode ttnn --output bevdepth_
 - `--threshold`: Detection score threshold (default: 0.3)
 - `--show-range`: Visualization range in meters (default: 60.0)
 
-The demo processes sample nuScenes data and visualizes 3D object detections in BEV space.
+The demo uses the pipeline API (1CQ, no trace) and processes sample nuScenes data to visualize 3D object detections in BEV space.
 
 ## Performance
 ### Single Device (BS=1)(n150):
-- end-2-end perf is `3.8` FPS
+- Device perf is `3.8` FPS
+- E2E perf (with 1CQ, no trace) is `0.17` FPS
 
-To run perf test:
+### Run Device Performance Test
 ```
 pytest models/experimental/BevDepth/tests/perf/test_bevdepth_perf.py -s
 ```
+
+### Run End-to-End Performance Test
+```
+pytest models/experimental/BevDepth/tests/perf/test_e2e_performant.py -s
+```
+
+The e2e_performant test uses the pipeline API with 1 command queue and trace disabled, providing realistic end-to-end performance measurements.
+
+**Note:** The test is configured with 1CQ (single command queue) without trace due to:
+- 2CQ requires sharded inputs, which conflicts with BevDepth's L1 memory requirements
+- Trace is not supported due to deformable convolution operations
 
 ## Configuration Notes
 - Resolution: (H, W) = (256, 704) is supported end-to-end.
@@ -179,6 +192,8 @@ pytest models/experimental/BevDepth/tests/perf/test_bevdepth_perf.py -s
   - arXiv: <https://arxiv.org/pdf/2206.10092>
   - Year: 2022
 
-### Code Repository
+### Code Repository and licensing
 - **Official BEVDepth Implementation**: <https://github.com/Megvii-BaseDetection/BEVDepth>
 - **License**: MIT License
+
+This TT-Metal implementation is adapted from the original BEVDepth repository (MIT License) and is licensed under Apache-2.0 by Tenstorrent AI ULC. The reference implementations in the `reference/` directory retain their original MIT license headers with proper attribution to the source repositories.
