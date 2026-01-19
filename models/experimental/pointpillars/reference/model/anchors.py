@@ -7,7 +7,7 @@
 
 import numpy as np
 import torch
-from models.experimental.pointpillars.reference.utils import limit_period, iou2d_nearest
+from models.experimental.pointpillars.reference.utils.process import limit_period, iou2d_nearest
 
 
 class Anchors:

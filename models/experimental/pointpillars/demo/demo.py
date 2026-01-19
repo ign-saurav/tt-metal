@@ -20,16 +20,14 @@ from models.experimental.pointpillars.tt.custom_preprocessor import create_custo
 from models.common.utility_functions import tt2torch_tensor
 
 # Import reference utilities for I/O and visualization
-from models.experimental.pointpillars.reference.utils import (
-    read_points,
-    read_calib,
+from models.experimental.pointpillars.reference.utils.process import (
     keep_bbox_from_image_range,
     keep_bbox_from_lidar_range,
-    vis_img_3d,
     bbox3d2corners_camera,
     points_camera2image,
 )
-
+from models.experimental.pointpillars.reference.utils.vis_o3d import vis_img_3d
+from models.experimental.pointpillars.reference.utils.io import read_points, read_calib
 
 LABEL2CLASSES = {0: "Pedestrian", 1: "Cyclist", 2: "Car"}
 
