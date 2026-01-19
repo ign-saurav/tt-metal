@@ -1,19 +1,6 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-PointPillars Demo with PyTorch and TTNN
-
-This demo script runs inference on point cloud data using both PyTorch and TTNN
-implementations of PointPillars. It includes full post-processing with anchor
-decoding, NMS, and saves visualization results to output directory.
-
-Usage:
-    python models/experimental/pointpillars/demo/demo.py \
-        --pc_path models/experimental/pointpillars/resources/000134.bin \
-        --calib_path models/experimental/pointpillars/resources/000134.txt \
-        --img_path models/experimental/pointpillars/resources/000134.png
-"""
 
 import argparse
 import cv2
@@ -44,8 +31,56 @@ from models.experimental.pointpillars.reference.utils import (
 )
 
 
-# Class mappings for KITTI dataset
 LABEL2CLASSES = {0: "Pedestrian", 1: "Cyclist", 2: "Car"}
+
+
+def download_test_data(resources_dir: str):
+    import subprocess
+    import tempfile
+
+    os.makedirs(resources_dir, exist_ok=True)
+    test_file = os.path.join(resources_dir, "000002.bin")
+    if not os.path.exists(test_file):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            subprocess.run(
+                [
+                    "git",
+                    "clone",
+                    "--depth",
+                    "1",
+                    "--filter=blob:none",
+                    "--sparse",
+                    "https://github.com/zhulf0804/PointPillars.git",
+                    tmpdir,
+                ],
+                check=True,
+                capture_output=True,
+            )
+            subprocess.run(
+                ["git", "-C", tmpdir, "sparse-checkout", "set", "pointpillars/dataset/demo_data/test"],
+                check=True,
+                capture_output=True,
+            )
+            src_dir = os.path.join(tmpdir, "pointpillars/dataset/demo_data/test")
+            for filename in ["000002.bin", "000002.txt", "000002.png"]:
+                src = os.path.join(src_dir, filename)
+                dst = os.path.join(resources_dir, filename)
+                if os.path.exists(src):
+                    import shutil
+
+                    shutil.copy2(src, dst)
+
+
+def download_checkpoint(checkpoint_dir: str):
+    import requests
+
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    checkpoint_path = os.path.join(checkpoint_dir, "epoch_160.pth")
+    if not os.path.exists(checkpoint_path):
+        url = "https://github.com/zhulf0804/PointPillars/raw/main/pretrained/epoch_160.pth"
+        response = requests.get(url)
+        with open(checkpoint_path, "wb") as f:
+            f.write(response.content)
 
 
 def point_range_filter(pts: np.ndarray, point_range: List[float] = [0, -39.68, -3, 69.12, 39.68, 1]) -> np.ndarray:
@@ -423,12 +458,9 @@ Example usage:
     )
     parser.add_argument(
         "--ckpt",
-        default="epoch_160.pth",
+        default="models/experimental/pointpillars/resources/checkpoint/epoch_160.pth",
         help="Path to checkpoint file",
     )
-    parser.add_argument("--pc_path", required=True, help="Path to point cloud file (.bin)")
-    parser.add_argument("--calib_path", default="", help="Path to calibration file (.txt)")
-    parser.add_argument("--img_path", default="", help="Path to image file (.png/.jpg)")
     parser.add_argument(
         "--output", default="models/experimental/pointpillars/resources/output", help="Output directory"
     )
@@ -436,7 +468,16 @@ Example usage:
 
     args = parser.parse_args()
 
-    # Initialize device with same method as the working test (CreateDevice, not open_device)
+    resources_dir = "models/experimental/pointpillars/resources"
+    checkpoint_dir = os.path.join(resources_dir, "checkpoint")
+
+    download_test_data(resources_dir)
+    download_checkpoint(checkpoint_dir)
+
+    pc_path = os.path.join(resources_dir, "000002.bin")
+    calib_path = os.path.join(resources_dir, "000002.txt")
+    img_path = os.path.join(resources_dir, "000002.png")
+
     logger.info(f"Opening Tenstorrent device {args.device_id}")
     device = ttnn.CreateDevice(device_id=args.device_id, l1_small_size=79104)
 
@@ -448,9 +489,9 @@ Example usage:
 
         # Run demo
         demo.run_demo(
-            pc_path=args.pc_path,
-            calib_path=args.calib_path,
-            img_path=args.img_path,
+            pc_path=pc_path,
+            calib_path=calib_path,
+            img_path=img_path,
             output_dir=args.output,
         )
         return 0
