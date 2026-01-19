@@ -3,6 +3,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
+import torch
+from typing import List
 
 
 def multi_scale_deformable_attn(value, value_spatial_shapes, sampling_locations, attention_weights, device):
@@ -82,16 +84,72 @@ def multi_scale_deformable_attn(value, value_spatial_shapes, sampling_locations,
     return output
 
 
-def inverse_sigmoid(x, eps: float = 1e-5):
+def inverse_sigmoid(x: ttnn.Tensor, eps: float = 1e-5) -> ttnn.Tensor:
+    """Compute inverse sigmoid using TTNN operations.
+
+    inverse_sigmoid(x) = log(x / (1 - x))
+
+    Args:
+        x: Input tensor with values in [0, 1].
+        eps: Small epsilon for numerical stability.
+
+    Returns:
+        Inverse sigmoid of input tensor.
+    """
     x = ttnn.to_layout(x, layout=ttnn.TILE_LAYOUT)
     x = ttnn.clamp(x, min=0, max=1)
     x1 = ttnn.clamp(x, min=eps)
+
+    # Create ones tensor of same shape for (1 - x) computation
     if len(x.shape) == 3:
         x_temp = ttnn.ones(shape=[x.shape[0], x.shape[1], x.shape[2]], layout=ttnn.TILE_LAYOUT, device=x.device())
     else:
         x_temp = ttnn.ones(
             shape=[x.shape[0], x.shape[1], x.shape[2], x.shape[3]], layout=ttnn.TILE_LAYOUT, device=x.device()
         )
+
     x_temp = x_temp - x
     x2 = ttnn.clamp(x_temp, min=eps)
+
     return ttnn.log(ttnn.div(x1, x2))
+
+
+def bbox_xyxy_to_cxcywh(bbox: ttnn.Tensor) -> ttnn.Tensor:
+    """Convert bounding boxes from xyxy to cxcywh format using TTNN operations.
+
+    Args:
+        bbox: Bounding boxes in xyxy format (xmin, ymin, xmax, ymax).
+              Shape: (..., 4)
+
+    Returns:
+        Bounding boxes in cxcywh format (cx, cy, w, h).
+        Shape: (..., 4)
+    """
+    x0 = bbox[..., 0:1]
+    y0 = bbox[..., 1:2]
+    x1 = bbox[..., 2:3]
+    y1 = bbox[..., 3:4]
+
+    cx = ttnn.div(ttnn.add(x0, x1), 2.0)
+    cy = ttnn.div(ttnn.add(y0, y1), 2.0)
+    w = ttnn.subtract(x1, x0)
+    h = ttnn.subtract(y1, y0)
+
+    result = ttnn.concat([cx, cy, w, h], dim=-1, memory_config=ttnn.L1_MEMORY_CONFIG)
+    return result
+
+
+def denormalize_2d_bbox(bboxes: torch.Tensor, pc_range: List[float]) -> torch.Tensor:
+    """Denormalize bounding boxes from [0, 1] to real-world coordinates."""
+    new_bboxes = bboxes.clone()
+    new_bboxes[..., 0::2] = bboxes[..., 0::2] * (pc_range[3] - pc_range[0]) + pc_range[0]
+    new_bboxes[..., 1::2] = bboxes[..., 1::2] * (pc_range[4] - pc_range[1]) + pc_range[1]
+    return new_bboxes
+
+
+def denormalize_2d_pts(pts: torch.Tensor, pc_range: List[float]) -> torch.Tensor:
+    """Denormalize points from [0, 1] to real-world coordinates."""
+    new_pts = pts.clone()
+    new_pts[..., 0] = pts[..., 0] * (pc_range[3] - pc_range[0]) + pc_range[0]
+    new_pts[..., 1] = pts[..., 1] * (pc_range[4] - pc_range[1]) + pc_range[1]
+    return new_pts
