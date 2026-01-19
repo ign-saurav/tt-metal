@@ -12,9 +12,26 @@ from models.experimental.MapTR.tt.bottleneck import TtBottleneck
 
 def create_conv_config_from_args(conv_args, conv_pth, activation=None):
     """Create Conv2dConfiguration from model args and weights."""
+    # Get weight tensor
+    weight = conv_pth.weight
+
+    # Check if weight needs to be permuted from HWIO to OICHW format
+    # Expected shape: (out_channels, in_channels, kernel_h, kernel_w)
+    # If shape is (kernel_h, kernel_w, in_channels, out_channels), permute it
+    if len(weight.shape) == 4:
+        h, w, in_ch, out_ch = weight.shape
+        expected_out_ch = conv_args.out_channels
+        expected_in_ch = conv_args.in_channels // conv_args.groups
+        expected_kernel_h, expected_kernel_w = conv_args.kernel_size
+
+        # If shape matches HWIO format, permute to OICHW
+        if h == expected_kernel_h and w == expected_kernel_w and in_ch == expected_in_ch and out_ch == expected_out_ch:
+            # Permute from (H, W, I, O) to (O, I, H, W)
+            weight = ttnn.permute(weight, (3, 2, 0, 1))
+
     return Conv2dConfiguration.from_model_args(
         conv2d_args=conv_args,
-        weights=conv_pth.weight,
+        weights=weight,
         bias=conv_pth.bias if hasattr(conv_pth, "bias") else None,
         activation=activation,
         sharding_strategy=AutoShardedStrategyConfiguration(),
@@ -48,47 +65,47 @@ class TtResNet50:
         )
         self.conv1 = TtConv2d(conv1_config, device)
 
-        # Layer 1
+        # Layer 1 - use attribute access with string keys
         self.layer1_0 = TtBottleneck(
-            conv_args.layer1[0],
+            getattr(conv_args.layer1, "0"),
             conv_pth.layer1_0,
             device=self.device,
             is_downsample=True,
         )
-        self.layer1_1 = TtBottleneck(conv_args.layer1[1], conv_pth.layer1_1, device=self.device)
-        self.layer1_2 = TtBottleneck(conv_args.layer1[2], conv_pth.layer1_2, device=self.device)
+        self.layer1_1 = TtBottleneck(getattr(conv_args.layer1, "1"), conv_pth.layer1_1, device=self.device)
+        self.layer1_2 = TtBottleneck(getattr(conv_args.layer1, "2"), conv_pth.layer1_2, device=self.device)
 
         # Layer 2
         self.layer2_0 = TtBottleneck(
-            conv_args.layer2[0],
+            getattr(conv_args.layer2, "0"),
             conv_pth.layer2_0,
             device=self.device,
             is_downsample=True,
             blk_sharded=True,
             activation_dtype=ttnn.bfloat8_b,
         )
-        self.layer2_1 = TtBottleneck(conv_args.layer2[1], conv_pth.layer2_1, device=self.device)
-        self.layer2_2 = TtBottleneck(conv_args.layer2[2], conv_pth.layer2_2, device=self.device)
-        self.layer2_3 = TtBottleneck(conv_args.layer2[3], conv_pth.layer2_3, device=self.device)
+        self.layer2_1 = TtBottleneck(getattr(conv_args.layer2, "1"), conv_pth.layer2_1, device=self.device)
+        self.layer2_2 = TtBottleneck(getattr(conv_args.layer2, "2"), conv_pth.layer2_2, device=self.device)
+        self.layer2_3 = TtBottleneck(getattr(conv_args.layer2, "3"), conv_pth.layer2_3, device=self.device)
 
         # Layer 3
         self.layer3_0 = TtBottleneck(
-            conv_args.layer3[0],
+            getattr(conv_args.layer3, "0"),
             conv_pth.layer3_0,
             device=self.device,
             is_downsample=True,
             blk_sharded=True,
             activation_dtype=ttnn.bfloat8_b,
         )
-        self.layer3_1 = TtBottleneck(conv_args.layer3[1], conv_pth.layer3_1, device=self.device)
-        self.layer3_2 = TtBottleneck(conv_args.layer3[2], conv_pth.layer3_2, device=self.device)
-        self.layer3_3 = TtBottleneck(conv_args.layer3[3], conv_pth.layer3_3, device=self.device)
-        self.layer3_4 = TtBottleneck(conv_args.layer3[4], conv_pth.layer3_4, device=self.device)
-        self.layer3_5 = TtBottleneck(conv_args.layer3[5], conv_pth.layer3_5, device=self.device)
+        self.layer3_1 = TtBottleneck(getattr(conv_args.layer3, "1"), conv_pth.layer3_1, device=self.device)
+        self.layer3_2 = TtBottleneck(getattr(conv_args.layer3, "2"), conv_pth.layer3_2, device=self.device)
+        self.layer3_3 = TtBottleneck(getattr(conv_args.layer3, "3"), conv_pth.layer3_3, device=self.device)
+        self.layer3_4 = TtBottleneck(getattr(conv_args.layer3, "4"), conv_pth.layer3_4, device=self.device)
+        self.layer3_5 = TtBottleneck(getattr(conv_args.layer3, "5"), conv_pth.layer3_5, device=self.device)
 
         # Layer 4
         self.layer4_0 = TtBottleneck(
-            conv_args.layer4[0],
+            getattr(conv_args.layer4, "0"),
             conv_pth.layer4_0,
             device=self.device,
             is_downsample=True,
@@ -97,13 +114,13 @@ class TtResNet50:
             conv3_blk_sharded=True,
         )
         self.layer4_1 = TtBottleneck(
-            conv_args.layer4[1],
+            getattr(conv_args.layer4, "1"),
             conv_pth.layer4_1,
             device=self.device,
             conv3_blk_sharded=True,
         )
         self.layer4_2 = TtBottleneck(
-            conv_args.layer4[2],
+            getattr(conv_args.layer4, "2"),
             conv_pth.layer4_2,
             device=self.device,
             conv3_blk_sharded=True,
