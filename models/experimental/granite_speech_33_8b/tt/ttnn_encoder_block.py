@@ -524,27 +524,17 @@ class GraniteSpeechConformerDepthWiseConv1dTTNN:
                 dtype=ttnn.bfloat16,
                 return_output_dim=True,
                 return_weights_and_bias=True,
-                # memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
 
-            # Process output tensor
-            tt_output_tensor = ttnn.from_device(tt_output_tensor)
+            # Process output tensor - ensure consistent memory layout for concatenation
             tt_output_tensor = ttnn.reshape(tt_output_tensor, (batch_size, out_length, chan_out_per_split))
-            tt_output_tensor = ttnn.to_device(tt_output_tensor, self.device)
-            tt_output_tensor = ttnn.permute(tt_output_tensor, (0, 2, 1))
+
+            tt_output_tensor = ttnn.to_memory_config(tt_output_tensor, ttnn.DRAM_MEMORY_CONFIG)
             output_splits.append(tt_output_tensor)
 
-        # Combine all num_splits outputs into single tensor along channel dimension
-        # First, permute back to (batch_size, length, channels) format for concatenation
-        output_splits_reshaped = []
-        for output_split in output_splits:
-            # output_split is (batch_size, chan_out_per_split, out_length)
-            # Reshape to (batch_size, out_length, chan_out_per_split) for concat
-            output_reshaped = ttnn.permute(output_split, (0, 2, 1))
-            output_splits_reshaped.append(output_reshaped)
-
         # Concatenate along channel dimension (dim=-1)
-        tt_output_tensor = ttnn.concat(output_splits_reshaped, dim=-1)
+        # All inputs must have the same memory layout (DRAM_MEMORY_CONFIG)
+        tt_output_tensor = ttnn.concat(output_splits, dim=-1)
 
         # Final reshape and permute to match original output format
         tt_output_tensor = ttnn.reshape(tt_output_tensor, (batch_size, out_length, self.chan_out))
