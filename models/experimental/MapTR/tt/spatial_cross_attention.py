@@ -39,9 +39,20 @@ class TtSpatialCrossAttention:
         deform_num_points = deformable_attention.get("num_points", 8)
         deform_im2col_step = deformable_attention.get("im2col_step", 64)
 
+        # Pass deformable_attention sub-params to the internal module
+        # Handle both dict-style and object-style params access
+        deform_params = params  # Default fallback
+        try:
+            if isinstance(params, dict) and "deformable_attention" in params:
+                deform_params = params["deformable_attention"]
+            elif hasattr(params, "deformable_attention"):
+                deform_params = params.deformable_attention
+        except (KeyError, AttributeError):
+            # Fallback: params already contains deformable_attention weights directly
+            pass
         self.deformable_attention = TtMSDeformableAttention3D(
             device=self.device,
-            params=params,
+            params=deform_params,
             embed_dims=deform_embed_dims,
             num_heads=deform_num_heads,
             num_levels=deform_num_levels,
@@ -236,7 +247,11 @@ class TtMSDeformableAttention3D:
 
         bs, num_query, _ = query.shape
         bs, num_value, _ = value.shape
-        assert (ttnn.sum(spatial_shapes[:, 0] * spatial_shapes[:, 1])) == num_value
+        # Convert to torch for assertion since ttnn.sum doesn't support INT32
+        # Use float32 for calculation to avoid bfloat16 precision issues with large integers
+        spatial_shapes_torch = ttnn.to_torch(spatial_shapes).float()
+        expected_num_value = int((spatial_shapes_torch[:, 0] * spatial_shapes_torch[:, 1]).sum().item())
+        assert expected_num_value == num_value, f"spatial_shapes product {expected_num_value} != num_value {num_value}"
         value = ttnn.to_layout(value, ttnn.TILE_LAYOUT)
 
         value = ttnn.linear(value, params.value_proj.weight, bias=params.value_proj.bias)

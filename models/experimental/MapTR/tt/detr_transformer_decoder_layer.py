@@ -83,11 +83,13 @@ class TtDetrTransformerDecoderLayer:
                     attn_cfgs[index]["batch_first"] = self.batch_first
                 if attn_cfgs[index]["type"] == "MultiheadAttention":
                     type = attn_cfgs[index].pop("type")
-                    attention = TtMultiheadAttention(params.attentions[f"attn0"], device, **attn_cfgs[index])
+                    attention = TtMultiheadAttention(getattr(params.attentions, "attn0"), device, **attn_cfgs[index])
                     attn_cfgs[index]["type"] = "MultiheadAttention"
                 elif attn_cfgs[index]["type"] == "CustomMSDeformableAttention":
                     type = attn_cfgs[index].pop("type")
-                    attention = TtCustomMSDeformableAttention(params.attentions[f"attn1"], device, **attn_cfgs[index])
+                    attention = TtCustomMSDeformableAttention(
+                        getattr(params.attentions, "attn1"), device, **attn_cfgs[index]
+                    )
                     attn_cfgs[index]["type"] = "CustomMSDeformableAttention"
 
                 self.attentions.append(attention)
@@ -115,7 +117,7 @@ class TtDetrTransformerDecoderLayer:
         num_ffns = operation_order.count("ffn")
 
         for i in range(num_ffns):
-            self.ffns.append(TtFFN(params.ffn[f"ffn{i}"], self.device))
+            self.ffns.append(TtFFN(getattr(params.ffn, f"ffn{i}"), self.device))
 
     def __call__(
         self,
@@ -164,13 +166,12 @@ class TtDetrTransformerDecoderLayer:
                 identity = query
 
             elif layer == "norm":
+                norm_params = getattr(self.params.norms, f"norm{norm_index}")
                 query = ttnn.layer_norm(
                     query,
-                    weight=self.params.norms[f"norm{norm_index}"].weight,
-                    bias=self.params.norms[f"norm{norm_index}"].bias,
+                    weight=norm_params.weight,
+                    bias=norm_params.bias,
                 )
-                ttnn.deallocate(self.params.norms[f"norm{norm_index}"].weight)
-                ttnn.deallocate(self.params.norms[f"norm{norm_index}"].bias)
                 norm_index += 1
 
             elif layer == "cross_attn":

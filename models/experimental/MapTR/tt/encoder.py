@@ -63,7 +63,7 @@ class TtBEVFormerEncoder:
 
         self.layers = []
         for i in range(self.num_layers):
-            self.layers.append(TtBEVFormerLayer(self.device, params.layers[f"layer{i}"], **transformer_layers))
+            self.layers.append(TtBEVFormerLayer(self.device, getattr(params.layers, f"layer{i}"), **transformer_layers))
 
     @staticmethod
     def get_reference_points_ttnn(H, W, Z=8, num_points_in_pillar=4, dim="3d", bs=1, device=None, dtype=ttnn.bfloat16):
@@ -261,6 +261,7 @@ class TtBEVFormerEncoder:
         bev_query = ttnn.permute(bev_query, (1, 0, 2))
         bev_pos = ttnn.permute(bev_pos, (1, 0, 2))
         bs, len_bev, num_bev_level, _ = ref_2d.shape
+
         if prev_bev is not None:
             prev_bev = ttnn.permute(prev_bev, (1, 0, 2))
             prev_bev = ttnn.stack([prev_bev, bev_query], 1)
@@ -270,6 +271,7 @@ class TtBEVFormerEncoder:
         else:
             hybird_ref_2d = ttnn.stack([ref_2d, ref_2d], 1)
             hybird_ref_2d = ttnn.reshape(hybird_ref_2d, (bs * 2, len_bev, num_bev_level, 2))
+
         ttnn.deallocate(ref_2d)
         ttnn.deallocate(shift)
         ttnn.deallocate(shift_ref_2d)
@@ -342,11 +344,11 @@ class TtBEVFormerLayer:
                     attn_cfgs[index]["batch_first"] = self.batch_first
                 if attn_cfgs[index]["type"] == "TemporalSelfAttention":
                     type = attn_cfgs[index].pop("type")
-                    attention = TtTemporalSelfAttention(device, params.attentions[f"attn0"], **attn_cfgs[index])
+                    attention = TtTemporalSelfAttention(device, getattr(params.attentions, "attn0"), **attn_cfgs[index])
                     attn_cfgs[index]["type"] = "TemporalSelfAttention"
                 elif attn_cfgs[index]["type"] == "SpatialCrossAttention":
                     type = attn_cfgs[index].pop("type")
-                    attention = TtSpatialCrossAttention(device, params.attentions[f"attn1"], **attn_cfgs[index])
+                    attention = TtSpatialCrossAttention(device, getattr(params.attentions, "attn1"), **attn_cfgs[index])
                     attn_cfgs[index]["type"] = "SpatialCrossAttention"
 
                 self.attentions.append(attention)
@@ -372,7 +374,7 @@ class TtBEVFormerLayer:
         num_ffns = operation_order.count("ffn")
 
         for i in range(num_ffns):
-            self.ffns.append(TtFFN(params.ffn[f"ffn{i}"], self.device))
+            self.ffns.append(TtFFN(getattr(params.ffn, f"ffn{i}"), self.device))
 
         assert len(operation_order) == 6
         assert set(operation_order) == set(["self_attn", "norm", "cross_attn", "ffn"])
@@ -440,13 +442,12 @@ class TtBEVFormerLayer:
                 identity = query
 
             elif layer == "norm":
+                norm_params = getattr(self.params.norms, f"norm{norm_index}")
                 query = ttnn.layer_norm(
                     query,
-                    weight=self.params.norms[f"norm{norm_index}"].weight,
-                    bias=self.params.norms[f"norm{norm_index}"].bias,
+                    weight=norm_params.weight,
+                    bias=norm_params.bias,
                 )
-                ttnn.deallocate(self.params.norms[f"norm{norm_index}"].weight)
-                ttnn.deallocate(self.params.norms[f"norm{norm_index}"].bias)
                 norm_index += 1
 
             # spaital cross attention

@@ -122,8 +122,11 @@ class TtCustomMSDeformableAttention:
 
         bs, num_query, _ = query.shape
         bs, num_value, _ = value.shape
-        # Verify spatial shapes using native TTNN operations (more efficient)
-        assert (ttnn.sum(spatial_shapes[:, 0] * spatial_shapes[:, 1])) == num_value
+        # Verify spatial shapes (convert to torch since ttnn.sum doesn't support INT32)
+        # Use float32 for calculation to avoid bfloat16 precision issues with large integers
+        spatial_shapes_torch = ttnn.to_torch(spatial_shapes).float()
+        expected_num_value = int((spatial_shapes_torch[:, 0] * spatial_shapes_torch[:, 1]).sum().item())
+        assert expected_num_value == num_value, f"spatial_shapes product {expected_num_value} != num_value {num_value}"
         value = ttnn.to_layout(value, ttnn.TILE_LAYOUT)
 
         value = ttnn.linear(value, params.value_proj.weight, bias=params.value_proj.bias)

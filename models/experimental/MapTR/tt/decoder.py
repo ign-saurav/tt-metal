@@ -29,7 +29,7 @@ class TtMapTRDecoder:
         self.params_branches = params_branches
         self.layers = [
             TtDetrTransformerDecoderLayer(
-                params.layers[f"layer{i}"],
+                getattr(params.layers, f"layer{i}"),
                 self.device,
                 attn_cfgs=[
                     {
