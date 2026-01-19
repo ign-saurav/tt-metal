@@ -1,49 +1,30 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-TTNN MapTR Perception Transformer Implementation
-"""
 
-import ttnn
 import torch
-import torch.nn as nn
+import ttnn
 import numpy as np
+from scipy.ndimage import rotate as scipy_rotate
 from typing import List, Optional, Tuple
-from torchvision.transforms.functional import rotate as torch_rotate
 
 
-class TtConvFuser(nn.Module):
+class TtConvFuser:
     """TTNN Convolution-based feature fuser for multi-modal fusion."""
 
-    def __init__(self, params: dict, device: ttnn.Device):
-        super().__init__()
+    def __init__(self, params, device: ttnn.Device):
         self.device = device
         self.params = params
 
-        # Extract conv parameters
-        conv_params = params["conv"]
-        self.conv_weight = conv_params["weight"]
-        self.conv_bias = conv_params.get("bias")
-
-        # Extract batch norm parameters
-        bn_params = params["batch_norm"]
-        self.bn_weight = bn_params["weight"]
-        self.bn_bias = bn_params["bias"]
-        self.bn_running_mean = bn_params["running_mean"]
-        self.bn_running_var = bn_params["running_var"]
-        self.bn_eps = bn_params.get("eps", 1e-5)
-        self.bn_momentum = bn_params.get("momentum", 0.1)
-
-    def forward(self, inputs: List[ttnn.Tensor]) -> ttnn.Tensor:
+    def __call__(self, inputs: List[ttnn.Tensor]) -> ttnn.Tensor:
         # Concatenate inputs along channel dimension
         concatenated = ttnn.concat(inputs, dim=1)
 
         # Apply convolution
         conv_output = ttnn.conv2d(
             input=concatenated,
-            weight=self.conv_weight,
-            bias=self.conv_bias,
+            weight=self.params.conv.weight,
+            bias=self.params.conv.bias,
             padding=[1, 1],
             stride=[1, 1],
             dilation=[1, 1],
@@ -53,44 +34,39 @@ class TtConvFuser(nn.Module):
         # Apply batch normalization
         bn_output = ttnn.batch_norm(
             conv_output,
-            running_mean=self.bn_running_mean,
-            running_var=self.bn_running_var,
-            weight=self.bn_weight,
-            bias=self.bn_bias,
-            epsilon=self.bn_eps,
-            momentum=self.bn_momentum,
+            running_mean=self.params.batch_norm.running_mean,
+            running_var=self.params.batch_norm.running_var,
+            weight=self.params.batch_norm.weight,
+            bias=self.params.batch_norm.bias,
+            epsilon=1e-5,
+            momentum=0.1,
             training=False,
         )
 
         # Apply ReLU activation
-        output = ttnn.relu(bn_output)
-
-        return output
+        return ttnn.relu(bn_output)
 
 
-class TtMapTRPerceptionTransformer(nn.Module):
+class TtMapTRPerceptionTransformer:
     """TTNN MapTR Perception Transformer Implementation."""
 
     def __init__(
         self,
-        params: dict,
+        params,
         device: ttnn.Device,
-        encoder: nn.Module,
-        decoder: nn.Module,
+        encoder,
+        decoder,
         embed_dims: int = 256,
         num_feature_levels: int = 1,
         num_cams: int = 6,
         rotate_prev_bev: bool = True,
         use_shift: bool = True,
         use_can_bus: bool = True,
-        len_can_bus: int = 18,
         can_bus_norm: bool = True,
         use_cams_embeds: bool = True,
         rotate_center: List[int] = None,
         fuser: Optional[TtConvFuser] = None,
     ):
-        super().__init__()
-
         if rotate_center is None:
             rotate_center = [100, 100]
 
@@ -101,11 +77,9 @@ class TtMapTRPerceptionTransformer(nn.Module):
         self.embed_dims = embed_dims
         self.num_feature_levels = num_feature_levels
         self.num_cams = num_cams
-
         self.rotate_prev_bev = rotate_prev_bev
         self.use_shift = use_shift
         self.use_can_bus = use_can_bus
-        self.len_can_bus = len_can_bus
         self.can_bus_norm = can_bus_norm
         self.use_cams_embeds = use_cams_embeds
         self.rotate_center = rotate_center
@@ -113,121 +87,6 @@ class TtMapTRPerceptionTransformer(nn.Module):
 
         # Check if using attention-based BEV encoder
         self.use_attn_bev = hasattr(encoder, "layers")
-
-        # Initialize TTNN parameters
-        self._init_ttnn_layers()
-
-    def _init_ttnn_layers(self):
-        """Initialize TTNN layers and parameters."""
-        # Level embeddings
-        self.level_embeds = self.params["level_embeds"]
-
-        # Camera embeddings
-        self.cams_embeds = self.params["cams_embeds"]
-
-        # Reference points linear layer
-        ref_params = self.params["reference_points"]
-        self.reference_points_weight = ref_params["weight"]
-        self.reference_points_bias = ref_params["bias"]
-
-        # CAN bus MLP parameters
-        # nn.Sequential structure: [0]=Linear, [1]=ReLU, [2]=Linear, [3]=ReLU, [4/norm]=LayerNorm
-        can_bus_params = self.params["can_bus_mlp"]
-        self.can_bus_mlp_weight1 = can_bus_params["0"]["weight"]  # First Linear at index 0
-        self.can_bus_mlp_bias1 = can_bus_params["0"]["bias"]
-        self.can_bus_mlp_weight2 = can_bus_params["2"]["weight"]  # Second Linear at index 2 (after ReLU)
-        self.can_bus_mlp_bias2 = can_bus_params["2"]["bias"]
-
-        if self.can_bus_norm:
-            self.can_bus_norm_weight = can_bus_params["norm"]["weight"]
-            self.can_bus_norm_bias = can_bus_params["norm"]["bias"]
-            self.can_bus_norm_eps = 1e-5
-
-        # Feature projection layer (optional, for when feat dims != embed_dims)
-        self.feat_proj_weight = self.params.get("feat_proj", {}).get("weight", None)
-        self.feat_proj_bias = self.params.get("feat_proj", {}).get("bias", None)
-
-    def _linear(self, input_tensor: ttnn.Tensor, weight: ttnn.Tensor, bias: ttnn.Tensor = None) -> ttnn.Tensor:
-        """TTNN linear layer implementation."""
-        return ttnn.linear(input_tensor, weight, bias=bias)
-
-    def _layer_norm(
-        self, input_tensor: ttnn.Tensor, weight: ttnn.Tensor, bias: ttnn.Tensor, eps: float = 1e-5
-    ) -> ttnn.Tensor:
-        """TTNN layer norm implementation."""
-        return ttnn.layer_norm(input_tensor, epsilon=eps, weight=weight, bias=bias)
-
-    def _relu(self, input_tensor: ttnn.Tensor) -> ttnn.Tensor:
-        """TTNN ReLU activation."""
-        return ttnn.relu(input_tensor)
-
-    def _can_bus_mlp(self, can_bus_torch: torch.Tensor) -> ttnn.Tensor:
-        """CAN bus MLP implementation in TTNN.
-
-        Uses padding to make tensors tile-compatible (multiples of 32).
-        Input can_bus is [bs, len_can_bus] where len_can_bus=18.
-
-        Args:
-            can_bus_torch: PyTorch tensor [bs, len_can_bus] - passed as torch for padding
-
-        Returns:
-            TTNN tensor [bs, embed_dims]
-        """
-        bs = can_bus_torch.shape[0]
-        in_features = can_bus_torch.shape[1]  # 18
-
-        # Pad input from [bs, 18] to [bs, 32] for tile compatibility
-        padded_size = 32
-        if in_features < padded_size:
-            padding = torch.zeros(bs, padded_size - in_features, dtype=can_bus_torch.dtype)
-            can_bus_padded = torch.cat([can_bus_torch, padding], dim=1)
-        else:
-            can_bus_padded = can_bus_torch
-
-        # Convert padded input to TTNN
-        can_bus = ttnn.from_torch(can_bus_padded, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
-
-        # Get weights as torch tensors for padding
-        weight1_torch = ttnn.to_torch(self.can_bus_mlp_weight1)  # [18, 128] (stored as T)
-        bias1_torch = ttnn.to_torch(self.can_bus_mlp_bias1)  # [128]
-
-        # Pad weight1 from [18, 128] to [32, 128]
-        if weight1_torch.shape[0] < padded_size:
-            w_padding = torch.zeros(
-                padded_size - weight1_torch.shape[0], weight1_torch.shape[1], dtype=weight1_torch.dtype
-            )
-            weight1_padded = torch.cat([weight1_torch, w_padding], dim=0)
-        else:
-            weight1_padded = weight1_torch
-
-        # Convert padded weight to TTNN
-        weight1 = ttnn.from_torch(weight1_padded, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
-        bias1 = ttnn.from_torch(bias1_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
-
-        # First linear: [bs, 32] @ [32, 128] = [bs, 128] + ReLU
-        hidden = ttnn.linear(can_bus, weight1, bias=bias1)
-        hidden = ttnn.relu(hidden)
-
-        # Clean up first layer tensors
-        ttnn.deallocate(can_bus)
-        ttnn.deallocate(weight1)
-        ttnn.deallocate(bias1)
-
-        # Second linear: [bs, 128] @ [128, 256] = [bs, 256] + ReLU
-        # weight2 is [128, 256] - already tile-compatible
-        output = ttnn.linear(hidden, self.can_bus_mlp_weight2, bias=self.can_bus_mlp_bias2)
-        output = ttnn.relu(output)
-
-        # Clean up hidden tensor
-        ttnn.deallocate(hidden)
-
-        # Layer norm if enabled
-        if self.can_bus_norm:
-            output = ttnn.layer_norm(
-                output, weight=self.can_bus_norm_weight, bias=self.can_bus_norm_bias, epsilon=self.can_bus_norm_eps
-            )
-
-        return output
 
     def attn_bev_encode(
         self,
@@ -244,18 +103,20 @@ class TtMapTRPerceptionTransformer(nn.Module):
         if grid_length is None:
             grid_length = [0.512, 0.512]
 
-        # Get batch size from first feature
         bs = mlvl_feats[0].shape[0]
 
         # Expand BEV queries
         bev_queries = ttnn.unsqueeze(bev_queries, 1)
-        bev_queries = ttnn.repeat(bev_queries, [1, bs, 1])
+        bev_queries = ttnn.repeat(bev_queries, (1, bs, 1))
 
-        # Flatten BEV position
-        bev_pos = ttnn.reshape(bev_pos, [bs, self.embed_dims, bev_h * bev_w])
-        bev_pos = ttnn.permute(bev_pos, [2, 0, 1])
+        # Reshape BEV position
+        bev_pos = ttnn.reshape(bev_pos, [bev_pos.shape[0], bev_pos.shape[1], bev_pos.shape[2] * bev_pos.shape[3]])
+        bev_pos = ttnn.permute(bev_pos, (2, 0, 1))
 
-        # Calculate shift from ego motion (same as PyTorch version)
+        # Convert to torch for tensor creation (following vadv2 pattern)
+        bev_queries_torch = ttnn.to_torch(bev_queries)
+
+        # Obtain rotation angle and shift with ego motion
         img_metas = kwargs.get("img_metas", [{}])
         delta_x = np.array([each.get("can_bus", np.zeros(18))[0] for each in img_metas])
         delta_y = np.array([each.get("can_bus", np.zeros(18))[1] for each in img_metas])
@@ -271,40 +132,54 @@ class TtMapTRPerceptionTransformer(nn.Module):
         shift_y = shift_y * self.use_shift
         shift_x = shift_x * self.use_shift
 
-        # Convert shift to TTNN tensor [bs, 2] matching PyTorch reference
-        # PyTorch ref: shift = shift.permute(1, 0) converts [2, bs] -> [bs, 2]
-        shift_array = np.stack([shift_x, shift_y], axis=0)  # [2, bs]
-        shift_torch = torch.from_numpy(shift_array).permute(1, 0).float()  # [bs, 2]
-        shift = ttnn.from_torch(shift_torch, dtype=ttnn.bfloat16, device=self.device)
+        # Create shift tensor (vadv2 pattern: use new_tensor then permute)
+        shift = bev_queries_torch.new_tensor([shift_x, shift_y]).permute(1, 0)  # [bs, 2]
+        shift = ttnn.from_torch(shift, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
 
-        # Handle previous BEV features
+        # Handle previous BEV features with rotation
         if prev_bev is not None:
             if prev_bev.shape[1] == bev_h * bev_w:
-                prev_bev = ttnn.permute(prev_bev, [1, 0, 2])
-
+                prev_bev = ttnn.permute(prev_bev, (1, 0, 2))
             if self.rotate_prev_bev:
-                # Rotate previous BEV features based on ego motion
-                # Fallback to PyTorch
-                prev_bev_torch = ttnn.to_torch(prev_bev)  # (bev_h*bev_w, bs, embed_dims)
+                prev_bev_torch = ttnn.to_torch(prev_bev)
                 for i in range(bs):
                     rotation_angle = img_metas[i].get("can_bus", np.zeros(18))[-1]
                     tmp_prev_bev = prev_bev_torch[:, i].reshape(bev_h, bev_w, -1).permute(2, 0, 1)
-                    tmp_prev_bev = torch_rotate(tmp_prev_bev, rotation_angle, center=self.rotate_center)
-                    tmp_prev_bev = tmp_prev_bev.permute(1, 2, 0).reshape(bev_h * bev_w, 1, -1)
-                    prev_bev_torch[:, i] = tmp_prev_bev[:, 0]
-                prev_bev = ttnn.from_torch(prev_bev_torch, dtype=ttnn.bfloat16, device=self.device)
+                    # Use scipy for rotation (operates on numpy)
+                    tmp_prev_bev_np = tmp_prev_bev.float().numpy()
+                    tmp_prev_bev_np = scipy_rotate(
+                        tmp_prev_bev_np, rotation_angle, axes=(1, 2), reshape=False, order=1, mode="constant", cval=0.0
+                    )
+                    tmp_prev_bev = torch.from_numpy(tmp_prev_bev_np).permute(1, 2, 0).reshape(bev_h * bev_w, -1)
+                    prev_bev_torch[:, i] = tmp_prev_bev
+                prev_bev = ttnn.from_torch(
+                    prev_bev_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
+                )
 
-        # Process CAN bus signals
-        can_bus_list = [torch.from_numpy(each.get("can_bus", np.zeros(18))).float() for each in img_metas]
-        can_bus_torch = torch.stack(can_bus_list)
-        can_bus_torch = can_bus_torch[:, : self.len_can_bus]
-        # Pass torch tensor directly to _can_bus_mlp for padding
-        can_bus_processed = self._can_bus_mlp(can_bus_torch)
-        can_bus_processed = ttnn.unsqueeze(can_bus_processed, 0)
+        # Add CAN bus signals (vadv2 pattern: direct linear layers)
+        can_bus = bev_queries_torch.new_tensor([each.get("can_bus", np.zeros(18)) for each in img_metas])
+        can_bus = ttnn.from_torch(can_bus, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
+        bev_queries = ttnn.from_torch(
+            bev_queries_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
+        )
 
-        # Add CAN bus to BEV queries
+        # CAN bus MLP: Linear -> ReLU -> Linear -> ReLU -> LayerNorm
+        can_bus = ttnn.linear(can_bus, self.params.can_bus_mlp["0"].weight, bias=self.params.can_bus_mlp["0"].bias)
+        can_bus = ttnn.relu(can_bus)
+        can_bus = ttnn.linear(can_bus, self.params.can_bus_mlp["2"].weight, bias=self.params.can_bus_mlp["2"].bias)
+        can_bus = ttnn.relu(can_bus)
+
+        if self.can_bus_norm:
+            can_bus = ttnn.layer_norm(
+                can_bus,
+                weight=self.params.can_bus_mlp.norm.weight,
+                bias=self.params.can_bus_mlp.norm.bias,
+            )
+
+        # Reshape and add to bev_queries
+        can_bus = ttnn.reshape(can_bus, (1, can_bus.shape[0], can_bus.shape[1]))
         if self.use_can_bus:
-            bev_queries = ttnn.add(bev_queries, can_bus_processed)
+            bev_queries = bev_queries + can_bus
 
         # Process multi-level features
         feat_flatten = []
@@ -315,53 +190,36 @@ class TtMapTRPerceptionTransformer(nn.Module):
             spatial_shape = (h, w)
             spatial_shapes.append(spatial_shape)
 
-            # Flatten and permute features [num_cam, bs, h*w, c]
-            feat = ttnn.reshape(feat, [bs, num_cam, c, h * w])
-            feat = ttnn.permute(feat, [1, 0, 3, 2])
-
-            # Project features to embed_dims if dimension doesn't match
-            if c != self.embed_dims and self.feat_proj_weight is not None:
-                feat = ttnn.to_layout(feat, ttnn.TILE_LAYOUT)
-                feat = ttnn.linear(feat, self.feat_proj_weight, bias=self.feat_proj_bias)
+            # Flatten and permute features
+            feat = ttnn.reshape(feat, (bs, num_cam, c, h * w))
+            feat = ttnn.permute(feat, (1, 0, 3, 2))
 
             # Add camera embeddings
-            # feat shape: [num_cam, bs, h*w, c] = [6, 1, 1400, 256]
-            # cams_embeds shape: [num_cam, c] = [6, 256]
             if self.use_cams_embeds:
-                cams_embed_expanded = ttnn.unsqueeze(ttnn.unsqueeze(self.cams_embeds, 1), 1)
-                # cams_embed_expanded: [6, 1, 1, 256]
-                # Repeat to match feat: [num_cam, bs, h*w, c] = [6, 1, 1400, 256]
-                cams_embed_expanded = ttnn.repeat(cams_embed_expanded, [1, bs, h * w, 1])
-                feat = ttnn.add(feat, cams_embed_expanded)
-                ttnn.deallocate(cams_embed_expanded)
+                cam_embeds = self.params.cams_embeds
+                cam_embeds = ttnn.reshape(cam_embeds, (cam_embeds.shape[0], 1, 1, cam_embeds.shape[1]))
+                feat = feat + cam_embeds
 
             # Add level embeddings
-            # level_embeds shape: [num_levels, c], we take one level: [1, 256]
-            level_embed = self.level_embeds[lvl : lvl + 1]
-            level_embed_expanded = ttnn.unsqueeze(ttnn.unsqueeze(level_embed, 0), 0)
-            # level_embed_expanded: [1, 1, 1, 256]
-            # Repeat to match feat: [num_cam, bs, h*w, c] = [6, 1, 1400, 256]
-            level_embed_expanded = ttnn.repeat(level_embed_expanded, [num_cam, bs, h * w, 1])
-            feat = ttnn.add(feat, level_embed_expanded)
-            ttnn.deallocate(level_embed_expanded)
+            level_embeds = self.params.level_embeds
+            level_embeds = level_embeds[lvl : lvl + 1, :]
+            level_embeds = ttnn.reshape(level_embeds, (1, 1, level_embeds.shape[0], level_embeds.shape[-1]))
+            feat = feat + level_embeds
 
             feat_flatten.append(feat)
 
         # Concatenate all features
-        feat_flatten = ttnn.concat(feat_flatten, dim=2)
-        feat_flatten = ttnn.permute(feat_flatten, [0, 2, 1, 3])
+        feat_flatten = ttnn.concat(feat_flatten, 2)
+        feat_flatten = ttnn.permute(feat_flatten, (0, 2, 1, 3))  # (num_cam, H*W, bs, embed_dims)
 
-        # Calculate level start index (cumulative sum of spatial sizes)
-        # PyTorch ref: level_start_index = torch.cat((spatial_shapes.new_zeros((1,)), spatial_shapes.prod(1).cumsum(0)[:-1]))
-        # spatial_shapes is still a list of tuples at this point
-        spatial_prods = [h * w for h, w in spatial_shapes]
-        level_start_index_list = [0] + list(np.cumsum(spatial_prods)[:-1]) if len(spatial_prods) > 1 else [0]
-        level_start_index_torch = torch.tensor(level_start_index_list, dtype=torch.long)
-        level_start_index = ttnn.from_torch(level_start_index_torch, dtype=ttnn.int32, device=self.device)
+        # Convert spatial shapes to tensor (vadv2 pattern)
+        spatial_shapes_tensor = torch.as_tensor(spatial_shapes, dtype=torch.long, device="cpu")
+        spatial_shapes_ttnn = ttnn.from_torch(
+            spatial_shapes_tensor, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
+        )
 
-        # Convert spatial shapes to tensor (after using it for level_start_index calculation)
-        spatial_shapes_torch = torch.tensor(spatial_shapes, dtype=torch.long)
-        spatial_shapes_ttnn = ttnn.from_torch(spatial_shapes_torch, dtype=ttnn.int32, device=self.device)
+        # Level start index (simple zeros for single level)
+        level_start_index = ttnn.zeros((1,), dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT, device=self.device)
 
         # Call encoder
         bev_embed = self.encoder(
@@ -453,7 +311,7 @@ class TtMapTRPerceptionTransformer(nn.Module):
 
         return bev_embed
 
-    def forward(
+    def __call__(
         self,
         mlvl_feats: List[ttnn.Tensor],
         lidar_feat: Optional[ttnn.Tensor],
@@ -463,12 +321,12 @@ class TtMapTRPerceptionTransformer(nn.Module):
         bev_w: int,
         grid_length: List[float] = None,
         bev_pos: ttnn.Tensor = None,
-        reg_branches: Optional[nn.ModuleList] = None,
-        cls_branches: Optional[nn.ModuleList] = None,
+        reg_branches: Optional[List] = None,
+        cls_branches: Optional[List] = None,
         prev_bev: ttnn.Tensor = None,
         **kwargs,
     ) -> Tuple[ttnn.Tensor, ttnn.Tensor, ttnn.Tensor, ttnn.Tensor]:
-        """TTNN forward pass."""
+        """Forward pass."""
         if grid_length is None:
             grid_length = [0.512, 0.512]
 
@@ -485,7 +343,6 @@ class TtMapTRPerceptionTransformer(nn.Module):
             **kwargs,
         )  # bev_embed shape: bs, bev_h*bev_w, embed_dims
 
-        # Get batch size
         bs = mlvl_feats[0].shape[0]
 
         # Split object query embeddings into position and content
@@ -501,7 +358,9 @@ class TtMapTRPerceptionTransformer(nn.Module):
         query = ttnn.expand(query, (bs, -1, -1))
 
         # Calculate reference points
-        reference_points = ttnn.linear(query_pos, self.reference_points_weight, bias=self.reference_points_bias)
+        reference_points = ttnn.linear(
+            query_pos, self.params.reference_points.weight, bias=self.params.reference_points.bias
+        )
         reference_points = ttnn.sigmoid(reference_points)
         init_reference_out = reference_points
 
@@ -510,11 +369,12 @@ class TtMapTRPerceptionTransformer(nn.Module):
         query_pos = ttnn.permute(query_pos, (1, 0, 2))
         bev_embed = ttnn.permute(bev_embed, (1, 0, 2))
 
-        # Create spatial shapes and level start index tensors
+        # Create spatial shapes and level start index (vadv2 pattern)
+        spatial_shapes = torch.tensor([[bev_h, bev_w]], device="cpu")
         spatial_shapes = ttnn.from_torch(
-            torch.tensor([[bev_h, bev_w]], dtype=torch.int32), dtype=ttnn.int32, device=self.device
+            spatial_shapes, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
         )
-        level_start_index = ttnn.from_torch(torch.tensor([0], dtype=torch.int32), dtype=ttnn.int32, device=self.device)
+        level_start_index = ttnn.zeros((1,), dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT, device=self.device)
 
         # Call decoder
         inter_states, inter_references = self.decoder(
