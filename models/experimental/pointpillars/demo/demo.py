@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
 
 
@@ -168,16 +168,6 @@ class PointPillarsDemo:
             custom_preprocessor=create_custom_mesh_preprocessor(mesh_mapper=None),
             device=self.device,
         )
-
-        # self.ttnn_model = TtPointPillars(
-        #     nclasses=self.nclasses,
-        #     voxel_size=self.voxel_size,
-        #     point_cloud_range=self.point_cloud_range,
-        #     max_num_points=self.max_num_points,
-        #     max_voxels=self.max_voxels,
-        #     parameters=parameters,
-        #     device=self.device,
-        # )
 
         # Create preprocessor
         self.preprocessor = PointPillarsPreprocessor(
@@ -450,10 +440,7 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Example usage:
-    python models/experimental/pointpillars/demo/demo.py \\
-        --pc_path models/experimental/pointpillars/resources/000134.bin \\
-        --calib_path models/experimental/pointpillars/resources/000134.txt \\
-        --img_path models/experimental/pointpillars/resources/000134.png
+    python models/experimental/pointpillars/demo/demo.py
         """,
     )
     parser.add_argument(

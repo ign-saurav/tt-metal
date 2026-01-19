@@ -1,6 +1,5 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
-
-# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC.
+# SPDX-License-Identifier: Apache-2.0
 
 # Based on PointPillars implementation from https://github.com/zhulf0804/PointPillars
 # Original implementation by zhulf0804 under MIT license

@@ -1,10 +1,9 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
-
-# SPDX-License-Identifier: MIT
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC.
+# SPDX-License-Identifier: Apache-2.0
 
 # Based on PointPillars implementation from https://github.com/zhulf0804/PointPillars
 # Original implementation by zhulf0804 under MIT license
-
+#
 
 import numpy as np
 import torch
@@ -37,8 +36,6 @@ class PillarLayer(nn.Module):
         pillars, coors, npoints_per_pillar = [], [], []
         for i, pts in enumerate(batched_pts):
             voxels_out, coors_out, num_points_per_voxel_out = self.voxel_layer(pts)
-            # voxels_out: (max_voxel, num_points, c), coors_out: (max_voxel, 3)
-            # num_points_per_voxel_out: (max_voxel, )
             pillars.append(voxels_out)
             coors.append(coors_out.long())
             npoints_per_pillar.append(num_points_per_voxel_out)
@@ -97,7 +94,6 @@ class PillarEncoder(nn.Module):
         # The reason can be referenced to https://github.com/open-mmlab/mmdetection3d/issues/1150
 
         # 4. find mask for (0, 0, 0) and update the encoded features
-        # a very beautiful implementation
         voxel_ids = torch.arange(0, pillars.size(1)).to(device)  # (num_points, )
         mask = voxel_ids[:, None] < npoints_per_pillar[None, :]  # (num_points, p1 + p2 + ... + pb)
         mask = mask.permute(1, 0).contiguous()  # (p1 + p2 + ... + pb, num_points)
@@ -396,25 +392,13 @@ class PointPillars(nn.Module):
 
     def forward(self, batched_pts, mode="test", batched_gt_bboxes=None, batched_gt_labels=None):
         batch_size = len(batched_pts)
-        # batched_pts: list[tensor] -> pillars: (p1 + p2 + ... + pb, num_points, c),
-        #                              coors_batch: (p1 + p2 + ... + pb, 1 + 3),
-        #                              num_points_per_pillar: (p1 + p2 + ... + pb, ), (b: batch size)
         pillars, coors_batch, npoints_per_pillar = self.pillar_layer(batched_pts)
-        # pillars: (p1 + p2 + ... + pb, num_points, c), c = 4
-        # coors_batch: (p1 + p2 + ... + pb, 1 + 3)
-        # npoints_per_pillar: (p1 + p2 + ... + pb, )
-        #                     -> pillar_features: (bs, out_channel, y_l, x_l)
         pillar_features = self.pillar_encoder(pillars, coors_batch, npoints_per_pillar)
 
-        # xs:  [(bs, 64, 248, 216), (bs, 128, 124, 108), (bs, 256, 62, 54)]
         xs = self.backbone(pillar_features)
 
         # x: (bs, 384, 248, 216)
         x = self.neck(xs)
-
-        # bbox_cls_pred: (bs, n_anchors*3, 248, 216)
-        # bbox_pred: (bs, n_anchors*7, 248, 216)
-        # bbox_dir_cls_pred: (bs, n_anchors*2, 248, 216)
         bbox_cls_pred, bbox_pred, bbox_dir_cls_pred = self.head(x)
 
         return bbox_cls_pred, bbox_pred, bbox_dir_cls_pred
