@@ -212,16 +212,7 @@ class TtMapTR:
             self.pts_bbox_head = None
 
     def extract_img_feat(self, img, img_metas, len_queue=None):
-        """Extract features of images.
-
-        Args:
-            img: Input image tensor.
-            img_metas: Image metadata.
-            len_queue: Queue length for temporal processing.
-
-        Returns:
-            List of image feature tensors.
-        """
+        """Extract features of images."""
         import logging
 
         logger = logging.getLogger(__name__)
@@ -230,15 +221,17 @@ class TtMapTR:
         logger.info(f"[TT] extract_img_feat input shape: {img.shape}")
 
         if img is not None:
+            # Handle 5D tensor case: (1, N, C, H, W) -> (N, C, H, W)
             if img.shape[0] == 1 and len(img.shape) == 5:
                 img = ttnn.squeeze(img, 0)
-                logger.info(f"[TT] After squeeze: {img.shape}")
+                logger.info(f"[TT] After squeeze 5D: {img.shape}")
             elif len(img.shape) == 4 and img.shape[0] > 1:
                 B, N, C, H, W = img.shape
                 img = ttnn.reshape(img, (B * N, C, H, W))
                 logger.info(f"[TT] After reshape 4D: {img.shape}")
 
-            img = ttnn.permute(img, (0, 2, 3, 1))
+            # Now img should be 4D: (N, C, H, W)
+            img = ttnn.permute(img, (0, 2, 3, 1))  # (N, H, W, C)
             N, H, W, C = img.shape
             batch_size = img.shape[0]
             img = ttnn.reshape(img, (1, 1, N * H * W, C))

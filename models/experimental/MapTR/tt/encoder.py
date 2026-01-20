@@ -135,16 +135,44 @@ class TtBEVFormerEncoder:
             return ref
 
     def point_sampling_ttnn(self, reference_points, pc_range, img_metas):
+        print(f"[ENCODER] point_sampling_ttnn called", flush=True)
+        print(f"[ENCODER] img_metas length: {len(img_metas)}", flush=True)
+        print(f"[ENCODER] img_metas[0] type: {type(img_metas[0])}", flush=True)
+        print(
+            f"[ENCODER] img_metas[0] keys: {list(img_metas[0].keys()) if isinstance(img_metas[0], dict) else 'not a dict'}",
+            flush=True,
+        )
+
         lidar2img = []
-        for img_meta in img_metas:
-            lidar2img.append(img_meta["lidar2img"])
+        for i, img_meta in enumerate(img_metas):
+            l2i = img_meta["lidar2img"]
+            print(f"[ENCODER] img_meta[{i}]['lidar2img'] type: {type(l2i)}", flush=True)
+            if isinstance(l2i, np.ndarray):
+                print(f"[ENCODER] img_meta[{i}]['lidar2img'] shape: {l2i.shape}", flush=True)
+            elif isinstance(l2i, (list, tuple)):
+                print(f"[ENCODER] img_meta[{i}]['lidar2img'] len: {len(l2i)}", flush=True)
+                if len(l2i) > 0:
+                    print(f"[ENCODER] img_meta[{i}]['lidar2img'][0] type: {type(l2i[0])}", flush=True)
+                    if isinstance(l2i[0], np.ndarray):
+                        print(f"[ENCODER] img_meta[{i}]['lidar2img'][0] shape: {l2i[0].shape}", flush=True)
+            lidar2img.append(l2i)
+
+        print(f"[ENCODER] lidar2img list length: {len(lidar2img)}", flush=True)
         lidar2img = np.asarray(lidar2img)
+        print(f"[ENCODER] lidar2img after np.asarray shape: {lidar2img.shape}", flush=True)
+
         reference_points = ttnn.to_torch(reference_points)
+        print(f"[ENCODER] reference_points torch shape: {reference_points.shape}", flush=True)
+
         lidar2img = reference_points.new_tensor(lidar2img)  # (B, N, 4, 4)
+        print(f"[ENCODER] lidar2img tensor shape: {lidar2img.shape}", flush=True)
+
         reference_points = ttnn.from_torch(
             reference_points, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
         )
         lidar2img = ttnn.from_torch(lidar2img, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
+        print(f"[ENCODER] lidar2img ttnn shape: {lidar2img.shape}", flush=True)
+
         ref = ttnn.clone(reference_points)
 
         x, y, z = ttnn.split(ref, (1, 1, 1), dim=3)
@@ -163,13 +191,27 @@ class TtBEVFormerEncoder:
         num_query = reference_points.shape[2]
         num_cam = lidar2img.shape[1]
 
+        print(f"[ENCODER] D={D}, B={B}, num_query={num_query}, num_cam={num_cam}", flush=True)
+        print(f"[ENCODER] reference_points after permute shape: {reference_points.shape}", flush=True)
+
         reference_points = ttnn.unsqueeze(reference_points, 2)
+        print(f"[ENCODER] reference_points after unsqueeze(2) shape: {reference_points.shape}", flush=True)
         reference_points = ttnn.repeat(reference_points, (1, 1, num_cam, 1, 1))
+        print(f"[ENCODER] reference_points after repeat shape: {reference_points.shape}", flush=True)
         reference_points = ttnn.unsqueeze(reference_points, -1)
+        print(f"[ENCODER] reference_points after unsqueeze(-1) shape: {reference_points.shape}", flush=True)
 
         lidar2img = ttnn.unsqueeze(lidar2img, 0)
+        print(f"[ENCODER] lidar2img after unsqueeze(0) shape: {lidar2img.shape}", flush=True)
         lidar2img = ttnn.unsqueeze(lidar2img, 3)
+        print(f"[ENCODER] lidar2img after unsqueeze(3) shape: {lidar2img.shape}", flush=True)
         lidar2img = ttnn.repeat(lidar2img, (D, 1, 1, num_query, 1, 1))
+        print(f"[ENCODER] lidar2img after repeat shape: {lidar2img.shape}", flush=True)
+
+        print(
+            f"[ENCODER] About to matmul: lidar2img {lidar2img.shape} @ reference_points {reference_points.shape}",
+            flush=True,
+        )
 
         reference_points_cam = ttnn.matmul(lidar2img, reference_points)
         reference_points_cam = ttnn.squeeze(reference_points_cam, -1)
