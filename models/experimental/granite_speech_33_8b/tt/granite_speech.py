@@ -8,12 +8,12 @@ from models.tt_transformers.tt.common import (
 from models.tt_transformers.tt.model_config import DecodersPrecision
 from models.experimental.granite_speech_33_8b.tt.generator import (
     Generator,
-    SamplingParams,
     prepare_generator_args,
 )
 from typing import List
 from models.experimental.granite_speech_33_8b.tt.ttnn_encoder_block import GraniteSpeechCTCEncoderTTNN
 from models.experimental.granite_speech_33_8b.tt.ttnn_projector_block import GraniteSpeechEncoderProjectorTTNN
+from models.tt_transformers.tt.generator import SamplingParams
 
 
 class GraniteSpeechTTNN:
@@ -198,7 +198,7 @@ class GraniteSpeechTTNN:
 
         while users_decoding:
             # Run decode forward
-            logits = self.generator.decode_forward_text(
+            logits, log_probs = self.generator.decode_forward_text(
                 out_tok,
                 current_pos,
                 enable_trace=False,
