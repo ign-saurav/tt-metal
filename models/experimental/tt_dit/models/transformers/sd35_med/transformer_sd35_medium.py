@@ -1,9 +1,5 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
-
-"""
-SD3Transformer2DModel implementation for SD3.5 Medium
-"""
 
 import math
 import torch
@@ -16,6 +12,11 @@ from models.experimental.tt_dit.utils.substate import substate
 # Import working implementations from embeddings
 from models.experimental.tt_dit.layers.embeddings import (
     SD35CombinedTimestepTextProjEmbeddings,
+)
+from models.experimental.tt_dit.models.transformers.sd35_med.joint_block_sd35_medium import (
+    JointTransformerBlockEarly,
+    JointTransformerBlockMiddle,
+    JointTransformerBlockFinal,
 )
 
 
@@ -38,8 +39,8 @@ class SD35PatchEmbed(Module):
     ):
         super().__init__()
 
-        self.height = height // patch_size  # Max height in patches
-        self.width = width // patch_size  # Max width in patches
+        self.height = height // patch_size
+        self.width = width // patch_size
         self.patch_size = patch_size
         self.in_channels = in_channels
         self.embed_dim = embed_dim
@@ -55,7 +56,7 @@ class SD35PatchEmbed(Module):
             packer_l1_acc=False,
         )
 
-        # Projection weights (equivalent to conv2d)
+        # Projection weights
         self.proj_weight = Parameter(
             total_shape=[in_channels * patch_size * patch_size, embed_dim],
             mesh_axes=[None, None],
@@ -67,8 +68,7 @@ class SD35PatchEmbed(Module):
             device=mesh_device,
         )
 
-        # Position embeddings - store at max size [1, 1, max_seq_len, embed_dim]
-        # Will be cropped at runtime based on actual input size
+        # Position embeddings
         max_seq_len = self.height * self.width
         self.pos_embed = Parameter(
             total_shape=[1, 1, max_seq_len, embed_dim],
@@ -95,9 +95,8 @@ class SD35PatchEmbed(Module):
         """Prepare PyTorch state dict for loading."""
         conv_weight = state.pop("proj.weight", None)
         if conv_weight is not None:
-            # Convert from (out_channels, in_channels, kh, kw) to (kh*kw*in_channels, out_channels)
             out_channels, in_c, kh, kw = conv_weight.shape
-            conv_weight = conv_weight.permute(2, 3, 1, 0)  # (kh, kw, in_c, out_channels)
+            conv_weight = conv_weight.permute(2, 3, 1, 0)
             conv_weight = conv_weight.reshape(kh * kw * in_c, out_channels)
             state["proj_weight"] = conv_weight
 
@@ -160,18 +159,15 @@ class SD35PatchEmbed(Module):
         patches_w = img_w // self.patch_size
 
         # Reshape input to extract patches
-        # (batch_size, patches_h, patch_size, patches_w, patch_size, img_c)
         x = ttnn.reshape(x, (batch_size, patches_h, self.patch_size, patches_w, self.patch_size, img_c))
 
         # Permute to group patch dimensions together
-        # (batch_size, patches_h, patches_w, patch_size, patch_size, img_c)
         x = ttnn.permute(x, (0, 1, 3, 2, 4, 5))
 
         # Flatten patch dimensions
-        # (batch_size, patches_h * patches_w, patch_size * patch_size * img_c)
         x = ttnn.reshape(x, (batch_size, patches_h * patches_w, self.patch_size * self.patch_size * img_c))
 
-        # Apply linear projection (equivalent to conv2d)
+        # Apply linear projection
         out = ttnn.linear(
             x,
             self.proj_weight.data,
@@ -182,14 +178,6 @@ class SD35PatchEmbed(Module):
 
         out = ttnn.reshape(out, (1, batch_size, patches_h * patches_w, -1))
         return out
-
-
-# Import JointTransformerBlock implementations
-from models.experimental.tt_dit.models.transformers.sd35_med.joint_block_sd35_medium import (
-    JointTransformerBlockEarly,
-    JointTransformerBlockMiddle,
-    JointTransformerBlockFinal,
-)
 
 
 class AdaLayerNormContinuousOutput(Module):
@@ -247,12 +235,11 @@ class AdaLayerNormContinuousOutput(Module):
         # Reshape to [1, B, 2, hidden_size] for chunking
         emb = ttnn.reshape(emb, (1, emb.shape[1], 2, self.hidden_size))
 
-        # Extract scale and shift - Diffusers: scale, shift = emb.chunk(2)
-        # So index 0 = scale, index 1 = shift
+        # Extract scale and shift
         scale = emb[:, :, 0:1, :]
         shift = emb[:, :, 1:2, :]
 
-        # Apply modulation: x = norm(x) * (1 + scale) + shift
+        # Apply modulation
         x_out = x_norm * (1 + scale) + shift
 
         return x_out
@@ -260,11 +247,6 @@ class AdaLayerNormContinuousOutput(Module):
     def load_torch_state_dict(self, state_dict):
         """Load weights from PyTorch state dict."""
         self.linear.load_torch_state_dict(substate(state_dict, "linear"))
-
-
-# =============================================================================
-# Main Transformer Model
-# =============================================================================
 
 
 class SD3Transformer2DModel(Module):
@@ -303,7 +285,7 @@ class SD3Transformer2DModel(Module):
         # Calculate hidden dimension
         self.inner_dim = num_attention_heads * attention_head_dim
 
-        # Positional embedding (patch embedding) - use custom SD35PatchEmbed
+        # Positional embedding (patch embedding)
         self.pos_embed = SD35PatchEmbed(
             height=sample_size,
             width=sample_size,
@@ -314,7 +296,7 @@ class SD3Transformer2DModel(Module):
             mesh_device=mesh_device,
         )
 
-        # Time and text embedding - use imported working version
+        # Time and text embedding
         self.time_text_embed = SD35CombinedTimestepTextProjEmbeddings(
             embedding_dim=self.inner_dim,
             pooled_projection_dim=pooled_projection_dim,
@@ -361,10 +343,10 @@ class SD3Transformer2DModel(Module):
         )
         self.transformer_blocks.append(block)
 
-        # Output normalization - use inlined version with correct scale/shift order
+        # Output normalization
         self.norm_out = AdaLayerNormContinuousOutput(
             hidden_size=self.inner_dim,
-            conditioning_size=self.inner_dim * 2,  # 2x for scale and shift
+            conditioning_size=self.inner_dim * 2,
             bias=True,
             mesh_device=mesh_device,
             eps=eps,
@@ -411,10 +393,10 @@ class SD3Transformer2DModel(Module):
         Returns:
             Output latent tensor [1, B, seq_len, out_channels*patch_size^2]
         """
-        # Apply positional embedding (also handles patchify)
+        # Apply positional embedding
         hidden_states = self.pos_embed(hidden_states)
 
-        # Add batch dimension for TTNN convention [1, B, seq_len, dim]
+        # Add batch dimension
         if hidden_states.shape[0] != 1 or len(hidden_states.shape) == 3:
             hidden_states = ttnn.reshape(
                 hidden_states, (1, hidden_states.shape[0], hidden_states.shape[1], hidden_states.shape[2])
@@ -426,7 +408,7 @@ class SD3Transformer2DModel(Module):
         # Embed context
         context = self.context_embedder(encoder_hidden_states)
 
-        # Add batch dimension for context if needed
+        # Add batch dimension
         if len(context.shape) == 3:
             context = ttnn.reshape(context, (1, context.shape[0], context.shape[1], context.shape[2]))
 
@@ -440,7 +422,7 @@ class SD3Transformer2DModel(Module):
                 context_seq_len=context_seq_len,
             )
 
-        # Apply output normalization (applies modulation internally)
+        # Apply output normalization
         hidden_states = self.norm_out(hidden_states, temb)
 
         # Final projection
@@ -481,14 +463,13 @@ class SD3Transformer2DModel(Module):
         h = height // p
         w = width // p
 
-        # Diffusers order: features are [p * p * c] -> reshape to [p, p, c]
-        # Reshape: [B, h*w, p*p*c] -> [B, h, w, p, p, c]
+        # Reshape
         x = x.reshape(batch_size, h, w, p, p, c)
 
-        # Permute: [B, h, w, p, p, c] -> [B, c, h, p, w, p]
+        # Permute
         x = x.permute(0, 5, 1, 3, 2, 4)
 
-        # Reshape: [B, c, h, p, w, p] -> [B, c, h*p, w*p]
+        # Reshape
         x = x.reshape(batch_size, c, h * p, w * p)
 
         return x

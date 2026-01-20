@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
 
 """
@@ -120,7 +120,7 @@ def test_sd3_transformer_real_weights(device, reset_seeds):
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
     )
 
-    # Run reference model (step by step to get proj_out before unpatchify)
+    # Run reference model
     with torch.no_grad():
         ref_hidden = torch_model.pos_embed(torch_hidden_states_nchw)
         ref_temb = torch_model.time_text_embed(torch_timestep, torch_pooled_projection)

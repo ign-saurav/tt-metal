@@ -20,7 +20,7 @@ For detailed information about each model including performance metrics, usage i
 tt_dit/
 ├── layers/              # Core neural network layers
 ├── models/              # Model architectures and documentation
-│   ├── transformers/    # Transformer implementations (SD35, SD35 medium, Mochi, Wan, Flux1, Motif)
+│   ├── transformers/    # Transformer implementations (SD35, SD35 medium, Mochi, Wan, Flux1, Motif, QwenImage)
 │   ├── vae/            # VAE/Autoencoder implementations
 │   ├── StableDiffusion35.md  # SD3.5 model documentation
 │   ├── StableDiffusionMed35.md  # SD3.5 medium model documentation
@@ -43,7 +43,7 @@ tt_dit/
 │   ├── motif/
 │   └── qwenimage/
 ├── tests/              # Test suite
-│   ├── models/         # Model-level tests (sd35, sd35 medium, mochi, wan2_2, flux1, motif)
+│   ├── models/         # Model-level tests (sd35, sd35 medium, mochi, wan2_2, flux1, motif, qwenimage)
 │   ├── encoders/       # Encoder tests
 │   ├── blocks/         # Block-level tests
 │   └── unit/          # Unit tests for layers

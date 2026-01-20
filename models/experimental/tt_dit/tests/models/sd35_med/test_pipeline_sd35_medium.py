@@ -1,14 +1,14 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
 import ttnn
 from loguru import logger
 
-from ....pipelines.stable_diffusion_35_medium.pipeline_stable_diffusion_35_medium import (
+from models.experimental.tt_dit.pipelines.stable_diffusion_35_medium.pipeline_stable_diffusion_35_medium import (
     StableDiffusion3MediumPipeline as TTSD35MediumPipeline,
 )
-from ....parallel.config import DiTParallelConfig, ParallelFactor
+from models.experimental.tt_dit.parallel.config import DiTParallelConfig, ParallelFactor
 
 
 @pytest.mark.parametrize(
@@ -30,7 +30,6 @@ def test_sd35_medium_pipeline_functional(
     num_links: int,
 ) -> None:
     """Functional test for SD3.5 Medium pipeline on N300 with CFG enabled."""
-
     parallel_config = DiTParallelConfig(
         cfg_parallel=ParallelFactor(factor=2, mesh_axis=1),  # CFG parallel on axis 1 for N300
         tensor_parallel=ParallelFactor(factor=1, mesh_axis=tp_axis),
@@ -82,12 +81,4 @@ def test_sd35_medium_pipeline_functional(
     # Save TT test image for visual inspection
     images[0].save("test_sd35_medium_tt_output.png")
     logger.info("TT image saved to test_sd35_medium_tt_output.png")
-
-    # Skip Diffusers reference generation (too slow on CPU without GPU)
-    # To generate Diffusers reference, run separately on a GPU machine:
-    # ```
-    # from diffusers import StableDiffusion3Pipeline
-    # pipe = StableDiffusion3Pipeline.from_pretrained("stabilityai/stable-diffusion-3.5-medium", torch_dtype=torch.bfloat16).to("cuda")
-    # pipe(prompt="a cat with a hat and pink nose", num_inference_steps=28, height=512, width=512, guidance_scale=4.5, generator=torch.Generator().manual_seed(123)).images[0].save("diffusers_ref.png")
-    # ```
     logger.info("TT image generation complete. Check test_sd35_medium_tt_output.png")

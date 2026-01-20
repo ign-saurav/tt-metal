@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
@@ -7,10 +7,6 @@ from models.experimental.tt_dit.layers.linear import Linear
 from models.experimental.tt_dit.layers.normalization import LayerNorm
 from models.experimental.tt_dit.models.transformers.sd35_med.attention_sd35_medium import SD35MediumSelfAttention
 from models.experimental.tt_dit.utils.substate import substate
-
-# =============================================================================
-# Inlined AdaLayerNorm Implementations
-# =============================================================================
 
 
 class AdaLayerNormZero(Module):
@@ -46,10 +42,10 @@ class AdaLayerNormZero(Module):
         self.conditioning_size = conditioning_size
         self.mesh_device = mesh_device
 
-        # Linear layer to process conditioning (hidden_size -> 6*hidden_size)
+        # Linear layer to process conditioning
         self.linear = Linear(hidden_size, conditioning_size, bias=bias, mesh_device=mesh_device)
 
-        # Layer norm (no learnable params)
+        # Layer norm
         self.norm = LayerNorm(
             hidden_size,
             norm_eps=eps,
@@ -69,7 +65,7 @@ class AdaLayerNormZero(Module):
         # Apply layer norm to input
         normalized_x = self.norm(x)
 
-        # Process conditioning: SiLU FIRST, then linear (matching Diffusers)
+        # Process conditioning: SiLU FIRST, then linear
         c_silu = ttnn.silu(c)
         c_processed = self.linear(c_silu)
 
@@ -131,7 +127,7 @@ class AdaLayerNormContinuous(Module):
         c_silu = ttnn.silu(c)
         c_processed = self.linear(c_silu)
 
-        # Reshape to [1, B, 2, hidden_size]
+        # Reshape
         scale = ttnn.reshape(c_processed, (1, c_processed.shape[1], 2, self.hidden_size))
 
         return normalized_x, scale
@@ -177,10 +173,10 @@ class SD35AdaLayerNormZeroX(Module):
         self.conditioning_size = conditioning_size
         self.mesh_device = mesh_device
 
-        # Linear layer to process conditioning (hidden_size -> 9*hidden_size)
+        # Linear layer to process conditioning
         self.linear = Linear(hidden_size, conditioning_size, bias=bias, mesh_device=mesh_device)
 
-        # Layer norm (no learnable params)
+        # Layer norm
         self.norm = LayerNorm(
             hidden_size,
             norm_eps=eps,
@@ -201,11 +197,11 @@ class SD35AdaLayerNormZeroX(Module):
         # Apply layer norm to input
         normalized_x = self.norm(x)
 
-        # Process conditioning: SiLU FIRST, then linear (matching Diffusers!)
+        # Process conditioning: SiLU FIRST, then linear
         c_silu = ttnn.silu(c)
         c_processed = self.linear(c_silu)
 
-        # Reshape to [1, B, 9, hidden_size]
+        # Reshape
         scale = ttnn.reshape(c_processed, (1, c_processed.shape[1], 9, self.hidden_size))
 
         return normalized_x, scale
@@ -213,11 +209,6 @@ class SD35AdaLayerNormZeroX(Module):
     def load_torch_state_dict(self, state_dict):
         """Load weights from PyTorch state dict."""
         self.linear.load_torch_state_dict(substate(state_dict, "linear"))
-
-
-# =============================================================================
-# Joint Transformer Block Implementations
-# =============================================================================
 
 
 class FeedForward(Module):
@@ -230,7 +221,7 @@ class FeedForward(Module):
         # Linear layers
         self.net = [
             Linear(dim, hidden_dim, bias=True, mesh_device=mesh_device),
-            None,  # Dropout placeholder
+            None,
             Linear(hidden_dim, dim, bias=True, mesh_device=mesh_device),
         ]
 
@@ -259,10 +250,10 @@ class JointTransformerBlockEarly(Module):
 
         # Blocks 0-12: SD35AdaLayerNormZeroX + AdaLayerNormZero
         self.norm1 = SD35AdaLayerNormZeroX(
-            hidden_size=dim, conditioning_size=13824, bias=True, mesh_device=mesh_device, eps=eps  # 9x scaling
+            hidden_size=dim, conditioning_size=13824, bias=True, mesh_device=mesh_device, eps=eps
         )
         self.norm1_context = AdaLayerNormZero(
-            hidden_size=dim, conditioning_size=9216, bias=True, mesh_device=mesh_device, eps=eps  # 6x scaling
+            hidden_size=dim, conditioning_size=9216, bias=True, mesh_device=mesh_device, eps=eps
         )
 
         # Attention layers
@@ -312,7 +303,7 @@ class JointTransformerBlockEarly(Module):
         x_norm, x_scale = self.norm1(x, conditioning)
         context_norm, context_scale = self.norm1_context(context, conditioning)
 
-        # Extract x modulation params (9 total for SD35AdaLayerNormZeroX)
+        # Extract x modulation params
         x_shift_msa = x_scale[:, :, 0:1, :]
         x_scale_msa = x_scale[:, :, 1:2, :]
         x_gate_msa = x_scale[:, :, 2:3, :]
@@ -323,7 +314,7 @@ class JointTransformerBlockEarly(Module):
         x_scale_msa2 = x_scale[:, :, 7:8, :]
         x_gate_msa2 = x_scale[:, :, 8:9, :]
 
-        # Extract context modulation params (6 total for AdaLayerNormZero)
+        # Extract context modulation params
         c_shift_msa = context_scale[:, :, 0:1, :]
         c_scale_msa = context_scale[:, :, 1:2, :]
         c_gate_msa = context_scale[:, :, 2:3, :]
@@ -335,16 +326,16 @@ class JointTransformerBlockEarly(Module):
         x_modulated = x_norm * (1 + x_scale_msa) + x_shift_msa
         context_modulated = context_norm * (1 + c_scale_msa) + c_shift_msa
 
-        # Joint attention (attn) - x and context attend together
+        # Joint attention
         attn_out, context_attn_out = self.attn(
             x_modulated, seq_len, added_input=context_modulated, added_seq_len=context_seq_len
         )
 
-        # Apply gate and residual for joint attention (NO silu on gate!)
+        # Apply gate and residual for joint attention
         x = x + x_gate_msa * attn_out
         context = context + c_gate_msa * context_attn_out
 
-        # Second attention (attn2) - self-attention on x only
+        # Second attention
         x_norm2 = self.norm2(x)
         x_modulated2 = x_norm2 * (1 + x_scale_msa2) + x_shift_msa2
         attn2_out = self.attn2(x_modulated2, seq_len)
@@ -390,13 +381,13 @@ class JointTransformerBlockMiddle(Module):
 
         # Blocks 13-22: AdaLayerNormZero + AdaLayerNormZero
         self.norm1 = AdaLayerNormZero(
-            hidden_size=dim, conditioning_size=9216, bias=True, mesh_device=mesh_device, eps=eps  # 6x scaling
+            hidden_size=dim, conditioning_size=9216, bias=True, mesh_device=mesh_device, eps=eps
         )
         self.norm1_context = AdaLayerNormZero(
-            hidden_size=dim, conditioning_size=9216, bias=True, mesh_device=mesh_device, eps=eps  # 6x scaling
+            hidden_size=dim, conditioning_size=9216, bias=True, mesh_device=mesh_device, eps=eps
         )
 
-        # Only joint attention (no attn2 in middle blocks!)
+        # Only joint attention
         self.attn = SD35MediumSelfAttention(
             dim=dim,
             num_heads=num_heads,
@@ -430,7 +421,7 @@ class JointTransformerBlockMiddle(Module):
         x_norm, x_scale = self.norm1(x, conditioning)
         context_norm, context_scale = self.norm1_context(context, conditioning)
 
-        # Extract x modulation params (6 total for AdaLayerNormZero)
+        # Extract x modulation params
         x_shift_msa = x_scale[:, :, 0:1, :]
         x_scale_msa = x_scale[:, :, 1:2, :]
         x_gate_msa = x_scale[:, :, 2:3, :]
@@ -438,7 +429,7 @@ class JointTransformerBlockMiddle(Module):
         x_scale_mlp = x_scale[:, :, 4:5, :]
         x_gate_mlp = x_scale[:, :, 5:6, :]
 
-        # Extract context modulation params (6 total for AdaLayerNormZero)
+        # Extract context modulation params
         c_shift_msa = context_scale[:, :, 0:1, :]
         c_scale_msa = context_scale[:, :, 1:2, :]
         c_gate_msa = context_scale[:, :, 2:3, :]
@@ -450,12 +441,12 @@ class JointTransformerBlockMiddle(Module):
         x_modulated = x_norm * (1 + x_scale_msa) + x_shift_msa
         context_modulated = context_norm * (1 + c_scale_msa) + c_shift_msa
 
-        # Joint attention (attn) - x and context attend together
+        # Joint attention
         attn_out, context_attn_out = self.attn(
             x_modulated, seq_len, added_input=context_modulated, added_seq_len=context_seq_len
         )
 
-        # Apply gate and residual for joint attention (NO silu on gate!)
+        # Apply gate and residual for joint attention
         x = x + x_gate_msa * attn_out
         context = context + c_gate_msa * context_attn_out
 
@@ -480,7 +471,6 @@ class JointTransformerBlockMiddle(Module):
         """Load weights from PyTorch state dict."""
         self.norm1.load_torch_state_dict(substate(state_dict, "norm1"))
         self.norm1_context.load_torch_state_dict(substate(state_dict, "norm1_context"))
-        # norm2 and norm2_context have norm_elementwise_affine=False, no weights to load
         self.attn.load_state_dict(substate(state_dict, "attn"))
         # NOTE: Middle blocks do NOT have attn2
         self.ff.load_torch_state_dict(substate(state_dict, "ff"))
@@ -505,13 +495,13 @@ class JointTransformerBlockFinal(Module):
 
         # Block 23: AdaLayerNormZero + AdaLayerNormContinuous
         self.norm1 = AdaLayerNormZero(
-            hidden_size=dim, conditioning_size=9216, bias=True, mesh_device=mesh_device, eps=eps  # 6x scaling
+            hidden_size=dim, conditioning_size=9216, bias=True, mesh_device=mesh_device, eps=eps
         )
         self.norm1_context = AdaLayerNormContinuous(
-            hidden_size=dim, conditioning_size=3072, bias=True, mesh_device=mesh_device, eps=eps  # 2x scaling
+            hidden_size=dim, conditioning_size=3072, bias=True, mesh_device=mesh_device, eps=eps
         )
 
-        # Only joint attention (no attn2, no to_add_out for context)
+        # Only joint attention
         self.attn = SD35MediumSelfAttention(
             dim=dim,
             num_heads=num_heads,
@@ -521,13 +511,13 @@ class JointTransformerBlockFinal(Module):
             eps=eps,
             mesh_device=mesh_device,
             added_proj_dim=dim,
-            context_pre_only=True,  # Final block: no to_add_out for context
+            context_pre_only=True,
         )
 
-        # Post-attention normalization (only for x)
+        # Post-attention normalization
         self.norm2 = LayerNorm(dim, norm_eps=eps, norm_elementwise_affine=False, mesh_device=mesh_device)
 
-        # Feed forward network (only for x, no ff_context)
+        # Feed forward network
         self.ff = FeedForward(dim=dim, hidden_dim=6144, mesh_device=mesh_device)
 
     def forward(self, x, context, conditioning, seq_len, context_seq_len):
@@ -546,7 +536,7 @@ class JointTransformerBlockFinal(Module):
         x_norm, x_scale = self.norm1(x, conditioning)
         context_norm, context_scale = self.norm1_context(context, conditioning)
 
-        # Extract x modulation params (6 total for AdaLayerNormZero)
+        # Extract x modulation params
         x_shift_msa = x_scale[:, :, 0:1, :]
         x_scale_msa = x_scale[:, :, 1:2, :]
         x_gate_msa = x_scale[:, :, 2:3, :]
@@ -554,7 +544,7 @@ class JointTransformerBlockFinal(Module):
         x_scale_mlp = x_scale[:, :, 4:5, :]
         x_gate_mlp = x_scale[:, :, 5:6, :]
 
-        # Extract context modulation params (2 total for AdaLayerNormContinuous)
+        # Extract context modulation params
         c_shift = context_scale[:, :, 0:1, :]
         c_scale = context_scale[:, :, 1:2, :]
 
@@ -562,17 +552,17 @@ class JointTransformerBlockFinal(Module):
         x_modulated = x_norm * (1 + x_scale_msa) + x_shift_msa
         context_modulated = context_norm * (1 + c_scale) + c_shift
 
-        # Joint attention - note: final block doesn't have to_add_out for context
+        # Joint attention
         attn_out, context_attn_out = self.attn(
             x_modulated, seq_len, added_input=context_modulated, added_seq_len=context_seq_len
         )
 
-        # Apply gate and residual for x (context has no gate in final block)
+        # Apply gate and residual for x
         x = x + x_gate_msa * attn_out
-        # Context: just residual, no gate (AdaLayerNormContinuous has no gate)
+        # Context: just residual, no gate
         context = context + context_attn_out
 
-        # Feed forward (only for x)
+        # Feed forward
         x_norm_ff = self.norm2(x)
         x_modulated_ff = x_norm_ff * (1 + x_scale_mlp) + x_shift_mlp
         ff_out = self.ff(x_modulated_ff)
@@ -584,7 +574,6 @@ class JointTransformerBlockFinal(Module):
         """Load weights from PyTorch state dict."""
         self.norm1.load_torch_state_dict(substate(state_dict, "norm1"))
         self.norm1_context.load_torch_state_dict(substate(state_dict, "norm1_context"))
-        # norm2 has norm_elementwise_affine=False, no weights to load
         self.attn.load_state_dict(substate(state_dict, "attn"))
         # NOTE: Final block does NOT have attn2
         self.ff.load_torch_state_dict(substate(state_dict, "ff"))

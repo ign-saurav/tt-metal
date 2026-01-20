@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
 
 import pytest
@@ -34,9 +34,6 @@ def test_sd35_medium_self_attention(device, dim, num_heads, seq_len, batch_size,
     )
     torch_transformer.eval()
 
-    # Extract attention layer from the transformer model
-    # Access the first transformer block's attention layer
-    # Structure: transformer.transformer_blocks[0].attn
     if not hasattr(torch_transformer, "transformer_blocks") or len(torch_transformer.transformer_blocks) == 0:
         raise ValueError("Could not find transformer_blocks in the loaded model")
 
@@ -77,10 +74,7 @@ def test_sd35_medium_self_attention(device, dim, num_heads, seq_len, batch_size,
     except Exception as e:
         logger.warning(f"Could not load state dict directly: {e}")
         logger.info("Attempting to extract weights manually...")
-        # Try to extract weights manually if direct loading fails
-        # The diffusers Attention class might have different weight names
         if hasattr(reference_model, "to_q") and hasattr(reference_model, "to_k") and hasattr(reference_model, "to_v"):
-            # Handle diffusers Attention structure (separate q, k, v projections)
             logger.info("Found separate q, k, v projections in attention layer")
         elif hasattr(reference_model, "to_qkv"):
             logger.info("Found fused qkv projection in attention layer")
@@ -90,12 +84,8 @@ def test_sd35_medium_self_attention(device, dim, num_heads, seq_len, batch_size,
     # Create input
     x_input = torch.randn(1, batch_size, seq_len, dim, dtype=torch.bfloat16)
 
-    # Reference forward - the diffusers Attention layer expects specific input format
-    # It typically expects: (hidden_states, encoder_hidden_states=None, ...)
     with torch.no_grad():
         try:
-            # Try calling the attention layer directly with the input
-            # Diffusers Attention usually expects (batch, seq_len, hidden_dim)
             ref_output = reference_model(x_input.squeeze(0))
             logger.info(f"Reference forward successful. Output shape: {ref_output.shape}")
         except Exception as e:
