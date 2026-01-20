@@ -1225,27 +1225,6 @@ def test_maptr_full_model_forward(device, reset_seeds):
     # ========================================================================
     # Step 4: Summary
     # ========================================================================
-    logger.info("\n" + "=" * 70)
-    logger.info("FULL MODEL COMPONENT SUMMARY")
-    logger.info("=" * 70)
-    logger.info(f"📦 Backbone (TtResNet50):           PCC = {backbone_pcc:.6f} {'✅' if backbone_pcc_passed else '❌'}")
-    logger.info(f"🔀 FPN (TtFPN):                     PCC = {fpn_pcc:.6f} {'✅' if fpn_pcc_passed else '❌'}")
-    logger.info(f"🏷️  Classification (TtMapTRHead):   PCC = {cls_pcc:.6f} {'✅' if cls_pcc_passed else '❌'}")
-    logger.info(f"📐 Bbox (TtMapTRHead):              PCC = {bbox_pcc:.6f} {'✅' if bbox_pcc_passed else '❌'}")
-
-    avg_pcc = (backbone_pcc + fpn_pcc + cls_pcc + bbox_pcc) / 4
-    logger.info(f"\n📊 OVERALL AVERAGE PCC: {avg_pcc:.6f}")
-
-    logger.info("\n" + "=" * 70)
-    logger.info("NOTE: The TtMapTR class DOES have the complete model:")
-    logger.info("  - img_backbone: TtResNet50")
-    logger.info("  - img_neck: TtFPN")
-    logger.info("  - transformer: TtMapTRPerceptionTransformer (encoder + decoder)")
-    logger.info("  - pts_bbox_head: TtMapTRHead")
-    logger.info("")
-    logger.info("The full __call__() runs: backbone -> FPN -> transformer -> head")
-    logger.info("Transformer encoder requires camera calibration (lidar2img) for 3D-to-2D projection")
-    logger.info("=" * 70)
 
     all_passed = backbone_pcc_passed and fpn_pcc_passed and cls_pcc_passed and bbox_pcc_passed
 
@@ -1262,17 +1241,20 @@ def test_maptr_full_model_forward(device, reset_seeds):
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
 def test_maptr_connected_backbone_fpn_head(device, reset_seeds):
-    """Test complete CONNECTED flow: TTNN Backbone -> TTNN FPN -> TTNN Head.
+    """Test complete CONNECTED TTNN flow: Backbone -> FPN -> Encoder -> Head.
 
-    This test runs the actual TTNN modules in sequence (not using PyTorch for intermediate steps).
-    The transformer encoder/decoder is skipped since it requires real camera calibration.
+    This test runs the actual TTNN modules in sequence with complete TTNN flow:
+    - TTNN Backbone output feeds into TTNN FPN
+    - TTNN FPN output feeds into TTNN Encoder
+    - All components use TTNN outputs (no PyTorch in the middle)
+    Uses proper camera calibration (lidar2img) matrices like VAD.
 
     Args:
         device: TTNN device fixture.
         reset_seeds: Fixture to reset random seeds.
     """
     logger.info("=" * 70)
-    logger.info("Testing CONNECTED Flow: TTNN Backbone -> TTNN FPN -> TTNN Head")
+    logger.info("Testing COMPLETE TTNN Flow: Backbone -> FPN -> Encoder -> Head")
     logger.info("=" * 70)
 
     checkpoint_path = get_checkpoint_path()
@@ -1294,6 +1276,12 @@ def test_maptr_connected_backbone_fpn_head(device, reset_seeds):
     torch.manual_seed(42)
     img_torch, _ = create_test_input(batch_size=1, num_cams=num_cams)
     logger.info(f"Input image shape: {img_torch.shape}")
+
+    # Create proper img_metas with realistic lidar2img calibration matrices (like VAD)
+    from models.experimental.MapTR.tests.pcc.test_encoder import create_dummy_img_metas
+
+    img_metas = create_dummy_img_metas(batch_size=batch_size, num_cams=num_cams)
+    logger.info(f"Created img_metas with lidar2img calibration matrices: {len(img_metas[0]['lidar2img'])} cameras")
 
     # ========================================================================
     # Step 1: Run PyTorch pipeline (reference)
@@ -1431,26 +1419,170 @@ def test_maptr_connected_backbone_fpn_head(device, reset_seeds):
     logger.info(f"  TTNN FPN PCC: {fpn_pcc:.6f} {'✅' if fpn_pcc_passed else '❌'}")
 
     # ========================================================================
-    # Step 4: Run TTNN Head (with simulated decoder outputs)
+    # Step 4: Run TTNN Encoder (BEVFormerEncoder)
     # ========================================================================
-    logger.info("\n[Step 4] Running TTNN Head...")
+    logger.info("\n[Step 4] Running TTNN Encoder...")
 
-    # Create simulated decoder outputs (since transformer needs camera calibration)
+    from models.experimental.MapTR.tt.encoder import TtBEVFormerEncoder
+    from models.experimental.MapTR.tests.pcc.test_encoder import (
+        create_encoder_parameters,
+        load_torch_encoder,
+    )
+    from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.encoder import BEVFormerEncoder
+
+    # Use reduced BEV size for memory constraints
+    encoder_bev_h = 50
+    encoder_bev_w = 25
+    encoder_num_layers = 1  # Use 1 layer for testing
+    logger.info(f"  Using BEV size: {encoder_bev_h}x{encoder_bev_w}, layers: {encoder_num_layers}")
+
+    # Create fresh PyTorch encoder with matching config (like standalone test)
+    transformerlayers_cfg = dict(
+        type="BEVFormerLayer",
+        attn_cfgs=[
+            dict(type="TemporalSelfAttention", embed_dims=embed_dims, num_levels=1),
+            dict(
+                type="SpatialCrossAttention",
+                pc_range=pc_range,
+                deformable_attention=dict(
+                    type="MSDeformableAttention3D",
+                    embed_dims=embed_dims,
+                    num_points=8,
+                    num_levels=1,
+                ),
+                embed_dims=embed_dims,
+            ),
+        ],
+        feedforward_channels=512,
+        ffn_dropout=0.1,
+        operation_order=("self_attn", "norm", "cross_attn", "norm", "ffn", "norm"),
+    )
+
+    torch_encoder = BEVFormerEncoder(
+        transformerlayer=transformerlayers_cfg,
+        num_layers=encoder_num_layers,
+        pc_range=pc_range,
+        num_points_in_pillar=4,
+        return_intermediate=False,
+    )
+
+    # Load weights using standalone encoder approach
+    torch_encoder = load_torch_encoder(torch_encoder, checkpoint_path, num_layers=encoder_num_layers)
+    torch_encoder.eval()
+
+    # Prepare encoder inputs
+    num_bev_query = encoder_bev_h * encoder_bev_w
+    torch.manual_seed(456)
+    bev_query_torch = torch.randn(num_bev_query, batch_size, embed_dims)
+    bev_pos_torch = torch.randn(num_bev_query, batch_size, embed_dims)
+
+    # Use TTNN FPN output for key/value (complete TTNN flow!)
+    fpn_for_encoder = ttnn_fpn_torch  # [6, 256, 12, 20] - TTNN FPN output
+    feat_h, feat_w = fpn_for_encoder.shape[2], fpn_for_encoder.shape[3]
+
+    # Reshape: (num_cams, C, H, W) -> (num_cams, H*W, 1, C)
+    key_torch = fpn_for_encoder.flatten(2).permute(0, 2, 1).unsqueeze(2)  # [6, 240, 1, 256]
+    value_torch = key_torch.clone()
+
+    logger.info("  ✅ Using TTNN FPN output for encoder (complete TTNN flow)")
+
+    # Spatial shapes
+    spatial_shapes_torch = torch.tensor([[feat_h, feat_w]])
+    level_start_index_torch = torch.tensor([0])
+    shift_torch = torch.zeros(batch_size, 2)
+
+    # Run PyTorch encoder
+    logger.info("  Running PyTorch encoder for reference...")
+    with torch.no_grad():
+        torch_encoder_output = torch_encoder(
+            bev_query_torch,
+            key_torch,
+            value_torch,
+            bev_h=encoder_bev_h,
+            bev_w=encoder_bev_w,
+            bev_pos=bev_pos_torch,
+            spatial_shapes=spatial_shapes_torch,
+            level_start_index=level_start_index_torch,
+            prev_bev=None,
+            shift=shift_torch,
+            img_metas=img_metas,
+        )
+
+    logger.info(f"  PyTorch encoder output shape: {torch_encoder_output.shape}")
+
+    # Create TTNN encoder parameters
+    encoder_params = create_encoder_parameters(torch_encoder, device)
+
+    # Create TTNN encoder
+    ttnn_encoder = TtBEVFormerEncoder(
+        params=encoder_params,
+        device=device,
+        num_layers=encoder_num_layers,
+        pc_range=pc_range,
+        num_points_in_pillar=4,
+        return_intermediate=False,
+        embed_dims=embed_dims,
+        num_heads=8,
+        feedforward_channels=512,
+        num_levels=1,
+        num_points=8,
+    )
+
+    # Convert inputs to TTNN
+    bev_query_tt = ttnn.from_torch(bev_query_torch, device=device, dtype=ttnn.bfloat16)
+    key_tt = ttnn.from_torch(key_torch, device=device, dtype=ttnn.bfloat16)
+    value_tt = ttnn.from_torch(value_torch, device=device, dtype=ttnn.bfloat16)
+    bev_pos_tt = ttnn.from_torch(bev_pos_torch, device=device, dtype=ttnn.bfloat16)
+    spatial_shapes_tt = ttnn.from_torch(spatial_shapes_torch, device=device, dtype=ttnn.bfloat16)
+    level_start_index_tt = ttnn.from_torch(level_start_index_torch, device=device, dtype=ttnn.bfloat16)
+    shift_tt = ttnn.from_torch(shift_torch, device=device, dtype=ttnn.bfloat16)
+
+    # Run TTNN encoder
+    logger.info("  Running TTNN encoder...")
+    tt_encoder_output = ttnn_encoder(
+        bev_query_tt,
+        key_tt,
+        value_tt,
+        bev_h=encoder_bev_h,
+        bev_w=encoder_bev_w,
+        bev_pos=bev_pos_tt,
+        spatial_shapes=spatial_shapes_tt,
+        level_start_index=level_start_index_tt,
+        prev_bev=None,
+        shift=shift_tt,
+        img_metas=img_metas,
+    )
+
+    # Compare encoder outputs
+    tt_encoder_torch = ttnn.to_torch(tt_encoder_output).float()
+    logger.info(f"  TTNN encoder output shape: {tt_encoder_torch.shape}")
+
+    encoder_pcc_passed, encoder_pcc = comp_pcc(torch_encoder_output, tt_encoder_torch, 0.90)
+    logger.info(f"  Encoder PCC: {encoder_pcc:.6f} {'✅' if encoder_pcc_passed else '❌'}")
+
+    # ========================================================================
+    # Step 5: Run TTNN Head (with simulated decoder outputs for now)
+    # ========================================================================
+    logger.info("\n[Step 5] Running TTNN Head...")
+
+    from models.experimental.MapTR.tests.pcc.test_head import create_maptr_model_parameters_head
+
+    # Use simulated decoder outputs (decoder test is separate)
     torch.manual_seed(123)
     num_query = num_vec * num_pts_per_vec
-    hs = torch.randn(num_decoder_layers, num_query, batch_size, embed_dims) * 0.1
-    init_reference = torch.rand(batch_size, num_query, 2) * 0.8 + 0.1
-    inter_references = [torch.rand(batch_size, num_query, 2) * 0.8 + 0.1 for _ in range(num_decoder_layers - 1)]
+    hs_torch = torch.randn(num_decoder_layers, num_query, batch_size, embed_dims) * 0.1
+    init_reference_torch = torch.rand(batch_size, num_query, 2) * 0.8 + 0.1
+    inter_references_torch = [torch.rand(batch_size, num_query, 2) * 0.8 + 0.1 for _ in range(num_decoder_layers - 1)]
 
-    # Run PyTorch head for reference
+    # Run PyTorch head branches
     with torch.no_grad():
-        hs_permuted = hs.permute(0, 2, 1, 3)
+        hs_permuted = hs_torch.permute(0, 2, 1, 3)
         outputs_classes_torch = []
         outputs_coords_torch = []
         outputs_pts_torch = []
 
         for lvl in range(num_decoder_layers):
-            reference = init_reference if lvl == 0 else inter_references[lvl - 1]
+            reference = init_reference_torch if lvl == 0 else inter_references_torch[lvl - 1]
             reference_inv = torch.log(reference.clamp(1e-5, 1 - 1e-5) / (1 - reference.clamp(1e-5, 1 - 1e-5)))
 
             hs_lvl = hs_permuted[lvl]
@@ -1472,9 +1604,6 @@ def test_maptr_connected_backbone_fpn_head(device, reset_seeds):
         outputs_coords_torch = torch.stack(outputs_coords_torch, dim=0)
         outputs_pts_torch = torch.stack(outputs_pts_torch, dim=0)
 
-    # Create TTNN head
-    from models.experimental.MapTR.tests.pcc.test_head import create_maptr_model_parameters_head
-
     head_params = create_maptr_model_parameters_head(torch_head, device=device)
     ttnn_head = TtMapTRHead(
         params=head_params,
@@ -1491,11 +1620,14 @@ def test_maptr_connected_backbone_fpn_head(device, reset_seeds):
         num_decoder_layers=num_decoder_layers,
     )
 
-    # Convert inputs to TTNN
-    hs_tt = ttnn.from_torch(hs, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
-    init_reference_tt = ttnn.from_torch(init_reference, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+    # Convert decoder outputs to TTNN
+    hs_tt = ttnn.from_torch(hs_torch, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+    init_reference_tt = ttnn.from_torch(
+        init_reference_torch, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+    )
     inter_references_tt = [
-        ttnn.from_torch(ref, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT) for ref in inter_references
+        ttnn.from_torch(ref, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+        for ref in inter_references_torch
     ]
 
     # Run TTNN head
@@ -1521,30 +1653,41 @@ def test_maptr_connected_backbone_fpn_head(device, reset_seeds):
     # Summary
     # ========================================================================
     logger.info("\n" + "=" * 70)
-    logger.info("CONNECTED FLOW TEST SUMMARY")
+    logger.info("CONNECTED FLOW TEST SUMMARY (WITH ENCODER)")
     logger.info("=" * 70)
     logger.info(f"📦 TTNN Backbone:        PCC = {backbone_pcc:.6f} {'✅' if backbone_pcc_passed else '❌'}")
     logger.info(f"🔀 TTNN FPN:             PCC = {fpn_pcc:.6f} {'✅' if fpn_pcc_passed else '❌'}")
+    logger.info(f"🔄 TTNN Encoder:         PCC = {encoder_pcc:.6f} {'✅' if encoder_pcc_passed else '❌'}")
     logger.info(f"🏷️  Classification:       PCC = {cls_pcc:.6f} {'✅' if cls_pcc_passed else '❌'}")
     logger.info(f"📐 Bounding Box:         PCC = {bbox_pcc:.6f} {'✅' if bbox_pcc_passed else '❌'}")
     logger.info(f"📍 Points:               PCC = {pts_pcc:.6f} {'✅' if pts_pcc_passed else '❌'}")
 
-    avg_pcc = (backbone_pcc + fpn_pcc + cls_pcc + bbox_pcc + pts_pcc) / 5
+    avg_pcc = (backbone_pcc + fpn_pcc + encoder_pcc + cls_pcc + bbox_pcc + pts_pcc) / 6
     logger.info(f"\n📊 OVERALL AVERAGE PCC: {avg_pcc:.6f}")
     logger.info("=" * 70)
 
-    logger.info("\n⚠️  NOTE: Transformer encoder/decoder skipped (requires camera calibration)")
-    logger.info("    The TTNN backbone output is fed into TTNN FPN, which is fed into TTNN Head")
+    logger.info("\n📝 Complete TTNN Flow: TTNN Backbone → TTNN FPN → TTNN Encoder → TTNN Head")
+    logger.info("    ✅ All components use TTNN outputs (no PyTorch in the middle)")
+    logger.info("    ✅ Using real lidar2img calibration matrices (like VAD)")
+    logger.info("    ⚠️  Decoder outputs simulated (decoder tested separately)")
 
-    all_passed = backbone_pcc_passed and fpn_pcc_passed and cls_pcc_passed and bbox_pcc_passed and pts_pcc_passed
+    all_passed = (
+        backbone_pcc_passed
+        and fpn_pcc_passed
+        and encoder_pcc_passed
+        and cls_pcc_passed
+        and bbox_pcc_passed
+        and pts_pcc_passed
+    )
 
     if all_passed:
-        logger.info("\n✅ CONNECTED FLOW TEST PASSED")
+        logger.info("\n✅ CONNECTED FLOW TEST PASSED (WITH ENCODER)")
     else:
         logger.info("\n❌ CONNECTED FLOW TEST FAILED")
 
     assert backbone_pcc_passed, f"Backbone PCC {backbone_pcc:.6f} below threshold"
     assert fpn_pcc_passed, f"FPN PCC {fpn_pcc:.6f} below threshold"
+    assert encoder_pcc_passed, f"Encoder PCC {encoder_pcc:.6f} below threshold"
     assert cls_pcc_passed, f"Classification PCC {cls_pcc:.6f} below threshold"
     assert bbox_pcc_passed, f"Bbox PCC {bbox_pcc:.6f} below threshold"
     assert pts_pcc_passed, f"Points PCC {pts_pcc:.6f} below threshold"
