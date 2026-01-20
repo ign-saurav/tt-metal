@@ -1,0 +1,18 @@
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+[submodule]
+	active = .
+[remote "origin"]
+	url = https://github.com/ign-saurav/tt-metal.git
+	fetch = +refs/heads/*:refs/remotes/origin/*
+[branch "main"]
+	remote = origin
+	merge = refs/heads/main
+	vscode-merge-base = origin/main
+[submodule "third_party/aloha"]
+	url = https://github.com/Physical-Intelligence/aloha.git
+[submodule "third_party/libero"]
+	url = https://github.com/Lifelong-Robot-Learning/LIBERO.git

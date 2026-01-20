@@ -1,0 +1,7 @@
+# pack-refs with: peeled fully-peeled sorted 
+884a39ebb1478602e08082bd5a50baf7a70ab955 refs/remotes/origin/02-05-default_to_us-west-1_when_downloading_from_s3__openpi-assets
+d8fb6f17580a795dcd7ccbddd79ae7a1281895ad refs/remotes/origin/05-31-implement_training_on_droid
+d536f68daf9ae70a4523edbe425437da95319a96 refs/remotes/origin/arhan/real2simevals
+b84cc75031eb3a9cbcfb1d55ee85fbd7db81e8bb refs/remotes/origin/karl/droid_policies
+84ebae7f83cfa4f2b7850d102d960aba61081349 refs/remotes/origin/kevin/pi05-support
+3e0325a5e6032a9ab6beef7395fe47ca724980a5 refs/remotes/origin/main
