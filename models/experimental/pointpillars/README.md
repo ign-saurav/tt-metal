@@ -38,28 +38,25 @@ models/
     └── pointpillars/
         │
         ├── reference/
-        │   ├── model/
-        │   │   ├── pointpillars.py    # Main PointPillars model
-        │   │   └── anchors.py         # Anchor generation
-        │   ├── ops/
-        │   │   ├── voxel_module.py    # Voxelization operations
-        │   │   └── iou3d_module.py    # 3D IoU operations
-        │   └── utils/
-        │       ├── io.py              # I/O utilities
-        │       ├── process.py         # Post-processing utilities
-        │       └── vis_o3d.py         # 3D visualization
+        │   ├── pointpillars.py                   # Main PointPillars model
+        │   └── anchors.py                        # Anchor generation
+        │   ├── voxel_module.py                   # Voxelization operations
+        │   └── iou3d_module.py                   # 3D IoU operations
+        │   ├── io.py                             # I/O utilities
+        │   ├── process.py                        # Post-processing utilities
+        │   └── vis_o3d.py                        # 3D visualization
         │
         ├── tt/
-        │   ├── pointpillars.py        # Main TTNN PointPillars model
-        │   ├── pillar_encoder.py      # TTNN PillarEncoder
-        │   ├── backbone.py            # TTNN Backbone
-        │   ├── neck.py                # TTNN Neck
-        │   ├── head.py                # TTNN Head
-        │   ├── custom_preprocessor.py # Custom weight preprocessing
-        │   └── utils.py               # TTNN utilities
+        │   ├── pointpillars.py                   # Main TTNN PointPillars model
+        │   ├── pillar_encoder.py                 # TTNN PillarEncoder
+        │   ├── backbone.py                       # TTNN Backbone
+        │   ├── neck.py                           # TTNN Neck
+        │   ├── head.py                           # TTNN Head
+        │   ├── custom_preprocessor.py            # Custom weight preprocessing
+        │   └── utils.py                          # TTNN utilities
         │
         ├── demo/
-        │   └── demo.py                # Main demo script
+        │   └── demo.py                           # Main demo script
         │
         ├── runner/
         │   └── performant_runner_infra.py
@@ -73,9 +70,9 @@ models/
         │   │   ├── test_pillar_encoder.py        # Pillar encoder test
         │   │   └── test_conv_transpose_split.py  # Conv transpose test
         │   ├── perf/
-        │   │   └── test_pointpillars_perf_e2e.py
-        │   └── test_stability.py
-        │
+        │   │   └── test_pointpillars_perf_e2e.py # End-to-end performance test
+        │   └── test_stability.py                 # Stability test
+        └── common.py
         └── README.md
 ```
 

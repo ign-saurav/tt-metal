@@ -1,18 +1,17 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC.
-
 # SPDX-License-Identifier: Apache-2.0
-
 
 import pytest
 import torch
 from loguru import logger
 
+import ttnn
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.common.utility_functions import comp_pcc, tt2torch_tensor
 from models.experimental.pointpillars.tt.backbone import TtBackbone
-from models.experimental.pointpillars.reference.model.pointpillars import Backbone
+from models.experimental.pointpillars.reference.pointpillars import Backbone
 from models.experimental.pointpillars.tt.custom_preprocessor import create_custom_mesh_preprocessor
-import ttnn
+from models.experimental.pointpillars.common import load_checkpoint, extract_component_state_dict
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
@@ -28,29 +27,10 @@ def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, r
 
     torch_model = Backbone(in_channel, out_channels, layer_nums, layer_strides)
 
-    try:
-        checkpoint = torch.load(
-            "epoch_160.pth",
-            map_location="cpu",
-        )
-
-        if "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
-        elif "model" in checkpoint:
-            state_dict = checkpoint["model"]
-        else:
-            state_dict = checkpoint
-
-        backbone_state_dict = {}
-        prefix = "backbone."
-        for key, value in state_dict.items():
-            if key.startswith(prefix):
-                new_key = key.replace(prefix, "")
-                backbone_state_dict[new_key] = value
-
+    state_dict = load_checkpoint("epoch_160.pth")
+    if state_dict is not None:
+        backbone_state_dict = extract_component_state_dict(state_dict, "backbone.")
         torch_model.load_state_dict(backbone_state_dict)
-    except FileNotFoundError:
-        logger.warning("Checkpoint file not found, using random weights")
 
     torch_model = torch_model.to(dtype=torch.bfloat16)
     torch_model.eval()
@@ -69,7 +49,7 @@ def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, r
     )
 
     ttnn_input = ttnn.from_torch(
-        torch_input.permute(0, 2, 3, 1).reshape(batch_size, 1, height * width, in_channel),  # Convert NCHW to NHWC
+        torch_input.permute(0, 2, 3, 1).reshape(batch_size, 1, height * width, in_channel),
         dtype=ttnn.bfloat16,
         device=device,
         layout=ttnn.ROW_MAJOR_LAYOUT,
@@ -87,7 +67,7 @@ def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, r
         input_height=height,
         input_width=width,
     )
-    # Run TTNN model
+
     tt_output = tt_model.forward(ttnn_input)
 
     all_passing = True
@@ -96,7 +76,6 @@ def test_backbone(device, in_channel, out_channels, layer_nums, layer_strides, r
         tt_out_torch = tt_out_torch.reshape(
             torch_out.shape[0], torch_out.shape[2], torch_out.shape[3], torch_out.shape[1]
         )
-
         tt_out_torch = tt_out_torch.permute(0, 3, 1, 2)
 
         passing, pcc = comp_pcc(torch_out, tt_out_torch, 0.99)

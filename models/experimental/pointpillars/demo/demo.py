@@ -1,7 +1,6 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
 
-
 import argparse
 import cv2
 import numpy as np
@@ -15,83 +14,38 @@ from typing import Dict, List, Optional, Tuple
 
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.experimental.pointpillars.tt.pointpillars import TtPointPillars, PointPillarsPreprocessor
-from models.experimental.pointpillars.reference.model.pointpillars import PointPillars
+from models.experimental.pointpillars.reference.pointpillars import PointPillars
 from models.experimental.pointpillars.tt.custom_preprocessor import create_custom_mesh_preprocessor
 from models.common.utility_functions import tt2torch_tensor
 
+# Import common utilities
+from models.experimental.pointpillars.common import (
+    VOXEL_SIZE,
+    POINT_CLOUD_RANGE,
+    MAX_NUM_POINTS,
+    MAX_VOXELS,
+    NCLASSES,
+    LABEL2CLASSES,
+    load_checkpoint,
+    download_test_data,
+    download_checkpoint,
+)
+
 # Import reference utilities for I/O and visualization
-from models.experimental.pointpillars.reference.utils.process import (
+from models.experimental.pointpillars.reference.process import (
     keep_bbox_from_image_range,
     keep_bbox_from_lidar_range,
     bbox3d2corners_camera,
     points_camera2image,
 )
-from models.experimental.pointpillars.reference.utils.vis_o3d import vis_img_3d
-from models.experimental.pointpillars.reference.utils.io import read_points, read_calib
-
-LABEL2CLASSES = {0: "Pedestrian", 1: "Cyclist", 2: "Car"}
+from models.experimental.pointpillars.reference.vis_o3d import vis_img_3d
+from models.experimental.pointpillars.reference.io import read_points, read_calib
 
 
-def download_test_data(resources_dir: str):
-    import subprocess
-    import tempfile
-
-    os.makedirs(resources_dir, exist_ok=True)
-    test_file = os.path.join(resources_dir, "000002.bin")
-    if not os.path.exists(test_file):
-        with tempfile.TemporaryDirectory() as tmpdir:
-            subprocess.run(
-                [
-                    "git",
-                    "clone",
-                    "--depth",
-                    "1",
-                    "--filter=blob:none",
-                    "--sparse",
-                    "https://github.com/zhulf0804/PointPillars.git",
-                    tmpdir,
-                ],
-                check=True,
-                capture_output=True,
-            )
-            subprocess.run(
-                ["git", "-C", tmpdir, "sparse-checkout", "set", "pointpillars/dataset/demo_data/test"],
-                check=True,
-                capture_output=True,
-            )
-            src_dir = os.path.join(tmpdir, "pointpillars/dataset/demo_data/test")
-            for filename in ["000002.bin", "000002.txt", "000002.png"]:
-                src = os.path.join(src_dir, filename)
-                dst = os.path.join(resources_dir, filename)
-                if os.path.exists(src):
-                    import shutil
-
-                    shutil.copy2(src, dst)
-
-
-def download_checkpoint(checkpoint_dir: str):
-    import requests
-
-    os.makedirs(checkpoint_dir, exist_ok=True)
-    checkpoint_path = os.path.join(checkpoint_dir, "epoch_160.pth")
-    if not os.path.exists(checkpoint_path):
-        url = "https://github.com/zhulf0804/PointPillars/raw/main/pretrained/epoch_160.pth"
-        response = requests.get(url)
-        with open(checkpoint_path, "wb") as f:
-            f.write(response.content)
-
-
-def point_range_filter(pts: np.ndarray, point_range: List[float] = [0, -39.68, -3, 69.12, 39.68, 1]) -> np.ndarray:
-    """
-    Filter points that fall within the specified range.
-
-    Args:
-        pts: Point cloud array of shape (N, 4) with x, y, z, intensity
-        point_range: [x_min, y_min, z_min, x_max, y_max, z_max]
-
-    Returns:
-        Filtered points within the range
-    """
+def point_range_filter(pts: np.ndarray, point_range: List[float] = None) -> np.ndarray:
+    """Filter points that fall within the specified range."""
+    if point_range is None:
+        point_range = POINT_CLOUD_RANGE
     flag_x_low = pts[:, 0] > point_range[0]
     flag_y_low = pts[:, 1] > point_range[1]
     flag_z_low = pts[:, 2] > point_range[2]
@@ -103,32 +57,25 @@ def point_range_filter(pts: np.ndarray, point_range: List[float] = [0, -39.68, -
 
 
 class PointPillarsDemo:
-    """
-    Demo class for running PointPillars inference with PyTorch and TTNN.
-    """
+    """Demo class for running PointPillars inference with PyTorch and TTNN."""
 
     def __init__(self, device: ttnn.Device):
         self.device = device
         self.torch_model = None
         self.ttnn_model = None
 
-        # Model configuration
-        self.nclasses = 3
-        self.voxel_size = [0.16, 0.16, 4]
-        self.point_cloud_range = [0, -39.68, -3, 69.12, 39.68, 1]
-        self.max_num_points = 32
-        self.max_voxels = (16000, 40000)
+        # Model configuration from common
+        self.nclasses = NCLASSES
+        self.voxel_size = VOXEL_SIZE
+        self.point_cloud_range = POINT_CLOUD_RANGE
+        self.max_num_points = MAX_NUM_POINTS
+        self.max_voxels = MAX_VOXELS
 
         # Limit range for filtering
         self.pcd_limit_range = np.array([0, -40, -3, 70.4, 40, 0.0], dtype=np.float32)
 
     def setup_models(self, ckpt_path: str):
-        """
-        Setup PyTorch model. TTNN model will be created before inference.
-
-        Args:
-            ckpt_path: Path to the checkpoint file
-        """
+        """Setup PyTorch model. TTNN model will be created before inference."""
         logger.info(f"Loading checkpoint from {ckpt_path}")
 
         # Initialize PyTorch model
@@ -141,20 +88,14 @@ class PointPillarsDemo:
         )
 
         # Load checkpoint
-        checkpoint = torch.load(ckpt_path, map_location="cpu")
-        if "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
-        elif "model" in checkpoint:
-            state_dict = checkpoint["model"]
-        else:
-            state_dict = checkpoint
+        state_dict = load_checkpoint(ckpt_path)
+        if state_dict is not None:
+            self.torch_model.load_state_dict(state_dict)
 
-        self.torch_model.load_state_dict(state_dict)
         self.torch_model = self.torch_model.to(dtype=torch.bfloat16)
         self.torch_model.eval()
         logger.info("PyTorch model loaded successfully")
 
-        # TTNN model will be created lazily in setup_ttnn_model()
         self.ttnn_model = None
 
     def setup_ttnn_model(self):
@@ -192,18 +133,7 @@ class PointPillarsDemo:
         bbox_pred: torch.Tensor,
         bbox_dir_cls_pred: torch.Tensor,
     ) -> List[Dict]:
-        """
-        Post-process predictions using PyTorch model's built-in method.
-
-        Args:
-            bbox_cls_pred: Classification predictions (B, n_anchors*3, H, W)
-            bbox_pred: Regression predictions (B, n_anchors*7, H, W)
-            bbox_dir_cls_pred: Direction predictions (B, n_anchors*2, H, W)
-
-        Returns:
-            List of result dictionaries with bboxes, labels, and scores
-        """
-        # Convert bfloat16 to float32 (required for NMS/numpy operations)
+        """Post-process predictions using PyTorch model's built-in method."""
         bbox_cls_pred = bbox_cls_pred.float()
         bbox_pred = bbox_pred.float()
         bbox_dir_cls_pred = bbox_dir_cls_pred.float()
@@ -224,34 +154,16 @@ class PointPillarsDemo:
         )
 
     def run_pytorch_inference(self, pc_torch: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Run inference using PyTorch model.
-
-        Args:
-            pc_torch: Point cloud tensor of shape (N, 4)
-
-        Returns:
-            Tuple of (cls_pred, reg_pred, dir_pred) tensors
-        """
+        """Run inference using PyTorch model."""
         with torch.no_grad():
             cls_pred, reg_pred, dir_pred = self.torch_model(batched_pts=[pc_torch])
         return cls_pred, reg_pred, dir_pred
 
     def run_ttnn_inference(self, pc_torch: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """
-        Run inference using TTNN model.
-
-        Args:
-            pc_torch: Point cloud tensor of shape (N, 4)
-
-        Returns:
-            Tuple of (cls_pred, reg_pred, dir_pred) tensors converted back to PyTorch
-        """
+        """Run inference using TTNN model."""
         with torch.no_grad():
             pillar_features = self.preprocessor.forward(batched_pts=[pc_torch])
-            # Convert from NCHW to NHWC format
             pillar_features = ttnn.permute(pillar_features, (0, 2, 3, 1))
-            # Flatten spatial dimensions: [1, 496, 432, 64] -> [1, 1, 214272, 64]
             pillar_features = ttnn.reshape(
                 pillar_features,
                 (
@@ -273,17 +185,7 @@ class PointPillarsDemo:
         title: str = "Detections",
         save_path: Optional[str] = None,
     ):
-        """
-        Process detection results and save visualization to file.
-
-        Args:
-            result: Detection result dictionary
-            calib_info: Calibration information (optional)
-            img: Camera image (optional)
-            title: Title for logging
-            save_path: Path to save visualization (optional)
-        """
-        # Skip if no detections
+        """Process detection results and save visualization to file."""
         if len(result["lidar_bboxes"]) == 0:
             logger.warning(f"{title}: No detections found")
             return
@@ -329,20 +231,10 @@ class PointPillarsDemo:
         img_path: str = "",
         output_dir: str = "models/experimental/pointpillars/resources/output",
     ):
-        """
-        Run the complete demo with both PyTorch and TTNN inference.
-
-        Args:
-            pc_path: Path to point cloud file (.bin)
-            calib_path: Path to calibration file (.txt)
-            img_path: Path to image file (.png/.jpg)
-            output_dir: Directory to save outputs
-        """
-        # Validate input
+        """Run the complete demo with both PyTorch and TTNN inference."""
         if not os.path.exists(pc_path):
             raise FileNotFoundError(f"Point cloud file not found: {pc_path}")
 
-        # Create output directory
         os.makedirs(output_dir, exist_ok=True)
 
         # Load point cloud
@@ -391,7 +283,7 @@ class PointPillarsDemo:
         logger.info("Running TTNN Inference")
         logger.info("=" * 60)
 
-        # Setup TTNN model right before inference
+        # Setup TTNN model
         self.setup_ttnn_model()
 
         start_time = time.time()

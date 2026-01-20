@@ -36,7 +36,6 @@ def test_split_conv(
     kernel_size,
 ):
     torch_input = torch.randn([1, in_channels, input_height, input_width])
-    # torch_weights = torch.randn([out_channels, in_channels, 4, 4])
     torch_weights = torch.randn([in_channels, out_channels, kernel_size, kernel_size])
     torch_biases = torch.randn([out_channels])
 
@@ -44,7 +43,6 @@ def test_split_conv(
         torch_input, torch_weights, bias=torch_biases, stride=(kernel_size, kernel_size), padding=(0, 0), groups=1
     )
 
-    # conv_weights, conv_bias = prepare_split_conv_weights_bias(
     conv_weights, conv_bias = prepare_split_conv_transpose2d_weights_bias(
         in_channels,
         out_channels,

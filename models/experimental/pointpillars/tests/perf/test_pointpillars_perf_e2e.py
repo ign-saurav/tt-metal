@@ -9,7 +9,7 @@ import ttnn
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.common.utility_functions import comp_pcc, profiler, run_for_wormhole_b0
 from models.experimental.pointpillars.tt.pointpillars import TtPointPillars, PointPillarsPreprocessor
-from models.experimental.pointpillars.reference.model.pointpillars import PointPillars
+from models.experimental.pointpillars.reference.pointpillars import PointPillars
 from models.experimental.pointpillars.tt.custom_preprocessor import create_custom_mesh_preprocessor
 from models.perf.perf_utils import prep_perf_report
 from models.tt_cnn.tt.pipeline import (
@@ -17,19 +17,15 @@ from models.tt_cnn.tt.pipeline import (
     create_pipeline_from_config,
     get_memory_config_for_persistent_dram_tensor,
 )
-
-
-def multi_device_to_torch(tt_tensor, device):
-    """Convert ttnn tensor to torch, handling multi-device case."""
-    num_devices = device.get_num_devices() if hasattr(device, "get_num_devices") else 1
-    tt_output = tt_tensor.cpu()
-    if tt_output.get_layout() != ttnn.ROW_MAJOR_LAYOUT:
-        tt_output = tt_output.to(ttnn.ROW_MAJOR_LAYOUT)
-    if num_devices > 1:
-        mesh_composer = ttnn.ConcatMeshToTensor(device, dim=0)
-        result = tt_output.to_torch(mesh_composer=mesh_composer)
-        return result[: tt_output.shape[0]]
-    return tt_output.to_torch()
+from models.experimental.pointpillars.common import (
+    VOXEL_SIZE,
+    POINT_CLOUD_RANGE,
+    MAX_NUM_POINTS,
+    MAX_VOXELS,
+    NCLASSES,
+    load_checkpoint,
+    multi_device_to_torch,
+)
 
 
 def run_pointpillars_pipeline(device, test_infra, num_iterations):
@@ -80,27 +76,17 @@ def setup_pointpillars_test_infra(device, batch_size_per_device):
     num_devices = device.get_num_devices()
     batch_size = batch_size_per_device * num_devices
 
-    voxel_size = [0.16, 0.16, 4]
-    point_cloud_range = [0, -39.68, -3, 69.12, 39.68, 1]
-    max_num_points = 32
-    max_voxels = (16000, 40000)
-    nclasses = 3
-
     torch_model = PointPillars(
-        nclasses=nclasses,
-        voxel_size=voxel_size,
-        point_cloud_range=point_cloud_range,
-        max_num_points=max_num_points,
-        max_voxels=max_voxels,
+        nclasses=NCLASSES,
+        voxel_size=VOXEL_SIZE,
+        point_cloud_range=POINT_CLOUD_RANGE,
+        max_num_points=MAX_NUM_POINTS,
+        max_voxels=MAX_VOXELS,
     )
 
-    try:
-        checkpoint = torch.load("epoch_160.pth", map_location="cpu")
-        state_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint))
+    state_dict = load_checkpoint("epoch_160.pth")
+    if state_dict is not None:
         torch_model.load_state_dict(state_dict)
-        logger.info("Loaded pretrained weights")
-    except FileNotFoundError:
-        logger.warning("Checkpoint not found, using random weights")
 
     torch_model = torch_model.to(dtype=torch.bfloat16).eval()
 
@@ -114,16 +100,16 @@ def setup_pointpillars_test_infra(device, batch_size_per_device):
     )
 
     preprocessor = PointPillarsPreprocessor(
-        voxel_size=voxel_size,
-        point_cloud_range=point_cloud_range,
-        max_num_points=max_num_points,
-        max_voxels=max_voxels,
+        voxel_size=VOXEL_SIZE,
+        point_cloud_range=POINT_CLOUD_RANGE,
+        max_num_points=MAX_NUM_POINTS,
+        max_voxels=MAX_VOXELS,
         parameters=parameters,
         device=device,
     )
 
     tt_model = TtPointPillars(
-        nclasses=nclasses,
+        nclasses=NCLASSES,
         parameters=parameters,
         device=device,
     )

@@ -10,7 +10,7 @@ import numba
 import numpy as np
 import random
 import torch
-from models.experimental.pointpillars.reference.ops.iou3d_module import boxes_overlap_bev, boxes_iou_bev
+from models.experimental.pointpillars.reference.iou3d_module import boxes_overlap_bev, boxes_iou_bev
 
 
 def setup_seed(seed=0, deterministic=True):

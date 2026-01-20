@@ -7,7 +7,7 @@ import torch
 from ttnn.model_preprocessing import ModuleArgs, fold_batch_norm2d_into_conv2d
 import torch
 import ttnn
-from models.experimental.pointpillars.reference.model.pointpillars import (
+from models.experimental.pointpillars.reference.pointpillars import (
     PillarEncoder,
     Backbone,
     Neck,

@@ -6,7 +6,7 @@ from models.experimental.pointpillars.tt.pillar_encoder import TtPillarEncoder
 from models.experimental.pointpillars.tt.backbone import TtBackbone
 from models.experimental.pointpillars.tt.neck import TtNeck
 from models.experimental.pointpillars.tt.head import TtHead
-from models.experimental.pointpillars.reference.model.pointpillars import PillarLayer
+from models.experimental.pointpillars.reference.pointpillars import PillarLayer
 
 
 class PointPillarsPreprocessor:

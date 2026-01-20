@@ -9,7 +9,7 @@ from ttnn.model_preprocessing import preprocess_model_parameters
 
 from models.common.utility_functions import comp_pcc, tt2torch_tensor
 from models.experimental.pointpillars.tt.pointpillars import TtPointPillars, PointPillarsPreprocessor
-from models.experimental.pointpillars.reference.model.pointpillars import PointPillars
+from models.experimental.pointpillars.reference.pointpillars import PointPillars
 from models.experimental.pointpillars.tt.custom_preprocessor import create_custom_mesh_preprocessor
 from models.tt_cnn.tt.pipeline import get_memory_config_for_persistent_dram_tensor
 

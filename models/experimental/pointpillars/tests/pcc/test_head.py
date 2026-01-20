@@ -1,21 +1,17 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC.
-
 # SPDX-License-Identifier: Apache-2.0
-
-"""
-Test for Head module
-"""
 
 import pytest
 import torch
 from loguru import logger
 
+import ttnn
 from ttnn.model_preprocessing import preprocess_model_parameters
 from models.common.utility_functions import comp_pcc, tt2torch_tensor
 from models.experimental.pointpillars.tt.head import TtHead
-from models.experimental.pointpillars.reference.model.pointpillars import Head
+from models.experimental.pointpillars.reference.pointpillars import Head
 from models.experimental.pointpillars.tt.custom_preprocessor import create_custom_mesh_preprocessor
-import ttnn
+from models.experimental.pointpillars.common import load_checkpoint, extract_component_state_dict
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
@@ -26,33 +22,15 @@ import ttnn
     ],
 )
 def test_head(device, in_channel, n_anchors, n_classes, reset_seeds):
+    """Test TtHead against PyTorch reference."""
     torch.manual_seed(0)
 
     torch_model = Head(in_channel, n_anchors, n_classes)
 
-    try:
-        checkpoint = torch.load(
-            "epoch_160.pth",
-            map_location="cpu",
-        )
-
-        if "state_dict" in checkpoint:
-            state_dict = checkpoint["state_dict"]
-        elif "model" in checkpoint:
-            state_dict = checkpoint["model"]
-        else:
-            state_dict = checkpoint
-
-        head_state_dict = {}
-        prefix = "head."
-        for key, value in state_dict.items():
-            if key.startswith(prefix):
-                new_key = key.replace(prefix, "")
-                head_state_dict[new_key] = value
-
+    state_dict = load_checkpoint("epoch_160.pth")
+    if state_dict is not None:
+        head_state_dict = extract_component_state_dict(state_dict, "head.")
         torch_model.load_state_dict(head_state_dict)
-    except FileNotFoundError:
-        logger.warning("Checkpoint file not found, using random weights")
 
     torch_model = torch_model.to(dtype=torch.bfloat16)
     torch_model.eval()
@@ -90,6 +68,7 @@ def test_head(device, in_channel, n_anchors, n_classes, reset_seeds):
     )
 
     tt_cls, tt_reg, tt_dir = tt_model.forward(ttnn_input)
+
     tt_cls_torch = tt2torch_tensor(tt_cls)
     tt_cls_torch = tt_cls_torch.reshape(torch_cls.shape[0], torch_cls.shape[2], torch_cls.shape[3], torch_cls.shape[1])
     tt_cls_torch = tt_cls_torch.permute(0, 3, 1, 2)

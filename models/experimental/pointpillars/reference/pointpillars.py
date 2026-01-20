@@ -9,10 +9,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.experimental.pointpillars.reference.model.anchors import Anchors, anchor_target, anchors2bboxes
-from models.experimental.pointpillars.reference.ops.voxel_module import Voxelization
-from models.experimental.pointpillars.reference.ops.iou3d_module import nms_cuda
-from models.experimental.pointpillars.reference.utils.process import limit_period
+from models.experimental.pointpillars.reference.anchors import Anchors, anchor_target, anchors2bboxes
+from models.experimental.pointpillars.reference.voxel_module import Voxelization
+from models.experimental.pointpillars.reference.iou3d_module import nms_cuda
+from models.experimental.pointpillars.reference.process import limit_period
 
 
 class PillarLayer(nn.Module):

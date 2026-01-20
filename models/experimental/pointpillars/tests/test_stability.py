@@ -48,7 +48,7 @@ def test_pointpillars_stability(
         input_mem_config,
     )
 
-    # Capture trace (replicated from PointPillarsPerformantRunner)
+    # Capture trace
     op_event = ttnn.record_event(device, 0)
 
     # First run configures convs JIT
@@ -102,7 +102,7 @@ def test_pointpillars_stability(
                 check_pcc = True
                 pcc_iter += 1
 
-            # Execute trace (replicated from PointPillarsPerformantRunner)
+            # Execute trace
             ttnn.wait_for_event(1, op_event)
             ttnn.copy_host_to_device_tensor(tt_inputs_host, input_dram_tensor, 1)
             write_event = ttnn.record_event(device, 1)
