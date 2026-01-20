@@ -93,7 +93,8 @@ class TtMapTRDecoder:
             output = ttnn.permute(output, (1, 0, 2))
 
             if map_reg_branches is not None:
-                layers = self.params_branches.map_reg_branches[str(lid)]
+                # Note: params are stored as reg_branches, not map_reg_branches
+                layers = self.params_branches.reg_branches[str(lid)]
 
                 tmp = output
                 for i in range(3):

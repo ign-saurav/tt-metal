@@ -177,10 +177,13 @@ class TtTemporalSelfAttention:
         ttnn.deallocate(sampling_offsets)
         ttnn.deallocate(value)
         output = ttnn.permute(output, (1, 2, 0))
-        output = ttnn.reshape(output, (num_query, embed_dims, bs, self.num_bev_queue))
+        # output shape is (num_query, embed_dims, bs * num_bev_queue) = (20000, 256, 2)
+        # Take mean over the last dim (num_bev_queue) before reshaping to avoid
+        # TILE padding overhead on small dimensions
+        output = ttnn.to_layout(output, ttnn.ROW_MAJOR_LAYOUT)
+        output = ttnn.mean(output, dim=-1)  # Shape: (num_query, embed_dims) = (20000, 256)
+        output = ttnn.reshape(output, (bs, num_query, embed_dims))  # Shape: (1, 20000, 256)
         output = ttnn.to_layout(output, ttnn.TILE_LAYOUT)
-        output = ttnn.mean(output, dim=-1)
-        output = ttnn.permute(output, (2, 0, 1))
         output = ttnn.linear(output, params.output_proj.weight, bias=params.output_proj.bias)
         ttnn.deallocate(params.output_proj.weight)
         ttnn.deallocate(params.output_proj.bias)

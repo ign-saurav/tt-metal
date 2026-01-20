@@ -345,6 +345,18 @@ class TtMapTRPerceptionTransformer:
 
         bs = mlvl_feats[0].shape[0]
 
+        # Log BEV embedding for debugging
+        import logging
+
+        logger = logging.getLogger(__name__)
+        bev_embed_torch = ttnn.to_torch(bev_embed)
+        logger.info(
+            f"[TT Transformer] BEV embed shape: {bev_embed_torch.shape}, sample: {bev_embed_torch.flatten()[:5].tolist()}"
+        )
+        import torch
+
+        torch.save(bev_embed_torch, "models/experimental/MapTR/tt/dumps/bev_embed_transformer.pt")
+
         # Split object query embeddings into position and content
         object_query_embed = ttnn.to_layout(object_query_embed, layout=ttnn.ROW_MAJOR_LAYOUT)
         query_pos, query = ttnn.split(object_query_embed, self.embed_dims, dim=1)
@@ -377,18 +389,31 @@ class TtMapTRPerceptionTransformer:
         level_start_index = ttnn.zeros((1,), dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT, device=self.device)
 
         # Call decoder
+        # NOTE: decoder expects map_reg_branches, not reg_branches
         inter_states, inter_references = self.decoder(
             query=query,
             key=None,
             value=bev_embed,
             query_pos=query_pos,
             reference_points=reference_points,
-            reg_branches=reg_branches,
+            map_reg_branches=reg_branches,  # Fix: was reg_branches, decoder expects map_reg_branches
             cls_branches=cls_branches,
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
             **kwargs,
         )
+
+        # Log decoder outputs for debugging
+        inter_states_torch = ttnn.to_torch(inter_states)
+        inter_refs_torch = ttnn.to_torch(inter_references)
+        logger.info(
+            f"[TT Transformer] Decoder inter_states shape: {inter_states_torch.shape}, sample: {inter_states_torch.flatten()[:5].tolist()}"
+        )
+        logger.info(
+            f"[TT Transformer] Decoder inter_refs shape: {inter_refs_torch.shape}, sample: {inter_refs_torch.flatten()[:5].tolist()}"
+        )
+        torch.save(inter_states_torch, "models/experimental/MapTR/tt/dumps/decoder_inter_states.pt")
+        torch.save(inter_refs_torch, "models/experimental/MapTR/tt/dumps/decoder_inter_refs.pt")
 
         inter_references_out = inter_references
 

@@ -3,6 +3,7 @@
 
 
 import ttnn
+import torch
 from typing import Dict, List, Optional, Tuple, Any
 from models.experimental.MapTR.tt.utils import (
     inverse_sigmoid,
@@ -213,9 +214,11 @@ class TtMapTRHead:
                 memory_config=ttnn.L1_MEMORY_CONFIG,
             )
             norm_key = f"{i+1}_norm"
-            if hasattr(cls_params, norm_key):
-                norm_layer = getattr(cls_params, norm_key)
+            try:
+                norm_layer = cls_params[norm_key]
                 cls_tmp = ttnn.layer_norm(cls_tmp, weight=norm_layer.weight, bias=norm_layer.bias)
+            except KeyError:
+                pass  # No norm layer for this position
             if i < 4:
                 cls_tmp = ttnn.relu(cls_tmp)
 
@@ -496,13 +499,19 @@ class TtMapTRHead:
         # Permute hs: (num_layers, num_query, bs, embed_dims) -> (num_layers, bs, num_query, embed_dims)
         hs = ttnn.permute(hs, (0, 2, 1, 3))
         bs = hs.shape[1]
+        num_layers = hs.shape[0]
+        print(f"[TT Head] hs after permute: shape={hs.shape}, num_layers={num_layers}")
 
         outputs_classes = []
         outputs_coords = []
         outputs_pts_coords = []
 
-        for lvl in range(hs.shape[0]):
-            reference = init_reference if lvl == 0 else inter_references[lvl - 1]
+        for lvl in range(num_layers):
+            if lvl == 0:
+                reference = init_reference
+            else:
+                # inter_references is stacked tensor (num_layers, bs, num_query, 2)
+                reference = inter_references[lvl - 1]
             reference = inverse_sigmoid(reference)
 
             # Classification: average over points per vector
@@ -569,7 +578,10 @@ class TtMapTRHead:
         torch_preds = {}
         for key, value in preds_dicts.items():
             if value is not None:
-                torch_preds[key] = ttnn.to_torch(value).float()
+                if isinstance(value, torch.Tensor):
+                    torch_preds[key] = value.float()
+                else:
+                    torch_preds[key] = ttnn.to_torch(value).float()
             else:
                 torch_preds[key] = None
 
@@ -587,10 +599,30 @@ class TtMapTRHead:
         ret_list = []
 
         for i in range(num_samples):
-            cls_score = cls_scores[i].sigmoid()
-            scores, labels = cls_score.max(dim=-1)
-            bboxes = denormalize_2d_bbox(bbox_preds[i], self.pc_range)
-            pts = denormalize_2d_pts(pts_preds[i], self.pc_range)
-            ret_list.append([bboxes, scores, labels, pts])
+            # Match PyTorch MapTRNMSFreeCoder.decode behavior:
+            # 1. Sigmoid on cls_scores
+            # 2. Flatten and take top-k scores
+            # 3. Compute labels from flattened indices
+            # 4. Reorder bbox/pts by top-k query indices
+
+            cls_score = cls_scores[i].sigmoid()  # (num_query, num_classes)
+            num_query = cls_score.shape[0]
+            num_classes = self.num_classes
+
+            # Flatten and get top-k (self.num_vec = max_num = 50)
+            scores_flat, indexs = cls_score.view(-1).topk(self.num_vec)
+            labels = indexs % num_classes
+            bbox_index = indexs // num_classes
+            bbox_index = torch.clamp(bbox_index, 0, num_query - 1)
+
+            # Reorder predictions by top-k query indices
+            bbox_pred_reordered = bbox_preds[i][bbox_index]
+            pts_pred_reordered = pts_preds[i][bbox_index]
+
+            # Denormalize
+            bboxes = denormalize_2d_bbox(bbox_pred_reordered, self.pc_range)
+            pts = denormalize_2d_pts(pts_pred_reordered, self.pc_range)
+
+            ret_list.append([bboxes, scores_flat, labels, pts])
 
         return ret_list

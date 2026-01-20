@@ -74,20 +74,6 @@ class TtFPN:
         outs = self.fpn_convs(laterals)
         ttnn.deallocate(laterals)
 
-        # Reshape output to ensure correct spatial dimensions
-        # Output from conv2d is in NHWC format: [batch, height, width, channels]
-        # Get output dimensions from config
-        batch_size = self.fpn_conv_config.batch_size
-        out_channels = self.fpn_conv_config.out_channels
-
-        # Compute output dimensions: 3x3 conv with padding=1 preserves spatial size
-        # Input to FPN conv is the output of lateral conv
-        fpn_input_h = self.fpn_conv_config.input_height
-        fpn_input_w = self.fpn_conv_config.input_width
-        fpn_out_h = fpn_input_h  # 3x3 with padding=1 preserves size
-        fpn_out_w = fpn_input_w
-
-        # Reshape to ensure dimensions match expected output
-        outs = ttnn.reshape(outs, (batch_size, fpn_out_h, fpn_out_w, out_channels))
-
+        # The conv2d output is already in the correct shape (NHWC format)
+        # No reshape needed as conv2d handles the output shape correctly
         return (outs,)
