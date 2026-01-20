@@ -458,7 +458,7 @@ def test_maptr(
 
             pcc_result = comp_pcc(ref, tt)
             pcc = pcc_result[1] if isinstance(pcc_result, tuple) else pcc_result
-            status = "✓ PASS" if pcc >= 0.90 else "✗ FAIL"
+            status = "✓ PASS" if pcc >= 0.99 else "✗ FAIL"
             logger.info(f"  {name}: PCC={pcc:.6f} {status}")
             logger.info(f"    ref sample: {ref.flatten()[:5].tolist()}")
             logger.info(f"    tt sample:  {tt.flatten()[:5].tolist()}")
@@ -589,85 +589,42 @@ def test_maptr(
                 torch.save(tensor, f"{tt_save_path}/{key}.pt")
                 logger.info(f"Saved TTNN {key} to {tt_save_path}/{key}.pt")
 
-        # Compare common keys in pts_bbox
-        pcc_results = {}
-        if torch_pts_bbox and ttnn_pts_bbox:
-            common_keys = set(torch_pts_bbox.keys()) & set(ttnn_pts_bbox.keys())
-            for key in common_keys:
-                ref_tensor = torch_pts_bbox[key]
-                tt_tensor = ttnn_pts_bbox[key]
+        # Check raw predictions (before top-k selection) which should have high PCC
+        logger.info("=" * 60)
+        logger.info("Raw prediction PCC (PASS/FAIL criteria):")
+        raw_pred_pass = True
+        try:
+            ref_cls = torch.load("models/experimental/MapTR/reference/dumps/head_all_cls_scores.pt")
+            ref_bbox = torch.load("models/experimental/MapTR/reference/dumps/head_all_bbox_preds.pt")
+            ref_pts = torch.load("models/experimental/MapTR/reference/dumps/head_all_pts_preds.pt")
+            ref_bev = torch.load("models/experimental/MapTR/reference/dumps/bev_embed_ref.pt")
+            tt_cls = torch.load("models/experimental/MapTR/tt/dumps/all_cls_scores.pt")
+            tt_bbox = torch.load("models/experimental/MapTR/tt/dumps/all_bbox_preds.pt")
+            tt_pts = torch.load("models/experimental/MapTR/tt/dumps/all_pts_preds.pt")
+            tt_bev = torch.load("models/experimental/MapTR/tt/dumps/bev_embed.pt")
 
-                if ref_tensor is not None and tt_tensor is not None:
-                    if not isinstance(tt_tensor, torch.Tensor):
-                        try:
-                            tt_tensor = ttnn.to_torch(tt_tensor)
-                        except Exception as e:
-                            logger.info(f"{key}: Error converting to torch - {e}")
-                            continue
-                    if not isinstance(ref_tensor, torch.Tensor):
-                        logger.info(f"{key}: Skipped (not a tensor)")
-                        continue
+            # comp_pcc returns (passed, pcc_value)
+            _, raw_pcc_bev = comp_pcc(ref_bev, tt_bev)
+            _, raw_pcc_cls = comp_pcc(ref_cls, tt_cls)
+            _, raw_pcc_bbox = comp_pcc(ref_bbox, tt_bbox)
+            _, raw_pcc_pts = comp_pcc(ref_pts, tt_pts)
 
-                    # Calculate PCC manually for logging
-                    from models.common.utility_functions import comp_pcc
+            threshold = 0.99
+            for name, pcc in [
+                ("bev_embed", raw_pcc_bev),
+                ("all_cls_scores", raw_pcc_cls),
+                ("all_bbox_preds", raw_pcc_bbox),
+                ("all_pts_preds", raw_pcc_pts),
+            ]:
+                status = "✓ PASS" if pcc >= threshold else "✗ FAIL"
+                logger.info(f"  {name}: PCC={pcc:.6f} {status}")
+                if pcc < threshold:
+                    raw_pred_pass = False
 
-                    pcc_result = comp_pcc(ref_tensor.float(), tt_tensor.float())
-                    # comp_pcc returns (passing, pcc_value)
-                    pcc_value = pcc_result[1] if isinstance(pcc_result, tuple) else pcc_result
-                    pcc_results[key] = pcc_value
-
-                    # Log shapes and PCC
-                    logger.info(f"{key}: ref shape={ref_tensor.shape}, tt shape={tt_tensor.shape}, PCC={pcc_value:.6f}")
-
-                    # Log sample values for debugging
-                    logger.info(f"  ref sample: {ref_tensor.flatten()[:5].tolist()}")
-                    logger.info(f"  tt sample:  {tt_tensor.flatten()[:5].tolist()}")
-                else:
-                    logger.info(f"{key}: Skipped (None tensor)")
-
-            # Report overall results
-            logger.info("=" * 60)
-            logger.info("Post-processed output PCC Summary (informational - different ordering expected):")
-            for key, pcc in pcc_results.items():
-                status = "✓" if pcc >= 0.90 else "⚠️ (ordering)"
-                logger.info(f"  {key}: PCC={pcc:.6f} {status}")
-
-            # Check raw predictions (before top-k selection) which should have high PCC
-            logger.info("=" * 60)
-            logger.info("Raw prediction PCC (PASS/FAIL criteria):")
-            raw_pred_pass = True
-            try:
-                ref_cls = torch.load("models/experimental/MapTR/reference/dumps/head_all_cls_scores.pt")
-                ref_bbox = torch.load("models/experimental/MapTR/reference/dumps/head_all_bbox_preds.pt")
-                ref_pts = torch.load("models/experimental/MapTR/reference/dumps/head_all_pts_preds.pt")
-                ref_bev = torch.load("models/experimental/MapTR/reference/dumps/bev_embed_ref.pt")
-                tt_cls = torch.load("models/experimental/MapTR/tt/dumps/all_cls_scores.pt")
-                tt_bbox = torch.load("models/experimental/MapTR/tt/dumps/all_bbox_preds.pt")
-                tt_pts = torch.load("models/experimental/MapTR/tt/dumps/all_pts_preds.pt")
-                tt_bev = torch.load("models/experimental/MapTR/tt/dumps/bev_embed.pt")
-
-                # comp_pcc returns (passed, pcc_value)
-                _, raw_pcc_bev = comp_pcc(ref_bev, tt_bev)
-                _, raw_pcc_cls = comp_pcc(ref_cls, tt_cls)
-                _, raw_pcc_bbox = comp_pcc(ref_bbox, tt_bbox)
-                _, raw_pcc_pts = comp_pcc(ref_pts, tt_pts)
-
-                threshold = 0.95
-                for name, pcc in [
-                    ("bev_embed", raw_pcc_bev),
-                    ("all_cls_scores", raw_pcc_cls),
-                    ("all_bbox_preds", raw_pcc_bbox),
-                    ("all_pts_preds", raw_pcc_pts),
-                ]:
-                    status = "✓ PASS" if pcc >= threshold else "✗ FAIL"
-                    logger.info(f"  {name}: PCC={pcc:.6f} {status}")
-                    if pcc < threshold:
-                        raw_pred_pass = False
-
-                assert raw_pred_pass, "Raw prediction PCC below threshold"
-                logger.info("Raw prediction PCC check PASSED!")
-            except FileNotFoundError:
-                logger.info("Raw prediction files not found, skipping raw PCC check")
+            assert raw_pred_pass, "Raw prediction PCC below threshold"
+            logger.info("Raw prediction PCC check PASSED!")
+        except FileNotFoundError:
+            logger.info("Raw prediction files not found, skipping raw PCC check")
         else:
             logger.info("Could not extract pts_bbox outputs")
     else:
@@ -675,235 +632,3 @@ def test_maptr(
 
     logger.info("=" * 60)
     logger.info("MapTR end-to-end test complete!")
-
-
-@pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-def test_maptr_head_only(device, reset_seeds):
-    """Test MapTR head only (without backbone/FPN) for faster iteration."""
-    torch.manual_seed(42)
-
-    # Import existing head test
-    from models.experimental.MapTR.tests.pcc.test_head import (
-        load_maptr_head_weights,
-        create_maptr_model_parameters_head,
-        ConfigDict,
-    )
-    from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.dense_heads.maptr_head import MapTRHead
-    from models.experimental.MapTR.tt.head import TtMapTRHead
-    from models.common.utility_functions import comp_pcc
-
-    # Config (maptr_tiny_r50_24e_bevformer)
-    embed_dims = 256
-    num_classes = 3
-    num_vec = 50
-    num_pts_per_vec = 20
-    num_decoder_layers = 6
-    num_reg_fcs = 2
-    code_size = 2
-    code_weights = [1.0, 1.0, 1.0, 1.0]
-    bev_h, bev_w = 200, 100
-    pc_range = [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
-    batch_size = 1
-    num_query = num_vec * num_pts_per_vec
-
-    # Build transformer config
-    transformer_cfg = ConfigDict(
-        type="MapTRPerceptionTransformer",
-        embed_dims=embed_dims,
-        encoder=ConfigDict(
-            type="BEVFormerEncoder",
-            num_layers=1,
-            pc_range=pc_range,
-            num_points_in_pillar=4,
-            return_intermediate=False,
-            transformerlayer=ConfigDict(
-                type="BEVFormerLayer",
-                attn_cfgs=[
-                    ConfigDict(type="TemporalSelfAttention", embed_dims=embed_dims, num_levels=1),
-                    ConfigDict(
-                        type="SpatialCrossAttention",
-                        pc_range=pc_range,
-                        deformable_attention=ConfigDict(
-                            type="MSDeformableAttention3D", embed_dims=embed_dims, num_points=8, num_levels=1
-                        ),
-                        embed_dims=embed_dims,
-                    ),
-                ],
-                feedforward_channels=512,
-                ffn_dropout=0.1,
-                operation_order=("self_attn", "norm", "cross_attn", "norm", "ffn", "norm"),
-            ),
-        ),
-        decoder=ConfigDict(
-            type="MapTRDecoder",
-            num_layers=num_decoder_layers,
-            return_intermediate=True,
-            transformerlayer=ConfigDict(
-                type="DetrTransformerDecoderLayer",
-                attn_cfgs=[
-                    ConfigDict(type="MultiheadAttention", embed_dims=embed_dims, num_heads=8, dropout=0.1),
-                    ConfigDict(type="CustomMSDeformableAttention", embed_dims=embed_dims, num_levels=1),
-                ],
-                feedforward_channels=512,
-                ffn_dropout=0.1,
-                operation_order=("self_attn", "norm", "cross_attn", "norm", "ffn", "norm"),
-            ),
-        ),
-    )
-
-    bbox_coder_cfg = ConfigDict(
-        type="MapTRNMSFreeCoder",
-        pc_range=pc_range,
-        post_center_range=[-20, -35, -20, -35, 20, 35, 20, 35],
-        max_num=50,
-        num_classes=num_classes,
-    )
-
-    # Load weights
-    logger.info("Loading MapTR head weights...")
-    head_weights = load_maptr_head_weights()
-
-    # Create PyTorch MapTRHead
-    logger.info("Creating PyTorch MapTRHead (reference)...")
-    torch_model = MapTRHead(
-        num_classes=num_classes,
-        in_channels=embed_dims,
-        embed_dims=embed_dims,
-        num_query=num_query,
-        num_reg_fcs=num_reg_fcs,
-        sync_cls_avg_factor=True,
-        with_box_refine=True,
-        as_two_stage=False,
-        code_size=code_size,
-        code_weights=code_weights,
-        bev_h=bev_h,
-        bev_w=bev_w,
-        num_vec=num_vec,
-        num_pts_per_vec=num_pts_per_vec,
-        num_pts_per_gt_vec=num_pts_per_vec,
-        query_embed_type="instance_pts",
-        transform_method="minmax",
-        gt_shift_pts_pattern="v0",
-        dir_interval=1,
-        transformer=transformer_cfg,
-        bbox_coder=bbox_coder_cfg,
-        loss_cls=ConfigDict(type="FocalLoss", use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=2.0),
-        loss_bbox=ConfigDict(type="L1Loss", loss_weight=0.0),
-        loss_iou=ConfigDict(type="GIoULoss", loss_weight=0.0),
-        loss_pts=None,
-        loss_dir=None,
-        train_cfg=None,
-        test_cfg=ConfigDict(max_per_img=50),
-    )
-
-    torch_model.load_state_dict(head_weights, strict=False)
-    torch_model.eval()
-
-    # Create test inputs (decoder outputs)
-    torch.manual_seed(123)
-    hs = torch.randn(num_decoder_layers, num_query, batch_size, embed_dims) * 0.1
-    init_reference = torch.rand(batch_size, num_query, 2) * 0.8 + 0.1
-    inter_references = [torch.rand(batch_size, num_query, 2) * 0.8 + 0.1 for _ in range(num_decoder_layers - 1)]
-
-    logger.info(f"Input shapes - hs: {hs.shape}, init_reference: {init_reference.shape}")
-
-    # Run PyTorch forward
-    logger.info("Running PyTorch MapTRHead forward pass...")
-    with torch.no_grad():
-        hs_permuted = hs.permute(0, 2, 1, 3)
-
-        outputs_classes_torch = []
-        outputs_coords_torch = []
-        outputs_pts_coords_torch = []
-
-        for lvl in range(num_decoder_layers):
-            reference = init_reference if lvl == 0 else inter_references[lvl - 1]
-            reference_inv = torch.log(reference.clamp(1e-5, 1 - 1e-5) / (1 - reference.clamp(1e-5, 1 - 1e-5)))
-
-            hs_lvl = hs_permuted[lvl]
-            hs_reshaped = hs_lvl.view(batch_size, num_vec, num_pts_per_vec, -1)
-            hs_mean = hs_reshaped.mean(dim=2)
-            outputs_class = torch_model.cls_branches[lvl](hs_mean)
-
-            tmp = torch_model.reg_branches[lvl](hs_lvl)
-            tmp_xy = tmp[..., 0:2]
-            ref_xy = reference_inv[..., 0:2]
-            tmp_updated = (tmp_xy + ref_xy).sigmoid()
-
-            outputs_coord, outputs_pts_coord = torch_model.transform_box(tmp_updated)
-
-            outputs_classes_torch.append(outputs_class)
-            outputs_coords_torch.append(outputs_coord)
-            outputs_pts_coords_torch.append(outputs_pts_coord)
-
-        outputs_classes_torch = torch.stack(outputs_classes_torch, dim=0)
-        outputs_coords_torch = torch.stack(outputs_coords_torch, dim=0)
-        outputs_pts_coords_torch = torch.stack(outputs_pts_coords_torch, dim=0)
-
-    # Create TTNN model
-    params = create_maptr_model_parameters_head(torch_model, device=device)
-
-    logger.info("Creating TTNN TtMapTRHead model...")
-    tt_model = TtMapTRHead(
-        params=params,
-        device=device,
-        transformer=None,
-        positional_encoding=None,
-        embed_dims=embed_dims,
-        num_classes=num_classes,
-        num_reg_fcs=num_reg_fcs,
-        code_size=code_size,
-        bev_h=bev_h,
-        bev_w=bev_w,
-        pc_range=pc_range,
-        num_vec=num_vec,
-        num_pts_per_vec=num_pts_per_vec,
-        num_decoder_layers=num_decoder_layers,
-        query_embed_type="instance_pts",
-        transform_method="minmax",
-    )
-
-    # Convert inputs to TTNN
-    hs_tt = ttnn.from_torch(hs, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
-    init_reference_tt = ttnn.from_torch(init_reference, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
-    inter_references_tt = [
-        ttnn.from_torch(ref, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT) for ref in inter_references
-    ]
-
-    # Run TTNN forward
-    logger.info("Running TTNN head forward pass...")
-    tt_outputs = tt_model(
-        hs=hs_tt,
-        init_reference=init_reference_tt,
-        inter_references=inter_references_tt,
-        bev_embed=None,
-    )
-
-    # Convert outputs
-    tt_cls_scores = ttnn.to_torch(tt_outputs["all_cls_scores"]).float()
-    tt_bbox_preds = ttnn.to_torch(tt_outputs["all_bbox_preds"]).float()
-    tt_pts_preds = ttnn.to_torch(tt_outputs["all_pts_preds"]).float()
-
-    # Compare with PCC
-    pcc_threshold = 0.97
-
-    logger.info("=" * 60)
-    logger.info("PCC Comparison Results:")
-    logger.info("=" * 60)
-
-    pcc_cls_passed, pcc_cls = comp_pcc(outputs_classes_torch, tt_cls_scores, pcc_threshold)
-    logger.info(f"Classification scores PCC: {pcc_cls:.6f} {'✓ PASSED' if pcc_cls_passed else '✗ FAILED'}")
-
-    pcc_bbox_passed, pcc_bbox = comp_pcc(outputs_coords_torch, tt_bbox_preds, pcc_threshold)
-    logger.info(f"Bbox predictions PCC:      {pcc_bbox:.6f} {'✓ PASSED' if pcc_bbox_passed else '✗ FAILED'}")
-
-    pcc_pts_passed, pcc_pts = comp_pcc(outputs_pts_coords_torch, tt_pts_preds, pcc_threshold)
-    logger.info(f"Points predictions PCC:    {pcc_pts:.6f} {'✓ PASSED' if pcc_pts_passed else '✗ FAILED'}")
-
-    logger.info("=" * 60)
-
-    assert pcc_cls_passed, f"Classification scores PCC {pcc_cls:.6f} below threshold {pcc_threshold}"
-    assert pcc_bbox_passed, f"Bbox predictions PCC {pcc_bbox:.6f} below threshold {pcc_threshold}"
-    assert pcc_pts_passed, f"Points predictions PCC {pcc_pts:.6f} below threshold {pcc_threshold}"
-
-    logger.info("✓ MapTR Head PCC test PASSED")
