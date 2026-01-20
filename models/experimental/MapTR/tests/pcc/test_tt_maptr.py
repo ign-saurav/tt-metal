@@ -640,7 +640,7 @@ def test_maptr(
                 ref_cls = torch.load("models/experimental/MapTR/reference/dumps/head_all_cls_scores.pt")
                 ref_bbox = torch.load("models/experimental/MapTR/reference/dumps/head_all_bbox_preds.pt")
                 ref_pts = torch.load("models/experimental/MapTR/reference/dumps/head_all_pts_preds.pt")
-                ref_bev = torch.load("models/experimental/MapTR/reference/dumps/bev_embed.pt")
+                ref_bev = torch.load("models/experimental/MapTR/reference/dumps/bev_embed_ref.pt")
                 tt_cls = torch.load("models/experimental/MapTR/tt/dumps/all_cls_scores.pt")
                 tt_bbox = torch.load("models/experimental/MapTR/tt/dumps/all_bbox_preds.pt")
                 tt_pts = torch.load("models/experimental/MapTR/tt/dumps/all_pts_preds.pt")

@@ -500,7 +500,6 @@ class TtMapTRHead:
         hs = ttnn.permute(hs, (0, 2, 1, 3))
         bs = hs.shape[1]
         num_layers = hs.shape[0]
-        print(f"[TT Head] hs after permute: shape={hs.shape}, num_layers={num_layers}")
 
         outputs_classes = []
         outputs_coords = []
