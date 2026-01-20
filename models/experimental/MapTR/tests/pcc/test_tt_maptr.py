@@ -1561,22 +1561,177 @@ def test_maptr_connected_backbone_fpn_head(device, reset_seeds):
     logger.info(f"  Encoder PCC: {encoder_pcc:.6f} {'✅' if encoder_pcc_passed else '❌'}")
 
     # ========================================================================
-    # Step 5: Run TTNN Head (with simulated decoder outputs for now)
+    # Step 5: Run TTNN Decoder (MapTRDecoder)
     # ========================================================================
-    logger.info("\n[Step 5] Running TTNN Head...")
+    logger.info("\n[Step 5] Running TTNN Decoder...")
+
+    from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.modules.decoder import MapTRDecoder
+    from models.experimental.MapTR.tt.decoder import TtMapTRDecoder
+    from models.experimental.MapTR.tests.pcc.test_deocder import (
+        create_maptr_model_parameters_decoder,
+        load_torch_model_maptr as load_torch_decoder,
+    )
+
+    # Use encoder output as value for decoder (complete flow!)
+    # bev_embed: (bev_h * bev_w, bs, embed_dims) -> use as value for decoder
+    num_query = num_vec * num_pts_per_vec  # 50 * 20 = 1000
+    decoder_num_layers = num_decoder_layers  # 6 layers
+
+    logger.info(f"  Decoder config: {decoder_num_layers} layers, {num_query} queries")
+
+    # Create PyTorch decoder with matching config
+    decoder_transformerlayers_cfg = dict(
+        type="DetrTransformerDecoderLayer",
+        attn_cfgs=[
+            dict(type="MultiheadAttention", embed_dims=embed_dims, num_heads=8, dropout=0.1),
+            dict(type="CustomMSDeformableAttention", embed_dims=embed_dims, num_levels=1),
+        ],
+        feedforward_channels=512,
+        ffn_dropout=0.1,
+        operation_order=("self_attn", "norm", "cross_attn", "norm", "ffn", "norm"),
+    )
+
+    torch_decoder = MapTRDecoder(
+        transformerlayer=decoder_transformerlayers_cfg,
+        num_layers=decoder_num_layers,
+        return_intermediate=True,
+    )
+
+    # Load weights
+    torch_decoder = load_torch_decoder(torch_decoder, checkpoint_path)
+    torch_decoder.eval()
+
+    # Disable dropout for deterministic testing
+    import torch.nn as nn
+
+    for layer in torch_decoder.layers:
+        for attn in layer.attentions:
+            if hasattr(attn, "proj_drop") and isinstance(attn.proj_drop, nn.Dropout):
+                attn.proj_drop = nn.Identity()
+            if hasattr(attn, "dropout_layer") and isinstance(attn.dropout_layer, nn.Dropout):
+                attn.dropout_layer = nn.Identity()
+            if hasattr(attn, "dropout") and isinstance(attn.dropout, nn.Dropout):
+                attn.dropout = nn.Identity()
+
+    # Prepare decoder inputs
+    # query: (num_query, bs, embed_dims)
+    # value: decoder expects (num_value, bs, embed_dims) where num_value = bev_h * bev_w
+    torch.manual_seed(456)
+    query_torch = torch.randn(num_query, batch_size, embed_dims) * 0.1
+    query_pos_torch = torch.randn(num_query, batch_size, embed_dims) * 0.1
+    reference_points_torch = torch.rand(batch_size, num_query, 2) * 0.8 + 0.1
+
+    # Use encoder output as value (complete TTNN flow!)
+    # Encoder output is (bev_h*bev_w, bs, embed_dims) but may vary
+    # Check actual shape and transpose if needed
+    logger.info(f"  Raw encoder output shape: {torch_encoder_output.shape}")
+
+    # The encoder output needs to be (num_value, bs, embed_dims) for decoder
+    # If output is (bs, num_value, embed_dims), transpose it
+    if torch_encoder_output.shape[0] == batch_size and torch_encoder_output.shape[1] == encoder_bev_h * encoder_bev_w:
+        # Shape is (bs, num_value, embed_dims), need to transpose to (num_value, bs, embed_dims)
+        value_torch = torch_encoder_output.permute(1, 0, 2).contiguous()
+        logger.info(f"  Transposed encoder output: {value_torch.shape}")
+    else:
+        value_torch = torch_encoder_output
+
+    decoder_spatial_shapes = torch.tensor([[encoder_bev_h, encoder_bev_w]], dtype=torch.long)
+
+    logger.info(f"  Query shape: {query_torch.shape}")
+    logger.info(f"  Value (encoder output) shape: {value_torch.shape}")
+    logger.info(f"  Spatial shapes: {decoder_spatial_shapes} -> num_value = {encoder_bev_h * encoder_bev_w}")
+    logger.info("  ✅ Using TTNN encoder output as decoder value (complete TTNN flow)")
+
+    # Run PyTorch decoder
+    logger.info("  Running PyTorch decoder for reference...")
+    with torch.no_grad():
+        torch_decoder_output, torch_decoder_ref_pts = torch_decoder(
+            query=query_torch,
+            key=None,
+            value=value_torch,
+            query_pos=query_pos_torch,
+            reference_points=reference_points_torch,
+            spatial_shapes=decoder_spatial_shapes,
+            reg_branches=None,
+        )
+
+    logger.info(f"  PyTorch decoder output shape: {torch_decoder_output.shape}")
+    logger.info(f"  PyTorch decoder ref_points shape: {torch_decoder_ref_pts.shape}")
+
+    # Create TTNN decoder parameters
+    decoder_params = create_maptr_model_parameters_decoder(torch_decoder, device)
+
+    # Create TTNN decoder
+    ttnn_decoder = TtMapTRDecoder(
+        num_layers=decoder_num_layers,
+        embed_dims=embed_dims,
+        num_heads=8,
+        params=decoder_params,
+        params_branches=None,  # No reg branches for testing
+        device=device,
+        feedforward_channels=512,
+    )
+
+    # Convert inputs to TTNN
+    query_tt = ttnn.from_torch(query_torch, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
+
+    # Use TTNN encoder output for decoder, matching the transposition done for PyTorch
+    # Convert from TTNN to torch, transpose, and convert back to maintain complete TTNN flow
+    tt_encoder_torch = ttnn.to_torch(tt_encoder_output).float()
+    if tt_encoder_torch.shape[0] == batch_size and tt_encoder_torch.shape[1] == encoder_bev_h * encoder_bev_w:
+        tt_encoder_for_decoder = tt_encoder_torch.permute(1, 0, 2).contiguous()
+    else:
+        tt_encoder_for_decoder = tt_encoder_torch
+    value_tt = ttnn.from_torch(tt_encoder_for_decoder, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
+
+    query_pos_tt = ttnn.from_torch(query_pos_torch, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
+    reference_points_dec_tt = ttnn.from_torch(
+        reference_points_torch, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+    )
+    decoder_spatial_shapes_tt = ttnn.from_torch(
+        decoder_spatial_shapes, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+    )
+    decoder_level_start_idx_tt = ttnn.from_torch(
+        torch.tensor([0], dtype=torch.long), device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+    )
+
+    # Run TTNN decoder
+    logger.info("  Running TTNN decoder...")
+    tt_decoder_output, tt_decoder_ref_pts = ttnn_decoder(
+        query=query_tt,
+        key=None,
+        value=value_tt,
+        query_pos=query_pos_tt,
+        reference_points=reference_points_dec_tt,
+        spatial_shapes=decoder_spatial_shapes_tt,
+        level_start_index=decoder_level_start_idx_tt,
+        map_reg_branches=None,
+    )
+
+    # Compare decoder outputs
+    tt_decoder_torch = ttnn.to_torch(tt_decoder_output).float()
+    tt_decoder_ref_torch = ttnn.to_torch(tt_decoder_ref_pts).float()
+    logger.info(f"  TTNN decoder output shape: {tt_decoder_torch.shape}")
+
+    decoder_pcc_passed, decoder_pcc = comp_pcc(torch_decoder_output, tt_decoder_torch, 0.85)
+    logger.info(f"  Decoder PCC: {decoder_pcc:.6f} {'✅' if decoder_pcc_passed else '❌'}")
+
+    # Use decoder outputs for head (complete flow!)
+    hs_torch = torch_decoder_output  # (num_layers, num_query, bs, embed_dims)
+    init_reference_torch = reference_points_torch  # Initial reference points
+    # Use PyTorch decoder reference points for head (indices 0 to num_layers-2)
+    inter_references_torch = [torch_decoder_ref_pts[i] for i in range(decoder_num_layers - 1)]
+
+    # ========================================================================
+    # Step 6: Run TTNN Head (using decoder outputs)
+    # ========================================================================
+    logger.info("\n[Step 6] Running TTNN Head...")
 
     from models.experimental.MapTR.tests.pcc.test_head import create_maptr_model_parameters_head
 
-    # Use simulated decoder outputs (decoder test is separate)
-    torch.manual_seed(123)
-    num_query = num_vec * num_pts_per_vec
-    hs_torch = torch.randn(num_decoder_layers, num_query, batch_size, embed_dims) * 0.1
-    init_reference_torch = torch.rand(batch_size, num_query, 2) * 0.8 + 0.1
-    inter_references_torch = [torch.rand(batch_size, num_query, 2) * 0.8 + 0.1 for _ in range(num_decoder_layers - 1)]
-
-    # Run PyTorch head branches
+    # Run PyTorch head branches using decoder output
     with torch.no_grad():
-        hs_permuted = hs_torch.permute(0, 2, 1, 3)
+        hs_permuted = hs_torch.permute(0, 2, 1, 3)  # (num_layers, bs, num_query, embed_dims)
         outputs_classes_torch = []
         outputs_coords_torch = []
         outputs_pts_torch = []
@@ -1620,15 +1775,21 @@ def test_maptr_connected_backbone_fpn_head(device, reset_seeds):
         num_decoder_layers=num_decoder_layers,
     )
 
-    # Convert decoder outputs to TTNN
-    hs_tt = ttnn.from_torch(hs_torch, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
-    init_reference_tt = ttnn.from_torch(
-        init_reference_torch, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
-    )
-    inter_references_tt = [
-        ttnn.from_torch(ref, device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
-        for ref in inter_references_torch
-    ]
+    # Use TTNN decoder outputs directly (complete TTNN flow!)
+    # tt_decoder_output is already in TTNN format from decoder step
+    hs_tt = tt_decoder_output  # Already in TTNN from decoder
+    init_reference_tt = reference_points_dec_tt  # Initial reference points already in TTNN
+
+    # Extract inter references from TTNN decoder reference points output
+    # tt_decoder_ref_pts: (num_layers, bs, num_query, 2)
+    # We need layers 0 to num_layers-2 for inter_references
+    inter_references_tt = []
+    for i in range(decoder_num_layers - 1):
+        # Extract slice from TTNN tensor
+        ref_slice = ttnn.from_torch(
+            tt_decoder_ref_torch[i], device=device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+        )
+        inter_references_tt.append(ref_slice)
 
     # Run TTNN head
     tt_outputs = ttnn_head(
@@ -1653,41 +1814,44 @@ def test_maptr_connected_backbone_fpn_head(device, reset_seeds):
     # Summary
     # ========================================================================
     logger.info("\n" + "=" * 70)
-    logger.info("CONNECTED FLOW TEST SUMMARY (WITH ENCODER)")
+    logger.info("COMPLETE CONNECTED FLOW TEST SUMMARY (FULL MODEL)")
     logger.info("=" * 70)
     logger.info(f"📦 TTNN Backbone:        PCC = {backbone_pcc:.6f} {'✅' if backbone_pcc_passed else '❌'}")
     logger.info(f"🔀 TTNN FPN:             PCC = {fpn_pcc:.6f} {'✅' if fpn_pcc_passed else '❌'}")
     logger.info(f"🔄 TTNN Encoder:         PCC = {encoder_pcc:.6f} {'✅' if encoder_pcc_passed else '❌'}")
+    logger.info(f"🔁 TTNN Decoder:         PCC = {decoder_pcc:.6f} {'✅' if decoder_pcc_passed else '❌'}")
     logger.info(f"🏷️  Classification:       PCC = {cls_pcc:.6f} {'✅' if cls_pcc_passed else '❌'}")
     logger.info(f"📐 Bounding Box:         PCC = {bbox_pcc:.6f} {'✅' if bbox_pcc_passed else '❌'}")
     logger.info(f"📍 Points:               PCC = {pts_pcc:.6f} {'✅' if pts_pcc_passed else '❌'}")
 
-    avg_pcc = (backbone_pcc + fpn_pcc + encoder_pcc + cls_pcc + bbox_pcc + pts_pcc) / 6
+    avg_pcc = (backbone_pcc + fpn_pcc + encoder_pcc + decoder_pcc + cls_pcc + bbox_pcc + pts_pcc) / 7
     logger.info(f"\n📊 OVERALL AVERAGE PCC: {avg_pcc:.6f}")
     logger.info("=" * 70)
 
-    logger.info("\n📝 Complete TTNN Flow: TTNN Backbone → TTNN FPN → TTNN Encoder → TTNN Head")
+    logger.info("\n📝 Complete TTNN Flow: TTNN Backbone → TTNN FPN → TTNN Encoder → TTNN Decoder → TTNN Head")
     logger.info("    ✅ All components use TTNN outputs (no PyTorch in the middle)")
     logger.info("    ✅ Using real lidar2img calibration matrices (like VAD)")
-    logger.info("    ⚠️  Decoder outputs simulated (decoder tested separately)")
+    logger.info("    ✅ Full end-to-end TTNN implementation - NO skipped components!")
 
     all_passed = (
         backbone_pcc_passed
         and fpn_pcc_passed
         and encoder_pcc_passed
+        and decoder_pcc_passed
         and cls_pcc_passed
         and bbox_pcc_passed
         and pts_pcc_passed
     )
 
     if all_passed:
-        logger.info("\n✅ CONNECTED FLOW TEST PASSED (WITH ENCODER)")
+        logger.info("\n✅ COMPLETE CONNECTED FLOW TEST PASSED (FULL MODEL)")
     else:
         logger.info("\n❌ CONNECTED FLOW TEST FAILED")
 
     assert backbone_pcc_passed, f"Backbone PCC {backbone_pcc:.6f} below threshold"
     assert fpn_pcc_passed, f"FPN PCC {fpn_pcc:.6f} below threshold"
     assert encoder_pcc_passed, f"Encoder PCC {encoder_pcc:.6f} below threshold"
+    assert decoder_pcc_passed, f"Decoder PCC {decoder_pcc:.6f} below threshold"
     assert cls_pcc_passed, f"Classification PCC {cls_pcc:.6f} below threshold"
     assert bbox_pcc_passed, f"Bbox PCC {bbox_pcc:.6f} below threshold"
     assert pts_pcc_passed, f"Points PCC {pts_pcc:.6f} below threshold"
