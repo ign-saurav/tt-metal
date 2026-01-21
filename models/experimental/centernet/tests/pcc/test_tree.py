@@ -30,8 +30,8 @@ from models.experimental.centernet.tt.custom_preprocessor import create_custom_m
         (2, 64, 128, 2, False, False, (1, 64, 128, 128)),
         # Case 3: Level 2 tree with larger channels
         (2, 128, 256, 2, False, False, (1, 128, 64, 64)),
-        # Case 4: Level 1 tree with large channels
-        (1, 256, 512, 2, False, False, (1, 256, 32, 32)),
+        # Case 4: Level 1 tree with large channels (uses BLOCK_SHARDED strategy like VGG16)
+        (1, 256, 512, 2, False, False, (1, 256, 16, 16)),
     ],
 )
 def test_tree(device, levels, in_channels, out_channels, stride, level_root, root_residual, input_shape):

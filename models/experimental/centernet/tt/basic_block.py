@@ -4,7 +4,8 @@
 
 import ttnn
 from models.tt_cnn.tt.builder import (
-    AutoShardedStrategyConfiguration,
+    HeightShardedStrategyConfiguration,
+    BlockShardedStrategyConfiguration,
     Conv2dConfiguration,
     TtConv2d,
 )
@@ -66,6 +67,19 @@ class TtBasicBlock(LightweightModule):
         if bias is not None and isinstance(bias, ttnn.Tensor) and ttnn.is_tensor_storage_on_device(bias):
             bias = ttnn.from_device(bias)
 
+        # For large channel counts (>128), switch to BLOCK_SHARDED strategy
+        use_block_sharding = in_ch > 128 or out_ch > 128
+
+        if use_block_sharding:
+            sharding_strategy = BlockShardedStrategyConfiguration(reshard_if_not_optimal=True)
+            reallocate_halo = False
+            enable_weights_db = True
+        else:
+            # Configuration for smaller channels
+            sharding_strategy = HeightShardedStrategyConfiguration(reshard_if_not_optimal=True)
+            reallocate_halo = True
+            enable_weights_db = False
+
         return Conv2dConfiguration(
             input_height=h,
             input_width=w,
@@ -82,10 +96,14 @@ class TtBasicBlock(LightweightModule):
             activation_dtype=ttnn.bfloat16,
             weights_dtype=ttnn.bfloat16,
             output_dtype=ttnn.bfloat16,
-            sharding_strategy=AutoShardedStrategyConfiguration(),
-            math_fidelity=ttnn.MathFidelity.HiFi2,
-            fp32_dest_acc_en=True,
-            deallocate_activation=True,
+            sharding_strategy=sharding_strategy,
+            math_fidelity=ttnn.MathFidelity.LoFi,
+            fp32_dest_acc_en=False,
+            packer_l1_acc=False,
+            deallocate_activation=False,
+            enable_act_double_buffer=False,
+            enable_weights_double_buffer=enable_weights_db,
+            reallocate_halo_output=reallocate_halo,
         )
 
     def forward(self, x, residual=None):
