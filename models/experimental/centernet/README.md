@@ -201,10 +201,16 @@ pytest models/experimental/centernet/tests/pcc/test_dla_seg.py
 ### Single Device (BS=1):
 - Expected throughput: `91.53` FPS
 
-### Run Device Performance Test
+### Run End To End Application Performance Test
 ```bash
 # Test full model performance
 pytest models/experimental/centernet/tests/perf/test_centernet_e2e_perf.py
+```
+### Run Device Level Performance Test
+- Expected throughput: `107.66` FPS
+```bash
+# Test full model performance
+pytest models/experimental/centernet/tests/perf/test_perf.py
 ```
 
 ### Run the Demo
