@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -7,9 +7,9 @@ import torch
 import ttnn
 from loguru import logger
 from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_module_args
-
+from models.experimental.centernet.reference.dlav0 import DLA, BasicBlock
 from models.common.utility_functions import run_for_wormhole_b0, comp_pcc, tt2torch_tensor
-from models.experimental.centernet.reference.network.dlav0 import DLAUp
+from models.experimental.centernet.reference.dlav0 import DLAUp
 from models.experimental.centernet.tt.dlaup import TtDLAUp
 from models.experimental.centernet.tt.custom_preprocessor import create_custom_mesh_preprocessor
 from models.demos.utils.common_demo_utils import get_mesh_mappers
@@ -24,16 +24,12 @@ from models.demos.utils.common_demo_utils import get_mesh_mappers
 def test_dla_up(device):
     """Test TTNN DLAUp with feature maps from PyTorch backbone."""
     torch.manual_seed(42)
-
-    # Create the full DLA model to get correct intermediate outputs
-    from models.experimental.centernet.reference.network.dlav0 import DLA, BasicBlock
-
     # Create DLA-34 model with return_levels=True
     dla_model = DLA(
         levels=[1, 1, 1, 2, 2, 1],
         channels=[16, 32, 64, 128, 256, 512],
         block=BasicBlock,
-        return_levels=True,  # Enable returning intermediate feature maps
+        return_levels=True,
     )
 
     dla_model.eval()
@@ -54,7 +50,7 @@ def test_dla_up(device):
     with torch.no_grad():
         dla_outputs = dla_model(input_tensor)
         # Extract the levels that DLAUp expects (starting from first_level)
-        first_level = 2  # Based on DLASeg configuration
+        first_level = 2
         actual_inputs = dla_outputs[first_level:]
 
         logger.info(f"Actual DLA output shapes: {[x.shape for x in actual_inputs]}")
@@ -80,7 +76,7 @@ def test_dla_up(device):
     # Extract the ACTUAL input channels from DLA backbone outputs
     actual_input_channels = []
     for tensor in actual_inputs:
-        actual_input_channels.append(tensor.shape[1])  # Get channel dimension
+        actual_input_channels.append(tensor.shape[1])
 
     logger.info(f"Using actual input channels from DLA outputs: {actual_input_channels}")
 
@@ -103,14 +99,12 @@ def test_dla_up(device):
     # Get TTNN output
     tt_output = tt_model.forward(tt_layers)
 
-    # Convert back and compare
-    # TTNN output is in NHWC format, PyTorch is in NCHW format
-    tt_output_torch = tt2torch_tensor(tt_output)  # Returns in NHWC [N, H, W, C]
+    tt_output_torch = tt2torch_tensor(tt_output)
     logger.info(f"TTNN output shape (NHWC): {tt_output_torch.shape}")
     logger.info(f"PyTorch output shape (NCHW): {dla_up_output.shape}")
 
     # Convert TTNN output from NHWC to NCHW for comparison
-    tt_output_nchw = tt_output_torch.permute(0, 3, 1, 2)  # [N, H, W, C] -> [N, C, H, W]
+    tt_output_nchw = tt_output_torch.permute(0, 3, 1, 2)
     logger.info(f"TTNN output shape (NCHW): {tt_output_nchw.shape}")
 
     passing, pcc_value = comp_pcc(dla_up_output, tt_output_nchw, pcc=0.99)

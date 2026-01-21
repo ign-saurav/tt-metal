@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
 
 import time
@@ -8,7 +8,7 @@ import ttnn
 from loguru import logger
 
 from models.experimental.centernet.tests.perf.performant_infra import CenterNetPerformantTestInfra
-from models.experimental.centernet.reference.network.dlav0 import DLASeg
+from models.experimental.centernet.reference.dlav0 import DLASeg
 from models.experimental.centernet.tt.dla_seg import TtDLASeg
 from models.experimental.centernet.tt.custom_preprocessor import create_custom_mesh_preprocessor
 from models.perf.perf_utils import prep_perf_report
@@ -33,7 +33,7 @@ def pad_channels(x, target_channels):
     indirect=True,
 )
 @pytest.mark.parametrize("num_iterations", [32])
-@pytest.mark.parametrize("batch_size, size, expected_compile_time, expected_throughput_fps", [(1, 512, 30.0, 45.0)])
+@pytest.mark.parametrize("batch_size, size, expected_compile_time, expected_throughput_fps", [(1, 512, 30.0, 90.0)])
 @pytest.mark.models_performance_bare_metal
 def test_centernet_e2e_performant(
     device,

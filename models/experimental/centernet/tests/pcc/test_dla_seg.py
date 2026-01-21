@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -9,7 +9,7 @@ from loguru import logger
 from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_module_args
 from models.demos.utils.common_demo_utils import get_mesh_mappers
 from models.common.utility_functions import run_for_wormhole_b0, comp_pcc, tt2torch_tensor
-from models.experimental.centernet.reference.network.dlav0 import DLASeg
+from models.experimental.centernet.reference.dlav0 import DLASeg
 from models.experimental.centernet.tt.dla_seg import TtDLASeg
 from models.experimental.centernet.tt.custom_preprocessor import create_custom_mesh_preprocessor
 
@@ -75,7 +75,6 @@ def test_dla_seg(device):
     # TTNN forward pass
     tt_output = tt_dla_seg.forward(tt_input)
 
-    # DLASeg returns a list containing a dictionary of head outputs
     # Convert each head output back to PyTorch format
     tt_output_torch = {}
     for head_name in tt_output[0]:

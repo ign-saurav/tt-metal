@@ -109,9 +109,32 @@ CenterNet with DLA-34 backbone (without deformable convolutions) is a real-time 
 ## Setup
 
 ### Download Weights
-To use trained weights:
-1. Download trained weigths from Google Drive link in [CenterNet MODEL ZOO](https://github.com/xingyizhou/CenterNet/blob/master/readme/MODEL_ZOO.md). Make sure to download the currently supported `ctdet_coco_dlav0_1x.pth`
-2. Load weights into the PyTorch model before transferring to TTNN
+
+CenterNet weightswill be automatically downloaded while running the demo and will be saved:
+
+- **Source**: [CenterNet MODEL ZOO](https://drive.google.com/drive/folders/1S3NnppRgXea_IG4WeyquJcnOB3I6G-LX)
+- **Model**: `ctdet_coco_dlav0_1x.pth` (DLA-34 backbone trained on COCO, 211.6 MB)
+- **Location**: `models/experimental/centernet/ctdet_coco_dlav0_1x.pth`
+
+**Download Options:**
+
+**Option 1 - Using wget (no additional installation required):**
+```bash
+cd models/experimental/centernet
+wget --load-cookies /tmp/cookies.txt "https://drive.google.com/uc?export=download&confirm=$(wget --quiet --save-cookies /tmp/cookies.txt --keep-session-cookies --no-check-certificate 'https://drive.google.com/uc?export=download&id=1pl_-ael8wERdUREEnaIfqOV_VF2bEVRT' -O- | sed -rn 's/.*confirm=([0-9A-Za-z_]+).*/\1\n/p')&id=1pl_-ael8wERdUREEnaIfqOV_VF2bEVRT" -O ctdet_coco_dlav0_1x.pth && rm -rf /tmp/cookies.txt
+```
+
+**Option 2 - Using gdown (simpler, but requires pip install):**
+```bash
+pip install gdown
+cd models/experimental/centernet
+gdown 1pl_-ael8wERdUREEnaIfqOV_VF2bEVRT -O ctdet_coco_dlav0_1x.pth
+```
+
+**Option 3 - Manual download from browser:**
+1. Visit: https://drive.google.com/file/d/1pl_-ael8wERdUREEnaIfqOV_VF2bEVRT/view
+2. Click the 'Download' button
+3. Save the file as `ctdet_coco_dlav0_1x.pth` in `models/experimental/centernet/`
 
 
 ## Repository Layout
@@ -158,7 +181,6 @@ models/
         │       ├── test_centernet_e2e_perf.py
         │       ├── test_perf.py
         │       └── performant_infra.py   # CenterNetPerformantTestInfra class
-        ├── ctdet_coco_dlav0_1x.pth       # Trained weights
         └── README.md
 ```
 
@@ -177,7 +199,7 @@ pytest models/experimental/centernet/tests/pcc/test_dla_seg.py
 
 ### Performance
 ### Single Device (BS=1):
-- Expected throughput: `83.26` FPS
+- Expected throughput: `91.53` FPS
 
 ### Run Device Performance Test
 ```bash
@@ -187,14 +209,20 @@ pytest models/experimental/centernet/tests/perf/test_centernet_e2e_perf.py
 
 ### Run the Demo
 ```bash
-# Process a single image
-python3 models/experimental/centernet/demo/demo.py --input_image <path_to_image> --weights <path_to_weights>
+# Process a single image (weights auto-detected)
+python3 models/experimental/centernet/demo/demo.py --input <path_to_image>
 
+# Or specify weights explicitly
+python3 models/experimental/centernet/demo/demo.py --input <path_to_image> --weights <path_to_weights>
 ```
 
 Example:
 ```bash
-python models/experimental/centernet/demo/demo.py --input models/experimental/centernet/resources/sample_input/16004479832_a748d55f21_k.jpg --weights models/experimental/centernet/ctdet_coco_dlav0_1x.pth
+# Auto-detect weights
+python3 models/experimental/centernet/demo/demo.py --input models/experimental/centernet/resources/sample_input/16004479832_a748d55f21_k.jpg
+
+# Or specify weights
+python3 models/experimental/centernet/demo/demo.py --input models/experimental/centernet/resources/sample_input/16004479832_a748d55f21_k.jpg --weights models/experimental/centernet/ctdet_coco_dlav0_1x.pth
 ```
 
 ### Demo Output Files
@@ -208,3 +236,8 @@ The demo generates output files for each processed image:
 - Resolution: (H, W) = (512, 512) is supported end-to-end.
 - Device: The demo opens a Wormhole device (default id typically 0). If you need to change it, adjust the DemoConfig or the device open call in the demo.
 - Batch Size: Demo/tests are written for BS=1. For larger BS you’ll need to verify memory layouts and tile alignment.
+
+## References
+
+- Original Paper: Objects as Points — https://arxiv.org/abs/1904.07850
+- Reference Implementation: CenterNet by Xingyi Zhou (MIT License) — https://github.com/xingyizhou/CenterNet

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -19,7 +19,7 @@ class CenterNetPerformantTestInfra:
         self.ttnn_model = ttnn_model
         self.dtype = dtype
         self.memory_config = ttnn.DRAM_MEMORY_CONFIG
-        self.heads = {"hm": 80, "wh": 2, "reg": 2}  # Default CenterNet heads
+        self.heads = {"hm": 80, "wh": 2, "reg": 2}
         self.down_ratio = 4
         self.input_size = 512
 
@@ -41,7 +41,7 @@ class CenterNetPerformantTestInfra:
         if isinstance(tt_output, list) and len(tt_output) > 0 and isinstance(tt_output[0], dict):
             # Extract values from the dictionary and return as a list
             output_list = []
-            for head_name in ["hm", "wh", "reg"]:  # Maintain consistent order
+            for head_name in ["hm", "wh", "reg"]:
                 if head_name in tt_output[0]:
                     output_list.append(tt_output[0][head_name])
             return output_list

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC.
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -10,23 +10,21 @@ from typing import Any, Optional, Dict
 
 import torch
 import ttnn
-import numpy as np
-import cv2
-from PIL import Image
 from loguru import logger
 
 from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_module_args
 from models.demos.utils.common_demo_utils import get_mesh_mappers
 from models.common.utility_functions import tt2torch_tensor, comp_pcc
-from models.experimental.centernet.reference.network.dlav0 import DLASeg
+from models.experimental.centernet.reference.dlav0 import DLASeg
 from models.experimental.centernet.tt.dla_seg import TtDLASeg
 from models.experimental.centernet.tt.custom_preprocessor import create_custom_mesh_preprocessor
+from models.experimental.centernet.tt.utils import download_weights
 from models.experimental.centernet.reference.model import load_model
-from models.experimental.centernet.reference.utils.decode import ctdet_decode
-from models.experimental.centernet.reference.utils.debugger import Debugger
-from models.experimental.centernet.reference.utils.image import get_affine_transform, transform_preds
 from models.experimental.centernet.tests.perf.performant_infra import CenterNetPerformantTestInfra
 from models.tt_cnn.tt.pipeline import PipelineConfig, create_pipeline_from_config
+
+# Import preprocessing and visualization utilities
+from models.experimental.centernet.demo.preprocess import preprocess_image, postprocess_output, draw_detections
 
 
 class Demo:
@@ -246,11 +244,11 @@ class Demo:
         self.initialize_torch_model(weights_path)
         self.initialize_ttnn_model(weights_path)
 
-        torch_input, ttnn_input, meta = self.preprocess_image(image_path)
+        torch_input, ttnn_input, meta = preprocess_image(image_path, self.input_size, self.down_ratio, self.ttnn_device)
 
         torch_output = self.run_torch_inference(torch_input)
-        torch_detections = self.postprocess_output(torch_output[0], K=self.K)
-        self.draw_detections(image_path, output_dir, torch_detections, "pytorch", meta=meta, score_threshold=0.3)
+        torch_detections = postprocess_output(torch_output[0], K=self.K)
+        draw_detections(image_path, output_dir, torch_detections, "pytorch", meta=meta, score_threshold=0.3)
 
         if ttnn_input is not None:
             tt_output = self.run_ttnn_inference(torch_input)
@@ -288,8 +286,8 @@ class Demo:
                     passing, pcc_value = comp_pcc(pt_out, tt_out, pcc=0.90)
                     logger.info(f"  {head_name}: PCC = {pcc_value:.4f}, passing = {passing}")
 
-            tt_detections = self.postprocess_output(tt_output_torch, K=self.K)
-            self.draw_detections(image_path, output_dir, tt_detections, "ttnn", meta=meta, score_threshold=0.5)
+            tt_detections = postprocess_output(tt_output_torch, K=self.K)
+            draw_detections(image_path, output_dir, tt_detections, "ttnn", meta=meta, score_threshold=0.5)
         else:
             logger.warning("TTNN input not available, skipping TTNN inference")
 
@@ -324,8 +322,8 @@ def _parse_args(argv: Optional[list[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--weights",
         "-w",
-        default="models/experimental/centernet/ctdet_coco_dlav0_1x.pth",
-        help="Path to model weights",
+        default=None,
+        help="Path to model weights (auto-detected if not provided)",
     )
     parser.add_argument(
         "--output",
@@ -343,8 +341,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         logger.error("Input image not found: {}", args.input)
         return 1
 
-    if not os.path.exists(args.weights):
-        logger.error("Weights file not found: {}", args.weights)
+    # Use download_weights utility to locate or download weights
+    try:
+        weights_path = download_weights(args.weights)
+        logger.info(f"Using weights: {weights_path}")
+    except FileNotFoundError as e:
+        logger.error(str(e))
         return 1
 
     out_dir = args.output or "models/experimental/centernet/demo/outputs"
@@ -355,7 +357,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     logger.info("=== CenterNet Demo ===")
     try:
         demo = Demo()
-        demo.run_demo(args.input, args.weights, out_dir)
+        demo.run_demo(args.input, weights_path, out_dir)
         return 0
     except Exception as e:
         logger.exception("Demo failed: {}", e)

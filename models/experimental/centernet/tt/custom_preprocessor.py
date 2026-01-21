@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -6,7 +6,7 @@ import ttnn
 import torch.nn as nn
 
 from ttnn.model_preprocessing import fold_batch_norm2d_into_conv2d
-from models.experimental.centernet.reference.network.dlav0 import (
+from models.experimental.centernet.reference.dlav0 import (
     BasicBlock,
     Root,
     Tree,
@@ -200,7 +200,7 @@ def fill_fc_weights(layers):
 
 def _extract_dla_seg(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
     """Extract and preprocess DLASeg model parameters."""
-    from models.experimental.centernet.reference.network.dlav0 import DLASeg
+    from models.experimental.centernet.reference.dlav0 import DLASeg
 
     assert isinstance(model, DLASeg)
 
@@ -265,7 +265,7 @@ def custom_preprocessor(
     parameters = {}
     weight_dtype = ttnn.bfloat16
 
-    from models.experimental.centernet.reference.network.dlav0 import DLASeg
+    from models.experimental.centernet.reference.dlav0 import DLASeg
 
     if isinstance(model, DLASeg):
         parameters["dla_seg"] = {}

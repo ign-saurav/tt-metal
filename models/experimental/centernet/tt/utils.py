@@ -1,6 +1,10 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 
 # SPDX-License-Identifier: Apache-2.0
+
+import os
+from pathlib import Path
+from loguru import logger
 
 import ttnn
 from models.common.lightweightmodule import LightweightModule
@@ -104,3 +108,128 @@ class TtConvTranspose2D(LightweightModule):
             return x, shape
         else:
             return x
+
+
+def download_weights(weights_path=None, model_name="ctdet_coco_dlav0_1x"):
+    import shutil
+    import subprocess
+
+    if weights_path and os.path.exists(weights_path):
+        logger.info(f"Using provided weights file: {weights_path}")
+        return weights_path
+
+    centernet_dir = Path(__file__).parent.parent
+    default_weights_path = centernet_dir / f"{model_name}.pth"
+
+    if default_weights_path.exists():
+        logger.info(f"Found weights at: {default_weights_path}")
+        return str(default_weights_path)
+
+    alternative_paths = [
+        centernet_dir / "wt" / f"{model_name}.pth",
+        centernet_dir / "weights" / f"{model_name}.pth",
+    ]
+
+    for alt_path in alternative_paths:
+        if alt_path.exists():
+            logger.info(f"Found weights at alternative location: {alt_path}")
+            try:
+                default_weights_path.parent.mkdir(parents=True, exist_ok=True)
+                logger.info(f"Copying weights to default location: {default_weights_path}")
+                shutil.copy2(str(alt_path), str(default_weights_path))
+                return str(default_weights_path)
+            except Exception as e:
+                logger.warning(f"Could not copy weights to default location: {e}")
+                return str(alt_path)
+
+    # Weights not found - attempt automatic download
+    logger.warning(f"Weights file '{model_name}.pth' not found!")
+    logger.info(f"Attempting automatic download...")
+
+    # Google Drive file ID for ctdet_coco_dlav0_1x.pth
+    file_id = "1pl_-ael8wERdUREEnaIfqOV_VF2bEVRT"
+
+    # Create directory if it doesn't exist
+    default_weights_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Try to install gdown if not available
+    import sys
+
+    try:
+        import gdown
+    except ImportError:
+        logger.info("Installing gdown for automatic download...")
+        try:
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "gdown", "-q"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            logger.info("✓ gdown installed successfully")
+            import gdown
+        except Exception as e:
+            logger.warning(f"Could not install gdown: {e}")
+            gdown = None
+
+    if gdown is not None:
+        try:
+            logger.info(f"Downloading weights from Google Drive...")
+            logger.info(f"  File: {model_name}.pth")
+            logger.info(f"  Size: ~211 MB (this may take a few minutes)")
+
+            folder_url = "https://drive.google.com/drive/folders/1S3NnppRgXea_IG4WeyquJcnOB3I6G-LX"
+            temp_download_dir = centernet_dir / "model_zoo"
+
+            logger.info(f"  Downloading from CenterNet MODEL ZOO...")
+            result = subprocess.run(
+                [sys.executable, "-m", "gdown", "--folder", folder_url, "--remaining-ok", "-O", str(temp_download_dir)],
+                capture_output=True,
+                text=True,
+                timeout=600,
+            )
+
+            # Check if the specific file was downloaded
+            downloaded_file = temp_download_dir / f"{model_name}.pth"
+            if downloaded_file.exists():
+                file_size_mb = downloaded_file.stat().st_size / (1024 * 1024)
+                if file_size_mb > 100:
+                    logger.info(f"  Moving weights to: {default_weights_path}")
+                    shutil.move(str(downloaded_file), str(default_weights_path))
+                    logger.info(f"✓ Successfully downloaded weights ({file_size_mb:.1f} MB)")
+                    return str(default_weights_path)
+                else:
+                    logger.warning(f"Downloaded file seems too small ({file_size_mb:.1f} MB)")
+                    downloaded_file.unlink()
+            else:
+                logger.warning(f"File {model_name}.pth not found in downloaded folder")
+                if result.stderr:
+                    logger.warning(f"gdown output: {result.stderr[:300]}")
+
+        except subprocess.TimeoutExpired:
+            logger.warning(f"Download timed out after 10 minutes")
+        except Exception as e:
+            logger.warning(f"Automatic download failed: {e}")
+            import traceback
+
+            logger.debug(traceback.format_exc())
+
+    logger.error(f"Could not download weights automatically.")
+    logger.info(f"")
+    logger.info(f"Please download weights manually:")
+    logger.info(f"  Expected location: {default_weights_path}")
+    logger.info(f"")
+    logger.info(f"Option 1 - Using gdown (recommended):")
+    logger.info(f"  pip install gdown")
+    logger.info(f"  cd {centernet_dir}")
+    logger.info(f"  gdown {file_id} -O {model_name}.pth")
+    logger.info(f"")
+    logger.info(f"Option 2 - Manual download from browser:")
+    logger.info(f"  1. Visit: https://drive.google.com/file/d/{file_id}/view")
+    logger.info(f"  2. Click 'Download' button")
+    logger.info(f"  3. Save as: {default_weights_path}")
+    logger.info(f"     (File size should be ~211 MB)")
+
+    raise FileNotFoundError(
+        f"Weights file not found: {default_weights_path}\n"
+        f"Please download from: https://drive.google.com/file/d/{file_id}/view"
+    )

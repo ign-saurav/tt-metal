@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC.
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC.
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -14,7 +14,7 @@ from __future__ import print_function
 
 import torch
 
-from models.experimental.centernet.reference.network.dlav0 import get_pose_net as get_dlav0
+from models.experimental.centernet.reference.dlav0 import get_pose_net as get_dlav0
 
 
 def create_model(arch, heads, head_conv):
