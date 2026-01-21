@@ -106,18 +106,6 @@
 ### Segmentation
 | Model                                                                       | Batch | Hardware                                                 | Frame/sec (FPS)     | Target FPS | Release     |
 |-----------------------------------------------------------------------------|-------|----------------------------------------------------------|---------|------------|-------------|
-<<<<<<< HEAD
-| [UNet - VGG19 (256x256)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/vision/segmentation/vgg_unet/wormhole)                  | 1     | [n150 (Wormhole)](https://tenstorrent.com/hardware/wormhole) | 198     | 150        |             |
-| [UNet - VGG19 (256x256) (DP=2)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/vision/segmentation/vgg_unet/wormhole)           | 2     | [n300 (Wormhole)](https://tenstorrent.com/hardware/wormhole) | 318     | 300        |             |
-| [UNet - VGG19 (256x256)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/vision/segmentation/vgg_unet/blackhole)                 | 1     | [p150 (Blackhole)](https://tenstorrent.com/hardware/blackhole) | 320    | 300        |             |
-| [UNet - Vanilla (480x640)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/vision/segmentation/vanilla_unet)                     | 1     | [n150 (Wormhole)](https://tenstorrent.com/hardware/wormhole) | 60      | 240        |             |
-| [UNet - Vanilla (480x640)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/vision/segmentation/vanilla_unet)                     | 2     | [n300 (Wormhole)](https://tenstorrent.com/hardware/wormhole) | 119     | 480        |             |
-| [SegFormer Semantic Segmentation (512x512)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/vision/segmentation/segformer)       | 1     | [n150 (Wormhole)](https://tenstorrent.com/hardware/wormhole) | 132     | 360        |             |
-| [SegFormer Semantic Segmentation (512x512) (DP=2)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/vision/segmentation/segformer)| 2     | [n300 (Wormhole)](https://tenstorrent.com/hardware/wormhole) | 248     | 720        |             |
-| [UFLD - v2 (320x800)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/vision/segmentation/ufld_v2/wormhole)                      | 1     | [n150 (Wormhole)](https://tenstorrent.com/hardware/wormhole) | 365     | 600        |             |
-| [UFLD - v2 (320x800) (DP=2)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/vision/segmentation/ufld_v2/wormhole)               | 2     | [n300 (Wormhole)](https://tenstorrent.com/hardware/wormhole) | 637     | 1200       |             |
-| [UFLD - v2 (320x800)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/vision/segmentation/ufld_v2/blackhole)                     | 1     | [p150 (Blackhole)](https://tenstorrent.com/hardware/blackhole) | 551   | 1200        |             |
-=======
 | [UNet - VGG19 (256x256)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/wormhole/vgg_unet)                  | 1     | [n150 (Wormhole)](https://tenstorrent.com/hardware/wormhole) | 198     | 150        |             |
 | [UNet - VGG19 (256x256) (DP=2)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/wormhole/vgg_unet)           | 2     | [n300 (Wormhole)](https://tenstorrent.com/hardware/wormhole) | 318     | 300        |             |
 | [UNet - VGG19 (256x256)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/blackhole/vgg_unet)                 | 1     | [p150 (Blackhole)](https://tenstorrent.com/hardware/blackhole) | 320    | 300        |             |
@@ -130,7 +118,6 @@
 | [UFLD - v2 (320x800)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/wormhole/ufld_v2)                      | 1     | [n150 (Wormhole)](https://tenstorrent.com/hardware/wormhole) | 365     | 600        |             |
 | [UFLD - v2 (320x800) (DP=2)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/wormhole/ufld_v2)               | 2     | [n300 (Wormhole)](https://tenstorrent.com/hardware/wormhole) | 637     | 1200       |             |
 | [UFLD - v2 (320x800)](https://github.com/tenstorrent/tt-metal/tree/main/models/demos/blackhole/ufld_v2)                     | 1     | [p150 (Blackhole)](https://tenstorrent.com/hardware/blackhole) | 551   | 1200        |             |
->>>>>>> ca802a38e8 (Revert "[skip ci] Remove YOLO entries from models/README (#33454)")
 
 ## NLPs
 
