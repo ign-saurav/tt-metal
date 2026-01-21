@@ -1,9 +1,10 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 #
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
 import pytest
+from loguru import logger
 
 import ttnn
 from ttnn.model_preprocessing import (
@@ -193,7 +194,7 @@ def test_basic_layer_ttnn_vs_torch_with_checkpoint(device, layer_idx, reset_seed
 
     # Compare outputs
     pcc = comp_pcc(torch_output_tensor, output_tensor)
-    print(f"[CHECKPOINT - BasicLayer layer_idx={layer_idx}, depth={depth}] PCC: {pcc}")
+    logger.info(f"[CHECKPOINT - BasicLayer layer_idx={layer_idx}, depth={depth}] PCC: {pcc}")
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)
 
 
@@ -271,7 +272,7 @@ def test_basic_layer_ttnn_vs_torch(device, dim, num_heads, window_size, depth, i
 
     # Compare outputs
     pcc = comp_pcc(torch_output_tensor, output_tensor)
-    print(
+    logger.info(
         f"[SYNTHETIC - BasicLayer dim={dim}, num_heads={num_heads}, window_size={window_size}, depth={depth}] PCC: {pcc}"
     )
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)

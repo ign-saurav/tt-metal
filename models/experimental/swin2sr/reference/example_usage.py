@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 #
 # SPDX-License-Identifier: Apache-2.0
 
@@ -10,6 +10,7 @@ of Swin2SR for image super-resolution.
 """
 
 import torch
+from loguru import logger
 
 from models.experimental.swin2sr.reference.swin2sr import Swin2SR
 
@@ -57,9 +58,9 @@ def example_inference():
     with torch.no_grad():
         output = model(input_tensor)
 
-    print(f"Input shape: {input_tensor.shape}")
-    print(f"Output shape: {output.shape}")
-    print(f"Upscale factor: {output.shape[2] / input_tensor.shape[2]}")
+    logger.info(f"Input shape: {input_tensor.shape}")
+    logger.info(f"Output shape: {output.shape}")
+    logger.info(f"Upscale factor: {output.shape[2] / input_tensor.shape[2]}")
 
 
 if __name__ == "__main__":

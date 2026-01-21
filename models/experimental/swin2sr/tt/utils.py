@@ -1,10 +1,11 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 #
 # SPDX-License-Identifier: Apache-2.0
 
 import urllib.request
 from pathlib import Path
 
+from loguru import logger
 import ttnn
 from models.tt_cnn.tt.builder import (
     Conv2dConfiguration,
@@ -118,10 +119,10 @@ def ensure_checkpoint_downloaded(checkpoint_filename: str, url: str, checkpoint_
     checkpoint_path = checkpoint_dir / checkpoint_filename
 
     if not checkpoint_path.exists():
-        print(f"Checkpoint not found at {checkpoint_path}, downloading from {url}...")
+        logger.info(f"Checkpoint not found at {checkpoint_path}, downloading from {url}...")
         try:
             urllib.request.urlretrieve(url, checkpoint_path)
-            print(f"Successfully downloaded checkpoint to {checkpoint_path}")
+            logger.info(f"Successfully downloaded checkpoint to {checkpoint_path}")
         except Exception as e:
             raise RuntimeError(f"Failed to download checkpoint from {url}: {e}")
 

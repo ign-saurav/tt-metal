@@ -1,9 +1,10 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 #
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
 import pytest
+from loguru import logger
 
 import ttnn
 from ttnn.model_preprocessing import (
@@ -231,7 +232,7 @@ def test_swin_transformer_block_ttnn_vs_torch_with_checkpoint(device, layer_idx,
 
     # Compare outputs and log PCC
     pcc_passed, pcc_message = comp_pcc(torch_output_tensor, output_tensor, pcc=0.99)
-    print(f"\n[CHECKPOINT - SwinTransformerBlock Layer {layer_idx}, Block {block_idx}] PCC: {pcc_message}")
+    logger.info(f"\n[CHECKPOINT - SwinTransformerBlock Layer {layer_idx}, Block {block_idx}] PCC: {pcc_message}")
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)
 
 
@@ -306,7 +307,7 @@ def test_swin_transformer_block_ttnn_vs_torch(
 
     # Compare outputs and log PCC
     pcc_passed, pcc_message = comp_pcc(torch_output_tensor, output_tensor, pcc=0.99)
-    print(
+    logger.info(
         f"\n[SYNTHETIC - SwinTransformerBlock dim={dim}, num_heads={num_heads}, window_size={window_size}, shift_size={shift_size}] PCC: {pcc_message}"
     )
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)

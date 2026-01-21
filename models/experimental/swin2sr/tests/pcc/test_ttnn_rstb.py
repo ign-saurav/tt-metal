@@ -1,9 +1,10 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 #
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
 import pytest
+from loguru import logger
 
 import ttnn
 from ttnn.model_preprocessing import preprocess_model_parameters
@@ -269,7 +270,9 @@ def test_rstb_ttnn_vs_torch_with_checkpoint(device, layer_idx, reset_seeds):
 
     # Compare outputs
     pcc = comp_pcc(torch_output_tensor, output_tensor)
-    print(f"[CHECKPOINT - RSTB layer_idx={layer_idx}, depth={depth}, resi_connection={resi_connection}] PCC: {pcc}")
+    logger.info(
+        f"[CHECKPOINT - RSTB layer_idx={layer_idx}, depth={depth}, resi_connection={resi_connection}] PCC: {pcc}"
+    )
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)
 
 
@@ -359,7 +362,7 @@ def test_rstb_ttnn_vs_torch(
 
     # Compare outputs
     pcc = comp_pcc(torch_output_tensor, output_tensor)
-    print(
+    logger.info(
         f"[SYNTHETIC - RSTB dim={dim}, num_heads={num_heads}, window_size={window_size}, depth={depth}, resi_connection={resi_connection}] PCC: {pcc}"
     )
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)

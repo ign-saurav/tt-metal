@@ -27,7 +27,6 @@ This repository provides:
   <https://github.com/tenstorrent/tt-metal>
 - Install **TT-Metalium™ / TT-NN™**:
   Follow the official instructions: <https://github.com/tenstorrent/tt-metal/blob/main/INSTALLING.md>
-  ```
 
 ## Repository Layout
 ```
@@ -36,7 +35,6 @@ models/experimental/swin2sr/
 ├── demo/
 │   └── demo_tiled.py            # Demo script with tiled processing
 ├── resources/
-│   ├── checkpoints/             # Model checkpoints (.pth files)
 │   └── test_images/             # Test images
 ├── tt/                          # TTNN implementation
 │   ├── tt_swin2sr.py            # Main model class
@@ -124,6 +122,7 @@ The model supports various input sizes including 256×256 and 512×512 pixels. F
 ## Performance
 ### Single Device (BS=1, img_size=64x64)(n150):
 - end-2-end perf with 1CQ (no trace) is `~2` FPS
+- Device Performance is `~1.7` FPS
 
 ### Multi Device (BS=1, img_size=64x64)(n300):
 - end-2-end perf with trace disabled and 2CQ is `~4` FPS

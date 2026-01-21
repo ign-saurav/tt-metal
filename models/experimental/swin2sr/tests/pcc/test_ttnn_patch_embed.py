@@ -1,10 +1,11 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 #
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
 from torch import nn
 import pytest
+from loguru import logger
 
 import ttnn
 from ttnn.model_preprocessing import preprocess_model_parameters
@@ -126,7 +127,7 @@ def test_swin2sr_patch_embed_ttnn_vs_torch(device, img_size, patch_size, in_chan
 
     # Log PCC value
     pcc_passed, pcc_message = comp_pcc(torch_output_tensor, output_tensor, pcc=0.99)
-    print(f"\n[CHECKPOINT - PatchEmbed] PCC: {pcc_message}")
+    logger.info(f"\n[CHECKPOINT - PatchEmbed] PCC: {pcc_message}")
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)
 
 
@@ -176,7 +177,7 @@ def test_swin2sr_patch_unembed_ttnn_vs_torch(device, img_size, patch_size, in_ch
 
     # Log PCC value
     pcc_passed, pcc_message = comp_pcc(torch_output_tensor, output_tensor, pcc=0.99)
-    print(f"\n[PatchUnEmbed] PCC: {pcc_message}")
+    logger.info(f"\n[PatchUnEmbed] PCC: {pcc_message}")
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)
 
 
@@ -231,7 +232,7 @@ def test_swin2sr_patch_unembed_ttnn_vs_torch_with_checkpoint(device, reset_seeds
 
     # Log PCC value
     pcc_passed, pcc_message = comp_pcc(torch_output_tensor, output_tensor, pcc=0.99)
-    print(f"\n[CHECKPOINT - PatchUnEmbed] PCC: {pcc_message}")
+    logger.info(f"\n[CHECKPOINT - PatchUnEmbed] PCC: {pcc_message}")
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)
 
 
@@ -306,5 +307,5 @@ def test_swin2sr_patch_embed_ttnn_vs_torch_with_checkpoint(device, reset_seeds):
 
     # Log PCC value
     pcc_passed, pcc_message = comp_pcc(torch_output_tensor, output_tensor, pcc=0.99)
-    print(f"\n[CHECKPOINT - PatchEmbed] PCC: {pcc_message}")
+    logger.info(f"\n[CHECKPOINT - PatchEmbed] PCC: {pcc_message}")
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)

@@ -1,10 +1,11 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 #
 # SPDX-License-Identifier: Apache-2.0
 
 import torch
 from torch import nn
 import pytest
+from loguru import logger
 
 import ttnn
 from ttnn.model_preprocessing import (
@@ -134,7 +135,7 @@ def test_swin2sr_mlp_ttnn_vs_torch_with_checkpoint(device, layer_idx, block_idx,
 
     # Log PCC value
     pcc_passed, pcc_message = comp_pcc(torch_output_tensor, output_tensor, pcc=0.99)
-    print(f"\n[CHECKPOINT - MLP Layer {layer_idx}, Block {block_idx}] PCC: {pcc_message}")
+    logger.info(f"\n[CHECKPOINT - MLP Layer {layer_idx}, Block {block_idx}] PCC: {pcc_message}")
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)
 
 
@@ -194,7 +195,7 @@ def test_swin2sr_mlp_ttnn_vs_torch(device, in_features, hidden_features, out_fea
 
     # Log PCC value
     pcc_passed, pcc_message = comp_pcc(torch_output_tensor, output_tensor, pcc=0.99)
-    print(
+    logger.info(
         f"\n[SYNTHETIC - MLP in_features={in_features}, hidden_features={hidden_features}, out_features={out_features}] PCC: {pcc_message}"
     )
     assert_with_pcc(torch_output_tensor, output_tensor, pcc=0.99)

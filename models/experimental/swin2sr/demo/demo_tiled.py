@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 #
 # SPDX-License-Identifier: Apache-2.0
 
@@ -9,6 +9,7 @@ import cv2
 import numpy as np
 import torch
 import ttnn
+from loguru import logger
 from ttnn.model_preprocessing import preprocess_model_parameters
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
@@ -56,7 +57,7 @@ def save_output_image(tensor: ttnn.Tensor, output_path: str, original_size: tupl
 
     img = (img * 255.0).round().astype(np.uint8)
     cv2.imwrite(output_path, img)
-    print(f"Saved output image to: {output_path}")
+    logger.info(f"Saved output image to: {output_path}")
 
 
 def load_model_from_checkpoint(
@@ -71,11 +72,11 @@ def load_model_from_checkpoint(
     upscale: int = 2,
     resi_connection: str = "1conv",
 ) -> tuple[TorchSwin2SR, TtSwin2SR]:
-    print(f"Loading checkpoint from: {checkpoint_path}")
+    logger.info(f"Loading checkpoint from: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
     params = checkpoint["params"] if "params" in checkpoint else checkpoint
 
-    print("Creating PyTorch model...")
+    logger.info("Creating PyTorch model...")
     torch_model = TorchSwin2SR(
         img_size=img_size,
         patch_size=1,
@@ -94,14 +95,14 @@ def load_model_from_checkpoint(
     torch_model.load_state_dict(params, strict=False)
     torch_model.eval()
 
-    print("Preprocessing parameters for TTNN...")
+    logger.info("Preprocessing parameters for TTNN...")
     parameters = preprocess_model_parameters(
         initialize_model=lambda: torch_model,
         custom_preprocessor=create_swin2sr_preprocessor(device),
         device=device,
     )
 
-    print("Creating TTNN model...")
+    logger.info("Creating TTNN model...")
     tt_model = TtSwin2SR(
         device=device,
         parameters=parameters,
@@ -144,11 +145,11 @@ def process_image_tiled(
     E = torch.zeros(1, C, output_h, output_w, dtype=torch.float32)
     W_mask = torch.zeros(1, C, output_h, output_w, dtype=torch.float32)
 
-    print(f"Processing {len(h_idx_list)}x{len(w_idx_list)} = {len(h_idx_list) * len(w_idx_list)} tiles...")
+    logger.info(f"Processing {len(h_idx_list)}x{len(w_idx_list)} = {len(h_idx_list) * len(w_idx_list)} tiles...")
 
     for tile_idx, (h_idx, w_idx) in enumerate([(h, w) for h in h_idx_list for w in w_idx_list]):
         if (tile_idx + 1) % 10 == 0:
-            print(f"  Processed {tile_idx + 1}/{len(h_idx_list) * len(w_idx_list)} tiles...")
+            logger.info(f"  Processed {tile_idx + 1}/{len(h_idx_list) * len(w_idx_list)} tiles...")
 
         in_patch = img_tensor[:, :, h_idx : h_idx + tile_size, w_idx : w_idx + tile_size]
 
@@ -189,32 +190,32 @@ def run_demo_tiled(
     tile_overlap: int = 32,
     device_id: int = 0,
 ):
-    print("=" * 80)
-    print("Swin2SR TTNN Demo - Tiled Processing")
-    print("=" * 80)
-    print(f"Input image: {image_path}")
-    print(f"Checkpoint: {checkpoint_path}")
-    print(f"Upscale factor: {scale}x")
-    print(f"Tile size: {tile_size}x{tile_size}")
-    print(f"Tile overlap: {tile_overlap} pixels")
-    print("=" * 80)
+    logger.info("=" * 80)
+    logger.info("Swin2SR TTNN Demo - Tiled Processing")
+    logger.info("=" * 80)
+    logger.info(f"Input image: {image_path}")
+    logger.info(f"Checkpoint: {checkpoint_path}")
+    logger.info(f"Upscale factor: {scale}x")
+    logger.info(f"Tile size: {tile_size}x{tile_size}")
+    logger.info(f"Tile overlap: {tile_overlap} pixels")
+    logger.info("=" * 80)
 
     window_size = 8
     if tile_size % window_size != 0:
         raise ValueError(f"tile_size ({tile_size}) must be a multiple of window_size ({window_size})")
 
-    print("\n[1/4] Opening TT device...")
+    logger.info("\n[1/4] Opening TT device...")
     device = ttnn.open_device(device_id=device_id)
 
     try:
-        print("\n[2/4] Loading and preprocessing image...")
+        logger.info("\n[2/4] Loading and preprocessing image...")
         img_array, (h, w) = load_image(image_path)
-        print(f"Image size: {h}x{w}")
+        logger.info(f"Image size: {h}x{w}")
 
         img_size = tile_size
-        print(f"Using img_size={img_size} for model initialization (matches tile_size and checkpoint)")
+        logger.info(f"Using img_size={img_size} for model initialization (matches tile_size and checkpoint)")
 
-        print("\n[3/4] Loading model from checkpoint...")
+        logger.info("\n[3/4] Loading model from checkpoint...")
         torch_model, tt_model = load_model_from_checkpoint(
             checkpoint_path=checkpoint_path,
             device=device,
@@ -228,7 +229,7 @@ def run_demo_tiled(
             resi_connection="1conv",
         )
 
-        print("\n[4/4] Processing image in tiles...")
+        logger.info("\n[4/4] Processing image in tiles...")
         output_array = process_image_tiled(
             tt_model=tt_model,
             device=device,
@@ -244,23 +245,23 @@ def run_demo_tiled(
             ext = os.path.splitext(image_path)[1]
             output_path = f"{base_name}_ttnn_tiled_output{ext}"
 
-        print(f"\nSaving output...")
+        logger.info(f"\nSaving output...")
         output_tensor = torch.from_numpy(output_array).unsqueeze(0)
         save_output_image(
             ttnn.from_torch(output_tensor, device=device, dtype=ttnn.bfloat16), output_path, (h, w), scale
         )
 
-        print(f"\nOutput shape: {output_array.shape}")
-        print(
+        logger.info(f"\nOutput shape: {output_array.shape}")
+        logger.info(
             f"Upscale factor achieved: {output_array.shape[1] / h:.2f}x (height), {output_array.shape[2] / w:.2f}x (width)"
         )
 
-        print("\n" + "=" * 80)
-        print("Demo completed successfully!")
-        print("=" * 80)
+        logger.info("\n" + "=" * 80)
+        logger.info("Demo completed successfully!")
+        logger.info("=" * 80)
 
     finally:
-        print("\nClosing TT device...")
+        logger.info("\nClosing TT device...")
         ttnn.close_device(device)
 
 
@@ -298,7 +299,7 @@ def main():
         }
         if args.scale in checkpoint_map:
             args.checkpoint = checkpoint_map[args.scale]
-            print(f"Auto-selected checkpoint for scale {args.scale}x: {args.checkpoint}")
+            logger.info(f"Auto-selected checkpoint for scale {args.scale}x: {args.checkpoint}")
         else:
             raise ValueError(f"No default checkpoint available for scale {args.scale}x. Please provide --checkpoint")
 
