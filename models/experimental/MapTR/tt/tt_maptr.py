@@ -3,8 +3,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
-import os
-import torch
 import ttnn
 
 from models.experimental.MapTR.tt.backbone import TtResNet50
@@ -249,10 +247,6 @@ class TtMapTR:
                 logger.info(
                     f"[TT] backbone[{i}] shape: {feat_torch.shape}, sample: {feat_torch.flatten()[:3].tolist()}"
                 )
-                # Save for comparison
-                import torch
-
-                torch.save(feat_torch, f"models/experimental/MapTR/tt/dumps/backbone_{i}.pt")
         else:
             return None
 
@@ -262,9 +256,6 @@ class TtMapTR:
             for i, feat in enumerate(img_feats):
                 feat_torch = ttnn.to_torch(feat)
                 logger.info(f"[TT] fpn[{i}] shape: {feat_torch.shape}, sample: {feat_torch.flatten()[:3].tolist()}")
-                import torch
-
-                torch.save(feat_torch, f"models/experimental/MapTR/tt/dumps/fpn_{i}.pt")
 
         img_feats_reshaped = []
         for img_feat in img_feats:
@@ -416,21 +407,6 @@ class TtMapTR:
         outs["all_cls_scores"] = ttnn.to_torch(outs["all_cls_scores"]).float()
         outs["all_bbox_preds"] = ttnn.to_torch(outs["all_bbox_preds"]).float()
         outs["all_pts_preds"] = ttnn.to_torch(outs["all_pts_preds"]).float()
-
-        # Save outputs for comparison (following vadv2 pattern)
-        save_path = "models/experimental/MapTR/tt/dumps"
-        os.makedirs(save_path, exist_ok=True)
-
-        keys_to_save = [
-            "bev_embed",
-            "all_cls_scores",
-            "all_bbox_preds",
-            "all_pts_preds",
-        ]
-
-        for key in keys_to_save:
-            tensor = outs[key]
-            torch.save(tensor, os.path.join(save_path, f"{key}.pt"))
 
         bbox_list = self.pts_bbox_head.get_bboxes(outs, img_metas, rescale=rescale)
 

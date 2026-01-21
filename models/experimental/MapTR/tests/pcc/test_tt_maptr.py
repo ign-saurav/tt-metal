@@ -2,11 +2,15 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+import traceback
+
+import numpy as np
 import pytest
 import torch
 import ttnn
-import numpy as np
 from loguru import logger
+
+from models.common.utility_functions import comp_pcc
 from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.detectors.maptr import MapTR
 from models.experimental.MapTR.tt import tt_maptr
 from models.experimental.MapTR.tt.model_preprocessing import (
@@ -48,7 +52,6 @@ def create_maptr_config():
     pc_range = [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
     bev_h, bev_w = 200, 100
 
-    # Image backbone config (ResNet50)
     img_backbone_cfg = ConfigDict(
         type="ResNet",
         depth=50,
@@ -60,7 +63,6 @@ def create_maptr_config():
         style="pytorch",
     )
 
-    # FPN neck config
     img_neck_cfg = ConfigDict(
         type="FPN",
         in_channels=[2048],
@@ -71,7 +73,6 @@ def create_maptr_config():
         relu_before_extra_convs=True,
     )
 
-    # Transformer config
     transformer_cfg = ConfigDict(
         type="MapTRPerceptionTransformer",
         embed_dims=embed_dims,
@@ -116,7 +117,6 @@ def create_maptr_config():
         ),
     )
 
-    # BBox coder config
     bbox_coder_cfg = ConfigDict(
         type="MapTRNMSFreeCoder",
         pc_range=pc_range,
@@ -125,7 +125,6 @@ def create_maptr_config():
         num_classes=num_classes,
     )
 
-    # Head config
     pts_bbox_head_cfg = ConfigDict(
         type="MapTRHead",
         num_classes=num_classes,
@@ -172,7 +171,7 @@ def create_maptr_config():
     )
 
 
-def create_input_dict(batch_size=1, num_cams=6, img_h=384, img_w=640):
+def create_input_dict(num_cams=6, img_h=384, img_w=640):
     """Create input dictionary for MapTR inference."""
     input_dict = {
         "img_metas": [
@@ -242,15 +241,13 @@ def test_maptr(
     model_location_generator,
 ):
     """Test MapTR: compare reference PyTorch MapTR vs TTNN implementation with PCC."""
-    # Ensure reproducible results
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
 
     config = create_maptr_config()
 
-    # Create PyTorch MapTR model (reference)
-    logger.info("Creating PyTorch MapTR model (reference)...")
+    logger.info("Creating PyTorch MapTR model...")
     torch_model = MapTR(
         use_grid_mask=False,
         pts_voxel_layer=None,
@@ -270,99 +267,14 @@ def test_maptr(
         video_test_mode=False,
     )
 
-    # Load weights
     logger.info(f"Loading weights from {MAPTR_WEIGHTS_PATH}...")
     torch_model = load_maptr_weights(torch_model, MAPTR_WEIGHTS_PATH)
     torch_model.eval()
 
-    # Create input data
     input_dict = create_input_dict()
     tensor = torch.randn(1, 6, 3, 384, 640)
-    img = [tensor]
 
-    # Save PyTorch outputs for comparison
-    import os
-    from models.common.utility_functions import comp_pcc
-
-    ref_save_path = "models/experimental/MapTR/reference/dumps"
-    tt_save_path = "models/experimental/MapTR/tt/dumps"
-    os.makedirs(ref_save_path, exist_ok=True)
-    os.makedirs(tt_save_path, exist_ok=True)
-
-    # ============================================================
-    # STAGE 1: Run PyTorch intermediate stages for comparison
-    # ============================================================
-    logger.info("=" * 60)
-    logger.info("STAGE 1: PyTorch Intermediate Outputs")
-    logger.info("=" * 60)
-
-    with torch.no_grad():
-        # Reshape input for backbone (B, N, C, H, W) -> (B*N, C, H, W)
-        B, N, C, H, W = tensor.shape
-        img_reshaped = tensor.reshape(B * N, C, H, W)
-
-        # Backbone
-        torch_backbone_out = torch_model.img_backbone(img_reshaped)
-        logger.info(f"PyTorch backbone output: {len(torch_backbone_out)} features")
-        for i, feat in enumerate(torch_backbone_out):
-            logger.info(f"  backbone[{i}] shape: {feat.shape}")
-        torch.save(torch_backbone_out[-1], f"{ref_save_path}/backbone_last.pt")
-
-        # FPN
-        torch_fpn_out = torch_model.img_neck(torch_backbone_out)
-        logger.info(f"PyTorch FPN output: {len(torch_fpn_out)} features")
-        for i, feat in enumerate(torch_fpn_out):
-            logger.info(f"  fpn[{i}] shape: {feat.shape}")
-        torch.save(torch_fpn_out[0], f"{ref_save_path}/fpn_first.pt")
-
-    # Hook to capture BEV embedding from PyTorch transformer
-    bev_embed_ref = None
-    decoder_inter_states_ref = None
-    decoder_inter_refs_ref = None
-
-    def hook_bev_embed(module, input, output):
-        nonlocal bev_embed_ref
-        # output from encoder is the bev_embed
-        bev_embed_ref = output
-
-    def hook_decoder(module, input, output):
-        nonlocal decoder_inter_states_ref, decoder_inter_refs_ref
-        # decoder output is (inter_states, inter_references)
-        if isinstance(output, tuple) and len(output) == 2:
-            decoder_inter_states_ref, decoder_inter_refs_ref = output
-
-    # Hook for head forward - capture hs and init_reference
-    head_hs_ref = None
-    head_init_ref_ref = None
-    head_outputs_ref = None
-
-    def hook_head(module, input, output):
-        nonlocal head_outputs_ref
-        head_outputs_ref = output
-
-    # Try to register hooks
-    if hasattr(torch_model, "pts_bbox_head") and hasattr(torch_model.pts_bbox_head, "transformer"):
-        if hasattr(torch_model.pts_bbox_head.transformer, "encoder"):
-            torch_model.pts_bbox_head.transformer.encoder.register_forward_hook(hook_bev_embed)
-            logger.info("Registered hook on transformer encoder to capture BEV embedding")
-        if hasattr(torch_model.pts_bbox_head.transformer, "decoder"):
-            torch_model.pts_bbox_head.transformer.decoder.register_forward_hook(hook_decoder)
-            logger.info("Registered hook on transformer decoder to capture outputs")
-
-    if hasattr(torch_model, "pts_bbox_head"):
-        torch_model.pts_bbox_head.register_forward_hook(hook_head)
-        logger.info("Registered hook on pts_bbox_head to capture head outputs")
-
-    # Run full PyTorch forward pass
-    logger.info("Running PyTorch MapTR full forward pass...")
-    with torch.no_grad():
-        torch_outputs = torch_model(
-            return_loss=False,
-            img=img,
-            img_metas=input_dict["img_metas"],
-        )
-
-    # Create TTNN model parameters
+    logger.info("Creating TTNN model parameters...")
     logger.info("Creating TTNN model parameters...")
     parameters = create_maptr_model_parameters(
         torch_model,
@@ -370,11 +282,9 @@ def test_maptr(
         device,
     )
 
-    # Convert input to TTNN
     tensor_tt = ttnn.from_torch(tensor, dtype=ttnn.bfloat16, device=device, layout=ttnn.ROW_MAJOR_LAYOUT)
     img_tt = [tensor_tt]
 
-    # Create TTNN MapTR model
     logger.info("Creating TTNN MapTR model...")
     tt_model = tt_maptr.TtMapTR(
         device=device,
@@ -404,231 +314,66 @@ def test_maptr(
         embed_dims=config.embed_dims,
     )
 
-    # ============================================================
-    # STAGE 2: Run TTNN forward pass with intermediate logging
-    # ============================================================
-    logger.info("=" * 60)
-    logger.info("STAGE 2: TTNN Forward Pass with Intermediate Outputs")
-    logger.info("=" * 60)
+    logger.info("Extracting PyTorch head outputs...")
+    with torch.no_grad():
+        B, N, C, H, W = tensor.shape
+        img_reshaped = tensor.reshape(B * N, C, H, W)
+        torch_backbone_out = torch_model.img_backbone(img_reshaped)
+        torch_fpn_out = torch_model.img_neck(torch_backbone_out)
 
-    ttnn_outputs = tt_model(
-        return_loss=False,
-        img=img_tt,
-        img_metas=input_dict["img_metas"],
+        torch_fpn_reshaped = []
+        for img_feat in torch_fpn_out:
+            BN, C_feat, H_feat, W_feat = img_feat.size()
+            img_feat_5d = img_feat.view(B, int(BN / B), C_feat, H_feat, W_feat)
+            torch_fpn_reshaped.append(img_feat_5d)
+
+        img_metas_for_head = input_dict["img_metas"][0]
+        torch_head_outs = torch_model.pts_bbox_head(
+            torch_fpn_reshaped,
+            lidar_feat=None,
+            img_metas=img_metas_for_head,
+            prev_bev=None,
+        )
+
+    logger.info("Extracting TTNN head outputs...")
+    ttnn_img_feats = tt_model.extract_feat(img_tt[0], input_dict["img_metas"])
+    ttnn_head_outs = tt_model.pts_bbox_head(
+        ttnn_img_feats,
+        lidar_feat=None,
+        img_metas=img_metas_for_head,
+        prev_bev=None,
     )
 
-    # ============================================================
-    # STAGE 3: Compare intermediate outputs
-    # ============================================================
-    logger.info("=" * 60)
-    logger.info("STAGE 3: Intermediate Output Comparison")
-    logger.info("=" * 60)
+    ttnn_head_outs_torch = {}
+    for key in ["bev_embed", "all_cls_scores", "all_bbox_preds", "all_pts_preds"]:
+        if key in ttnn_head_outs:
+            ttnn_tensor = ttnn_head_outs[key]
+            if not isinstance(ttnn_tensor, torch.Tensor):
+                ttnn_head_outs_torch[key] = ttnn.to_torch(ttnn_tensor).float()
+            else:
+                ttnn_head_outs_torch[key] = ttnn_tensor.float()
 
-    def compare_tensors(name, ref_path, tt_path, convert_nhwc_to_nchw=False):
-        """Compare two saved tensors and report PCC."""
-        try:
-            ref = torch.load(ref_path)
-            tt = torch.load(tt_path)
+    logger.info("Final output PCC comparison:")
+    raw_pred_pass = True
+    threshold = 0.99
 
-            # Ensure same dtype for comparison
-            ref = ref.float()
-            tt = tt.float()
-
-            # Handle TTNN format: (1, 1, N*H*W, C) -> (N, C, H, W)
-            if convert_nhwc_to_nchw and len(tt.shape) == 4 and tt.shape[0] == 1 and tt.shape[1] == 1:
-                # Get target shape info from ref
-                N, C, H, W = ref.shape
-                logger.info(f"  {name}: Converting TTNN (1,1,{N*H*W},{C}) NHWC to ({N},{C},{H},{W}) NCHW")
-                # TT shape: (1, 1, N*H*W, C) - flattened spatial, channels last
-                tt = tt.reshape(N, H, W, C)  # (N, H, W, C)
-                tt = tt.permute(0, 3, 1, 2)  # (N, C, H, W)
-
-            # Handle shape differences
-            if ref.shape != tt.shape:
-                logger.info(f"  {name}: SHAPE MISMATCH ref={ref.shape} tt={tt.shape}")
-                # Try to reshape or permute to match
-                if ref.numel() == tt.numel():
-                    tt = tt.reshape(ref.shape)
-                    logger.info(f"  {name}: Reshaped tt to {tt.shape}")
-                else:
-                    logger.info(
-                        f"  {name}: Cannot compare - different number of elements (ref={ref.numel()}, tt={tt.numel()})"
-                    )
-                    return None
-
-            pcc_result = comp_pcc(ref, tt)
-            pcc = pcc_result[1] if isinstance(pcc_result, tuple) else pcc_result
-            status = "✓ PASS" if pcc >= 0.99 else "✗ FAIL"
-            logger.info(f"  {name}: PCC={pcc:.6f} {status}")
-            logger.info(f"    ref sample: {ref.flatten()[:5].tolist()}")
-            logger.info(f"    tt sample:  {tt.flatten()[:5].tolist()}")
-            return pcc
-        except Exception as e:
-            logger.info(f"  {name}: Error - {e}")
-            import traceback
-
-            traceback.print_exc()
-            return None
-
-    # Compare backbone outputs (TTNN saves backbone_0.pt)
-    # TTNN output format: (1, 1, N*H*W, C), PyTorch format: (N, C, H, W)
-    logger.info("Backbone comparison:")
-    compare_tensors(
-        "backbone", f"{ref_save_path}/backbone_last.pt", f"{tt_save_path}/backbone_0.pt", convert_nhwc_to_nchw=True
-    )
-
-    # Compare FPN outputs
-    logger.info("FPN comparison:")
-    compare_tensors("fpn", f"{ref_save_path}/fpn_first.pt", f"{tt_save_path}/fpn_0.pt", convert_nhwc_to_nchw=True)
-
-    # Save and compare BEV embedding
-    logger.info("BEV Embedding comparison:")
-    if bev_embed_ref is not None:
-        torch.save(bev_embed_ref, f"{ref_save_path}/bev_embed_ref.pt")
-        logger.info(f"  PyTorch BEV embed shape: {bev_embed_ref.shape}, sample: {bev_embed_ref.flatten()[:5].tolist()}")
-        compare_tensors("bev_embed", f"{ref_save_path}/bev_embed_ref.pt", f"{tt_save_path}/bev_embed_transformer.pt")
-    else:
-        logger.info("  BEV embed hook not triggered")
-
-    # Save and compare decoder outputs
-    logger.info("Decoder comparison:")
-    if decoder_inter_states_ref is not None:
-        torch.save(decoder_inter_states_ref, f"{ref_save_path}/decoder_inter_states_ref.pt")
-        logger.info(
-            f"  PyTorch decoder inter_states shape: {decoder_inter_states_ref.shape}, sample: {decoder_inter_states_ref.flatten()[:5].tolist()}"
-        )
-        compare_tensors(
-            "decoder_inter_states",
-            f"{ref_save_path}/decoder_inter_states_ref.pt",
-            f"{tt_save_path}/decoder_inter_states.pt",
-        )
-    else:
-        logger.info("  Decoder inter_states hook not triggered")
-
-    if decoder_inter_refs_ref is not None:
-        torch.save(decoder_inter_refs_ref, f"{ref_save_path}/decoder_inter_refs_ref.pt")
-        logger.info(
-            f"  PyTorch decoder inter_refs shape: {decoder_inter_refs_ref.shape}, sample: {decoder_inter_refs_ref.flatten()[:5].tolist()}"
-        )
-        compare_tensors(
-            "decoder_inter_refs", f"{ref_save_path}/decoder_inter_refs_ref.pt", f"{tt_save_path}/decoder_inter_refs.pt"
-        )
-    else:
-        logger.info("  Decoder inter_refs hook not triggered")
-
-    # Compare head outputs
-    logger.info("Head comparison:")
-    if head_outputs_ref is not None:
-        if isinstance(head_outputs_ref, dict):
-            for key, val in head_outputs_ref.items():
-                if val is not None and isinstance(val, torch.Tensor):
-                    torch.save(val, f"{ref_save_path}/head_{key}.pt")
-                    logger.info(f"  PyTorch head {key}: shape={val.shape}, sample={val.flatten()[:5].tolist()}")
-
-            # Compare all_cls_scores, all_bbox_preds, all_pts_preds
-            if "all_cls_scores" in head_outputs_ref and head_outputs_ref["all_cls_scores"] is not None:
-                compare_tensors(
-                    "head_all_cls_scores", f"{ref_save_path}/head_all_cls_scores.pt", f"{tt_save_path}/head_cls_lvl0.pt"
-                )
-            if "all_bbox_preds" in head_outputs_ref and head_outputs_ref["all_bbox_preds"] is not None:
-                compare_tensors(
-                    "head_all_bbox_preds",
-                    f"{ref_save_path}/head_all_bbox_preds.pt",
-                    f"{tt_save_path}/head_bbox_lvl0.pt",
-                )
-            if "all_pts_preds" in head_outputs_ref and head_outputs_ref["all_pts_preds"] is not None:
-                compare_tensors(
-                    "head_all_pts_preds", f"{ref_save_path}/head_all_pts_preds.pt", f"{tt_save_path}/head_pts_lvl0.pt"
-                )
-    else:
-        logger.info("  Head outputs hook not triggered")
-
-    # Compare outputs - direct comparison
-    logger.info("=" * 60)
-    logger.info("PCC Comparison Results:")
-    logger.info("=" * 60)
-
-    # Debug output structure
-    logger.info(f"PyTorch output type: {type(torch_outputs)}")
-    logger.info(f"TTNN output type: {type(ttnn_outputs)}")
-
-    if torch_outputs:
-        if isinstance(torch_outputs, list) and len(torch_outputs) > 0:
-            logger.info(f"PyTorch output[0] type: {type(torch_outputs[0])}")
-            if isinstance(torch_outputs[0], dict):
-                logger.info(f"PyTorch output[0] keys: {torch_outputs[0].keys()}")
-        elif isinstance(torch_outputs, dict):
-            logger.info(f"PyTorch output keys: {torch_outputs.keys()}")
-
-    if ttnn_outputs:
-        if isinstance(ttnn_outputs, list) and len(ttnn_outputs) > 0:
-            logger.info(f"TTNN output[0] type: {type(ttnn_outputs[0])}")
-            if isinstance(ttnn_outputs[0], dict):
-                logger.info(f"TTNN output[0] keys: {ttnn_outputs[0].keys()}")
-        elif isinstance(ttnn_outputs, dict):
-            logger.info(f"TTNN output keys: {ttnn_outputs.keys()}")
-
-    # Extract pts_bbox from outputs and save reference dumps
-    if torch_outputs and ttnn_outputs:
-        torch_pts_bbox = torch_outputs[0].get("pts_bbox", {}) if isinstance(torch_outputs[0], dict) else {}
-        ttnn_pts_bbox = ttnn_outputs[0].get("pts_bbox", {}) if isinstance(ttnn_outputs[0], dict) else {}
-
-        logger.info(f"PyTorch pts_bbox keys: {torch_pts_bbox.keys() if torch_pts_bbox else 'None'}")
-        logger.info(f"TTNN pts_bbox keys: {ttnn_pts_bbox.keys() if ttnn_pts_bbox else 'None'}")
-
-        # Save reference and TTNN outputs for inspection
-        for key, tensor in torch_pts_bbox.items():
-            if tensor is not None and isinstance(tensor, torch.Tensor):
-                torch.save(tensor, f"{ref_save_path}/{key}.pt")
-                logger.info(f"Saved reference {key} to {ref_save_path}/{key}.pt")
-
-        for key, tensor in ttnn_pts_bbox.items():
-            if tensor is not None:
-                if not isinstance(tensor, torch.Tensor):
-                    tensor = ttnn.to_torch(tensor)
-                torch.save(tensor, f"{tt_save_path}/{key}.pt")
-                logger.info(f"Saved TTNN {key} to {tt_save_path}/{key}.pt")
-
-        # Check raw predictions (before top-k selection) which should have high PCC
-        logger.info("=" * 60)
-        logger.info("Raw prediction PCC (PASS/FAIL criteria):")
-        raw_pred_pass = True
-        try:
-            ref_cls = torch.load("models/experimental/MapTR/reference/dumps/head_all_cls_scores.pt")
-            ref_bbox = torch.load("models/experimental/MapTR/reference/dumps/head_all_bbox_preds.pt")
-            ref_pts = torch.load("models/experimental/MapTR/reference/dumps/head_all_pts_preds.pt")
-            ref_bev = torch.load("models/experimental/MapTR/reference/dumps/bev_embed_ref.pt")
-            tt_cls = torch.load("models/experimental/MapTR/tt/dumps/all_cls_scores.pt")
-            tt_bbox = torch.load("models/experimental/MapTR/tt/dumps/all_bbox_preds.pt")
-            tt_pts = torch.load("models/experimental/MapTR/tt/dumps/all_pts_preds.pt")
-            tt_bev = torch.load("models/experimental/MapTR/tt/dumps/bev_embed.pt")
-
-            # comp_pcc returns (passed, pcc_value)
-            _, raw_pcc_bev = comp_pcc(ref_bev, tt_bev)
-            _, raw_pcc_cls = comp_pcc(ref_cls, tt_cls)
-            _, raw_pcc_bbox = comp_pcc(ref_bbox, tt_bbox)
-            _, raw_pcc_pts = comp_pcc(ref_pts, tt_pts)
-
-            threshold = 0.99
-            for name, pcc in [
-                ("bev_embed", raw_pcc_bev),
-                ("all_cls_scores", raw_pcc_cls),
-                ("all_bbox_preds", raw_pcc_bbox),
-                ("all_pts_preds", raw_pcc_pts),
-            ]:
+    try:
+        outputs_to_check = ["all_cls_scores", "all_bbox_preds", "all_pts_preds", "bev_embed"]
+        for key in outputs_to_check:
+            if key in torch_head_outs and key in ttnn_head_outs_torch:
+                ref = torch_head_outs[key].float()
+                tt = ttnn_head_outs_torch[key]
+                _, pcc = comp_pcc(ref, tt)
                 status = "✓ PASS" if pcc >= threshold else "✗ FAIL"
-                logger.info(f"  {name}: PCC={pcc:.6f} {status}")
+                logger.info(f"  {key}: PCC={pcc:.6f} {status}")
                 if pcc < threshold:
                     raw_pred_pass = False
+            else:
+                logger.warning(f"  {key}: Reference or TTNN output not available")
 
-            assert raw_pred_pass, "Raw prediction PCC below threshold"
-            logger.info("Raw prediction PCC check PASSED!")
-        except FileNotFoundError:
-            logger.info("Raw prediction files not found, skipping raw PCC check")
-        else:
-            logger.info("Could not extract pts_bbox outputs")
-    else:
-        logger.info("Could not extract comparable outputs")
-
-    logger.info("=" * 60)
-    logger.info("MapTR end-to-end test complete!")
+        assert raw_pred_pass, "PCC below threshold"
+        logger.info("PCC check PASSED!")
+    except Exception as e:
+        logger.error(f"Error during PCC check: {e}")
+        traceback.print_exc()
+        raise

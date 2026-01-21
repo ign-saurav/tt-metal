@@ -353,9 +353,6 @@ class TtMapTRPerceptionTransformer:
         logger.info(
             f"[TT Transformer] BEV embed shape: {bev_embed_torch.shape}, sample: {bev_embed_torch.flatten()[:5].tolist()}"
         )
-        import torch
-
-        torch.save(bev_embed_torch, "models/experimental/MapTR/tt/dumps/bev_embed_transformer.pt")
 
         # Split object query embeddings into position and content
         object_query_embed = ttnn.to_layout(object_query_embed, layout=ttnn.ROW_MAJOR_LAYOUT)
@@ -412,8 +409,6 @@ class TtMapTRPerceptionTransformer:
         logger.info(
             f"[TT Transformer] Decoder inter_refs shape: {inter_refs_torch.shape}, sample: {inter_refs_torch.flatten()[:5].tolist()}"
         )
-        torch.save(inter_states_torch, "models/experimental/MapTR/tt/dumps/decoder_inter_states.pt")
-        torch.save(inter_refs_torch, "models/experimental/MapTR/tt/dumps/decoder_inter_refs.pt")
 
         inter_references_out = inter_references
 
