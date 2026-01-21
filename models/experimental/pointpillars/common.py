@@ -1,8 +1,6 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Common utilities and constants for PointPillars tests and demo."""
-
 import os
 import torch
 import ttnn
@@ -69,26 +67,6 @@ def extract_component_state_dict(state_dict: Dict, prefix: str) -> Dict:
             new_key = key.replace(prefix, "")
             component_state_dict[new_key] = value
     return component_state_dict
-
-
-def load_component_weights(model: torch.nn.Module, checkpoint_path: str, component_name: str) -> torch.nn.Module:
-    """
-    Load weights for a specific component from checkpoint.
-
-    Args:
-        model: PyTorch model to load weights into.
-        checkpoint_path: Path to checkpoint file.
-        component_name: Name of component (e.g., "backbone", "neck", "head", "pillar_encoder").
-
-    Returns:
-        Model with loaded weights (or random weights if checkpoint not found).
-    """
-    state_dict = load_checkpoint(checkpoint_path)
-    if state_dict is not None:
-        prefix = f"{component_name}."
-        component_state_dict = extract_component_state_dict(state_dict, prefix)
-        model.load_state_dict(component_state_dict)
-    return model
 
 
 # =============================================================================
