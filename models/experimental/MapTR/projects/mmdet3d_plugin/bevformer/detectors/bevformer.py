@@ -114,44 +114,18 @@ class BEVFormer(MVXTwoStageDetector):
         return img_feats
 
     def forward_pts_train(self, pts_feats, gt_bboxes_3d, gt_labels_3d, img_metas, gt_bboxes_ignore=None, prev_bev=None):
-        """Forward function'
-        Args:
-            pts_feats (list[torch.Tensor]): Features of point cloud branch
-            gt_bboxes_3d (list[:obj:`BaseInstance3DBoxes`]): Ground truth
-                boxes for each sample.
-            gt_labels_3d (list[torch.Tensor]): Ground truth labels for
-                boxes of each sampole
-            img_metas (list[dict]): Meta information of samples.
-            gt_bboxes_ignore (list[torch.Tensor], optional): Ground truth
-                boxes to be ignored. Defaults to None.
-            prev_bev (torch.Tensor, optional): BEV features of previous frame.
-        Returns:
-            dict: Losses of each branch.
-        """
-
-        outs = self.pts_bbox_head(pts_feats, img_metas, prev_bev)
-        loss_inputs = [gt_bboxes_3d, gt_labels_3d, outs]
-        losses = self.pts_bbox_head.loss(*loss_inputs, img_metas=img_metas)
-        return losses
+        """Training is disabled in this build; use BEVFormer TTNN inference instead."""
+        raise NotImplementedError("BEVFormer training is disabled in this build. Use inference-only APIs.")
 
     def forward_dummy(self, img):
         dummy_metas = None
         return self.forward_test(img=img, img_metas=[[dummy_metas]])
 
     def forward(self, return_loss=True, **kwargs):
-        """Calls either forward_train or forward_test depending on whether
-        return_loss=True.
-        Note this setting will change the expected inputs. When
-        `return_loss=True`, img and img_metas are single-nested (i.e.
-        torch.Tensor and list[dict]), and when `resturn_loss=False`, img and
-        img_metas should be double nested (i.e.  list[torch.Tensor],
-        list[list[dict]]), with the outer list indicating test time
-        augmentations.
-        """
+        """Forward entrypoint; training is disabled in this build."""
         if return_loss:
-            return self.forward_train(**kwargs)
-        else:
-            return self.forward_test(**kwargs)
+            raise NotImplementedError("BEVFormer training is disabled in this build. Call with return_loss=False.")
+        return self.forward_test(**kwargs)
 
     def obtain_history_bev(self, imgs_queue, img_metas_list):
         """Obtain history BEV features iteratively. To save GPU memory, gradients are not calculated."""
@@ -164,67 +138,10 @@ class BEVFormer(MVXTwoStageDetector):
             img_feats_list = self.extract_feat(img=imgs_queue, len_queue=len_queue)
             for i in range(len_queue):
                 img_metas = [each[i] for each in img_metas_list]
-                # img_feats = self.extract_feat(img=img, img_metas=img_metas)
                 img_feats = [each_scale[:, i] for each_scale in img_feats_list]
                 prev_bev = self.pts_bbox_head(img_feats, img_metas, prev_bev, only_bev=True)
             self.train()
             return prev_bev
-
-    @auto_fp16(apply_to=("img", "points"))
-    def forward_train(
-        self,
-        points=None,
-        img_metas=None,
-        gt_bboxes_3d=None,
-        gt_labels_3d=None,
-        gt_labels=None,
-        gt_bboxes=None,
-        img=None,
-        proposals=None,
-        gt_bboxes_ignore=None,
-        img_depth=None,
-        img_mask=None,
-    ):
-        """Forward training function.
-        Args:
-            points (list[torch.Tensor], optional): Points of each sample.
-                Defaults to None.
-            img_metas (list[dict], optional): Meta information of each sample.
-                Defaults to None.
-            gt_bboxes_3d (list[:obj:`BaseInstance3DBoxes`], optional):
-                Ground truth 3D boxes. Defaults to None.
-            gt_labels_3d (list[torch.Tensor], optional): Ground truth labels
-                of 3D boxes. Defaults to None.
-            gt_labels (list[torch.Tensor], optional): Ground truth labels
-                of 2D boxes in images. Defaults to None.
-            gt_bboxes (list[torch.Tensor], optional): Ground truth 2D boxes in
-                images. Defaults to None.
-            img (torch.Tensor optional): Images of each sample with shape
-                (N, C, H, W). Defaults to None.
-            proposals ([list[torch.Tensor], optional): Predicted proposals
-                used for training Fast RCNN. Defaults to None.
-            gt_bboxes_ignore (list[torch.Tensor], optional): Ground truth
-                2D boxes in images to be ignored. Defaults to None.
-        Returns:
-            dict: Losses of different branches.
-        """
-
-        len_queue = img.size(1)
-        prev_img = img[:, :-1, ...]
-        img = img[:, -1, ...]
-
-        prev_img_metas = copy.deepcopy(img_metas)
-        prev_bev = self.obtain_history_bev(prev_img, prev_img_metas)
-
-        img_metas = [each[len_queue - 1] for each in img_metas]
-        img_feats = self.extract_feat(img=img, img_metas=img_metas)
-        losses = dict()
-        losses_pts = self.forward_pts_train(
-            img_feats, gt_bboxes_3d, gt_labels_3d, img_metas, gt_bboxes_ignore, prev_bev
-        )
-
-        losses.update(losses_pts)
-        return losses
 
     def forward_test(self, img_metas, img=None, **kwargs):
         for var, name in [(img_metas, "img_metas")]:
