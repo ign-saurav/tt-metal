@@ -276,25 +276,6 @@ class MapTR(MVXTwoStageDetector):
 
         return lidar_feat
 
-    # Training entrypoint disabled: keep signature but raise to prevent accidental use.
-    @force_fp32(apply_to=("img", "points", "prev_bev"))
-    def forward_train(
-        self,
-        points=None,
-        img_metas=None,
-        gt_bboxes_3d=None,
-        gt_labels_3d=None,
-        gt_labels=None,
-        gt_bboxes=None,
-        img=None,
-        proposals=None,
-        gt_bboxes_ignore=None,
-        img_depth=None,
-        img_mask=None,
-    ):
-        """Training is disabled in this build; use TTNN MapTR for inference."""
-        raise NotImplementedError("MapTR training is disabled in this build. Use TTNN MapTR for inference.")
-
     def forward_test(self, img_metas, img=None, points=None, **kwargs):
         for var, name in [(img_metas, "img_metas")]:
             if not isinstance(var, list):
