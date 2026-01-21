@@ -32,11 +32,9 @@ from ttnn.model_preprocessing import (
 
 
 def custom_preprocessor(model, name):
-    """Custom preprocessor for MapTRPerceptionTransformer parameters."""
     parameters = {}
 
     def extract_transformer_parameters(transformer_module):
-        """Extract parameters from encoder/decoder layers."""
         parameters = {"layers": {}}
 
         for i, layer in enumerate(transformer_module.layers):
@@ -191,8 +189,6 @@ def custom_preprocessor(model, name):
 
 
 class ParamsWrapper:
-    """Wrapper class to convert dict parameters to object attributes."""
-
     def __init__(self, params_dict):
         for k, v in params_dict.items():
             setattr(self, k, self._dict_to_obj(v))
@@ -207,7 +203,6 @@ class ParamsWrapper:
 
 
 def create_maptr_model_parameters(model: MapTRPerceptionTransformer, device=None):
-    """Create TTNN parameters for MapTRPerceptionTransformer model."""
     parameters = preprocess_model_parameters(
         initialize_model=lambda: model,
         custom_preprocessor=custom_preprocessor,
@@ -221,7 +216,6 @@ def test_maptr_transformer(
     device,
     reset_seeds,
 ):
-    """Test MapTR MapTRPerceptionTransformer: compare reference vs TTNN implementation."""
     # Config
     embed_dims = 256
     num_feature_levels = 1
@@ -387,11 +381,7 @@ def test_maptr_transformer(
         feedforward_channels=512,
     )
 
-    # Create transformer params with proper structure for dict subscript + attribute access
-    # can_bus_mlp needs dict subscript ["0"], ["2"], but inner dicts need .weight attribute access
     class AttrDict(dict):
-        """Dict that supports both dict['key'] and dict.key access."""
-
         def __getattr__(self, key):
             try:
                 value = self[key]

@@ -25,18 +25,6 @@ BACKBONE_LAYER = "img_backbone."
 
 
 def load_maptr_backbone_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load and isolate backbone weights from mapTR checkpoint.
-
-    The backbone is a ResNet50 with weights for:
-    - conv1, bn1 (initial convolution)
-    - layer1, layer2, layer3, layer4 (residual blocks)
-
-    Args:
-        weights_path: Path to the mapTR checkpoint file.
-
-    Returns:
-        Dictionary containing only the backbone weights.
-    """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"MapTR weights not found at {weights_path}. " "Please download the weights first.")
 
@@ -63,15 +51,6 @@ def load_maptr_backbone_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
 
 
 def load_torch_model_maptr(torch_model: ResNet, weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load mapTR weights into the ResNet model.
-
-    Args:
-        torch_model: The ResNet model to load weights into.
-        weights_path: Path to the mapTR checkpoint file.
-
-    Returns:
-        The model with loaded weights.
-    """
     backbone_weights = load_maptr_backbone_weights(weights_path)
 
     # Map by order (matching vadv2 behavior) - checkpoint keys in order map to model keys in order

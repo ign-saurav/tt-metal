@@ -1,10 +1,6 @@
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Test for MapTR BEVFormer Encoder.
-"""
-
 import os
 import pytest
 import torch
@@ -34,7 +30,6 @@ ENCODER_LAYER_PREFIX = "pts_bbox_head.transformer.encoder.layers."
 
 
 def load_maptr_encoder_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load and isolate encoder weights from mapTR checkpoint."""
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"MapTR weights not found at {weights_path}.")
 
@@ -68,7 +63,6 @@ def load_torch_encoder(
     weights_path: str = MAPTR_WEIGHTS_PATH,
     num_layers: int = 1,
 ):
-    """Load mapTR weights into the BEVFormerEncoder model."""
     encoder_weights = load_maptr_encoder_weights(weights_path)
 
     model_state_dict = torch_model.state_dict()
@@ -143,7 +137,6 @@ def load_torch_encoder(
 
 
 def custom_preprocessor_encoder(model, name):
-    """Custom preprocessor for BEVFormerEncoder weights."""
     parameters = {}
 
     if isinstance(model, BEVFormerEncoder):
@@ -238,7 +231,6 @@ def custom_preprocessor_encoder(model, name):
 
 
 def create_encoder_parameters(model: BEVFormerEncoder, device=None):
-    """Create preprocessed parameters for the TT encoder."""
     parameters = preprocess_model_parameters(
         initialize_model=lambda: model,
         custom_preprocessor=custom_preprocessor_encoder,
@@ -248,11 +240,6 @@ def create_encoder_parameters(model: BEVFormerEncoder, device=None):
 
 
 def create_dummy_img_metas(batch_size: int = 1, num_cams: int = 6):
-    """Create dummy image metadata for testing.
-
-    Creates realistic lidar2img projection matrices that will produce valid
-    projections for points in the BEV range.
-    """
     # Typical image shape: (H, W)
     img_h, img_w = 450, 800
     img_shape = [(img_h, img_w)] * num_cams
@@ -332,7 +319,6 @@ def create_dummy_img_metas(batch_size: int = 1, num_cams: int = 6):
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
 def test_maptr_bevformer_encoder(device, reset_seeds):
-    """Test MapTR BEVFormer Encoder - PyTorch vs TT implementation."""
     # MapTR config parameters (reduced BEV size for memory constraints)
     point_cloud_range = [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
     embed_dims = 256

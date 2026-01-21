@@ -74,31 +74,28 @@ class TtBEVFormerEncoder:
                 step_size = (end - start) / (steps - 1)
                 return ttnn.add(ttnn.multiply(idx, step_size), start)
 
-            # Generate z-values
             z_vals = _linspace_ttnn(0.5, Z - 0.5, num_points_in_pillar)
             z_vals = ttnn.reshape(z_vals, (num_points_in_pillar, 1, 1))
             z_vals = ttnn.expand(z_vals, (num_points_in_pillar, H, W))
             z_vals = ttnn.divide(z_vals, Z)
 
-            # Generate x-values
             x_vals = _linspace_ttnn(0.5, W - 0.5, W)
             x_vals = ttnn.reshape(x_vals, (1, 1, W))
             x_vals = ttnn.expand(x_vals, (num_points_in_pillar, H, W))
             x_vals = ttnn.divide(x_vals, W)
 
-            # Generate y-values
             y_vals = _linspace_ttnn(0.5, H - 0.5, H)
             y_vals = ttnn.reshape(y_vals, (1, H, 1))
             y_vals = ttnn.expand(y_vals, (num_points_in_pillar, H, W))
             y_vals = ttnn.divide(y_vals, H)
 
-            ref = ttnn.stack((x_vals, y_vals, z_vals), dim=-1)  # [P, H, W, 3]
-            ref = ttnn.permute(ref, (0, 3, 1, 2))  # [P, 3, H, W]
+            ref = ttnn.stack((x_vals, y_vals, z_vals), dim=-1)
+            ref = ttnn.permute(ref, (0, 3, 1, 2))
             ref = ttnn.reshape(ref, (num_points_in_pillar, 3, H * W))
-            ref = ttnn.permute(ref, (0, 2, 1))  # [P, H*W, 3]
+            ref = ttnn.permute(ref, (0, 2, 1))
             ref = ttnn.reshape(ref, (1, num_points_in_pillar, H * W, 3))
 
-            ref = ttnn.repeat(ref, (bs, 1, 1, 1))  # [B, P, HW, 3]
+            ref = ttnn.repeat(ref, (bs, 1, 1, 1))
             ttnn.deallocate(x_vals)
             ttnn.deallocate(y_vals)
             ttnn.deallocate(z_vals)
@@ -115,20 +112,20 @@ class TtBEVFormerEncoder:
             x_vals = ttnn.divide(x_vals, W)
 
             y_vals = ttnn.reshape(y_vals, (H, 1))
-            y_vals = ttnn.repeat(y_vals, (1, W))  # [H, W]
+            y_vals = ttnn.repeat(y_vals, (1, W))
 
             x_vals = ttnn.reshape(x_vals, (1, W))
-            x_vals = ttnn.repeat(x_vals, (H, 1))  # [H, W]
+            x_vals = ttnn.repeat(x_vals, (H, 1))
 
             y_vals = ttnn.reshape(y_vals, (-1,))
-            y_vals = ttnn.unsqueeze(y_vals, 0)  # [1, H*W]
+            y_vals = ttnn.unsqueeze(y_vals, 0)
             x_vals = ttnn.reshape(x_vals, (-1,))
-            x_vals = ttnn.unsqueeze(x_vals, 0)  # [1, H*W]
+            x_vals = ttnn.unsqueeze(x_vals, 0)
 
-            ref = ttnn.stack((x_vals, y_vals), dim=-1)  # [1, H*W, 2]
+            ref = ttnn.stack((x_vals, y_vals), dim=-1)
 
-            ref = ttnn.repeat(ref, (bs, 1, 1))  # [bs, H*W, 2]
-            ref = ttnn.reshape(ref, (bs, H * W, 1, 2))  # [bs, H*W, 1, 2]
+            ref = ttnn.repeat(ref, (bs, 1, 1))
+            ref = ttnn.reshape(ref, (bs, H * W, 1, 2))
             ttnn.deallocate(x_vals)
             ttnn.deallocate(y_vals)
 
@@ -144,7 +141,7 @@ class TtBEVFormerEncoder:
 
         reference_points = ttnn.to_torch(reference_points)
 
-        lidar2img = reference_points.new_tensor(lidar2img)  # (B, N, 4, 4)
+        lidar2img = reference_points.new_tensor(lidar2img)
 
         reference_points = ttnn.from_torch(
             reference_points, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
@@ -163,7 +160,7 @@ class TtBEVFormerEncoder:
         ones = ttnn.ones_like(reference_points[..., :1])
         reference_points = ttnn.concat((reference_points, ones), dim=-1)
 
-        reference_points = ttnn.permute(reference_points, (1, 0, 2, 3))  # [D, B, Q, 4]
+        reference_points = ttnn.permute(reference_points, (1, 0, 2, 3))
         D = reference_points.shape[0]
         B = reference_points.shape[1]
         num_query = reference_points.shape[2]

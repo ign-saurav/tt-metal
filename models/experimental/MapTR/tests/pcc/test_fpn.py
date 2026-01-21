@@ -19,7 +19,6 @@ FPN_LAYER = "img_neck."
 
 
 def load_maptr_fpn_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load and isolate FPN weights from mapTR checkpoint."""
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"MapTR weights not found at {weights_path}. Please download the weights first.")
 
@@ -41,7 +40,6 @@ def load_maptr_fpn_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
 
 
 def load_torch_model_maptr(torch_model: FPN, weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load mapTR weights into the FPN model."""
     fpn_weights = load_maptr_fpn_weights(weights_path)
     model_state_dict = torch_model.state_dict()
     new_state_dict = {}
@@ -68,7 +66,6 @@ def create_conv_config_from_conv(
     activation: ttnn.UnaryWithParam = None,
     deallocate_activation: bool = False,
 ) -> Conv2dConfiguration:
-    """Create a Conv2dConfiguration from PyTorch Conv2d layer."""
     kernel_size = conv.kernel_size if isinstance(conv.kernel_size, tuple) else (conv.kernel_size, conv.kernel_size)
     stride = conv.stride if isinstance(conv.stride, tuple) else (conv.stride, conv.stride)
     padding = conv.padding if isinstance(conv.padding, tuple) else (conv.padding, conv.padding)

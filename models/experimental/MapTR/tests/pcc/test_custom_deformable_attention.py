@@ -29,20 +29,6 @@ CUSTOM_MS_DEFORMABLE_ATTN_LAYER = "pts_bbox_head.transformer.decoder.layers.0.at
 
 
 def load_maptr_custom_ms_deformable_attention_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load and isolate CustomMSDeformableAttention weights from MapTR checkpoint.
-
-    The weights structure for CustomMSDeformableAttention:
-    - sampling_offsets.weight/bias
-    - attention_weights.weight/bias
-    - value_proj.weight/bias
-    - output_proj.weight/bias
-
-    Args:
-        weights_path: Path to the MapTR checkpoint file.
-
-    Returns:
-        Dictionary containing only the CustomMSDeformableAttention weights.
-    """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"MapTR weights not found at {weights_path}. " "Please download the weights first.")
 
@@ -72,15 +58,6 @@ def load_maptr_custom_ms_deformable_attention_weights(weights_path: str = MAPTR_
 
 
 def load_torch_model_maptr(torch_model: CustomMSDeformableAttention, weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load MapTR weights into the CustomMSDeformableAttention model.
-
-    Args:
-        torch_model: The CustomMSDeformableAttention model to load weights into.
-        weights_path: Path to the MapTR checkpoint file.
-
-    Returns:
-        The model with loaded weights.
-    """
     attn_weights = load_maptr_custom_ms_deformable_attention_weights(weights_path)
 
     # Map the checkpoint keys to model keys
@@ -101,7 +78,6 @@ def load_torch_model_maptr(torch_model: CustomMSDeformableAttention, weights_pat
 
 
 def custom_preprocessor(model, name):
-    """Custom preprocessor for CustomMSDeformableAttention parameters."""
     parameters = {}
 
     if isinstance(model, CustomMSDeformableAttention):
@@ -139,7 +115,6 @@ def custom_preprocessor(model, name):
 
 
 def create_maptr_model_parameters_attn(model: CustomMSDeformableAttention, device=None):
-    """Create TTNN parameters for CustomMSDeformableAttention model."""
     parameters = preprocess_model_parameters(
         initialize_model=lambda: model,
         custom_preprocessor=custom_preprocessor,
@@ -153,7 +128,6 @@ def test_maptr_custom_ms_deformable_attention(
     device,
     reset_seeds,
 ):
-    """Test MapTR CustomMSDeformableAttention: compare reference vs TTNN implementation with MapTR weights."""
     # MapTR config parameters from maptr_tiny_r50_24e_bevformer.py
     # dict(type="CustomMSDeformableAttention", embed_dims=_dim_, num_levels=1)
     embed_dims = 256

@@ -30,20 +30,6 @@ TEMPORAL_SELF_ATTN_LAYER = "pts_bbox_head.transformer.encoder.layers.0.attention
 
 
 def load_maptr_temporal_self_attention_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load and isolate temporal self attention weights from mapTR checkpoint.
-
-    The weights structure for TemporalSelfAttention:
-    - sampling_offsets.weight/bias
-    - attention_weights.weight/bias
-    - value_proj.weight/bias
-    - output_proj.weight/bias
-
-    Args:
-        weights_path: Path to the mapTR checkpoint file.
-
-    Returns:
-        Dictionary containing only the temporal self attention weights.
-    """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"MapTR weights not found at {weights_path}. " "Please download the weights first.")
 
@@ -71,15 +57,6 @@ def load_maptr_temporal_self_attention_weights(weights_path: str = MAPTR_WEIGHTS
 
 
 def load_torch_model_maptr(torch_model: TemporalSelfAttention, weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load mapTR weights into the TemporalSelfAttention model.
-
-    Args:
-        torch_model: The TemporalSelfAttention model to load weights into.
-        weights_path: Path to the mapTR checkpoint file.
-
-    Returns:
-        The model with loaded weights.
-    """
     tsa_weights = load_maptr_temporal_self_attention_weights(weights_path)
 
     # Map the checkpoint keys to model keys

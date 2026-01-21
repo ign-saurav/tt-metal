@@ -82,7 +82,6 @@ def main():
     args = parse_args()
     cfg = Config.fromfile(args.config)
 
-    # import modules from plugin/xx, registry will be updated
     if hasattr(cfg, "plugin"):
         if cfg.plugin:
             import importlib
@@ -105,18 +104,15 @@ def main():
                 _module_path = "models.experimental.MapTR.projects.mmdet3d_plugin"
                 plg_lib = importlib.import_module(_module_path)
 
-    # set cudnn_benchmark
     if cfg.get("cudnn_benchmark", False):
         torch.backends.cudnn.benchmark = True
 
     cfg.model.pretrained = None
-    # in case the test dataset is concatenated
     samples_per_gpu = 1
     if isinstance(cfg.data.test, dict):
         cfg.data.test.test_mode = True
         samples_per_gpu = cfg.data.test.pop("samples_per_gpu", 1)
         if samples_per_gpu > 1:
-            # Replace 'ImageToTensor' to 'DefaultFormatBundle'
             cfg.data.test.pipeline = replace_ImageToTensor(cfg.data.test.pipeline)
     elif isinstance(cfg.data.test, list):
         for ds_cfg in cfg.data.test:
@@ -128,7 +124,6 @@ def main():
 
     if args.show_dir is None:
         args.show_dir = osp.join("./work_dirs", osp.splitext(osp.basename(args.config))[0], "vis_pred")
-    # create vis_label dir
     os.makedirs(osp.abspath(args.show_dir), exist_ok=True)
 
     with open(osp.join(args.show_dir, osp.basename(args.config)), "w") as f:
@@ -148,7 +143,6 @@ def main():
     )
     mmlogger.info("Done build test data set")
 
-    # Build PyTorch model first for weight loading
     cfg.model.train_cfg = None
     torch_model = build_model(cfg.model, test_cfg=cfg.get("test_cfg"))
     fp16_cfg = cfg.get("fp16", None)
@@ -167,12 +161,10 @@ def main():
     mmlogger.info("DONE load checkpoint")
     torch_model.eval()
 
-    # Initialize TTNN device
     device_params = json.loads(args.device_params)
     device = ttnn.open_device(device_id=0, l1_small_size=device_params.get("l1_small_size", 24576))
     mmlogger.info("DONE open TTNN device")
 
-    # Extract config parameters for TtMapTR
     bev_h = cfg.bev_h_ if hasattr(cfg, "bev_h_") else 200
     bev_w = cfg.bev_w_ if hasattr(cfg, "bev_w_") else 100
     pc_range = cfg.point_cloud_range if hasattr(cfg, "point_cloud_range") else [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
@@ -183,9 +175,6 @@ def main():
     num_classes = cfg.model.pts_bbox_head.num_classes if hasattr(cfg.model.pts_bbox_head, "num_classes") else 3
     embed_dims = cfg.model.pts_bbox_head.in_channels if hasattr(cfg.model.pts_bbox_head, "in_channels") else 256
 
-    # Get expected input image size from config pipeline
-    # Default to 384x640 which matches the hardcoded reshape in tt_maptr.py
-    # (feature map 12x20 * 32 downsampling = 384x640)
     expected_img_h, expected_img_w = 384, 640
     if hasattr(cfg, "data") and hasattr(cfg.data, "test") and hasattr(cfg.data.test, "pipeline"):
         for transform in cfg.data.test.pipeline:
@@ -201,7 +190,6 @@ def main():
                 break
     mmlogger.info(f"Expected input image size: {expected_img_h}x{expected_img_w}")
 
-    # Create TTNN model parameters
     mmlogger.info("Creating TTNN model parameters...")
     dummy_input = torch.randn(1, 6, 3, expected_img_h, expected_img_w)
     parameters = create_maptr_model_parameters(
@@ -210,7 +198,6 @@ def main():
         device,
     )
 
-    # Create TTNN MapTR model
     mmlogger.info("Creating TTNN MapTR model...")
     tt_model = tt_maptr.TtMapTR(
         device=device,
@@ -243,15 +230,11 @@ def main():
 
     img_norm_cfg = cfg.img_norm_cfg
 
-    # get denormalized param
     mean = np.array(img_norm_cfg["mean"], dtype=np.float32)
     std = np.array(img_norm_cfg["std"], dtype=np.float32)
     to_bgr = img_norm_cfg["to_rgb"]
 
-    # get car icon
     car_img = Image.open("models/experimental/MapTR/figs/lidar_car.png")
-
-    # get color map: divider->r, ped->b, boundary->g
     colors_plt = ["orange", "b", "g"]
 
     mmlogger.info("BEGIN vis test dataset samples gt label & pred using TTNN model")
@@ -261,7 +244,6 @@ def main():
     dataset = data_loader.dataset
     have_mask = False
 
-    # Populate CANDIDATE from available samples in dataset
     if len(CANDIDATE) == 0:
         for i in range(min(len(dataset), 10)):
             try:
@@ -378,10 +360,7 @@ def main():
             mmlogger.info(f"=== Processing sample {pts_filename} with TTNN model ===")
             mmlogger.info(f"Data keys: {list(data.keys())}")
 
-            # Build img_metas in the format expected by TtMapTR
-            # TtMapTR expects img_metas as [[{dict with scene_token, can_bus, lidar2img, etc.}]]
             def extract_data_value(data, key):
-                """Extract value from data dict, handling DataContainer wrapper."""
                 if key not in data:
                     return None
                 val = data[key]
@@ -413,26 +392,18 @@ def main():
                 val = extract_data_value(data, key)
                 if val is not None:
                     if key == "lidar2img":
-                        # lidar2img needs special handling - should be array of 6 4x4 matrices
-                        # Don't take val[0], keep the full array
                         constructed_img_metas[key] = val
                     elif key in ["img_shape", "ori_shape", "pad_shape"]:
-                        # These should be lists of shapes per camera: [(H, W, C), (H, W, C), ...]
-                        # The encoder expects img_shape[0] = (H, W, C) for first camera
                         if isinstance(val, (list, tuple)) and len(val) > 0:
-                            # Check if it's already in correct format
                             if isinstance(val[0], (list, tuple)) and len(val[0]) >= 2:
-                                # Already [(H, W, C), ...]
                                 constructed_img_metas[key] = val
                             elif isinstance(val[0], (int, float)):
-                                # Single shape (H, W, C) - wrap in list for 6 cameras
                                 constructed_img_metas[key] = [tuple(val)] * 6
                             else:
                                 constructed_img_metas[key] = val
                         else:
                             constructed_img_metas[key] = val
                     elif isinstance(val, (list, tuple)) and len(val) > 0:
-                        # For lists, take first element if it's a batch
                         if isinstance(val[0], (np.ndarray, str, int, float)):
                             constructed_img_metas[key] = val[0]
                         else:
@@ -448,34 +419,25 @@ def main():
                 elif isinstance(can_bus_val, list):
                     constructed_img_metas["can_bus"] = np.array(can_bus_val)
 
-            # Ensure img_shape is in correct format: [(H, W, C), (H, W, C), ...] for each camera
-            # The encoder accesses img_shape[0][0] for height and img_shape[0][1] for width
             for shape_key in ["img_shape", "ori_shape", "pad_shape"]:
                 if shape_key in constructed_img_metas:
                     shape_val = constructed_img_metas[shape_key]
                     mmlogger.info(f"{shape_key} raw: {shape_val}")
 
-                    # Convert to list of tuples format
                     if isinstance(shape_val, np.ndarray):
                         if shape_val.ndim == 1 and len(shape_val) >= 2:
-                            # Single shape array [H, W, C] -> [(H, W, C)] * 6
                             constructed_img_metas[shape_key] = [tuple(shape_val.tolist())] * 6
                         elif shape_val.ndim == 2:
-                            # Multiple shapes (6, 3) -> [(H, W, C), ...]
                             constructed_img_metas[shape_key] = [tuple(row) for row in shape_val]
                     elif isinstance(shape_val, (list, tuple)):
                         if len(shape_val) > 0:
                             if isinstance(shape_val[0], (int, float, np.integer, np.floating)):
-                                # Single shape (H, W, C) -> [(H, W, C)] * 6
                                 constructed_img_metas[shape_key] = [tuple(shape_val)] * 6
                             elif not isinstance(shape_val[0], (list, tuple)):
-                                # Try to convert to proper format
                                 constructed_img_metas[shape_key] = [tuple(shape_val)] * 6
 
                     mmlogger.info(f"{shape_key} processed: {constructed_img_metas.get(shape_key)}")
 
-            # Ensure lidar2img is properly formatted as array of shape (6, 4, 4)
-            # The encoder expects img_meta["lidar2img"] to be convertible to shape (6, 4, 4)
             if "lidar2img" in constructed_img_metas:
                 lidar2img_val = constructed_img_metas["lidar2img"]
                 mmlogger.info(f"Raw lidar2img type: {type(lidar2img_val)}")
@@ -484,21 +446,17 @@ def main():
                 elif hasattr(lidar2img_val, "__len__"):
                     mmlogger.info(f"Raw lidar2img len: {len(lidar2img_val)}")
 
-                # Unwrap nested lists if needed
                 while isinstance(lidar2img_val, (list, tuple)) and len(lidar2img_val) == 1:
                     inner = lidar2img_val[0]
                     if isinstance(inner, (list, tuple)) and len(inner) > 1:
-                        # Inner is a list of multiple items (likely the 6 camera matrices)
                         lidar2img_val = inner
                         break
                     elif isinstance(inner, np.ndarray) and inner.ndim >= 3:
-                        # Inner is a 3D+ array, unwrap
                         lidar2img_val = inner
                         break
                     else:
                         break
 
-                # Convert to numpy array
                 if isinstance(lidar2img_val, (list, tuple)):
                     if hasattr(lidar2img_val[0], "numpy"):
                         matrices = [m.numpy() for m in lidar2img_val]
@@ -510,11 +468,9 @@ def main():
                 elif hasattr(lidar2img_val, "numpy"):
                     lidar2img_val = lidar2img_val.numpy()
 
-                # Now ensure shape is (6, 4, 4)
                 if isinstance(lidar2img_val, np.ndarray):
                     mmlogger.info(f"lidar2img after conversion shape: {lidar2img_val.shape}")
 
-                    # Squeeze out any singleton dimensions to get to (6, 4, 4)
                     while lidar2img_val.ndim > 3:
                         # Find singleton dimensions to squeeze
                         squeezed = False
@@ -528,12 +484,10 @@ def main():
                             mmlogger.warning(f"Cannot squeeze lidar2img to 3D, shape: {lidar2img_val.shape}")
                             break
 
-                    # Verify final shape
                     if lidar2img_val.ndim == 3 and lidar2img_val.shape[1:] == (4, 4):
                         constructed_img_metas["lidar2img"] = lidar2img_val
                         mmlogger.info(f"Final lidar2img shape: {lidar2img_val.shape}")
                     elif lidar2img_val.ndim == 2 and lidar2img_val.shape == (4, 4):
-                        # Single matrix - duplicate for 6 cameras
                         constructed_img_metas["lidar2img"] = np.stack([lidar2img_val] * 6)
                         mmlogger.info(f"Final lidar2img shape (duplicated): {constructed_img_metas['lidar2img'].shape}")
                     else:
@@ -542,9 +496,7 @@ def main():
                 else:
                     mmlogger.warning(f"lidar2img is not numpy array: {type(lidar2img_val)}")
 
-            # Use extracted img_metas if available, otherwise use constructed
             if img_metas is not None and len(img_metas) > 0 and isinstance(img_metas[0], dict):
-                # Merge with extracted img_metas
                 for key, val in constructed_img_metas.items():
                     if key not in img_metas[0]:
                         img_metas[0][key] = val
@@ -554,41 +506,30 @@ def main():
 
             mmlogger.info(f"Constructed img_metas keys: {list(final_img_metas[0][0].keys())}")
 
-            # Prepare input for TTNN model
-            # Need to get the proper image tensor in (N, C, H, W) format where N=6 cameras
             img_tensor = None
             if "img" in data:
                 img_data = data["img"]
                 mmlogger.info(f"=== DEBUG: Image Data Structure ===")
                 mmlogger.info(f"data['img'] type: {type(img_data)}")
 
-                # Handle different data structures from dataloader
                 if isinstance(img_data, (list, tuple)) and len(img_data) == 6:
-                    # List of 6 camera images - this is the expected format
                     mmlogger.info(f"data['img'] is list of {len(img_data)} camera images")
                     first_elem = img_data[0]
                     if hasattr(first_elem, "shape"):
                         mmlogger.info(f"Each camera image shape: {first_elem.shape}")
-                        # Stack all 6 camera images
                         img_tensor = torch.stack(list(img_data), dim=0)
                         mmlogger.info(f"Stacked images shape: {img_tensor.shape}")
 
-                        # Handle various input shapes and normalize to (N, C, H, W) where N=6
                         if img_tensor.dim() == 5:
-                            # Shape is (6, 1, H, W, C) or (6, 1, C, H, W) - squeeze batch dim
                             img_tensor = img_tensor.squeeze(1)
                             mmlogger.info(f"After squeeze(1): {img_tensor.shape}")
 
-                        # Now should be (6, H, W, C) or (6, C, H, W)
                         if img_tensor.dim() == 4 and img_tensor.shape[-1] == 3:
-                            # (N, H, W, C) -> (N, C, H, W)
                             img_tensor = img_tensor.permute(0, 3, 1, 2)
                             mmlogger.info(f"After permute to (N, C, H, W): {img_tensor.shape}")
                 elif isinstance(img_data, (list, tuple)) and len(img_data) > 0:
-                    # Other list format - might be DataContainer wrapped
                     mmlogger.info(f"data['img'] is list/tuple of length: {len(img_data)}")
                     if hasattr(img_data[0], "data"):
-                        # DataContainer format: data['img'][0].data[0]
                         inner_tensor = img_data[0].data[0] if len(img_data[0].data) > 0 else None
                         if inner_tensor is not None:
                             mmlogger.info(f"DataContainer inner tensor shape: {inner_tensor.shape}")
@@ -597,7 +538,6 @@ def main():
                         mmlogger.info(f"data['img'][0] is tensor with shape: {img_data[0].shape}")
                         img_tensor = img_data[0]
                 elif hasattr(img_data, "data"):
-                    # Single DataContainer
                     mmlogger.info(f"data['img'] is DataContainer")
                     if len(img_data.data) > 0:
                         inner_tensor = img_data.data[0]
@@ -612,32 +552,21 @@ def main():
                     f"Raw image tensor shape: {img_tensor.shape if hasattr(img_tensor, 'shape') else type(img_tensor)}"
                 )
 
-                # Convert to proper format for TtMapTR
-                # TtMapTR.forward_test does: img = ttnn.unsqueeze(img[0][0], 0)
-                # So img[0][0] should be (N, C, H, W) where N=num_cameras (4D)
-                # The model adds the batch dimension itself
                 if len(img_tensor.shape) == 3:
-                    # Single image (H, W, C) - need to handle multi-camera
                     H, W, C = img_tensor.shape
                     mmlogger.warning(f"Single camera image detected ({H}x{W}), duplicating for 6 cameras")
-                    img_tensor = img_tensor.permute(2, 0, 1)  # HWC -> CHW
-                    img_tensor = img_tensor.unsqueeze(0).repeat(6, 1, 1, 1)  # (6, C, H, W)
+                    img_tensor = img_tensor.permute(2, 0, 1)
+                    img_tensor = img_tensor.unsqueeze(0).repeat(6, 1, 1, 1)
                 elif len(img_tensor.shape) == 4:
-                    # Could be (N, C, H, W) or (N, H, W, C)
                     N, dim1, dim2, dim3 = img_tensor.shape
-                    if dim3 == 3:  # (N, H, W, C)
-                        img_tensor = img_tensor.permute(0, 3, 1, 2)  # -> (N, C, H, W)
-                    # Keep as (N, C, H, W) - don't add batch dimension
+                    if dim3 == 3:
+                        img_tensor = img_tensor.permute(0, 3, 1, 2)
                 elif len(img_tensor.shape) == 5:
-                    # (B, N, C, H, W) or (B, N, H, W, C) - squeeze batch dimension
                     B, N, dim1, dim2, dim3 = img_tensor.shape
-                    if dim3 == 3:  # (B, N, H, W, C)
-                        img_tensor = img_tensor.permute(0, 1, 4, 2, 3)  # -> (B, N, C, H, W)
-                    # Squeeze batch dimension since model adds it
-                    img_tensor = img_tensor.squeeze(0)  # -> (N, C, H, W)
+                    if dim3 == 3:
+                        img_tensor = img_tensor.permute(0, 1, 4, 2, 3)
+                    img_tensor = img_tensor.squeeze(0)
 
-                # Resize to expected input size if needed
-                # img_tensor is now (N, C, H, W)
                 _, _, curr_h, curr_w = img_tensor.shape
                 resize_scale_h = 1.0
                 resize_scale_w = 1.0
@@ -655,42 +584,33 @@ def main():
                         align_corners=False,
                     )
 
-                    # CRITICAL: Scale lidar2img matrices to account for image resize
-                    # The lidar2img matrix projects 3D points to 2D pixel coordinates.
-                    # When we resize images, pixel coordinates change proportionally.
-                    # Row 0 of lidar2img affects x (width) coordinate -> scale by width factor
-                    # Row 1 of lidar2img affects y (height) coordinate -> scale by height factor
                     if "lidar2img" in final_img_metas[0][0]:
                         lidar2img_orig = final_img_metas[0][0]["lidar2img"]
                         if isinstance(lidar2img_orig, np.ndarray):
                             lidar2img_scaled = lidar2img_orig.copy()
-                            # Scale rows for each camera's projection matrix
-                            lidar2img_scaled[:, 0, :] *= resize_scale_w  # u (width) coordinate
-                            lidar2img_scaled[:, 1, :] *= resize_scale_h  # v (height) coordinate
+                            lidar2img_scaled[:, 0, :] *= resize_scale_w
+                            lidar2img_scaled[:, 1, :] *= resize_scale_h
                             final_img_metas[0][0]["lidar2img"] = lidar2img_scaled
                             mmlogger.info(f"Scaled lidar2img matrices for resize: shape {lidar2img_scaled.shape}")
                         else:
                             mmlogger.warning(f"Could not scale lidar2img - unexpected type: {type(lidar2img_orig)}")
 
-                    # Update img_shape to reflect the resized image dimensions
                     final_img_metas[0][0]["img_shape"] = [(expected_img_h, expected_img_w, 3)] * 6
                     mmlogger.info(f"Updated img_shape to: {final_img_metas[0][0]['img_shape'][0]}")
 
                 mmlogger.info(f"Processed image tensor shape: {img_tensor.shape}")
 
-                # Convert to TTNN tensor
                 img_tt = ttnn.from_torch(
                     img_tensor.float(),
                     dtype=ttnn.bfloat16,
                     device=device,
                     layout=ttnn.ROW_MAJOR_LAYOUT,
                 )
-                img_tt = [[img_tt]]  # TtMapTR expects [[tensor]]
+                img_tt = [[img_tt]]
             else:
                 img_tt = None
                 mmlogger.warning("No image tensor found in data")
 
-            # Run TTNN inference
             with torch.no_grad():
                 result = tt_model(
                     return_loss=False,
@@ -748,7 +668,6 @@ def main():
                     mmlogger.warning(f"Failed to process image {filepath}: {e}, skipping")
                     continue
 
-            # Create surround view
             row_1_list = []
             for cam in CAMS[:3]:
                 cam_img_name = cam + ".jpg"
@@ -813,7 +732,6 @@ def main():
                     cams_img_path = osp.join(sample_dir, "surroud_view.jpg")
                     cv2.imwrite(cams_img_path, cams_img, [cv2.IMWRITE_JPEG_QUALITY, 70])
 
-            # Visualize GT
             for vis_format in args.gt_format:
                 if not has_gt or gt_bboxes_3d is None or gt_labels_3d is None:
                     mmlogger.warning(f"Skipping GT visualization for format {vis_format} - no GT data")
@@ -885,7 +803,6 @@ def main():
                     mmlogger.error(f"WRONG visformat for GT: {vis_format}")
                     raise ValueError(f"WRONG visformat for GT: {vis_format}")
 
-            # Visualize predictions
             plt.figure(figsize=(2, 4))
             plt.xlim(pc_range[0], pc_range[3])
             plt.ylim(pc_range[1], pc_range[4])
@@ -897,7 +814,6 @@ def main():
             labels_3d = result_dic["labels_3d"]
             pts_3d = result_dic["pts_3d"]
 
-            # DEBUG: Log raw prediction info
             mmlogger.info(f"=== DEBUG: Raw TTNN Model Output ===")
             mmlogger.info(
                 f"boxes_3d type: {type(boxes_3d)}, shape: {boxes_3d.shape if hasattr(boxes_3d, 'shape') else 'N/A'}"
@@ -910,7 +826,6 @@ def main():
             )
             mmlogger.info(f"pts_3d type: {type(pts_3d)}, shape: {pts_3d.shape if hasattr(pts_3d, 'shape') else 'N/A'}")
 
-            # Convert to numpy if needed
             if hasattr(scores_3d, "cpu"):
                 scores_3d = scores_3d.cpu().numpy()
             elif hasattr(scores_3d, "numpy"):
@@ -925,7 +840,6 @@ def main():
             elif not isinstance(labels_3d, np.ndarray):
                 labels_3d = np.array(labels_3d)
 
-            # Apply score threshold
             keep = scores_3d > args.score_thresh
             num_predictions = keep.sum()
             mmlogger.info(
@@ -950,11 +864,9 @@ def main():
             all_pred_x = []
             all_pred_y = []
 
-            # Plot predictions
             for pred_score_3d, pred_bbox_3d, pred_label_3d, pred_pts_3d in zip(
                 scores_3d[keep], boxes_3d[keep], labels_3d[keep], pts_3d[keep]
             ):
-                # Convert to numpy
                 if hasattr(pred_pts_3d, "cpu"):
                     pred_pts_3d = pred_pts_3d.cpu().numpy()
                 elif hasattr(pred_pts_3d, "numpy"):
@@ -962,21 +874,18 @@ def main():
                 elif not isinstance(pred_pts_3d, np.ndarray):
                     pred_pts_3d = np.array(pred_pts_3d)
 
-                # DEBUG: Log first few predictions
                 if pred_count < 3:
                     mmlogger.info(f"=== DEBUG: Prediction {pred_count} ===")
                     mmlogger.info(f"pred_pts_3d shape: {pred_pts_3d.shape}")
                     mmlogger.info(f"pred_pts_3d sample (first 5):\n{pred_pts_3d[:5]}")
                     mmlogger.info(f"pred_label_3d: {pred_label_3d}, pred_score_3d: {pred_score_3d:.4f}")
 
-                # Extract coordinates
                 pts_x = pred_pts_3d[:, 0]
                 pts_y = pred_pts_3d[:, 1]
 
                 all_pred_x.extend(pts_x)
                 all_pred_y.extend(pts_y)
 
-                # DEBUG: Log coordinate ranges for first prediction
                 if pred_count == 0:
                     mmlogger.info(
                         f"First prediction coordinate ranges - X: [{pts_x.min():.2f}, {pts_x.max():.2f}], Y: [{pts_y.min():.2f}, {pts_y.max():.2f}]"
@@ -985,7 +894,6 @@ def main():
                         f"PC range: X: [{pc_range[0]:.2f}, {pc_range[3]:.2f}], Y: [{pc_range[1]:.2f}, {pc_range[4]:.2f}]"
                     )
 
-                # Plot
                 pred_label_idx = int(pred_label_3d) if hasattr(pred_label_3d, "__int__") else pred_label_3d
                 if pred_label_idx < 0 or pred_label_idx >= len(colors_plt):
                     pred_label_idx = pred_label_idx % len(colors_plt) if pred_label_idx >= 0 else 0
@@ -996,7 +904,6 @@ def main():
 
             mmlogger.info(f"Visualized {pred_count} predictions for sample {pts_filename}")
 
-            # DEBUG: Compare with GT if available
             if has_gt and gt_bboxes_3d is not None and gt_labels_3d is not None and len(all_pred_x) > 0:
                 try:
                     gt_lines_fixed_num_pts = gt_bboxes_3d[0].fixed_num_sampled_points

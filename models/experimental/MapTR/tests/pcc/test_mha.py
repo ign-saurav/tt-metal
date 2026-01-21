@@ -27,20 +27,6 @@ MHA_LAYER = "pts_bbox_head.transformer.decoder.layers.0.attentions.0.attn."
 
 
 def load_maptr_mha_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load and isolate MultiheadAttention weights from MapTR checkpoint.
-
-    The weights structure for MultiheadAttention:
-    - in_proj_weight
-    - in_proj_bias
-    - out_proj.weight
-    - out_proj.bias
-
-    Args:
-        weights_path: Path to the MapTR checkpoint file.
-
-    Returns:
-        Dictionary containing only the MultiheadAttention weights.
-    """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"MapTR weights not found at {weights_path}. " "Please download the weights first.")
 
@@ -70,15 +56,6 @@ def load_maptr_mha_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
 
 
 def load_torch_model_maptr(torch_model: MultiheadAttention, weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load MapTR weights into the MultiheadAttention model.
-
-    Args:
-        torch_model: The MultiheadAttention model to load weights into.
-        weights_path: Path to the MapTR checkpoint file.
-
-    Returns:
-        The model with loaded weights.
-    """
     mha_weights = load_maptr_mha_weights(weights_path)
 
     # Map the checkpoint keys to model keys
@@ -108,7 +85,6 @@ def load_torch_model_maptr(torch_model: MultiheadAttention, weights_path: str = 
 
 
 def custom_preprocessor(model, name):
-    """Custom preprocessor for MultiheadAttention parameters."""
     parameters = {}
 
     if isinstance(model, MultiheadAttention):
@@ -138,7 +114,6 @@ def custom_preprocessor(model, name):
 
 
 def create_maptr_model_parameters_mha(model: MultiheadAttention, device=None):
-    """Create TTNN parameters for MultiheadAttention model."""
     parameters = preprocess_model_parameters(
         initialize_model=lambda: model,
         custom_preprocessor=custom_preprocessor,
@@ -152,7 +127,6 @@ def test_maptr_multihead_attention(
     device,
     reset_seeds,
 ):
-    """Test MapTR MultiheadAttention: compare reference vs TTNN implementation with MapTR weights."""
     # MapTR config parameters (matching maptr_tiny_r50_24e_bevformer.py)
     embed_dims = 256
     num_heads = 8

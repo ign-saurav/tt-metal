@@ -8,20 +8,6 @@ from models.experimental.MapTR.tt.utils import inverse_sigmoid
 
 
 class TtMapTRDecoder:
-    """TTNN implementation of MapTRDecoder.
-
-    This is the decoder used in MapTR for map element detection.
-
-    Args:
-        num_layers: Number of decoder layers (6 in config).
-        embed_dims: Embedding dimension (256 in config).
-        num_heads: Number of attention heads (8 in config).
-        params: Preprocessed parameters for decoder layers.
-        params_branches: Preprocessed parameters for regression branches.
-        device: TTNN device.
-        feedforward_channels: FFN hidden dimension (512 in config).
-    """
-
     def __init__(self, num_layers, embed_dims, num_heads, params, params_branches, device, feedforward_channels=512):
         self.return_intermediate = True
         self.device = device
@@ -93,7 +79,6 @@ class TtMapTRDecoder:
             output = ttnn.permute(output, (1, 0, 2))
 
             if map_reg_branches is not None:
-                # Note: params are stored as reg_branches, not map_reg_branches
                 layers = self.params_branches.reg_branches[str(lid)]
 
                 tmp = output
@@ -101,7 +86,7 @@ class TtMapTRDecoder:
                     tmp = ttnn.linear(
                         tmp, layers[str(i)].weight, bias=layers[str(i)].bias, memory_config=ttnn.L1_MEMORY_CONFIG
                     )
-                    if i < 2:  # Apply ReLU after the first two layers
+                    if i < 2:
                         tmp = ttnn.relu(tmp)
 
                 assert reference_points.shape[-1] == 2

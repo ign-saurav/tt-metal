@@ -33,8 +33,6 @@ HEAD_LAYER_PREFIX = "pts_bbox_head."
 
 
 class ConfigDict(dict):
-    """A dictionary that supports attribute-style access (like mmcv.Config)."""
-
     def __getattr__(self, name):
         try:
             value = self[name]
@@ -53,11 +51,6 @@ class ConfigDict(dict):
 
 
 class ParamsWrapper:
-    """Wrapper class to convert dict parameters to object attributes for TT models.
-
-    Allows both attribute-style (params.weight) and dict-style (params["0"]) access.
-    """
-
     def __init__(self, d):
         for k, v in d.items():
             if isinstance(v, dict):
@@ -73,14 +66,6 @@ class ParamsWrapper:
 
 
 def load_maptr_head_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load and isolate MapTRHead weights from MapTR checkpoint.
-
-    Args:
-        weights_path: Path to the MapTR checkpoint file.
-
-    Returns:
-        Dictionary containing the head weights.
-    """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"MapTR weights not found at {weights_path}. Please download the weights first.")
 
@@ -116,11 +101,9 @@ def load_maptr_head_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
 
 
 def custom_preprocessor(model, name):
-    """Custom preprocessor for MapTRHead parameters"""
     parameters = {}
 
     def extract_sequential_branch(module_list, dtype):
-        """Extract parameters from sequential branch (cls_branches, reg_branches)."""
         branch_params = {}
 
         for i, mod in enumerate(module_list):
@@ -202,15 +185,6 @@ def custom_preprocessor(model, name):
 
 
 def create_maptr_model_parameters_head(model: MapTRHead, device=None):
-    """Create TTNN parameters from PyTorch MapTRHead model.
-
-    Args:
-        model: The PyTorch MapTRHead model with loaded weights.
-        device: TTNN device.
-
-    Returns:
-        ParamsWrapper with preprocessed parameters.
-    """
     parameters = preprocess_model_parameters(
         initialize_model=lambda: model,
         custom_preprocessor=custom_preprocessor,
@@ -223,7 +197,6 @@ def create_maptr_model_parameters_head(model: MapTRHead, device=None):
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
 def test_maptr_head(device, reset_seeds):
-    """Test MapTR Head: compare reference PyTorch MapTRHead vs TTNN implementation with PCC."""
     # Ensure reproducible results
     torch.manual_seed(42)
     if torch.cuda.is_available():

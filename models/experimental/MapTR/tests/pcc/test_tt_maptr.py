@@ -23,8 +23,6 @@ MAPTR_WEIGHTS_PATH = "models/experimental/MapTR/chkpt/maptr_tiny_r50_24e_bevform
 
 
 class ConfigDict(dict):
-    """A dictionary that supports attribute-style access (like mmcv.Config)."""
-
     def __getattr__(self, name):
         try:
             value = self[name]
@@ -43,7 +41,6 @@ class ConfigDict(dict):
 
 
 def create_maptr_config():
-    """Create MapTR model configuration."""
     embed_dims = 256
     num_classes = 3
     num_vec = 50
@@ -172,7 +169,6 @@ def create_maptr_config():
 
 
 def create_input_dict(num_cams=6, img_h=384, img_w=640):
-    """Create input dictionary for MapTR inference."""
     input_dict = {
         "img_metas": [
             [
@@ -240,7 +236,6 @@ def test_maptr(
     reset_seeds,
     model_location_generator,
 ):
-    """Test MapTR: compare reference PyTorch MapTR vs TTNN implementation with PCC."""
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)

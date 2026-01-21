@@ -35,19 +35,6 @@ MAP_DECODER_LAYER = "pts_bbox_head.transformer.decoder.layers."
 
 
 def load_maptr_decoder_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load and isolate MapTRDecoder weights from MapTR checkpoint.
-
-    The decoder contains multiple layers, each with:
-    - attentions (MultiheadAttention and CustomMSDeformableAttention)
-    - ffns (FeedForward Networks)
-    - norms (LayerNorm)
-
-    Args:
-        weights_path: Path to the MapTR checkpoint file.
-
-    Returns:
-        Dictionary containing the decoder weights.
-    """
     if not os.path.exists(weights_path):
         raise FileNotFoundError(f"MapTR weights not found at {weights_path}. " "Please download the weights first.")
 
@@ -85,15 +72,6 @@ def load_maptr_decoder_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
 
 
 def load_torch_model_maptr(torch_model: MapTRDecoder, weights_path: str = MAPTR_WEIGHTS_PATH):
-    """Load MapTR weights into the MapTRDecoder model.
-
-    Args:
-        torch_model: The MapTRDecoder model to load weights into.
-        weights_path: Path to the MapTR checkpoint file.
-
-    Returns:
-        The model with loaded weights.
-    """
     decoder_weights = load_maptr_decoder_weights(weights_path)
 
     # Map the checkpoint keys to model keys
@@ -199,14 +177,6 @@ def load_torch_model_maptr(torch_model: MapTRDecoder, weights_path: str = MAPTR_
 
 
 def extract_transformer_parameters(transformer_module):
-    """Extract parameters from MapTRDecoder layers.
-
-    Args:
-        transformer_module: MapTRDecoder instance.
-
-    Returns:
-        Dictionary of preprocessed parameters.
-    """
     parameters = {"layers": {}}
 
     for i, layer in enumerate(transformer_module.layers):  # BaseTransformerLayer
@@ -282,7 +252,6 @@ def extract_transformer_parameters(transformer_module):
 
 
 def custom_preprocessor(model, name):
-    """Custom preprocessor for MapTRDecoder parameters."""
     parameters = {}
 
     if isinstance(model, MapTRDecoder):
@@ -292,11 +261,6 @@ def custom_preprocessor(model, name):
 
 
 def create_maptr_model_parameters_decoder(model: MapTRDecoder, device=None):
-    """Create TTNN parameters for MapTRDecoder model.
-
-    Note: The lambda captures the model instance, so it will use the model
-    with loaded weights, not create a new one.
-    """
     # Ensure model is in eval mode before preprocessing
     model.eval()
 
@@ -317,7 +281,6 @@ def test_maptr_decoder(
     device,
     reset_seeds,
 ):
-    """Test MapTR MapTRDecoder: compare reference vs TTNN implementation with MapTR weights."""
     # Ensure reproducible results
     torch.manual_seed(42)
     if torch.cuda.is_available():
@@ -569,9 +532,7 @@ def test_maptr_decoder(
         f"TTNN output stats: min={ttnn_output.min():.4f}, max={ttnn_output.max():.4f}, mean={ttnn_output.mean():.4f}"
     )
 
-    # Helper function to extract PCC value
     def extract_pcc_value(message):
-        """Extract PCC value from assert_with_pcc message."""
         try:
             if "PCC:" in message:
                 pcc_str = message.split("PCC: ")[-1].split(",")[0].strip()
