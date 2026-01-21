@@ -12,15 +12,27 @@ from models.experimental.tt_dit.parallel.config import DiTParallelConfig, Parall
 
 
 @pytest.mark.parametrize(
-    "mesh_device, sp_axis, tp_axis, num_links",
+    "mesh_device, sp_axis, tp_axis, num_links, cfg_factor, device_params",
     [
-        [(1, 2), 0, 1, 1],  # N300 configuration - 2 devices with CFG parallel
+        [
+            (1, 1),
+            0,
+            0,
+            1,
+            1,
+            {"fabric_config": ttnn.FabricConfig.DISABLED, "l1_small_size": 32768},
+        ],  # N150 configuration - 1 device, no CFG parallel, no fabric needed
+        [
+            (1, 2),
+            0,
+            1,
+            1,
+            2,
+            {"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 32768},
+        ],  # N300 configuration - 2 devices with CFG parallel
     ],
-    ids=["1x2_n300"],
-    indirect=["mesh_device"],
-)
-@pytest.mark.parametrize(
-    "device_params", [{"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 32768}], indirect=True
+    ids=["1x1_n150", "1x2_n300"],
+    indirect=["mesh_device", "device_params"],
 )
 @pytest.mark.parametrize(
     "image_size, spatial_sequence_length",
@@ -36,12 +48,15 @@ def test_sd35_medium_pipeline_functional(
     sp_axis: int,
     tp_axis: int,
     num_links: int,
+    cfg_factor: int,
     image_size: int,
     spatial_sequence_length: int,
 ) -> None:
-    """Functional test for SD3.5 Medium pipeline on N300 with CFG enabled."""
+    """Functional test for SD3.5 Medium pipeline on N150 and N300."""
+    # CFG parallel: factor=2 for N300 (2 devices), factor=1 for N150 (1 device)
+    cfg_mesh_axis = 1 if cfg_factor > 1 else 0
     parallel_config = DiTParallelConfig(
-        cfg_parallel=ParallelFactor(factor=2, mesh_axis=1),  # CFG parallel on axis 1 for N300
+        cfg_parallel=ParallelFactor(factor=cfg_factor, mesh_axis=cfg_mesh_axis),
         tensor_parallel=ParallelFactor(factor=1, mesh_axis=tp_axis),
         sequence_parallel=ParallelFactor(factor=1, mesh_axis=sp_axis),
     )
@@ -51,10 +66,15 @@ def test_sd35_medium_pipeline_functional(
     seed = 23
     num_steps = 40
 
+    # guidance_cond: 2 for CFG (positive + negative prompts), 1 for no CFG
+    # For N150 (cfg_factor=1): guidance_cond=2 (process both prompts on same device)
+    # For N300 (cfg_factor=2): guidance_cond=2 (CFG parallel across devices)
+    guidance_cond = 2 if cfg_factor == 1 else cfg_factor
+
     tt_pipe = TTSD35MediumPipeline(
         mesh_device=mesh_device,
         enable_t5_text_encoder=False,
-        guidance_cond=2,  # CFG enabled: positive + negative prompt
+        guidance_cond=guidance_cond,
         parallel_config=parallel_config,
         num_links=num_links,
         height=image_size,

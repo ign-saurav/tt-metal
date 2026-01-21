@@ -57,7 +57,7 @@ class AdaLayerNormZero(Module):
         """
         Args:
             x: Input tensor [1, B, seq_len, hidden_size]
-            c: Conditioning tensor [1, B, hidden_size] (temb after passing through time embedding)
+            c: Conditioning tensor [1, B, hidden_size] or [1, 1, B, hidden_size] when guidance_cond=2
         Returns:
             normalized_x: Normalized input [1, B, seq_len, hidden_size]
             scale: Modulation params [1, B, 6, hidden_size]
@@ -69,8 +69,17 @@ class AdaLayerNormZero(Module):
         c_silu = ttnn.silu(c)
         c_processed = self.linear(c_silu)
 
+        # Handle different input shapes: [1, B, hidden_size] or [1, 1, B, hidden_size] (guidance_cond=2)
+        # Get batch dimension from the appropriate axis
+        if len(c_processed.shape) == 4:
+            # Shape is [1, 1, B, conditioning_size] - use shape[2] for batch
+            batch_dim = c_processed.shape[2]
+        else:
+            # Shape is [1, B, conditioning_size] - use shape[1] for batch
+            batch_dim = c_processed.shape[1]
+
         # Reshape to [1, B, 6, hidden_size]
-        scale = ttnn.reshape(c_processed, (1, c_processed.shape[1], 6, self.hidden_size))
+        scale = ttnn.reshape(c_processed, (1, batch_dim, 6, self.hidden_size))
 
         return normalized_x, scale
 
@@ -115,7 +124,7 @@ class AdaLayerNormContinuous(Module):
         """
         Args:
             x: Input tensor [1, B, seq_len, hidden_size]
-            c: Conditioning tensor [1, B, hidden_size]
+            c: Conditioning tensor [1, B, hidden_size] or [1, 1, B, hidden_size] when guidance_cond=2
         Returns:
             normalized_x: Normalized input
             scale: Modulation params [1, B, 2, hidden_size] (shift, scale)
@@ -127,8 +136,17 @@ class AdaLayerNormContinuous(Module):
         c_silu = ttnn.silu(c)
         c_processed = self.linear(c_silu)
 
+        # Handle different input shapes: [1, B, hidden_size] or [1, 1, B, hidden_size] (guidance_cond=2)
+        # Get batch dimension from the appropriate axis
+        if len(c_processed.shape) == 4:
+            # Shape is [1, 1, B, conditioning_size] - use shape[2] for batch
+            batch_dim = c_processed.shape[2]
+        else:
+            # Shape is [1, B, conditioning_size] - use shape[1] for batch
+            batch_dim = c_processed.shape[1]
+
         # Reshape
-        scale = ttnn.reshape(c_processed, (1, c_processed.shape[1], 2, self.hidden_size))
+        scale = ttnn.reshape(c_processed, (1, batch_dim, 2, self.hidden_size))
 
         return normalized_x, scale
 
@@ -188,7 +206,7 @@ class SD35AdaLayerNormZeroX(Module):
         """
         Args:
             x: Input tensor [1, B, seq_len, hidden_size]
-            c: Conditioning tensor [1, B, hidden_size]
+            c: Conditioning tensor [1, B, hidden_size] or [1, 1, B, hidden_size] when guidance_cond=2
         Returns:
             normalized_x: Normalized input [1, B, seq_len, hidden_size]
             scale: Modulation params [1, B, 9, hidden_size]
@@ -201,8 +219,17 @@ class SD35AdaLayerNormZeroX(Module):
         c_silu = ttnn.silu(c)
         c_processed = self.linear(c_silu)
 
-        # Reshape
-        scale = ttnn.reshape(c_processed, (1, c_processed.shape[1], 9, self.hidden_size))
+        # Handle different input shapes: [1, B, hidden_size] or [1, 1, B, hidden_size] (guidance_cond=2)
+        # Get batch dimension from the appropriate axis
+        if len(c_processed.shape) == 4:
+            # Shape is [1, 1, B, conditioning_size] - use shape[2] for batch
+            batch_dim = c_processed.shape[2]
+        else:
+            # Shape is [1, B, conditioning_size] - use shape[1] for batch
+            batch_dim = c_processed.shape[1]
+
+        # Reshape: conditioning_size = 9 * hidden_size
+        scale = ttnn.reshape(c_processed, (1, batch_dim, 9, self.hidden_size))
 
         return normalized_x, scale
 

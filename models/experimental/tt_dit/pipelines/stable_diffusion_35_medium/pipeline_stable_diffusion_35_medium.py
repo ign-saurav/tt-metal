@@ -441,6 +441,8 @@ class StableDiffusion3MediumPipeline:
     ):
         # default config per mesh shape
         default_config = {
+            (1, 1): {"cfg_config": (1, 0), "sp_config": (1, 0), "tp_config": (1, 0), "num_links": 1},  # N150
+            (1, 2): {"cfg_config": (2, 1), "sp_config": (1, 0), "tp_config": (1, 0), "num_links": 1},  # N300
             (2, 4): {"cfg_config": (2, 1), "sp_config": (2, 0), "tp_config": (2, 1), "num_links": 1},
             (4, 8): {"cfg_config": (2, 1), "sp_config": (4, 0), "tp_config": (4, 1), "num_links": 4},
         }
@@ -804,9 +806,10 @@ class StableDiffusion3MediumPipeline:
         if do_classifier_free_guidance:
             if not self.dit_parallel_config.cfg_parallel.factor > 1:
                 # Single device case - direct operations work
-                split_pos = noise_pred_list[0].shape[0] // 2
-                uncond = noise_pred_list[0][0:split_pos]
-                cond = noise_pred_list[0][split_pos:]
+                # With guidance_cond=2, tensor shape is [1, 2, seq_len, ...] where batch dim is shape[1]
+                split_pos = noise_pred_list[0].shape[1] // 2
+                uncond = noise_pred_list[0][:, 0:split_pos, :, :]
+                cond = noise_pred_list[0][:, split_pos:, :, :]
                 noise_pred_list[0] = uncond + guidance_scale * (cond - uncond)
             else:
                 uncond = ttnn.to_torch(ttnn.get_device_tensors(noise_pred_list[0])[0].cpu(blocking=True)).to(

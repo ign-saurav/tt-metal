@@ -221,7 +221,7 @@ class AdaLayerNormContinuousOutput(Module):
         """
         Args:
             x: Input tensor [1, B, seq_len, hidden_size]
-            c: Conditioning tensor [1, B, 1, hidden_size] (temb)
+            c: Conditioning tensor [1, B, 1, hidden_size] or [1, 1, B, 1, hidden_size] when guidance_cond=2 (temb)
         Returns:
             Modulated tensor [1, B, seq_len, hidden_size]
         """
@@ -232,8 +232,25 @@ class AdaLayerNormContinuousOutput(Module):
         c_silu = ttnn.silu(c)
         emb = self.linear(c_silu)
 
+        # Handle different input shapes for guidance_cond=2
+        # Get batch dimension from the appropriate axis
+        if len(emb.shape) == 5:
+            # Shape is [1, 1, B, 1, conditioning_size] - use shape[2] for batch
+            batch_dim = emb.shape[2]
+        elif len(emb.shape) == 4:
+            # Could be [1, B, 1, conditioning_size] or [1, 1, B, conditioning_size]
+            if emb.shape[1] == 1 and emb.shape[2] > 1:
+                # Shape is [1, 1, B, conditioning_size] - use shape[2] for batch (guidance_cond=2)
+                batch_dim = emb.shape[2]
+            else:
+                # Shape is [1, B, 1, conditioning_size] - use shape[1] for batch
+                batch_dim = emb.shape[1]
+        else:
+            # Shape is [1, B, conditioning_size] - use shape[1] for batch
+            batch_dim = emb.shape[1]
+
         # Reshape to [1, B, 2, hidden_size] for chunking
-        emb = ttnn.reshape(emb, (1, emb.shape[1], 2, self.hidden_size))
+        emb = ttnn.reshape(emb, (1, batch_dim, 2, self.hidden_size))
 
         # Extract scale and shift
         scale = emb[:, :, 0:1, :]
