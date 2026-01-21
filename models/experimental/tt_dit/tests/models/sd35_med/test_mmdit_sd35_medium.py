@@ -8,7 +8,6 @@ Test file for SD3Transformer2DModel with real weights
 import pytest
 import torch
 import ttnn
-from loguru import logger
 
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
@@ -169,7 +168,4 @@ def test_sd3_transformer_real_weights(device, reset_seeds):
     pcc_threshold = 0.99
     passing, pcc = assert_with_pcc(ref_proj, tt_proj_torch, pcc=pcc_threshold)
 
-    if passing:
-        logger.info(f"✓ SD3Transformer2DModel PCC: {pcc:.6f}")
-    else:
-        pytest.fail(f"SD3Transformer2DModel PCC test FAILED: pcc={pcc:.6f}")
+    assert passing, f"PCC check failed: {pcc}"

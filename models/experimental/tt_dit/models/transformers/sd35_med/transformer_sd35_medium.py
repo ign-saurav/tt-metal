@@ -9,7 +9,6 @@ from models.experimental.tt_dit.layers.linear import Linear
 from models.experimental.tt_dit.layers.normalization import LayerNorm
 from models.experimental.tt_dit.utils.substate import substate
 
-# Import working implementations from embeddings
 from models.experimental.tt_dit.layers.embeddings import (
     SD35CombinedTimestepTextProjEmbeddings,
 )
@@ -184,13 +183,6 @@ class AdaLayerNormContinuousOutput(Module):
     """
     AdaLayerNormContinuous for norm_out - applies modulation directly.
 
-    Diffusers implementation:
-    ```python
-    emb = self.linear(self.silu(conditioning))
-    scale, shift = emb.chunk(2, dim=-1)  # NOTE: scale first, then shift!
-    x = self.norm(x) * (1 + scale) + shift
-    return x  # Returns modulated tensor directly
-    ```
     """
 
     def __init__(

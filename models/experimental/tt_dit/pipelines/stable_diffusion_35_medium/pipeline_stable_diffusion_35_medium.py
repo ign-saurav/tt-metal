@@ -22,7 +22,6 @@ from contextlib import contextmanager, nullcontext
 from models.experimental.tt_dit.encoders.clip.model_clip import CLIPEncoder, CLIPConfig
 from models.experimental.tt_dit.encoders.t5.model_t5 import T5Encoder, T5Config
 
-# Import SD3.5 Medium transformer
 from models.experimental.tt_dit.models.transformers.sd35_med.transformer_sd35_medium import SD3Transformer2DModel
 from models.experimental.tt_dit.models.vae.vae_sd35_med import VAEDecoder
 from models.experimental.tt_dit.parallel.manager import CCLManager
@@ -38,6 +37,10 @@ from models.experimental.tt_dit.utils.cache import (
     load_cache_dict,
     cache_dict_exists,
     get_and_create_cache_path,
+)
+from models.experimental.tt_dit.pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large import (
+    _get_clip_prompt_embeds,
+    _get_t5_prompt_embeds,
 )
 
 TILE_SIZE = 32
@@ -123,9 +126,6 @@ class StableDiffusion3MediumPipeline:
         # Create submeshes
         submesh_shape = list(mesh_device.shape)
         submesh_shape[parallel_config.cfg_parallel.mesh_axis] //= parallel_config.cfg_parallel.factor
-        logger.info(f"Parallel config: {parallel_config}")
-        logger.info(f"Original mesh shape: {mesh_device.shape}")
-        logger.info(f"Creating submeshes with shape {submesh_shape}")
         self.submesh_devices = self._mesh_device.create_submeshes(ttnn.MeshShape(*submesh_shape))
 
         self.ccl_managers = [
@@ -154,7 +154,6 @@ class StableDiffusion3MediumPipeline:
             assert (
                 cfg_shape[0] * cfg_shape[1] == encoder_tp_factor
             ), f"Cannot reshape {cfg_shape} to a 1x{encoder_tp_factor} mesh"
-            logger.info(f"Reshaping submesh device 0 from {cfg_shape} to (1, {encoder_tp_factor}) for CLIP")
             self.desired_encoder_submesh_shape = (1, encoder_tp_factor)
 
         else:
@@ -196,7 +195,6 @@ class StableDiffusion3MediumPipeline:
             torch_dtype=torch.bfloat16,
         )
         torch_transformer.eval()
-        logger.debug("Loaded torch transformer")
 
         assert isinstance(self._tokenizer_1, CLIPTokenizer)
         assert isinstance(self._tokenizer_2, CLIPTokenizer)
@@ -237,8 +235,6 @@ class StableDiffusion3MediumPipeline:
         # Set patch_size
         self.patch_size = patch_size
 
-        logger.info(f"Using transformer depth={transformer_depth}")
-
         self.transformers = []
         for i, submesh_device in enumerate(self.submesh_devices):
             tt_transformer = SD3Transformer2DModel(
@@ -266,16 +262,11 @@ class StableDiffusion3MediumPipeline:
                 )
                 # create cache if it doesn't exist
                 if not cache_dict_exists(cache_path):
-                    logger.info(
-                        f"Cache does not exist. Creating cache: {cache_path} and loading transformer weights from PyTorch state dict"
-                    )
                     tt_transformer.load_torch_state_dict(torch_transformer.state_dict())
                     save_cache_dict(tt_transformer.to_cached_state_dict(cache_path), cache_path)
                 else:
-                    logger.info(f"Loading transformer weights from cache: {cache_path}")
                     tt_transformer.from_cached_state_dict(load_cache_dict(cache_path))
             else:
-                logger.info("Loading transformer weights from PyTorch state dict")
                 tt_transformer.load_torch_state_dict(torch_transformer.state_dict())
 
             self.transformers.append(tt_transformer)
@@ -466,11 +457,6 @@ class StableDiffusion3MediumPipeline:
         submesh_shape[cfg_axis] //= cfg_factor
         enable_t5_text_encoder = submesh_shape[1] == 4  # T5 only works if submesh doesn't need reshaping
 
-        logger.info(f"Mesh device shape: {mesh_device.shape}")
-        logger.info(f"Submesh shape: {submesh_shape}")
-        logger.info(f"Parallel config: {parallel_config}")
-        logger.info(f"T5 enabled: {enable_t5_text_encoder}")
-
         # Create pipeline
         pipeline = StableDiffusion3MediumPipeline(
             mesh_device=mesh_device,
@@ -564,10 +550,6 @@ class StableDiffusion3MediumPipeline:
                 self._num_channels_latents,
             )
 
-            logger.debug(f"Latents shape: {latents_shape}")
-
-            logger.info("encoding prompts...")
-
             with timer.time_section("total_encoding") if timer else nullcontext():
                 if self.desired_encoder_submesh_shape != self.original_submesh_shape:
                     self.encoder_device.reshape(ttnn.MeshShape(*self.desired_encoder_submesh_shape))
@@ -587,12 +569,9 @@ class StableDiffusion3MediumPipeline:
                 if self.desired_encoder_submesh_shape != self.original_submesh_shape:
                     self.encoder_device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
                 prompt_encoding_end_time = time.time()
-                logger.info("preparing timesteps...")
 
             self._scheduler.set_timesteps(num_inference_steps)
             timesteps = self._scheduler.timesteps
-
-            logger.info("preparing latents...")
 
             if seed is not None:
                 torch.manual_seed(seed)
@@ -742,26 +721,17 @@ class StableDiffusion3MediumPipeline:
                 image_decoding_start_time = time.time()
                 decoded_output = self._vae_decode(tt_latents_step_list[self.vae_submesh_idx], width, height)
                 decoded_output = ttnn.to_torch(ttnn.get_device_tensors(decoded_output)[0]).permute(0, 3, 1, 2)
-                logger.debug(
-                    f"VAE decoded output: min={decoded_output.min():.4f}, max={decoded_output.max():.4f}, mean={decoded_output.mean():.4f}"
-                )
 
                 if self.desired_encoder_submesh_shape != self.original_submesh_shape:
                     # If reshaping, vae device is same as encoder device
                     self.encoder_device.reshape(ttnn.MeshShape(*self.original_submesh_shape))
                 image = self._image_processor.postprocess(decoded_output, output_type="pt")
-                logger.debug(f"Postprocessed image shape: {image.shape}")
                 assert isinstance(image, torch.Tensor)
                 image_decoding_end_time = time.time()
 
                 output = self._image_processor.numpy_to_pil(self._image_processor.pt_to_numpy(image))
 
                 end_time = time.time()
-
-                logger.info(f"prompt encoding duration: {prompt_encoding_end_time - prompt_encoding_start_time}")
-                logger.info(f"denoising duration: {denoising_end_time - denoising_start_time}")
-                logger.info(f"image decoding duration: {image_decoding_end_time - image_decoding_start_time}")
-                logger.info(f"total runtime: {end_time - start_time}")
 
         return output
 
@@ -887,10 +857,6 @@ class StableDiffusion3MediumPipeline:
         clip_skip: int | None,
     ):
         """Encode prompts using CLIP and T5 text encoders"""
-        from ...pipelines.stable_diffusion_35_large.pipeline_stable_diffusion_35_large import (
-            _get_clip_prompt_embeds,
-            _get_t5_prompt_embeds,
-        )
 
         timer = self.timing_collector
 
@@ -1013,21 +979,12 @@ class StableDiffusion3MediumPipeline:
         while torch_latents.dim() > 4:
             torch_latents = torch_latents.squeeze(0)
 
-        # Apply VAE scaling (in NHWC format)
-        logger.debug(
-            f"Latents before VAE scaling: min={torch_latents.min():.4f}, max={torch_latents.max():.4f}, mean={torch_latents.mean():.4f}"
-        )
-
         # Re-center latents to compensate for accumulated numerical drift
         latent_mean = torch_latents.mean()
         if abs(latent_mean) > 0.05:
-            logger.debug(f"Correcting latent mean drift: {latent_mean:.4f}")
             torch_latents = torch_latents - latent_mean
 
         torch_latents = (torch_latents / self._torch_vae_scaling_factor) + self._torch_vae_shift_factor
-        logger.debug(
-            f"Latents after VAE scaling: min={torch_latents.min():.4f}, max={torch_latents.max():.4f}, mean={torch_latents.mean():.4f}"
-        )
 
         if self.desired_encoder_submesh_shape != self.original_submesh_shape:
             # If reshaping, vae device is same as encoder device
@@ -1171,10 +1128,6 @@ def _get_t5_prompt_embeds(
 
     if untruncated_ids.shape[-1] >= text_input_ids.shape[-1] and not torch.equal(text_input_ids, untruncated_ids):
         removed_text = tokenizer.batch_decode(untruncated_ids[:, tokenizer_max_length - 1 : -1])
-        logger.warning(
-            "The following part of your input was truncated because `max_sequence_length` is set to "
-            f" {max_sequence_length} tokens: {removed_text}"
-        )
 
     tt_text_input_ids = ttnn.from_torch(
         text_input_ids,

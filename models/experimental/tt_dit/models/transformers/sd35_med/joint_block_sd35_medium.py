@@ -13,20 +13,6 @@ class AdaLayerNormZero(Module):
     """
     AdaLayerNormZero with 6x scaling for SD3.5 Medium.
 
-    Diffusers implementation:
-    ```python
-    class AdaLayerNormZero(nn.Module):
-        def __init__(self, embedding_dim, num_embeddings=None, norm_type="layer_norm", bias=True):
-            self.silu = nn.SiLU()
-            self.linear = nn.Linear(embedding_dim, 6 * embedding_dim, bias=bias)
-            self.norm = nn.LayerNorm(embedding_dim, elementwise_affine=False, eps=1e-6)
-
-        def forward(self, x, emb=None):
-            emb = self.linear(self.silu(emb))  # Note: SiLU BEFORE linear!
-            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = emb.chunk(6, dim=1)
-            x = self.norm(x) * (1 + scale_msa[:, None]) + shift_msa[:, None]
-            return x, gate_msa, shift_mlp, scale_mlp, gate_mlp
-    ```
     """
 
     def __init__(
@@ -92,8 +78,7 @@ class AdaLayerNormContinuous(Module):
     """
     AdaLayerNormContinuous with 2x scaling for SD3.5 Medium block 23.
 
-    Diffusers implementation applies shift and scale directly:
-    x = self.norm(x) * (1 + scale) + shift
+    Diffusers implementation applies shift and scale directly
     """
 
     def __init__(
@@ -162,20 +147,6 @@ class SD35AdaLayerNormZeroX(Module):
     This is used for hidden_states (x) in early blocks.
     Outputs 9 modulation params: 3 for attn, 3 for mlp, 3 for attn2.
 
-    Diffusers implementation:
-    ```python
-    class SD35AdaLayerNormZeroX(nn.Module):
-        def __init__(self, embedding_dim, norm_type="layer_norm", bias=True):
-            self.silu = nn.SiLU()
-            self.linear = nn.Linear(embedding_dim, 9 * embedding_dim, bias=bias)
-            self.norm = nn.LayerNorm(embedding_dim, elementwise_affine=False, eps=1e-6)
-
-        def forward(self, x, emb):
-            emb = self.linear(self.silu(emb))  # SiLU BEFORE linear!
-            shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp, shift_msa2, scale_msa2, gate_msa2 = emb.chunk(9, dim=1)
-            x = self.norm(x) * (1 + scale_msa[:, None]) + shift_msa[:, None]
-            return x, gate_msa, shift_mlp, scale_mlp, gate_mlp, shift_msa2, scale_msa2, gate_msa2
-    ```
     """
 
     def __init__(
@@ -387,7 +358,6 @@ class JointTransformerBlockEarly(Module):
         """Load weights from PyTorch state dict."""
         self.norm1.load_torch_state_dict(substate(state_dict, "norm1"))
         self.norm1_context.load_torch_state_dict(substate(state_dict, "norm1_context"))
-        # norm2 and norm2_context have norm_elementwise_affine=False, no weights to load
         self.attn.load_state_dict(substate(state_dict, "attn"))
         self.attn2.load_state_dict(substate(state_dict, "attn2"))
         self.ff.load_torch_state_dict(substate(state_dict, "ff"))
@@ -476,8 +446,6 @@ class JointTransformerBlockMiddle(Module):
         # Apply gate and residual for joint attention
         x = x + x_gate_msa * attn_out
         context = context + c_gate_msa * context_attn_out
-
-        # NOTE: Middle blocks do NOT use attn2 - only early blocks (0-12) use it
 
         # Feed forward
         x_norm_ff = self.norm2(x)
@@ -602,5 +570,4 @@ class JointTransformerBlockFinal(Module):
         self.norm1.load_torch_state_dict(substate(state_dict, "norm1"))
         self.norm1_context.load_torch_state_dict(substate(state_dict, "norm1_context"))
         self.attn.load_state_dict(substate(state_dict, "attn"))
-        # NOTE: Final block does NOT have attn2
         self.ff.load_torch_state_dict(substate(state_dict, "ff"))

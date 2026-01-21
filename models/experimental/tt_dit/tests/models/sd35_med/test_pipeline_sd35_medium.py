@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+import sys
 import pytest
 import ttnn
 from loguru import logger
@@ -9,6 +11,36 @@ from models.experimental.tt_dit.pipelines.stable_diffusion_35_medium.pipeline_st
     StableDiffusion3MediumPipeline as TTSD35MediumPipeline,
 )
 from models.experimental.tt_dit.parallel.config import DiTParallelConfig, ParallelFactor
+
+
+def _get_prompt_from_terminal(default_prompt: str) -> str:
+    """Get prompt from command line arguments or environment variable."""
+    if "--prompt" in sys.argv:
+        idx = sys.argv.index("--prompt")
+        if idx + 1 < len(sys.argv):
+            return sys.argv[idx + 1]
+
+    env_prompt = os.getenv("PROMPT")
+    if env_prompt:
+        return env_prompt
+
+    return default_prompt
+
+
+def _get_negative_prompt_from_terminal(default_negative_prompt: str) -> str:
+    """Get negative prompt from command line arguments or environment variable."""
+    # Check command line arguments for --negative-prompt flag
+    if "--negative-prompt" in sys.argv:
+        idx = sys.argv.index("--negative-prompt")
+        if idx + 1 < len(sys.argv):
+            return sys.argv[idx + 1]
+
+    # Check environment variable
+    env_negative_prompt = os.getenv("NEGATIVE_PROMPT")
+    if env_negative_prompt:
+        return env_negative_prompt
+
+    return default_negative_prompt
 
 
 @pytest.mark.parametrize(
@@ -61,15 +93,12 @@ def test_sd35_medium_pipeline_functional(
         sequence_parallel=ParallelFactor(factor=1, mesh_axis=sp_axis),
     )
 
-    # Test with a simple prompt
-    prompt = "A capybara wearing a suit holding a sign that reads hello world"
+    prompt = _get_prompt_from_terminal("A capybara wearing a suit holding a sign that reads hello world")
+    negative_prompt = _get_negative_prompt_from_terminal("blurry image")
     seed = 23
     num_steps = 40
 
-    # guidance_cond: 2 for CFG (positive + negative prompts), 1 for no CFG
-    # For N150 (cfg_factor=1): guidance_cond=2 (process both prompts on same device)
-    # For N300 (cfg_factor=2): guidance_cond=2 (CFG parallel across devices)
-    guidance_cond = 2 if cfg_factor == 1 else cfg_factor
+    guidance_cond = 2
 
     tt_pipe = TTSD35MediumPipeline(
         mesh_device=mesh_device,
@@ -96,7 +125,7 @@ def test_sd35_medium_pipeline_functional(
 
     images = tt_pipe.run_single_prompt(
         prompt=prompt,
-        negative_prompt="blurry image",
+        negative_prompt=negative_prompt,
         num_inference_steps=num_steps,
         seed=seed,
     )
@@ -106,5 +135,5 @@ def test_sd35_medium_pipeline_functional(
         image_size,
         image_size,
     ), f"Image size should be {image_size}x{image_size}, got {images[0].size}"
-    images[0].save(f"test_sd35_medium_tt_output_{image_size}.png")
-    logger.info(f"TT {image_size}x{image_size} image saved to test_sd35_medium_tt_output_{image_size}.png")
+    images[0].save(f"sd35_medium_tt_output_{image_size}x{image_size}.png")
+    logger.info(f"TT {image_size}x{image_size} image saved to sd35_medium_tt_output_{image_size}x{image_size}.png")
