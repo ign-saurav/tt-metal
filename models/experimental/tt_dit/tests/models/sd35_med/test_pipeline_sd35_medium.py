@@ -22,12 +22,22 @@ from models.experimental.tt_dit.parallel.config import DiTParallelConfig, Parall
 @pytest.mark.parametrize(
     "device_params", [{"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 32768}], indirect=True
 )
+@pytest.mark.parametrize(
+    "image_size, spatial_sequence_length",
+    [
+        (512, 1024),
+        (1024, 4096),
+    ],
+    ids=["512x512", "1024x1024"],
+)
 def test_sd35_medium_pipeline_functional(
     *,
     mesh_device: ttnn.MeshDevice,
     sp_axis: int,
     tp_axis: int,
     num_links: int,
+    image_size: int,
+    spatial_sequence_length: int,
 ) -> None:
     """Functional test for SD3.5 Medium pipeline on N300 with CFG enabled."""
     parallel_config = DiTParallelConfig(
@@ -36,49 +46,45 @@ def test_sd35_medium_pipeline_functional(
         sequence_parallel=ParallelFactor(factor=1, mesh_axis=sp_axis),
     )
 
-    # Create pipeline with N300 CFG configuration
+    # Test with a simple prompt
+    prompt = "A capybara wearing a suit holding a sign that reads hello world"
+    seed = 23
+    num_steps = 40
+
     tt_pipe = TTSD35MediumPipeline(
         mesh_device=mesh_device,
         enable_t5_text_encoder=False,
         guidance_cond=2,  # CFG enabled: positive + negative prompt
         parallel_config=parallel_config,
         num_links=num_links,
-        height=512,  # Smaller image for faster test
-        width=512,
+        height=image_size,
+        width=image_size,
         model_checkpoint_path="stabilityai/stable-diffusion-3.5-medium",
         use_cache=False,
     )
 
-    # Prepare with guidance_scale=4.5 for CFG on N300
     tt_pipe.prepare(
         batch_size=1,
         num_images_per_prompt=1,
-        width=512,
-        height=512,
-        guidance_scale=7,  # CFG enabled with guidance scale 4.5
+        width=image_size,
+        height=image_size,
+        guidance_scale=7,
         max_t5_sequence_length=256,
         prompt_sequence_length=333,
-        spatial_sequence_length=1024,
+        spatial_sequence_length=spatial_sequence_length,
     )
-
-    # Test with a simple prompt
-    prompt = "A capybara wearing a suit holding a sign that reads hello world"
-    seed = 23
-    num_steps = 40
 
     images = tt_pipe.run_single_prompt(
         prompt=prompt,
-        negative_prompt=" ",
-        # negative_prompt="blurry, low quality, low contrast",
+        negative_prompt="blurry image",
         num_inference_steps=num_steps,
         seed=seed,
     )
 
-    # Basic validation
     assert len(images) == 1, "Should generate exactly one image"
-    assert images[0].size == (512, 512), f"Image size should be 512x512, got {images[0].size}"
-
-    # Save TT test image for visual inspection
-    images[0].save("test_sd35_medium_tt_output.png")
-    logger.info("TT image saved to test_sd35_medium_tt_output.png")
-    logger.info("TT image generation complete. Check test_sd35_medium_tt_output.png")
+    assert images[0].size == (
+        image_size,
+        image_size,
+    ), f"Image size should be {image_size}x{image_size}, got {images[0].size}"
+    images[0].save(f"test_sd35_medium_tt_output_{image_size}.png")
+    logger.info(f"TT {image_size}x{image_size} image saved to test_sd35_medium_tt_output_{image_size}.png")

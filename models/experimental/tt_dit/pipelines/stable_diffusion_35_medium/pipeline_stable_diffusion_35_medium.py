@@ -24,7 +24,7 @@ from models.experimental.tt_dit.encoders.t5.model_t5 import T5Encoder, T5Config
 
 # Import SD3.5 Medium transformer
 from models.experimental.tt_dit.models.transformers.sd35_med.transformer_sd35_medium import SD3Transformer2DModel
-from models.experimental.tt_dit.models.vae.vae_sd35 import VAEDecoder
+from models.experimental.tt_dit.models.vae.vae_sd35_med import VAEDecoder
 from models.experimental.tt_dit.parallel.manager import CCLManager
 from models.experimental.tt_dit.parallel.config import (
     DiTParallelConfig,
