@@ -2,6 +2,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+###########################################################
+# Adapted from https://github.com/mv-lab/swin2sr/tree/main
+# licensed under Apache-2.0 license.
+###########################################################
+
+
 import torch
 import torch.nn as nn
 

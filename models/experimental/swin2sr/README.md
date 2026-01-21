@@ -145,3 +145,7 @@ This test validates Swin2SR on single and multi-device setups using:
 - Memory Layouts: The TT-NN path uses ROW_MAJOR layout for resize ops and may pad channels to multiples of 32 to satisfy kernel/tile alignment.
 - Pipeline Configuration: Single device only supports 1 command queue without trace. Trace and 2CQ require sharded tensors which are not supported on single-device setups. Multi-device supports 2 command queues with trace for optimal performance using `ShardTensorToMesh` for input distribution and `ConcatMeshToTensor` for output composition.
 - Tiled Processing: Large images are automatically split into overlapping tiles for processing. Uses weighted averaging at tile boundaries for smooth transitions. Required due to transformer attention's quadratic memory growth and Wormhole L1 memory constraints.
+
+# References
+- **Original Paper**: [Swin2-SR](https://arxiv.org/abs/2209.11345)
+- **Reference Implementation**: [Swin2-SR](https://github.com/mv-lab/swin2sr/tree/main) by Marcos V. Conde, Ui-Jin Choi, Maxime Burchi, Radu Timofte ( Apache-2.0 license)
