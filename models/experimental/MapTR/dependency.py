@@ -4625,22 +4625,6 @@ class BaseDetector(nn.Module, metaclass=ABCMeta):
         assert isinstance(imgs, list)
         return [self.extract_feat(img) for img in imgs]
 
-    def forward_train(self, imgs, img_metas, **kwargs):
-        """
-        Args:
-            img (list[Tensor]): List of tensors of shape (1, C, H, W).
-                Typically these should be mean centered and std scaled.
-            img_metas (list[dict]): List of image info dict where each dict
-                has: 'img_shape', 'scale_factor', 'flip', and may also contain
-                'filename', 'ori_shape', 'pad_shape', and 'img_norm_cfg'.
-                For details on the values of these keys, see
-                :class:`mmdet.datasets.pipelines.Collect`.
-            kwargs (keyword arguments): Specific to concrete implementation.
-        """
-        batch_input_shape = tuple(imgs[0].size()[-2:])
-        for img_meta in img_metas:
-            img_meta["batch_input_shape"] = batch_input_shape
-
     @abstractmethod
     def simple_test(self, img, img_metas, **kwargs):
         pass
@@ -4693,9 +4677,10 @@ class BaseDetector(nn.Module, metaclass=ABCMeta):
         augmentations.
         """
         if return_loss:
-            return self.forward_train(**kwargs)
-        else:
-            return self.forward_test(**kwargs)
+            raise NotImplementedError(
+                "Training is disabled in this embedded MapTR reference. Use return_loss=False for inference."
+            )
+        return self.forward_test(**kwargs)
 
 
 # https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/dense_heads/base_dense_head.py
