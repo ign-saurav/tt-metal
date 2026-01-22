@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
+#
+# SPDX-License-Identifier: Apache-2.0
+
 _base_ = ["config_base_datasets_nus_3d.py", "config_base_default_runtime.py"]
 #
 plugin = True
