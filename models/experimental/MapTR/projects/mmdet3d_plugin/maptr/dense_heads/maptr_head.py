@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
+# SPDX-License-Identifier: Apache-2.0
+
 import copy
 import torch
 import torch.nn as nn
@@ -262,9 +265,6 @@ class MapTRHead(DETRHead):
                 head with normalized coordinate format (cx, cy, w, l, cz, h, theta, vx, vy). \
                 Shape [nb_dec, bs, num_query, 9].
         """
-        import numpy as np
-        import os
-
         batch_id = str(img_metas[0].get("sample_idx", "unknown")) if img_metas else "unknown"
         bs, num_cam, _, _, _ = mlvl_feats[0].shape
         dtype = mlvl_feats[0].dtype
@@ -281,9 +281,6 @@ class MapTRHead(DETRHead):
             bev_mask = torch.zeros((bs, self.bev_h, self.bev_w), device=bev_queries.device).to(dtype)
             if self.positional_encoding is not None:
                 bev_pos = self.positional_encoding(bev_mask).to(dtype)
-                save_dir = "models/experimental/MapTR/numpy_feats/position_encoding"
-                os.makedirs(save_dir, exist_ok=True)
-                np.save(os.path.join(save_dir, f"position_encoding_{batch_id}.npy"), bev_pos.detach().cpu().numpy())
             else:
                 bev_pos = None
         else:
@@ -421,18 +418,6 @@ class MapTRHead(DETRHead):
             "enc_bbox_preds": None,
             "enc_pts_preds": None,
         }
-        import numpy as np
-        import os
-
-        batch_id = str(img_metas[0].get("sample_idx", "unknown")) if img_metas else "unknown"
-        save_dir = "models/experimental/MapTR/numpy_feats/head"
-        os.makedirs(save_dir, exist_ok=True)
-        head_outputs = {
-            "all_cls_scores": outputs_classes.detach().cpu().numpy(),
-            "all_bbox_preds": outputs_coords.detach().cpu().numpy(),
-            "all_pts_preds": outputs_pts_coords.detach().cpu().numpy(),
-        }
-        np.save(os.path.join(save_dir, f"head_{batch_id}.npy"), head_outputs, allow_pickle=True)
 
         return outs
 
@@ -773,23 +758,6 @@ class MapTRHead(DETRHead):
         """
         # bboxes: xmin, ymin, xmax, ymax
         preds_dicts = self.bbox_coder.decode(preds_dicts)
-        import numpy as np
-        import os
-
-        batch_id = str(img_metas[0].get("sample_idx", "unknown")) if img_metas else "unknown"
-        save_dir = "models/experimental/MapTR/numpy_feats/bboxcoder"
-        os.makedirs(save_dir, exist_ok=True)
-        bboxcoder_outputs = []
-        for pred_dict in preds_dicts:
-            bboxcoder_outputs.append(
-                {
-                    "bboxes": pred_dict["bboxes"].detach().cpu().numpy(),
-                    "scores": pred_dict["scores"].detach().cpu().numpy(),
-                    "labels": pred_dict["labels"].detach().cpu().numpy(),
-                    "pts": pred_dict["pts"].detach().cpu().numpy(),
-                }
-            )
-        np.save(os.path.join(save_dir, f"bboxcoder_{batch_id}.npy"), bboxcoder_outputs, allow_pickle=True)
 
         num_samples = len(preds_dicts)
         ret_list = []

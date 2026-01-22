@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
+# SPDX-License-Identifier: Apache-2.0
+
+import os
 import torch
 import torch.nn as nn
 import numpy as np
@@ -351,13 +355,6 @@ class MapTRPerceptionTransformer(BaseModule):
             prev_bev=prev_bev,
             **kwargs,
         )
-        import os
-
-        img_metas = kwargs.get("img_metas", [])
-        batch_id = str(img_metas[0].get("sample_idx", "unknown")) if img_metas else "unknown"
-        save_dir = "models/experimental/MapTR/numpy_feats/encoder"
-        os.makedirs(save_dir, exist_ok=True)
-        np.save(os.path.join(save_dir, f"encoder_{batch_id}.npy"), bev_embed.detach().cpu().numpy())
 
         bs = mlvl_feats[0].size(0)
         query_pos, query = torch.split(object_query_embed, self.embed_dims, dim=1)
@@ -391,9 +388,6 @@ class MapTRPerceptionTransformer(BaseModule):
             level_start_index=torch.tensor([0], device=query.device),
             **kwargs,
         )
-        save_dir = "models/experimental/MapTR/numpy_feats/decoder"
-        os.makedirs(save_dir, exist_ok=True)
-        np.save(os.path.join(save_dir, f"decoder_{batch_id}.npy"), inter_states.detach().cpu().numpy())
 
         inter_references_out = inter_references
 
