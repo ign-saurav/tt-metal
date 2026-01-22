@@ -1,6 +1,13 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
-
+#
 # SPDX-License-Identifier: Apache-2.0
+
+"""
+Performance test for MapTR using TT-CNN Pipeline API for optimized execution.
+"""
+
+import time
+import traceback
 
 import numpy as np
 import pytest
@@ -8,14 +15,18 @@ import torch
 import ttnn
 from loguru import logger
 
-from models.common.utility_functions import comp_pcc
-from models.experimental.MapTR.reference.maptr import MapTR
-from models.experimental.MapTR.resources.download_chkpoint import ensure_checkpoint_downloaded, MAPTR_WEIGHTS_PATH
-from models.experimental.MapTR.tt import ttnn_maptr
+from models.common.utility_functions import comp_pcc, run_for_wormhole_b0
+from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.detectors.maptr import MapTR
+from models.experimental.MapTR.tt import tt_maptr
 from models.experimental.MapTR.tt.model_preprocessing import (
     create_maptr_model_parameters,
     load_maptr_weights,
 )
+from models.perf.perf_utils import prep_perf_report
+from models.tt_cnn.tt.pipeline import PipelineConfig, create_pipeline_from_config
+
+
+MAPTR_WEIGHTS_PATH = "models/experimental/MapTR/chkpt/maptr_tiny_r50_24e_bevformer.pth"
 
 
 class ConfigDict(dict):
@@ -226,18 +237,91 @@ def create_input_dict(num_cams=6, img_h=384, img_w=640):
     return input_dict
 
 
-@pytest.mark.parametrize("device_params", [{"l1_small_size": 20 * 1024}], indirect=True)
-def test_maptr(
+def create_stateless_maptr_pipeline_model(tt_model_class, torch_model, tensor, device, config, input_dict):
+    def run(input_tensor: ttnn.Tensor) -> tuple:
+        fresh_parameters = create_maptr_model_parameters(
+            torch_model,
+            tensor,
+            device,
+        )
+
+        fresh_model = tt_model_class(
+            device=device,
+            params=fresh_parameters,
+            use_grid_mask=False,
+            pts_voxel_layer=None,
+            pts_voxel_encoder=None,
+            pts_middle_encoder=None,
+            pts_fusion_layer=None,
+            img_backbone=True,
+            pts_backbone=None,
+            img_neck=True,
+            pts_neck=None,
+            pts_bbox_head=True,
+            img_roi_head=None,
+            img_rpn_head=None,
+            train_cfg=None,
+            test_cfg=None,
+            pretrained=None,
+            video_test_mode=False,
+            bev_h=config.bev_h,
+            bev_w=config.bev_w,
+            pc_range=config.pc_range,
+            num_vec=config.num_vec,
+            num_pts_per_vec=config.num_pts_per_vec,
+            num_classes=config.num_classes,
+            embed_dims=config.embed_dims,
+        )
+
+        if input_tensor.memory_config().buffer_type == ttnn.BufferType.L1:
+            input_tensor = ttnn.to_memory_config(input_tensor, ttnn.DRAM_MEMORY_CONFIG)
+
+        ttnn_img_feats = fresh_model.extract_feat(input_tensor, input_dict["img_metas"])
+        ttnn_head_outs = fresh_model.pts_bbox_head(
+            ttnn_img_feats,
+            lidar_feat=None,
+            img_metas=input_dict["img_metas"][0],
+            prev_bev=None,
+        )
+
+        output_keys = ["bev_embed", "all_cls_scores", "all_bbox_preds", "all_pts_preds"]
+        output_tensors = []
+
+        for key in output_keys:
+            if key in ttnn_head_outs:
+                ttnn_tensor = ttnn_head_outs[key]
+                if not isinstance(ttnn_tensor, torch.Tensor):
+                    if ttnn_tensor.layout != ttnn.ROW_MAJOR_LAYOUT:
+                        ttnn_tensor = ttnn.to_layout(ttnn_tensor, ttnn.ROW_MAJOR_LAYOUT)
+                    ttnn_tensor = ttnn.to_memory_config(ttnn_tensor, ttnn.DRAM_MEMORY_CONFIG)
+                output_tensors.append(ttnn_tensor)
+
+        return tuple(output_tensors)
+
+    return run
+
+
+@run_for_wormhole_b0()
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
+@pytest.mark.models_performance_bare_metal
+def test_maptr_e2e_performant(
     device,
     reset_seeds,
     model_location_generator,
 ):
+    """
+    Performance test for MapTR using TT-CNN Pipeline API with stateless wrapper.
+
+    Uses a stateless wrapper that creates a fresh model instance for each pipeline
+    call to avoid persistent tensor deallocation issues.
+    """
     torch.manual_seed(42)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
 
-    ensure_checkpoint_downloaded(MAPTR_WEIGHTS_PATH)
     config = create_maptr_config()
+
+    logger.info("Creating PyTorch MapTR model...")
     torch_model = MapTR(
         use_grid_mask=False,
         pts_voxel_layer=None,
@@ -257,18 +341,22 @@ def test_maptr(
         video_test_mode=False,
     )
 
+    logger.info(f"Loading weights from {MAPTR_WEIGHTS_PATH}...")
     torch_model = load_maptr_weights(torch_model, MAPTR_WEIGHTS_PATH)
     torch_model.eval()
 
     input_dict = create_input_dict()
     tensor = torch.randn(1, 6, 3, 384, 640)
-    parameters = create_maptr_model_parameters(torch_model, tensor, device)
 
-    tensor_tt = ttnn.from_torch(tensor, dtype=ttnn.bfloat16, device=device, layout=ttnn.ROW_MAJOR_LAYOUT)
-    img_tt = [tensor_tt]
+    logger.info("Creating TTNN model parameters...")
+    parameters = create_maptr_model_parameters(
+        torch_model,
+        tensor,
+        device,
+    )
 
     logger.info("Creating TTNN MapTR model...")
-    tt_model = ttnn_maptr.TtMapTR(
+    tt_model = tt_maptr.TtMapTR(
         device=device,
         params=parameters,
         use_grid_mask=False,
@@ -296,6 +384,7 @@ def test_maptr(
         embed_dims=config.embed_dims,
     )
 
+    logger.info("Extracting PyTorch head outputs...")
     with torch.no_grad():
         B, N, C, H, W = tensor.shape
         img_reshaped = tensor.reshape(B * N, C, H, W)
@@ -310,33 +399,118 @@ def test_maptr(
 
         img_metas_for_head = input_dict["img_metas"][0]
         torch_head_outs = torch_model.pts_bbox_head(
-            torch_fpn_reshaped, lidar_feat=None, img_metas=img_metas_for_head, prev_bev=None
+            torch_fpn_reshaped,
+            lidar_feat=None,
+            img_metas=img_metas_for_head,
+            prev_bev=None,
         )
 
-    ttnn_img_feats = tt_model.extract_feat(img_tt[0], input_dict["img_metas"])
-    ttnn_head_outs = tt_model.pts_bbox_head(
-        ttnn_img_feats, lidar_feat=None, img_metas=img_metas_for_head, prev_bev=None
+    logger.info("Creating stateless pipeline model...")
+    pipeline_model = create_stateless_maptr_pipeline_model(
+        tt_maptr.TtMapTR, torch_model, tensor, device, config, input_dict
     )
 
-    ttnn_head_outs_torch = {}
-    for key in ["bev_embed", "all_cls_scores", "all_bbox_preds", "all_pts_preds"]:
-        if key in ttnn_head_outs:
-            ttnn_tensor = ttnn_head_outs[key]
-            ttnn_head_outs_torch[key] = (
-                ttnn.to_torch(ttnn_tensor).float() if not isinstance(ttnn_tensor, torch.Tensor) else ttnn_tensor.float()
-            )
+    logger.info("Preparing input tensor for pipeline...")
+    # Use the same tensor as PyTorch reference for correct comparison
+    pipeline_input = ttnn.from_torch(
+        tensor,
+        device=None,
+        dtype=ttnn.bfloat16,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+    )
 
-    # PCC comparison for all 4 outputs
+    logger.info("Configuring pipeline...")
+    pipeline = create_pipeline_from_config(
+        config=PipelineConfig(
+            use_trace=False,
+            num_command_queues=1,
+            all_transfers_on_separate_command_queue=False,
+        ),
+        model=pipeline_model,
+        device=device,
+        dram_input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        l1_input_memory_config=ttnn.L1_MEMORY_CONFIG,
+    )
+
+    logger.info("Compiling pipeline (warmup)...")
+    start = time.time()
+    pipeline.compile(pipeline_input)
+    ttnn.synchronize_device(device)
+    end = time.time()
+    compile_time = end - start
+    logger.info(f"Compilation time: {compile_time:.2f}s")
+
+    num_iterations = 1
+    batch_size = 1
+    input_tensors = [pipeline_input] * num_iterations
+
+    pipeline.preallocate_output_tensors_on_host(num_iterations)
+
+    logger.info(f"Running {num_iterations} inference iteration(s)...")
+    start = time.time()
+    outputs = pipeline.enqueue(input_tensors).pop_all()
+    ttnn.synchronize_device(device)
+    end = time.time()
+
+    inference_time = (end - start) / num_iterations
+    throughput_fps = num_iterations * batch_size / (end - start)
+
+    # Convert pipeline outputs to expected format
+    # outputs is a list where each element corresponds to one input
+    # Each element is a tuple of (bev_embed, all_cls_scores, all_bbox_preds, all_pts_preds)
+    ttnn_head_outs_torch = {}
+    output_keys = ["bev_embed", "all_cls_scores", "all_bbox_preds", "all_pts_preds"]
+
+    if len(outputs) > 0:
+        output_tuple = outputs[0]
+        for i, key in enumerate(output_keys):
+            if i < len(output_tuple) and output_tuple[i] is not None:
+                output_tensor = output_tuple[i]
+                if not isinstance(output_tensor, torch.Tensor):
+                    ttnn_head_outs_torch[key] = ttnn.to_torch(output_tensor).float()
+                else:
+                    ttnn_head_outs_torch[key] = output_tensor.float()
+
+    # Cleanup pipeline
+    pipeline.cleanup()
+
+    logger.info("Final output PCC comparison:")
+    raw_pred_pass = True
     threshold = 0.99
-    outputs_to_check = ["all_cls_scores", "all_bbox_preds", "all_pts_preds", "bev_embed"]
-    logger.info("PCC Comparison Results:")
-    for key in outputs_to_check:
-        if key in torch_head_outs and key in ttnn_head_outs_torch:
-            ref = torch_head_outs[key].float()
-            tt = ttnn_head_outs_torch[key]
-            pcc_passed, pcc = comp_pcc(ref, tt, threshold)
-            status = "✓ PASS" if pcc_passed else "✗ FAIL"
-            logger.info(f"  {key}: PCC={pcc:.6f} {status}")
-            assert pcc_passed, f"{key} PCC {pcc:.6f} below threshold {threshold}"
-        else:
-            logger.warning(f"  {key}: Reference or TTNN output not available")
+
+    try:
+        outputs_to_check = ["all_cls_scores", "all_bbox_preds", "all_pts_preds", "bev_embed"]
+        for key in outputs_to_check:
+            if key in torch_head_outs and key in ttnn_head_outs_torch:
+                ref = torch_head_outs[key].float()
+                tt = ttnn_head_outs_torch[key]
+                _, pcc = comp_pcc(ref, tt)
+                status = "✓ PASS" if pcc >= threshold else "✗ FAIL"
+                logger.info(f"  {key}: PCC={pcc:.6f} {status}")
+                if pcc < threshold:
+                    raw_pred_pass = False
+            else:
+                logger.warning(f"  {key}: Reference or TTNN output not available")
+
+        assert raw_pred_pass, "PCC below threshold"
+        logger.info("PCC check PASSED!")
+    except Exception as e:
+        logger.error(f"Error during PCC check: {e}")
+        traceback.print_exc()
+        raise
+
+    logger.info(f"Average model time: {1000.0 * inference_time:.2f} ms")
+    logger.info(f"Average model performance: {throughput_fps:.2f} fps")
+
+    total_num_samples = batch_size
+    prep_perf_report(
+        model_name="maptr-e2e",
+        batch_size=total_num_samples,
+        inference_and_compile_time=compile_time,
+        inference_time=inference_time,
+        expected_compile_time=15.0,
+        expected_inference_time=total_num_samples / 0.12,
+        comments=f"img_384x640-iters_{num_iterations}",
+    )
+
+    logger.info("Performance test completed!")
