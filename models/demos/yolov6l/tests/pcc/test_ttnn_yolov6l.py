@@ -39,3 +39,4 @@ def test_yolov6l(device, reset_seeds, model_location_generator):
 
     output = ttnn.to_torch(output)
     assert_with_pcc(torch_output[0], output, pcc=0.999)
+    print(f"PCC: {assert_with_pcc(torch_output[0], output, pcc=0.999)[1]}")

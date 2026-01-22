@@ -1,9 +1,9 @@
 #!/bin/bash
 
-# Check if gdown is installed
-if ! command -v gdown &> /dev/null; then
+# Check if gdown is installed as a Python module
+if ! python3 -m gdown --version &> /dev/null; then
     echo "gdown is not installed. Installing..."
-    pip3 install gdown
+    uv pip install gdown
 fi
 
 # Google Drive file ID

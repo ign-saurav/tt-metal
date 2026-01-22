@@ -77,19 +77,22 @@ class TtYOLOv5xConv2D:
                 else ttnn.TensorMemoryLayout.BLOCK_SHARDED
             )
 
-        self.conv_config = ttnn.Conv2dConfig(
-            weights_dtype=weights_dtype,
-            shard_layout=shard_layout,
-            deallocate_activation=self.deallocate_activation,
-            reshard_if_not_optimal=True if self.use_1d_systolic_array else False,
-            activation=activation,
-            output_layout=ttnn.TILE_LAYOUT,
-            enable_act_double_buffer=self.enable_act_double_buffer,
-            enable_weights_double_buffer=self.enable_weights_double_buffer,
-        )
+        # Build Conv2dConfig kwargs - only include shard_layout if not using auto_shard
+        conv_config_kwargs = {
+            "weights_dtype": weights_dtype,
+            "deallocate_activation": self.deallocate_activation,
+            "reshard_if_not_optimal": True if self.use_1d_systolic_array else False,
+            "activation": activation,
+            "output_layout": ttnn.TILE_LAYOUT,
+            "enable_act_double_buffer": self.enable_act_double_buffer,
+            "enable_weights_double_buffer": self.enable_weights_double_buffer,
+        }
 
-        if auto_shard:
-            self.conv_config.shard_layout = None
+        # Only include shard_layout if not using auto_shard
+        if not auto_shard:
+            conv_config_kwargs["shard_layout"] = shard_layout
+
+        self.conv_config = ttnn.Conv2dConfig(**conv_config_kwargs)
 
         config_override = {"act_block_h": 64} if conv.in_channels == 3 or conv.in_channels == 6 else config_override
         if config_override and "act_block_h" in config_override:
