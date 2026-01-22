@@ -1,4 +1,4 @@
-_base_ = ["../datasets/custom_nus-3d.py", "../_base_/default_runtime.py"]
+_base_ = ["../_base_/datasets/nus-3d.py", "../_base_/default_runtime.py"]
 #
 plugin = True
 plugin_dir = "projects/mmdet3d_plugin/"
