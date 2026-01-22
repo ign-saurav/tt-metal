@@ -255,10 +255,9 @@ lr_config = dict(policy="CosineAnnealing", warmup="linear", warmup_iters=500, wa
 total_epochs = 24
 evaluation = dict(interval=1, pipeline=test_pipeline)
 
-runner = dict(type="EpochBasedRunner_video", max_epochs=total_epochs)
-
-log_config = dict(interval=50, hooks=[dict(type="TextLoggerHook"), dict(type="TensorboardLoggerHook")])
-
-fp16 = dict(loss_scale=512.0)
-checkpoint_config = dict(interval=1)
-custom_hooks = [dict(type="TransferWeight", priority="LOWEST")]
+# Training configs removed for inference-only build
+# runner = dict(type="EpochBasedRunner_video", max_epochs=total_epochs)
+# log_config = dict(interval=50, hooks=[dict(type="TextLoggerHook"), dict(type="TensorboardLoggerHook")])
+# fp16 = dict(loss_scale=512.0)
+# checkpoint_config = dict(interval=1)
+# custom_hooks = [dict(type="TransferWeight", priority="LOWEST")]

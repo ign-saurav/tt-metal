@@ -5360,48 +5360,6 @@ class MVXTwoStageDetector(Base3DDetector):
         pts_feats = self.extract_pts_feat(points, img_feats, img_metas)
         return (img_feats, pts_feats)
 
-    def forward_train(
-        self,
-        points=None,
-        img_metas=None,
-        gt_bboxes_3d=None,
-        gt_labels_3d=None,
-        gt_labels=None,
-        gt_bboxes=None,
-        img=None,
-        proposals=None,
-        gt_bboxes_ignore=None,
-    ):
-        """Forward training function."""
-        img_feats, pts_feats = self.extract_feat(points, img=img, img_metas=img_metas)
-        losses = dict()
-        if pts_feats:
-            losses_pts = self.forward_pts_train(pts_feats, gt_bboxes_3d, gt_labels_3d, img_metas, gt_bboxes_ignore)
-            losses.update(losses_pts)
-        if img_feats:
-            losses_img = self.forward_img_train(
-                img_feats,
-                img_metas=img_metas,
-                gt_bboxes=gt_bboxes,
-                gt_labels=gt_labels,
-                gt_bboxes_ignore=gt_bboxes_ignore,
-                proposals=proposals,
-            )
-            losses.update(losses_img)
-        return losses
-
-    def forward_pts_train(self, pts_feats, gt_bboxes_3d, gt_labels_3d, img_metas, gt_bboxes_ignore=None):
-        """Forward function for point cloud branch."""
-        outs = self.pts_bbox_head(pts_feats)
-        loss_inputs = outs + (gt_bboxes_3d, gt_labels_3d, img_metas)
-        losses = self.pts_bbox_head.loss(*loss_inputs, gt_bboxes_ignore=gt_bboxes_ignore)
-        return losses
-
-    def forward_img_train(self, x, img_metas, gt_bboxes, gt_labels, gt_bboxes_ignore=None, proposals=None, **kwargs):
-        """Forward function for image branch."""
-        losses = dict()
-        return losses
-
     def simple_test_pts(self, x, img_metas, rescale=False):
         """Test function of point cloud branch."""
         outs = self.pts_bbox_head(x)
@@ -12026,7 +11984,6 @@ def get_deprecated_model_names():
 
 # Adapted from : https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/parallel/data_parallel.py
 # Copyright (c) OpenMMLab. All rights reserved.
-from itertools import chain
 
 from torch.nn.parallel import DataParallel
 
@@ -12078,54 +12035,6 @@ class MMDataParallel(DataParallel):
 
     def scatter(self, inputs, kwargs, device_ids):
         return scatter_kwargs(inputs, kwargs, device_ids, dim=self.dim)
-
-    def train_step(self, *inputs, **kwargs):
-        if not self.device_ids:
-            # We add the following line thus the module could gather and
-            # convert data containers as those in GPU inference
-            inputs, kwargs = self.scatter(inputs, kwargs, [-1])
-            return self.module.train_step(*inputs[0], **kwargs[0])
-
-        assert len(self.device_ids) == 1, (
-            "MMDataParallel only supports single GPU training, if you need to"
-            " train with multiple GPUs, please use MMDistributedDataParallel"
-            " instead."
-        )
-
-        for t in chain(self.module.parameters(), self.module.buffers()):
-            if t.device != self.src_device_obj:
-                raise RuntimeError(
-                    "module must have its parameters and buffers "
-                    f"on device {self.src_device_obj} (device_ids[0]) but "
-                    f"found one of them on device: {t.device}"
-                )
-
-        inputs, kwargs = self.scatter(inputs, kwargs, self.device_ids)
-        return self.module.train_step(*inputs[0], **kwargs[0])
-
-    def val_step(self, *inputs, **kwargs):
-        if not self.device_ids:
-            # We add the following line thus the module could gather and
-            # convert data containers as those in GPU inference
-            inputs, kwargs = self.scatter(inputs, kwargs, [-1])
-            return self.module.val_step(*inputs[0], **kwargs[0])
-
-        assert len(self.device_ids) == 1, (
-            "MMDataParallel only supports single GPU training, if you need to"
-            " train with multiple GPUs, please use MMDistributedDataParallel"
-            " instead."
-        )
-
-        for t in chain(self.module.parameters(), self.module.buffers()):
-            if t.device != self.src_device_obj:
-                raise RuntimeError(
-                    "module must have its parameters and buffers "
-                    f"on device {self.src_device_obj} (device_ids[0]) but "
-                    f"found one of them on device: {t.device}"
-                )
-
-        inputs, kwargs = self.scatter(inputs, kwargs, self.device_ids)
-        return self.module.val_step(*inputs[0], **kwargs[0])
 
 
 # Eval hooks - these need to be defined before build_dataloader import to avoid circular import

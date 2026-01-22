@@ -255,7 +255,8 @@ lr_config = dict(policy="CosineAnnealing", warmup="linear", warmup_iters=500, wa
 total_epochs = 24
 evaluation = dict(interval=1, pipeline=test_pipeline)
 
-runner = dict(type="EpochBasedRunner", max_epochs=total_epochs)
+# Training config removed for inference-only build
+# runner = dict(type="EpochBasedRunner", max_epochs=total_epochs)
 
 log_config = dict(interval=50, hooks=[dict(type="TextLoggerHook"), dict(type="TensorboardLoggerHook")])
 

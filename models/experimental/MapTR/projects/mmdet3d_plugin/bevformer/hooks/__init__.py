@@ -1,1 +1,1 @@
-from .custom_hooks import TransferWeight
+# Training hooks removed for inference-only build

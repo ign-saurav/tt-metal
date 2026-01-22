@@ -236,7 +236,6 @@ class MapTR(MVXTwoStageDetector):
                     prev_bev = None
                 img_feats = [each_scale[:, i] for each_scale in img_feats_list]
                 prev_bev = self.pts_bbox_head(img_feats, None, img_metas, prev_bev, only_bev=True)
-            self.train()
             return prev_bev
 
     @torch.no_grad()

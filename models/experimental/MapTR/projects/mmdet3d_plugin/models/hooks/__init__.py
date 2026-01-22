@@ -1,1 +1,1 @@
-from .hooks import GradChecker
+# Training hooks removed for inference-only build
