@@ -18,12 +18,53 @@ Compared to SD3.5-Large, the Medium variant is smaller, faster, and requires les
 
 ## Performance
 
-Measured on N300 (1x2 mesh) at 512×512 with 40 steps:
+Performance measurements from the performance test suite:
 
-- prompt encoding: ~52.81s
-- denoising: ~105.66s
-- image decoding: ~87.32s
-- total runtime: ~246.71s
+### N150 (1x1 mesh) - 512×512, 40 steps, Guidance Scale=7.0
+
+- CLIP encoding: ~0.07s
+- T5 encoding: ~0.00s (disabled)
+- Total encoding: ~0.15s
+- Denoising (per step): ~0.60s
+- Total denoising: ~24.12s
+- VAE decoding: ~0.34s
+- **Total pipeline runtime: ~24.63s**
+- Throughput: ~0.0406 images/second
+
+### N150 (1x1 mesh) - 1024×1024, 40 steps, Guidance Scale=7.0
+
+- CLIP encoding: ~0.06s
+- T5 encoding: ~0.00s (disabled)
+- Total encoding: ~0.14s
+- Denoising (per step): ~2.63s
+- Total denoising: ~105.23s
+- VAE decoding: ~7.86s
+- **Total pipeline runtime: ~113.27s**
+- Throughput: ~0.0088 images/second
+
+### N300 (1x2 mesh) - 512×512, 40 steps, Guidance Scale=7.0
+
+- CLIP encoding: ~0.07s
+- T5 encoding: ~0.00s (disabled)
+- Total encoding: ~0.15s
+- Denoising (per step): ~0.71s
+- Total denoising: ~28.31s
+- VAE decoding: ~0.34s
+- **Total pipeline runtime: ~28.83s**
+- Throughput: ~0.0347 images/second
+
+### N300 (1x2 mesh) - 1024×1024, 40 steps, Guidance Scale=7.0
+
+- CLIP encoding: ~0.07s
+- T5 encoding: ~0.00s (disabled)
+- Total encoding: ~0.15s
+- Denoising (per step): ~2.68s
+- Total denoising: ~107.27s
+- VAE decoding: ~8.06s
+- **Total pipeline runtime: ~115.52s**
+- Throughput: ~0.0087 images/second
+
+*Note: Performance numbers are measured averages across multiple runs. Actual performance may vary based on system configuration and workload.*
 
 ## Prerequisites
 
@@ -53,6 +94,9 @@ export PYTHONPATH=$(pwd)
 # Run on N150 (1x1 mesh) at 512x512
 pytest models/experimental/tt_dit/tests/models/sd35_med/test_pipeline_sd35_medium.py -k "1x1_n150 and 512x512"
 
+# Run on N150 (1x1 mesh) at 1024x1024
+pytest models/experimental/tt_dit/tests/models/sd35_med/test_pipeline_sd35_medium.py -k "1x1_n150 and 1024x1024"
+
 # Run on N300 (1x2 mesh) at 512x512
 pytest models/experimental/tt_dit/tests/models/sd35_med/test_pipeline_sd35_medium.py -k "1x2_n300 and 512x512"
 
@@ -78,13 +122,16 @@ The SD3.5 Medium pipeline includes a comprehensive performance test suite that m
 
 ```bash
 # Run performance test on N150 (1x1 mesh) at 512x512
-pytest models/experimental/tt_dit/tests/models/sd35_med/test_performance_sd35_medium.py -k "1x1_n150 and 512x512"
+pytest models/experimental/tt_dit/tests/models/sd35_med/test_performance_sd35_medium.py -k "1x1_n150 and 512"
+
+# Run performance test on N150 (1x1 mesh) at 1024x1024
+pytest models/experimental/tt_dit/tests/models/sd35_med/test_performance_sd35_medium.py -k "1x1_n150 and 1024"
 
 # Run performance test on N300 (1x2 mesh) at 512x512
-pytest models/experimental/tt_dit/tests/models/sd35_med/test_performance_sd35_medium.py -k "1x2_n300 and 512x512"
+pytest models/experimental/tt_dit/tests/models/sd35_med/test_performance_sd35_medium.py -k "1x2_n300 and 512"
 
 # Run performance test on N300 (1x2 mesh) at 1024x1024
-pytest models/experimental/tt_dit/tests/models/sd35_med/test_performance_sd35_medium.py -k "1x2_n300 and 1024x1024"
+pytest models/experimental/tt_dit/tests/models/sd35_med/test_performance_sd35_medium.py -k "1x2_n300 and 1024"
 ```
 
 ### Performance Test Features

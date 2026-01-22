@@ -21,7 +21,7 @@ def get_expected_metrics(mesh_device):
     if tuple(mesh_device.shape) == (1, 1):
         return {
             "clip_encoding_time": 0.5,
-            "t5_encoding_time": 0.001,  # Allow small tolerance for disabled T5 overhead
+            "t5_encoding_time": 0.001,
             "total_encoding_time": 0.5,
             "denoising_steps_time": 200.0,
             "vae_decoding_time": 100.0,
@@ -30,7 +30,7 @@ def get_expected_metrics(mesh_device):
     elif tuple(mesh_device.shape) == (1, 2):
         return {
             "clip_encoding_time": 0.6,
-            "t5_encoding_time": 0.001,  # Allow small tolerance for disabled T5 overhead
+            "t5_encoding_time": 0.001,
             "total_encoding_time": 0.6,
             "denoising_steps_time": 110.0,
             "vae_decoding_time": 90.0,
@@ -48,24 +48,32 @@ def get_expected_metrics(mesh_device):
     ],
 )
 @pytest.mark.parametrize(
-    "mesh_device, cfg, sp, tp, topology, num_links",
+    "mesh_device, cfg, sp, tp, topology, num_links, device_params",
     [
-        [(1, 1), (1, 0), (1, 0), (1, 0), ttnn.Topology.Linear, 1],
-        [(1, 2), (2, 1), (1, 0), (1, 0), ttnn.Topology.Linear, 1],
+        [
+            (1, 1),
+            (1, 0),
+            (1, 0),
+            (1, 0),
+            ttnn.Topology.Linear,
+            1,
+            {"fabric_config": ttnn.FabricConfig.DISABLED, "l1_small_size": 32768, "trace_region_size": 25000000},
+        ],
+        [
+            (1, 2),
+            (2, 1),
+            (1, 0),
+            (1, 0),
+            ttnn.Topology.Linear,
+            1,
+            {"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 32768, "trace_region_size": 25000000},
+        ],
     ],
     ids=[
         "1x1_n150",
         "1x2_n300",
     ],
-    indirect=["mesh_device"],
-)
-@pytest.mark.parametrize(
-    "device_params",
-    [
-        {"fabric_config": ttnn.FabricConfig.DISABLED, "l1_small_size": 32768, "trace_region_size": 25000000},
-        {"fabric_config": ttnn.FabricConfig.FABRIC_1D, "l1_small_size": 32768, "trace_region_size": 25000000},
-    ],
-    indirect=True,
+    indirect=["mesh_device", "device_params"],
 )
 def test_sd35_medium_pipeline_performance(
     *,
