@@ -238,28 +238,13 @@ def create_input_dict(num_cams=6, img_h=384, img_w=640):
 
 
 def create_stateless_maptr_pipeline_model(tt_model_class, torch_model, tensor, device, config, input_dict):
-    """
-    Creates a stateless wrapper for MapTR that's compatible with TT-CNN Pipeline.
-
-    This wrapper creates a fresh model instance with recreated parameters for each call
-    to avoid persistent tensor deallocation issues. Parameters are recreated from the
-    torch model to ensure all device tensors are properly allocated.
-
-    Note: This approach has performance overhead due to parameter recreation, but ensures
-    correctness with the TT-CNN Pipeline API. If LazyWeight becomes available in the future,
-    it could be used to optimize parameter reallocation.
-    """
-
     def run(input_tensor: ttnn.Tensor) -> tuple:
-        # Recreate parameters for each pipeline call to ensure all device tensors are allocated
-        # This is necessary because the model deallocates parameter tensors during execution
         fresh_parameters = create_maptr_model_parameters(
             torch_model,
             tensor,
             device,
         )
 
-        # Create fresh model instance with recreated parameters
         fresh_model = tt_model_class(
             device=device,
             params=fresh_parameters,
@@ -288,11 +273,9 @@ def create_stateless_maptr_pipeline_model(tt_model_class, torch_model, tensor, d
             embed_dims=config.embed_dims,
         )
 
-        # Ensure input is in proper memory config
         if input_tensor.memory_config().buffer_type == ttnn.BufferType.L1:
             input_tensor = ttnn.to_memory_config(input_tensor, ttnn.DRAM_MEMORY_CONFIG)
 
-        # Run inference with fresh model
         ttnn_img_feats = fresh_model.extract_feat(input_tensor, input_dict["img_metas"])
         ttnn_head_outs = fresh_model.pts_bbox_head(
             ttnn_img_feats,
@@ -301,7 +284,6 @@ def create_stateless_maptr_pipeline_model(tt_model_class, torch_model, tensor, d
             prev_bev=None,
         )
 
-        # Convert outputs to expected format
         output_keys = ["bev_embed", "all_cls_scores", "all_bbox_preds", "all_pts_preds"]
         output_tensors = []
 
@@ -459,7 +441,7 @@ def test_maptr_e2e_performant(
     logger.info(f"Compilation time: {compile_time:.2f}s")
 
     num_iterations = 1
-    batch_size = 1  # From tensor shape: (1, 6, 3, 384, 640)
+    batch_size = 1
     input_tensors = [pipeline_input] * num_iterations
 
     pipeline.preallocate_output_tensors_on_host(num_iterations)
@@ -480,7 +462,7 @@ def test_maptr_e2e_performant(
     output_keys = ["bev_embed", "all_cls_scores", "all_bbox_preds", "all_pts_preds"]
 
     if len(outputs) > 0:
-        output_tuple = outputs[0]  # Get outputs for first (and only) input
+        output_tuple = outputs[0]
         for i, key in enumerate(output_keys):
             if i < len(output_tuple) and output_tuple[i] is not None:
                 output_tensor = output_tuple[i]
@@ -517,7 +499,6 @@ def test_maptr_e2e_performant(
         traceback.print_exc()
         raise
 
-    # Performance report
     logger.info(f"Average model time: {1000.0 * inference_time:.2f} ms")
     logger.info(f"Average model performance: {throughput_fps:.2f} fps")
 

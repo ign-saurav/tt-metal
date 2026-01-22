@@ -357,7 +357,7 @@ def test_maptr_e2e_performant(
     ttnn.synchronize_device(device)
     end_time = time.time()
     inference_time = end_time - start_time
-    compile_time = inference_time  # First run includes compilation
+    compile_time = inference_time
     num_iterations = 1
 
     ttnn_head_outs_torch = {}
@@ -394,7 +394,6 @@ def test_maptr_e2e_performant(
         traceback.print_exc()
         raise
 
-    # Performance report
     logger.info(f"Inference time: {1000.0 * inference_time:.2f} ms")
     logger.info(f"Throughput: {1.0 / inference_time:.2f} fps")
 

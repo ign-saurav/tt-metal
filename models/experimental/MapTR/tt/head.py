@@ -350,10 +350,7 @@ class TtMapTRHead:
             prev_bev=prev_bev,
         )
 
-        # Don't deallocate bev_queries if it's a model parameter (self.bev_embedding.weight)
-        # Model parameters should persist across calls, especially when using pipeline API
         if bev_queries is not None:
-            # Only deallocate if it's not the model parameter weight
             if self.bev_embedding is None or bev_queries is not self.bev_embedding.weight:
                 ttnn.deallocate(bev_queries)
         if bev_mask is not None:
@@ -393,17 +390,14 @@ class TtMapTRHead:
             tmp_updated = ttnn.add(tmp_xy, ref_xy)
             tmp_updated = ttnn.sigmoid(tmp_updated)
 
-            # Transform to bbox and pts
             outputs_coord, outputs_pts_coord = self.transform_box(tmp_updated)
 
             outputs_classes.append(outputs_class)
             outputs_coords.append(outputs_coord)
             outputs_pts_coords.append(outputs_pts_coord)
 
-            # Memory cleanup
             ttnn.deallocate(reference)
 
-        # Memory cleanup
         ttnn.deallocate(init_reference)
         for ref in inter_references:
             ttnn.deallocate(ref)
@@ -472,17 +466,14 @@ class TtMapTRHead:
             num_query = cls_score.shape[0]
             num_classes = self.num_classes
 
-            # Flatten and get top-k (self.num_vec = max_num = 50)
             scores_flat, indexs = cls_score.view(-1).topk(self.num_vec)
             labels = indexs % num_classes
             bbox_index = indexs // num_classes
             bbox_index = torch.clamp(bbox_index, 0, num_query - 1)
 
-            # Reorder predictions by top-k query indices
             bbox_pred_reordered = bbox_preds[i][bbox_index]
             pts_pred_reordered = pts_preds[i][bbox_index]
 
-            # Denormalize
             bboxes = denormalize_2d_bbox(bbox_pred_reordered, self.pc_range)
             pts = denormalize_2d_pts(pts_pred_reordered, self.pc_range)
 
