@@ -17,8 +17,8 @@ import ttnn
 from loguru import logger
 
 from models.common.utility_functions import comp_pcc, run_for_wormhole_b0
-from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.detectors.maptr import MapTR
-from models.experimental.MapTR.tt import tt_maptr
+from models.experimental.MapTR.reference.maptr import MapTR
+from models.experimental.MapTR.tt.ttnn_maptr import TtMapTR
 from models.experimental.MapTR.tt.model_preprocessing import (
     create_maptr_model_parameters,
     load_maptr_weights,
@@ -293,7 +293,7 @@ def test_maptr_e2e_performant(
     img_tt = [tensor_tt]
 
     logger.info("Creating TTNN MapTR model...")
-    tt_model = tt_maptr.TtMapTR(
+    tt_model = TtMapTR(
         device=device,
         params=parameters,
         use_grid_mask=False,

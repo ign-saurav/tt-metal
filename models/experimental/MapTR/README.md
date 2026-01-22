@@ -26,17 +26,24 @@ MapTR/
 ├── chkpt/                          # Checkpoint directory
 │   └── downloaded_weights.pth      # Auto-downloaded model weights
 ├── demo/                           # Demo scripts
-│   └── demo.py                     # Main inference demo
-├── projects/                       # Model definitions and configs
-│   ├── configs/                    # Configuration files
-│   │   ├── _base_/                 # Base configurations
-│   │   └── maptr/                  # MapTR-specific configs
+│   ├── demo.py                     # Main inference demo
+│   └── processing.py               # Data generation utilities
+├── reference/                      # Reference implementations and configs
+│   ├── config_maptr_tiny_r50_24e_bevformer.py  # Main config file
+│   ├── maptr.py                    # MapTR detector implementation
+│   ├── dependency.py               # Shared dependencies and utilities
+│   ├── datasets_nuscenes.py        # NuScenes dataset implementation
+│   ├── datasets_nuscenes_map.py    # NuScenes map dataset implementation
+│   ├── pipelines.py                # Data processing pipelines
+│   └── ...                         # Other reference modules
+├── projects/                       # MMDetection3D plugin modules (legacy)
 │   └── mmdet3d_plugin/            # MMDetection3D plugin modules
 │       ├── bevformer/              # BEVFormer encoder modules
 │       ├── maptr/                  # MapTR detector and head modules
 │       └── datasets/               # Dataset loaders
 ├── resources/                      # Resource utilities
-│   └── download_chkpoint.py        # Checkpoint download utility
+│   ├── download_chkpoint.py        # Checkpoint download utility
+│   └── nuScenes/                   # Sample data files
 ├── tests/                          # Test suite
 │   ├── pcc/                        # PCC tests for numerical validation
 │   │   ├── test_backbone.py        # ResNet50 backbone test
@@ -46,16 +53,16 @@ MapTR/
 │   │   ├── test_fpn.py             # FPN test
 │   │   ├── test_mha.py             # Multi-head attention test
 │   │   ├── test_transformer.py     # Transformer test
-│   │   └── test_tt_maptr.py        # Full model end-to-end test
+│   │   └── test_maptr.py           # Full model end-to-end test
 │   └── perf/                       # Performance tests
-├── tt/                             # TTNN implementations
-│   ├── backbone.py                 # ResNet50 TTNN implementation
-│   ├── encoder.py                  # BEVFormer encoder TTNN implementation
-│   ├── decoder.py                  # MapTR decoder TTNN implementation
-│   ├── head.py                     # MapTR head TTNN implementation
-│   ├── transformer.py              # Transformer TTNN implementation
-│   └── tt_maptr.py                 # Full MapTR TTNN model
-└── dependency.py                   # Shared dependencies and utilities
+└── tt/                             # TTNN implementations
+    ├── ttnn_backbone.py            # ResNet50 TTNN implementation
+    ├── ttnn_encoder.py             # BEVFormer encoder TTNN implementation
+    ├── ttnn_decoder.py             # MapTR decoder TTNN implementation
+    ├── ttnn_head.py                # MapTR head TTNN implementation
+    ├── ttnn_transformer.py         # Transformer TTNN implementation
+    ├── ttnn_maptr.py               # Full MapTR TTNN model
+    └── model_preprocessing.py       # Model preprocessing utilities
 ```
 
 ## Installation
@@ -75,7 +82,7 @@ MapTR/
 
 1. Ensure you're in the TTNN environment:
 ```bash
-cd /home/ubuntu/ign_tt/tt-metal
+cd /home/ubuntu/christyv1/tt-metal
 ```
 
 2. The checkpoint will be automatically downloaded when you run the demo or tests. If you want to download it manually:
@@ -92,17 +99,20 @@ The demo script automatically downloads the checkpoint if it's missing:
 
 ```bash
 # Using default checkpoint (auto-downloads if missing)
-python models/experimental/MapTR/demo/demo.py \
-    models/experimental/MapTR/projects/configs/maptr/maptr_tiny_r50_24e_bevformer.py
+python_env/bin/python \
+    models/experimental/MapTR/demo/demo.py \
+    models/experimental/MapTR/reference/config_maptr_tiny_r50_24e_bevformer.py
 
 # Using custom checkpoint
-python models/experimental/MapTR/demo/demo.py \
-    models/experimental/MapTR/projects/configs/maptr/maptr_tiny_r50_24e_bevformer.py \
+python_env/bin/python \
+    models/experimental/MapTR/demo/demo.py \
+    models/experimental/MapTR/reference/config_maptr_tiny_r50_24e_bevformer.py \
     path/to/your/checkpoint.pth
 
 # With custom options
-python models/experimental/MapTR/demo/demo.py \
-    models/experimental/MapTR/projects/configs/maptr/maptr_tiny_r50_24e_bevformer.py \
+python_env/bin/python \
+    models/experimental/MapTR/demo/demo.py \
+    models/experimental/MapTR/reference/config_maptr_tiny_r50_24e_bevformer.py \
     --score-thresh 0.5 \
     --show-dir ./output \
     --device-params '{"l1_small_size": 32768}'
@@ -147,7 +157,7 @@ pytest models/experimental/MapTR/tests/perf/
 - `test_spatial_cross_attention.py`: Tests Spatial Cross Attention
 - `test_temporal_self_attention.py`: Tests Temporal Self Attention
 - `test_transformer.py`: Tests MapTRPerceptionTransformer
-- `test_tt_maptr.py`: End-to-end full model test
+- `test_maptr.py`: End-to-end full model test
 
 ## Configuration
 
@@ -234,10 +244,11 @@ If PCC tests fail:
 
 If demo fails:
 
-1. Verify configuration file path is correct
+1. Verify configuration file path is correct (should be `models/experimental/MapTR/reference/config_maptr_tiny_r50_24e_bevformer.py`)
 2. Check that dataset paths in config are valid
 3. Ensure TTNN device parameters are appropriate for your hardware
 4. Check image input format matches expected dimensions
+5. Verify you're using `python_env/bin/python` or have the correct Python environment activated
 
 ## License
 

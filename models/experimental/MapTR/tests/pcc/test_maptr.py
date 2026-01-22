@@ -11,7 +11,7 @@ from loguru import logger
 from models.common.utility_functions import comp_pcc
 from models.experimental.MapTR.reference.maptr import MapTR
 from models.experimental.MapTR.resources.download_chkpoint import ensure_checkpoint_downloaded, MAPTR_WEIGHTS_PATH
-from models.experimental.MapTR.tt import ttnn_maptr
+from models.experimental.MapTR.tt.ttnn_maptr import TtMapTR
 from models.experimental.MapTR.tt.model_preprocessing import (
     create_maptr_model_parameters,
     load_maptr_weights,
@@ -268,7 +268,7 @@ def test_maptr(
     img_tt = [tensor_tt]
 
     logger.info("Creating TTNN MapTR model...")
-    tt_model = ttnn_maptr.TtMapTR(
+    tt_model = TtMapTR(
         device=device,
         params=parameters,
         use_grid_mask=False,

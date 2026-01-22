@@ -28,7 +28,7 @@ def test_perf_device_bare_metal_maptr(batch_size, model_name, expected_perf):
     num_iterations = 1
     margin = 0.1282
 
-    command = f"pytest models/experimental/MapTR/tests/pcc/test_tt_maptr.py::test_maptr"
+    command = f"pytest models/experimental/MapTR/tests/pcc/test_maptr.py::test_maptr"
 
     cols = ["DEVICE FW", "DEVICE KERNEL", "DEVICE BRISC KERNEL"]
 
