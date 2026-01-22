@@ -11,11 +11,12 @@ import json
 from models.experimental.MapTR.reference.dependency import Config
 from models.experimental.MapTR.reference.dependency import load_checkpoint, wrap_fp16_model
 from models.experimental.MapTR.reference.dependency import get_logger, ProgressBar
-from models.experimental.MapTR.reference.dependency import build_dataset
-from models.experimental.MapTR.reference.dependency import build_model
+from models.experimental.MapTR.reference.dependency import build_dataset, build_model
+
+# Import build_dataloader after dependency to avoid circular import
 from models.experimental.MapTR.reference.dependency import replace_ImageToTensor
 from models.experimental.MapTR.resources.download_chkpoint import ensure_checkpoint_downloaded, MAPTR_WEIGHTS_PATH
-from models.experimental.MapTR.tt import ttnn_maptr
+from models.experimental.MapTR.tt.ttnn_maptr import TtMapTR
 from models.experimental.MapTR.tt.model_preprocessing import (
     create_maptr_model_parameters,
 )
@@ -25,6 +26,16 @@ from PIL import Image
 import matplotlib.pyplot as plt
 from matplotlib.patches import Rectangle
 import cv2
+
+# Import processing functions from local processing.py
+# Add current directory to path to ensure import works when running as script
+import sys
+import os
+
+_current_dir = os.path.dirname(os.path.abspath(__file__))
+if _current_dir not in sys.path:
+    sys.path.insert(0, _current_dir)
+from processing import write_map_annotations_to_file, write_sample_info_to_file
 
 CAMS = [
     "CAM_FRONT_LEFT",
@@ -87,30 +98,34 @@ def main():
     args = parse_args()
     cfg = Config.fromfile(args.config)
 
-    # Import dataset modules to trigger registration of dataset classes
-    # This must happen before build_dataset is called
-    try:
-        pass
-    except Exception as e:
-        print(f"Warning: Failed to import dataset modules: {e}")
+    # Import dataset classes to register them
+    from models.experimental.MapTR.reference import datasets_nuscenes_map  # noqa: F401
+    from models.experimental.MapTR.reference import datasets_nuscenes  # noqa: F401
 
-    # Import pipeline modules to trigger registration of pipeline transforms
-    # This must happen before build_dataset is called (pipelines are used in dataset initialization)
-    try:
-        pass
-    except Exception as e:
-        print(f"Warning: Failed to import pipeline modules: {e}")
+    # Import pipeline classes to register them
+    from models.experimental.MapTR.reference import pipelines  # noqa: F401
 
     if hasattr(cfg, "plugin"):
         if cfg.plugin:
-            # Import reference modules directly to trigger registration
-            # No need for __init__.py - import modules directly to register classes
-            try:
-                from models.experimental.MapTR.reference.datasets import build_dataloader
+            import importlib
 
-                print("Imported reference modules for registration")
+            try:
+                if hasattr(cfg, "plugin_dir"):
+                    plugin_dir = cfg.plugin_dir
+                    _module_dir = plugin_dir.rstrip("/").replace("/", ".")
+                    if not _module_dir.startswith("models.experimental.MapTR."):
+                        _module_path = "models.experimental.MapTR." + _module_dir
+                    else:
+                        _module_path = _module_dir
+                else:
+                    _module_path = "models.experimental.MapTR.projects.mmdet3d_plugin"
+                print(f"Importing plugin from: {_module_path}")
+                plg_lib = importlib.import_module(_module_path)
             except Exception as e:
-                print(f"Warning: Failed to import reference modules: {e}")
+                print(f"Warning: Failed to import plugin module {_module_path}: {e}")
+                print("Trying default plugin path...")
+                _module_path = "models.experimental.MapTR.projects.mmdet3d_plugin"
+                plg_lib = importlib.import_module(_module_path)
 
     if cfg.get("cudnn_benchmark", False):
         torch.backends.cudnn.benchmark = True
@@ -139,8 +154,43 @@ def main():
     mmlogger = get_logger("demo")
     mmlogger.info(f"DONE create vis_pred dir: {args.show_dir}")
 
+    # Generate data files from processing.py instead of loading from external JSON/pickle files
+    if write_map_annotations_to_file is not None and write_sample_info_to_file is not None:
+        # Handle both dict and object-style config access
+        if isinstance(cfg.data.test, dict):
+            data_root = cfg.data.test.get("data_root", "models/experimental/MapTR/data/nuscenes/")
+            map_ann_file = cfg.data.test.get("map_ann_file")
+            ann_file = cfg.data.test.get("ann_file")
+        else:
+            data_root = getattr(cfg.data.test, "data_root", "models/experimental/MapTR/data/nuscenes/")
+            map_ann_file = getattr(cfg.data.test, "map_ann_file", None)
+            ann_file = getattr(cfg.data.test, "ann_file", None)
+
+        # Generate and write map annotations JSON file
+        if map_ann_file:
+            map_ann_file_path = map_ann_file
+            # Check if path already includes data_root (from config like data_root + "file.json")
+            if not osp.isabs(map_ann_file_path) and not map_ann_file_path.startswith(data_root):
+                map_ann_file_path = osp.join(data_root, map_ann_file_path)
+            mmlogger.info(f"Generating map annotations from processing.py and writing to {map_ann_file_path}")
+            write_map_annotations_to_file(map_ann_file_path)
+
+        # Generate and write sample info pickle file
+        if ann_file:
+            ann_file_path = ann_file
+            # Check if path already includes data_root (from config like data_root + "file.pkl")
+            if not osp.isabs(ann_file_path) and not ann_file_path.startswith(data_root):
+                ann_file_path = osp.join(data_root, ann_file_path)
+            mmlogger.info(f"Generating sample info from processing.py and writing to {ann_file_path}")
+            write_sample_info_to_file(ann_file_path)
+    else:
+        mmlogger.warning("Processing functions not available, will use default file loading")
+
     dataset = build_dataset(cfg.data.test)
     dataset.is_vis_on_test = True  # TODO, this is a hack
+    # Import build_dataloader here to avoid circular import
+    from models.experimental.MapTR.reference.datasets import build_dataloader
+
     data_loader = build_dataloader(
         dataset,
         samples_per_gpu=samples_per_gpu,
@@ -213,7 +263,7 @@ def main():
     )
 
     mmlogger.info("Creating TTNN MapTR model...")
-    tt_model = ttnn_maptr.TtMapTR(
+    tt_model = TtMapTR(
         device=device,
         params=parameters,
         use_grid_mask=False,

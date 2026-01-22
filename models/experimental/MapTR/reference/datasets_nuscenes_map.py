@@ -1153,7 +1153,11 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
             input_dict["camera2ego"] = []
             input_dict["camera_intrinsics"] = []
             for cam_type, cam_info in info["cams"].items():
-                image_paths.append(cam_info["data_path"])
+                # Join data_root with data_path to get full path
+                data_path = cam_info["data_path"]
+                if not os.path.isabs(data_path):
+                    data_path = os.path.join(self.data_root, data_path)
+                image_paths.append(data_path)
                 # obtain lidar to image transformation matrix
                 lidar2cam_r = np.linalg.inv(cam_info["sensor2lidar_rotation"])
                 lidar2cam_t = cam_info["sensor2lidar_translation"] @ lidar2cam_r.T
