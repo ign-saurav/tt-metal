@@ -132,6 +132,7 @@ def test_pcc_gemma_vlm_mlp(device, use_pretrained):
 
     # PyTorch
     mlp_torch = GemmaMLPTorch(config, mlp_weights)
+    print("MLP torch *** =>", mlp_torch)
     out_torch = mlp_torch.forward(hidden)
 
     # TTNN - convert weights
