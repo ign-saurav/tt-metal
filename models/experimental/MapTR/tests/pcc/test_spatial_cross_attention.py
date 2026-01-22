@@ -2,7 +2,6 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import pytest
 import torch
 import ttnn
@@ -10,6 +9,7 @@ from loguru import logger
 from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.spatial_cross_attention import (
     SpatialCrossAttention,
 )
+from models.experimental.MapTR.resources.download_chkpoint import ensure_checkpoint_downloaded, MAPTR_WEIGHTS_PATH
 from models.experimental.MapTR.tt.spatial_cross_attention import TtSpatialCrossAttention
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (
@@ -19,40 +19,22 @@ from ttnn.model_preprocessing import (
     preprocess_linear_bias,
 )
 
-
-MAPTR_WEIGHTS_PATH = "models/experimental/MapTR/chkpt/maptr_tiny_r50_24e_bevformer.pth"
-
-# Layer prefix for spatial cross attention in encoder layer 0
-# MapTR uses: pts_bbox_head.transformer.encoder.layers.0.attentions.1
-# attentions.0 = TemporalSelfAttention
-# attentions.1 = SpatialCrossAttention (GeometrySptialCrossAttention in actual mapTR config)
 SPATIAL_CROSS_ATTN_LAYER = "pts_bbox_head.transformer.encoder.layers.0.attentions.1."
 
 
 def load_maptr_spatial_cross_attention_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
-    if not os.path.exists(weights_path):
-        raise FileNotFoundError(f"MapTR weights not found at {weights_path}. " "Please download the weights first.")
+    ensure_checkpoint_downloaded(weights_path)
 
-    # Load full checkpoint
     checkpoint = torch.load(weights_path, map_location="cpu")
+    full_state_dict = checkpoint.get("state_dict", checkpoint)
 
-    # Handle different checkpoint formats
-    if "state_dict" in checkpoint:
-        full_state_dict = checkpoint["state_dict"]
-    else:
-        full_state_dict = checkpoint
-
-    # Extract only spatial cross attention weights
     sca_weights = {}
     for key, value in full_state_dict.items():
         if key.startswith(SPATIAL_CROSS_ATTN_LAYER):
-            # Remove the layer prefix to get the relative key
             relative_key = key[len(SPATIAL_CROSS_ATTN_LAYER) :]
             sca_weights[relative_key] = value
 
     logger.info(f"Loaded {len(sca_weights)} weight tensors for spatial cross attention")
-    logger.info(f"Weight keys: {list(sca_weights.keys())}")
-
     return sca_weights
 
 
@@ -80,35 +62,28 @@ def custom_preprocessor(model, name):
     parameters = {}
 
     if isinstance(model, SpatialCrossAttention):
-        parameters["spatial_cross_attention"] = {}
-        parameters["spatial_cross_attention"]["sampling_offsets"] = {}
-        parameters["spatial_cross_attention"]["sampling_offsets"]["weight"] = preprocess_linear_weight(
-            model.deformable_attention.sampling_offsets.weight, dtype=ttnn.bfloat16
-        )
-        parameters["spatial_cross_attention"]["sampling_offsets"]["bias"] = preprocess_linear_bias(
-            model.deformable_attention.sampling_offsets.bias, dtype=ttnn.bfloat16
-        )
-        parameters["spatial_cross_attention"]["attention_weights"] = {}
-        parameters["spatial_cross_attention"]["attention_weights"]["weight"] = preprocess_linear_weight(
-            model.deformable_attention.attention_weights.weight, dtype=ttnn.bfloat16
-        )
-        parameters["spatial_cross_attention"]["attention_weights"]["bias"] = preprocess_linear_bias(
-            model.deformable_attention.attention_weights.bias, dtype=ttnn.bfloat16
-        )
-        parameters["spatial_cross_attention"]["value_proj"] = {}
-        parameters["spatial_cross_attention"]["value_proj"]["weight"] = preprocess_linear_weight(
-            model.deformable_attention.value_proj.weight, dtype=ttnn.bfloat16
-        )
-        parameters["spatial_cross_attention"]["value_proj"]["bias"] = preprocess_linear_bias(
-            model.deformable_attention.value_proj.bias, dtype=ttnn.bfloat16
-        )
-        parameters["spatial_cross_attention"]["output_proj"] = {}
-        parameters["spatial_cross_attention"]["output_proj"]["weight"] = preprocess_linear_weight(
-            model.output_proj.weight, dtype=ttnn.bfloat16
-        )
-        parameters["spatial_cross_attention"]["output_proj"]["bias"] = preprocess_linear_bias(
-            model.output_proj.bias, dtype=ttnn.bfloat16
-        )
+        parameters["spatial_cross_attention"] = {
+            "sampling_offsets": {
+                "weight": preprocess_linear_weight(
+                    model.deformable_attention.sampling_offsets.weight, dtype=ttnn.bfloat16
+                ),
+                "bias": preprocess_linear_bias(model.deformable_attention.sampling_offsets.bias, dtype=ttnn.bfloat16),
+            },
+            "attention_weights": {
+                "weight": preprocess_linear_weight(
+                    model.deformable_attention.attention_weights.weight, dtype=ttnn.bfloat16
+                ),
+                "bias": preprocess_linear_bias(model.deformable_attention.attention_weights.bias, dtype=ttnn.bfloat16),
+            },
+            "value_proj": {
+                "weight": preprocess_linear_weight(model.deformable_attention.value_proj.weight, dtype=ttnn.bfloat16),
+                "bias": preprocess_linear_bias(model.deformable_attention.value_proj.bias, dtype=ttnn.bfloat16),
+            },
+            "output_proj": {
+                "weight": preprocess_linear_weight(model.output_proj.weight, dtype=ttnn.bfloat16),
+                "bias": preprocess_linear_bias(model.output_proj.bias, dtype=ttnn.bfloat16),
+            },
+        }
 
     return parameters
 
@@ -141,39 +116,26 @@ def create_maptr_model_parameters_sca(model: SpatialCrossAttention, input_tensor
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-def test_maptr_spatial_cross_attention(
-    device,
-    reset_seeds,
-):
-    # MapTR config parameters (matching maptr_tiny_r50_24e_bevformer.py)
+def test_maptr_spatial_cross_attention(device, reset_seeds):
     point_cloud_range = [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
     batch_first = True
     embed_dims = 256
-    num_levels = 1  # _num_levels_ in config
-    num_points = 8  # num_points in MSDeformableAttention3D
+    num_levels = 1
+    num_points = 8
 
-    # Create PyTorch model with matching deformable_attention config
     torch_model = SpatialCrossAttention(
         embed_dims=embed_dims,
         pc_range=point_cloud_range,
         batch_first=batch_first,
         deformable_attention=dict(
-            type="MSDeformableAttention3D",
-            embed_dims=embed_dims,
-            num_levels=num_levels,
-            num_points=num_points,
+            type="MSDeformableAttention3D", embed_dims=embed_dims, num_levels=num_levels, num_points=num_points
         ),
     )
-
-    # Load mapTR weights
     torch_model = load_torch_model_maptr(torch_model)
 
-    # Create input tensors
-    # MapTR uses bev_h=200, bev_w=100, so num_query = 200*100 = 20000
-    # For testing we use smaller values
     num_query = 10000
     num_cams = 6
-    num_points_per_level = 240  # 12 * 20 for spatial shape [12, 20]
+    num_points_per_level = 240
     num_z_anchors = 4
 
     query = torch.randn(1, num_query, embed_dims)
@@ -185,7 +147,6 @@ def test_maptr_spatial_cross_attention(
     bev_mask = torch.randn(num_cams, 1, num_query, num_z_anchors)
     level_start_index = torch.tensor([0])
 
-    # Run PyTorch model
     torch_output = torch_model(
         query,
         key,
@@ -197,14 +158,12 @@ def test_maptr_spatial_cross_attention(
         level_start_index=level_start_index,
     )
 
-    # Prepare TT model parameters
     parameter = create_maptr_model_parameters_sca(
         torch_model,
         [query, key, value, reference_points, spatial_shapes, reference_points_cam, bev_mask, level_start_index],
         device,
     )
 
-    # Create TT model
     tt_model = TtSpatialCrossAttention(
         device=device,
         params=parameter.spatial_cross_attention,
@@ -212,14 +171,10 @@ def test_maptr_spatial_cross_attention(
         pc_range=point_cloud_range,
         batch_first=batch_first,
         deformable_attention=dict(
-            type="MSDeformableAttention3D",
-            embed_dims=embed_dims,
-            num_levels=num_levels,
-            num_points=num_points,
+            type="MSDeformableAttention3D", embed_dims=embed_dims, num_levels=num_levels, num_points=num_points
         ),
     )
 
-    # Convert inputs to TT tensors
     query_tt = ttnn.from_torch(query, device=device, dtype=ttnn.bfloat16)
     key_tt = ttnn.from_torch(key, device=device, dtype=ttnn.bfloat16)
     value_tt = ttnn.from_torch(value, device=device, dtype=ttnn.bfloat16)
@@ -227,7 +182,6 @@ def test_maptr_spatial_cross_attention(
     bev_mask_tt = ttnn.from_torch(bev_mask, device=device, dtype=ttnn.bfloat16)
     level_start_index_tt = ttnn.from_torch(level_start_index, device=device, dtype=ttnn.bfloat16)
 
-    # Run TT model
     tt_output = tt_model(
         query_tt,
         key_tt,
@@ -239,7 +193,6 @@ def test_maptr_spatial_cross_attention(
         level_start_index=level_start_index_tt,
     )
 
-    # Compare outputs
     ttnn_output = ttnn.to_torch(tt_output)
     pcc_passed, pcc_message = assert_with_pcc(ttnn_output, torch_output, 0.99)
-    logger.info(pcc_message)
+    assert pcc_passed, pcc_message

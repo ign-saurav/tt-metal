@@ -2,8 +2,6 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-import traceback
-
 import numpy as np
 import pytest
 import torch
@@ -12,14 +10,12 @@ from loguru import logger
 
 from models.common.utility_functions import comp_pcc
 from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.detectors.maptr import MapTR
+from models.experimental.MapTR.resources.download_chkpoint import ensure_checkpoint_downloaded, MAPTR_WEIGHTS_PATH
 from models.experimental.MapTR.tt import tt_maptr
 from models.experimental.MapTR.tt.model_preprocessing import (
     create_maptr_model_parameters,
     load_maptr_weights,
 )
-
-
-MAPTR_WEIGHTS_PATH = "models/experimental/MapTR/chkpt/maptr_tiny_r50_24e_bevformer.pth"
 
 
 class ConfigDict(dict):
@@ -240,9 +236,8 @@ def test_maptr(
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(42)
 
+    ensure_checkpoint_downloaded(MAPTR_WEIGHTS_PATH)
     config = create_maptr_config()
-
-    logger.info("Creating PyTorch MapTR model...")
     torch_model = MapTR(
         use_grid_mask=False,
         pts_voxel_layer=None,
@@ -262,25 +257,16 @@ def test_maptr(
         video_test_mode=False,
     )
 
-    logger.info(f"Loading weights from {MAPTR_WEIGHTS_PATH}...")
     torch_model = load_maptr_weights(torch_model, MAPTR_WEIGHTS_PATH)
     torch_model.eval()
 
     input_dict = create_input_dict()
     tensor = torch.randn(1, 6, 3, 384, 640)
-
-    logger.info("Creating TTNN model parameters...")
-    logger.info("Creating TTNN model parameters...")
-    parameters = create_maptr_model_parameters(
-        torch_model,
-        tensor,
-        device,
-    )
+    parameters = create_maptr_model_parameters(torch_model, tensor, device)
 
     tensor_tt = ttnn.from_torch(tensor, dtype=ttnn.bfloat16, device=device, layout=ttnn.ROW_MAJOR_LAYOUT)
     img_tt = [tensor_tt]
 
-    logger.info("Creating TTNN MapTR model...")
     tt_model = tt_maptr.TtMapTR(
         device=device,
         params=parameters,
@@ -309,7 +295,6 @@ def test_maptr(
         embed_dims=config.embed_dims,
     )
 
-    logger.info("Extracting PyTorch head outputs...")
     with torch.no_grad():
         B, N, C, H, W = tensor.shape
         img_reshaped = tensor.reshape(B * N, C, H, W)
@@ -324,51 +309,33 @@ def test_maptr(
 
         img_metas_for_head = input_dict["img_metas"][0]
         torch_head_outs = torch_model.pts_bbox_head(
-            torch_fpn_reshaped,
-            lidar_feat=None,
-            img_metas=img_metas_for_head,
-            prev_bev=None,
+            torch_fpn_reshaped, lidar_feat=None, img_metas=img_metas_for_head, prev_bev=None
         )
 
-    logger.info("Extracting TTNN head outputs...")
     ttnn_img_feats = tt_model.extract_feat(img_tt[0], input_dict["img_metas"])
     ttnn_head_outs = tt_model.pts_bbox_head(
-        ttnn_img_feats,
-        lidar_feat=None,
-        img_metas=img_metas_for_head,
-        prev_bev=None,
+        ttnn_img_feats, lidar_feat=None, img_metas=img_metas_for_head, prev_bev=None
     )
 
     ttnn_head_outs_torch = {}
     for key in ["bev_embed", "all_cls_scores", "all_bbox_preds", "all_pts_preds"]:
         if key in ttnn_head_outs:
             ttnn_tensor = ttnn_head_outs[key]
-            if not isinstance(ttnn_tensor, torch.Tensor):
-                ttnn_head_outs_torch[key] = ttnn.to_torch(ttnn_tensor).float()
-            else:
-                ttnn_head_outs_torch[key] = ttnn_tensor.float()
+            ttnn_head_outs_torch[key] = (
+                ttnn.to_torch(ttnn_tensor).float() if not isinstance(ttnn_tensor, torch.Tensor) else ttnn_tensor.float()
+            )
 
-    logger.info("Final output PCC comparison:")
-    raw_pred_pass = True
+    # PCC comparison for all 4 outputs
     threshold = 0.99
-
-    try:
-        outputs_to_check = ["all_cls_scores", "all_bbox_preds", "all_pts_preds", "bev_embed"]
-        for key in outputs_to_check:
-            if key in torch_head_outs and key in ttnn_head_outs_torch:
-                ref = torch_head_outs[key].float()
-                tt = ttnn_head_outs_torch[key]
-                _, pcc = comp_pcc(ref, tt)
-                status = "✓ PASS" if pcc >= threshold else "✗ FAIL"
-                logger.info(f"  {key}: PCC={pcc:.6f} {status}")
-                if pcc < threshold:
-                    raw_pred_pass = False
-            else:
-                logger.warning(f"  {key}: Reference or TTNN output not available")
-
-        assert raw_pred_pass, "PCC below threshold"
-        logger.info("PCC check PASSED!")
-    except Exception as e:
-        logger.error(f"Error during PCC check: {e}")
-        traceback.print_exc()
-        raise
+    outputs_to_check = ["all_cls_scores", "all_bbox_preds", "all_pts_preds", "bev_embed"]
+    logger.info("PCC Comparison Results:")
+    for key in outputs_to_check:
+        if key in torch_head_outs and key in ttnn_head_outs_torch:
+            ref = torch_head_outs[key].float()
+            tt = ttnn_head_outs_torch[key]
+            pcc_passed, pcc = comp_pcc(ref, tt, threshold)
+            status = "✓ PASS" if pcc_passed else "✗ FAIL"
+            logger.info(f"  {key}: PCC={pcc:.6f} {status}")
+            assert pcc_passed, f"{key} PCC {pcc:.6f} below threshold {threshold}"
+        else:
+            logger.warning(f"  {key}: Reference or TTNN output not available")

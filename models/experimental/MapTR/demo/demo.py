@@ -15,6 +15,7 @@ from models.experimental.MapTR.dependency import build_dataset
 from models.experimental.MapTR.projects.mmdet3d_plugin.datasets.builder import build_dataloader
 from models.experimental.MapTR.dependency import build_model
 from models.experimental.MapTR.dependency import replace_ImageToTensor
+from models.experimental.MapTR.resources.download_chkpoint import ensure_checkpoint_downloaded, MAPTR_WEIGHTS_PATH
 from models.experimental.MapTR.tt import tt_maptr
 from models.experimental.MapTR.tt.model_preprocessing import (
     create_maptr_model_parameters,
@@ -56,7 +57,12 @@ def perspective(cam_coords, proj_mat):
 def parse_args():
     parser = argparse.ArgumentParser(description="MapTR TTNN Demo - visualize predictions using TTNN model")
     parser.add_argument("config", help="test config file path")
-    parser.add_argument("checkpoint", help="checkpoint file")
+    parser.add_argument(
+        "checkpoint",
+        nargs="?",
+        default=MAPTR_WEIGHTS_PATH,
+        help=f"checkpoint file (default: {MAPTR_WEIGHTS_PATH}, will auto-download if missing)",
+    )
     parser.add_argument("--score-thresh", default=0.4, type=float, help="score threshold for predictions")
     parser.add_argument("--show-dir", help="directory where visualizations will be saved")
     parser.add_argument("--show-cam", action="store_true", help="show camera pic")
@@ -148,8 +154,14 @@ def main():
     fp16_cfg = cfg.get("fp16", None)
     if fp16_cfg is not None:
         wrap_fp16_model(torch_model)
+
+    # Ensure checkpoint is downloaded if using default path
+    checkpoint_path = args.checkpoint
+    if checkpoint_path == MAPTR_WEIGHTS_PATH or not os.path.exists(checkpoint_path):
+        ensure_checkpoint_downloaded(checkpoint_path)
+
     mmlogger.info("loading checkpoint")
-    checkpoint = load_checkpoint(torch_model, args.checkpoint, map_location="cpu")
+    checkpoint = load_checkpoint(torch_model, checkpoint_path, map_location="cpu")
     if "CLASSES" in checkpoint.get("meta", {}):
         torch_model.CLASSES = checkpoint["meta"]["CLASSES"]
     else:

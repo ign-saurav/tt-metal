@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
+#
 # SPDX-License-Identifier: Apache-2.0
 
-import os
 import pytest
 import torch
 import numpy as np
@@ -9,6 +9,7 @@ import ttnn
 from loguru import logger
 
 from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.encoder import BEVFormerEncoder
+from models.experimental.MapTR.resources.download_chkpoint import ensure_checkpoint_downloaded, MAPTR_WEIGHTS_PATH
 from models.experimental.MapTR.tt.encoder import TtBEVFormerEncoder
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (
@@ -17,9 +18,6 @@ from ttnn.model_preprocessing import (
     preprocess_linear_bias,
     preprocess_layernorm_parameter,
 )
-
-
-MAPTR_WEIGHTS_PATH = "models/experimental/MapTR/chkpt/maptr_tiny_r50_24e_bevformer.pth"
 
 # Layer prefix for BEVFormer encoder
 # pts_bbox_head.transformer.encoder.layers.X.attentions.0 = TemporalSelfAttention
@@ -30,15 +28,10 @@ ENCODER_LAYER_PREFIX = "pts_bbox_head.transformer.encoder.layers."
 
 
 def load_maptr_encoder_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
-    if not os.path.exists(weights_path):
-        raise FileNotFoundError(f"MapTR weights not found at {weights_path}.")
+    ensure_checkpoint_downloaded(weights_path)
 
     checkpoint = torch.load(weights_path, map_location="cpu")
-
-    if "state_dict" in checkpoint:
-        full_state_dict = checkpoint["state_dict"]
-    else:
-        full_state_dict = checkpoint
+    full_state_dict = checkpoint.get("state_dict", checkpoint)
 
     encoder_weights = {}
     for key, value in full_state_dict.items():
@@ -47,55 +40,24 @@ def load_maptr_encoder_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
             encoder_weights[relative_key] = value
 
     logger.info(f"Loaded {len(encoder_weights)} weight tensors for encoder")
-    logger.info("=" * 60)
-    logger.info("Encoder weight keys from checkpoint:")
-    logger.info("=" * 60)
-    for key in sorted(encoder_weights.keys()):
-        shape = tuple(encoder_weights[key].shape)
-        logger.info(f"  {key}: {shape}")
-    logger.info("=" * 60)
-
     return encoder_weights
 
 
-def load_torch_encoder(
-    torch_model: BEVFormerEncoder,
-    weights_path: str = MAPTR_WEIGHTS_PATH,
-    num_layers: int = 1,
-):
+def load_torch_encoder(torch_model: BEVFormerEncoder, weights_path: str = MAPTR_WEIGHTS_PATH, num_layers: int = 1):
     encoder_weights = load_maptr_encoder_weights(weights_path)
-
     model_state_dict = torch_model.state_dict()
-
-    logger.info("=" * 60)
-    logger.info("Model state dict keys (expected):")
-    logger.info("=" * 60)
-    for key in sorted(model_state_dict.keys()):
-        shape = tuple(model_state_dict[key].shape)
-        logger.info(f"  {key}: {shape}")
-    logger.info("=" * 60)
-
     new_state_dict = {}
     matched_keys = []
     missing_keys = []
 
     for model_key in model_state_dict.keys():
-        # Map model keys to checkpoint keys
-        # Model: layers.0.attentions.0.sampling_offsets.weight
-        # Checkpoint: 0.attentions.0.sampling_offsets.weight
-        # Only remove the leading "layers." prefix, not all occurrences
         if model_key.startswith("layers."):
             checkpoint_key = model_key[len("layers.") :]
         else:
             checkpoint_key = model_key
 
-        # Handle FFN key mapping difference:
-        # Model (flat Sequential): ffns.0.layers.0.weight, ffns.0.layers.3.weight
-        # Checkpoint (nested Sequential): ffns.0.layers.0.0.weight, ffns.0.layers.1.weight
+        # Handle FFN key mapping: Model (flat) vs Checkpoint (nested Sequential)
         if ".ffns." in checkpoint_key and ".layers." in checkpoint_key:
-            # Map flat indices to nested structure
-            # layers.0 -> layers.0.0 (first linear is nested in Sequential)
-            # layers.3 -> layers.1 (second linear is at index 1)
             import re
 
             match = re.search(r"\.ffns\.(\d+)\.layers\.(\d+)\.(weight|bias)$", checkpoint_key)
@@ -103,16 +65,13 @@ def load_torch_encoder(
                 ffn_idx = match.group(1)
                 layer_idx = int(match.group(2))
                 param_type = match.group(3)
-
                 if layer_idx == 0:
-                    # First linear: layers.0 -> layers.0.0
                     checkpoint_key = re.sub(
                         r"\.ffns\.(\d+)\.layers\.0\.(weight|bias)$",
                         f".ffns.{ffn_idx}.layers.0.0.{param_type}",
                         checkpoint_key,
                     )
                 elif layer_idx == 3:
-                    # Second linear: layers.3 -> layers.1
                     checkpoint_key = re.sub(
                         r"\.ffns\.(\d+)\.layers\.3\.(weight|bias)$",
                         f".ffns.{ffn_idx}.layers.1.{param_type}",
@@ -123,14 +82,13 @@ def load_torch_encoder(
             new_state_dict[model_key] = encoder_weights[checkpoint_key]
             matched_keys.append(model_key)
         else:
-            logger.warning(f"Weight not found in checkpoint for: {model_key} (tried: {checkpoint_key})")
+            logger.warning(f"Weight not found: {model_key} (tried: {checkpoint_key})")
             new_state_dict[model_key] = model_state_dict[model_key]
             missing_keys.append(model_key)
 
-    logger.info(f"Successfully matched {len(matched_keys)} weights")
+    logger.info(f"Matched {len(matched_keys)}/{len(model_state_dict)} weights")
     if missing_keys:
-        logger.warning(f"Missing {len(missing_keys)} weights: {missing_keys}")
-
+        logger.warning(f"Missing {len(missing_keys)} weights")
     torch_model.load_state_dict(new_state_dict)
     torch_model.eval()
     return torch_model
@@ -240,99 +198,41 @@ def create_encoder_parameters(model: BEVFormerEncoder, device=None):
 
 
 def create_dummy_img_metas(batch_size: int = 1, num_cams: int = 6):
-    # Typical image shape: (H, W)
     img_h, img_w = 450, 800
     img_shape = [(img_h, img_w)] * num_cams
-
-    # Create proper lidar2img matrices for 6 cameras around the vehicle
-    # Each camera has: lidar2img = K @ [R | t] where K is intrinsic, R|t is extrinsic
-    lidar2img_list = []
-
-    # Camera intrinsics (shared)
-    fx, fy = 400.0, 400.0  # focal length
-    cx, cy = img_w / 2, img_h / 2  # principal point
-
-    # Camera positions around vehicle (front, front-left, front-right, back, back-left, back-right)
-    # Angles in radians from forward direction
+    fx, fy = 400.0, 400.0
+    cx, cy = img_w / 2, img_h / 2
     cam_angles = [0, np.pi / 3, -np.pi / 3, np.pi, 2 * np.pi / 3, -2 * np.pi / 3]
 
+    lidar2img_list = []
     for cam_idx in range(num_cams):
         angle = cam_angles[cam_idx % len(cam_angles)]
-
-        # Rotation matrix (camera looks outward from vehicle center)
-        # In lidar coords: x=right, y=forward, z=up
-        # Camera convention: z=forward (depth), x=right, y=down
         cos_a, sin_a = np.cos(angle), np.sin(angle)
-
-        # Rotation from lidar to camera frame
-        R = np.array(
-            [
-                [cos_a, sin_a, 0],  # camera x from lidar x,y
-                [0, 0, -1],  # camera y from -lidar z (flip up to down)
-                [sin_a, -cos_a, 0],  # camera z (depth) from lidar y,x
-            ],
-            dtype=np.float32,
-        )
-
-        # Translation: camera at height 1.5m, 2m from center in viewing direction
-        t = np.array(
-            [
-                -2 * sin_a,  # x offset
-                -2 * cos_a,  # y offset
-                -1.5,  # z offset (height)
-            ],
-            dtype=np.float32,
-        )
-
-        # Intrinsic matrix
-        K = np.array(
-            [
-                [fx, 0, cx, 0],
-                [0, fy, cy, 0],
-                [0, 0, 1, 0],
-                [0, 0, 0, 1],
-            ],
-            dtype=np.float32,
-        )
-
-        # Extrinsic matrix [R | t]
+        R = np.array([[cos_a, sin_a, 0], [0, 0, -1], [sin_a, -cos_a, 0]], dtype=np.float32)
+        t = np.array([-2 * sin_a, -2 * cos_a, -1.5], dtype=np.float32)
+        K = np.array([[fx, 0, cx, 0], [0, fy, cy, 0], [0, 0, 1, 0], [0, 0, 0, 1]], dtype=np.float32)
         RT = np.eye(4, dtype=np.float32)
         RT[:3, :3] = R
-        RT[:3, 3] = R @ t  # Transform translation to camera frame
+        RT[:3, 3] = R @ t
+        lidar2img_list.append(K @ RT)
 
-        # Combined projection matrix
-        lidar2img = K @ RT
-        lidar2img_list.append(lidar2img)
-
-    lidar2img = np.stack(lidar2img_list, axis=0)  # (num_cams, 4, 4)
-
-    img_metas = [
-        {
-            "img_shape": img_shape,
-            "lidar2img": lidar2img,
-        }
-        for _ in range(batch_size)
-    ]
-
-    return img_metas
+    lidar2img = np.stack(lidar2img_list, axis=0)
+    return [{"img_shape": img_shape, "lidar2img": lidar2img} for _ in range(batch_size)]
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
 def test_maptr_bevformer_encoder(device, reset_seeds):
-    # MapTR config parameters (reduced BEV size for memory constraints)
     point_cloud_range = [-15.0, -30.0, -2.0, 15.0, 30.0, 2.0]
     embed_dims = 256
-    num_heads = 8  # MSDeformableAttention3D uses 8 heads
+    num_heads = 8
     feedforward_channels = 512
-    num_levels = 1  # Single feature level
-    num_points = 8  # MSDeformableAttention3D num_points
-    num_layers = 1  # Test with 1 layer for simplicity
-    bev_h = 50  # Reduced from 200 for memory
-    bev_w = 25  # Reduced from 100 for memory
+    num_levels = 1
+    num_points = 8
+    num_layers = 1
+    bev_h, bev_w = 50, 25
     num_cams = 6
     batch_size = 1
 
-    # Create PyTorch model using config-based approach (matching MapTR reference)
     transformerlayers_cfg = dict(
         type="BEVFormerLayer",
         attn_cfgs=[
@@ -341,10 +241,7 @@ def test_maptr_bevformer_encoder(device, reset_seeds):
                 type="SpatialCrossAttention",
                 pc_range=point_cloud_range,
                 deformable_attention=dict(
-                    type="MSDeformableAttention3D",
-                    embed_dims=embed_dims,
-                    num_points=num_points,
-                    num_levels=num_levels,
+                    type="MSDeformableAttention3D", embed_dims=embed_dims, num_points=num_points, num_levels=num_levels
                 ),
                 embed_dims=embed_dims,
             ),
@@ -355,41 +252,25 @@ def test_maptr_bevformer_encoder(device, reset_seeds):
     )
 
     torch_model = BEVFormerEncoder(
-        transformerlayer=transformerlayers_cfg,  # Note: singular 'transformerlayer'
+        transformerlayer=transformerlayers_cfg,
         num_layers=num_layers,
         pc_range=point_cloud_range,
         num_points_in_pillar=4,
         return_intermediate=False,
     )
-
-    # Load mapTR weights
     torch_model = load_torch_encoder(torch_model, num_layers=num_layers)
 
-    # Create input tensors
     num_query = bev_h * bev_w
-
-    # BEV query: (num_query, bs, embed_dims) - before permute in forward
+    num_feat_per_level = 12 * 20
     bev_query = torch.randn(num_query, batch_size, embed_dims)
-
-    # Key/Value from backbone: (num_cams, num_feat, bs, embed_dims)
-    num_feat_per_level = 12 * 20  # Example: 12x20 feature map
     key = torch.randn(num_cams, num_feat_per_level, batch_size, embed_dims)
     value = torch.randn(num_cams, num_feat_per_level, batch_size, embed_dims)
-
-    # BEV positional encoding: (num_query, bs, embed_dims)
     bev_pos = torch.randn(num_query, batch_size, embed_dims)
-
-    # Spatial shapes for feature levels
     spatial_shapes = torch.tensor([[12, 20]])
     level_start_index = torch.tensor([0])
-
-    # Shift for temporal alignment
     shift = torch.zeros(batch_size, 2)
-
-    # Image metadata
     img_metas = create_dummy_img_metas(batch_size, num_cams)
 
-    # Run PyTorch model
     with torch.no_grad():
         torch_output = torch_model(
             bev_query,
@@ -405,15 +286,7 @@ def test_maptr_bevformer_encoder(device, reset_seeds):
             img_metas=img_metas,
         )
 
-    logger.info(f"PyTorch output shape: {torch_output.shape}")
-    logger.info(
-        f"PyTorch output stats: min={torch_output.min():.4f}, max={torch_output.max():.4f}, mean={torch_output.mean():.4f}"
-    )
-
-    # Prepare TT model parameters
     parameters = create_encoder_parameters(torch_model, device)
-
-    # Create TT model
     tt_model = TtBEVFormerEncoder(
         params=parameters,
         device=device,
@@ -428,7 +301,6 @@ def test_maptr_bevformer_encoder(device, reset_seeds):
         num_points=num_points,
     )
 
-    # Convert inputs to TT tensors
     bev_query_tt = ttnn.from_torch(bev_query, device=device, dtype=ttnn.bfloat16)
     key_tt = ttnn.from_torch(key, device=device, dtype=ttnn.bfloat16)
     value_tt = ttnn.from_torch(value, device=device, dtype=ttnn.bfloat16)
@@ -437,7 +309,6 @@ def test_maptr_bevformer_encoder(device, reset_seeds):
     level_start_index_tt = ttnn.from_torch(level_start_index, device=device, dtype=ttnn.bfloat16)
     shift_tt = ttnn.from_torch(shift, device=device, dtype=ttnn.bfloat16)
 
-    # Run TT model
     tt_output = tt_model(
         bev_query_tt,
         key_tt,
@@ -452,12 +323,6 @@ def test_maptr_bevformer_encoder(device, reset_seeds):
         img_metas=img_metas,
     )
 
-    # Compare outputs
     ttnn_output = ttnn.to_torch(tt_output)
-    logger.info(f"TT output shape: {ttnn_output.shape}")
-    logger.info(
-        f"TT output stats: min={ttnn_output.min():.4f}, max={ttnn_output.max():.4f}, mean={ttnn_output.mean():.4f}"
-    )
-
     pcc_passed, pcc_message = assert_with_pcc(ttnn_output, torch_output, 0.97)
-    logger.info(f"PCC Result: {pcc_message}")
+    assert pcc_passed, pcc_message

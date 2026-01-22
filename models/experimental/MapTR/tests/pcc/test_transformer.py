@@ -7,6 +7,7 @@ import torch
 import ttnn
 import numpy as np
 import torch.nn as nn
+from loguru import logger
 
 from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.modules.transformer import (
     MapTRPerceptionTransformer,
@@ -19,6 +20,7 @@ from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.tempora
 from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.spatial_cross_attention import (
     SpatialCrossAttention,
 )
+from models.experimental.MapTR.resources.download_chkpoint import ensure_checkpoint_downloaded, MAPTR_WEIGHTS_PATH
 from models.experimental.MapTR.tt.transformer import TtMapTRPerceptionTransformer
 from models.experimental.MapTR.tt.encoder import TtBEVFormerEncoder
 from models.experimental.MapTR.tt.decoder import TtMapTRDecoder
@@ -29,6 +31,82 @@ from ttnn.model_preprocessing import (
     preprocess_linear_bias,
     preprocess_layernorm_parameter,
 )
+
+TRANSFORMER_LAYER_PREFIX = "pts_bbox_head.transformer."
+ENCODER_LAYER_PREFIX = "pts_bbox_head.transformer.encoder.layers."
+DECODER_LAYER_PREFIX = "pts_bbox_head.transformer.decoder.layers."
+
+
+def load_maptr_transformer_weights(weights_path: str = MAPTR_WEIGHTS_PATH):
+    ensure_checkpoint_downloaded(weights_path)
+
+    checkpoint = torch.load(weights_path, map_location="cpu")
+    full_state_dict = checkpoint.get("state_dict", checkpoint.get("model", checkpoint))
+
+    transformer_weights = {}
+    encoder_weights = {}
+    decoder_weights = {}
+
+    for key, value in full_state_dict.items():
+        if key.startswith(TRANSFORMER_LAYER_PREFIX):
+            relative_key = key[len(TRANSFORMER_LAYER_PREFIX) :]
+            if relative_key.startswith("encoder.layers."):
+                encoder_relative_key = relative_key[len("encoder.layers.") :]
+                encoder_weights[encoder_relative_key] = value
+            elif relative_key.startswith("decoder.layers."):
+                decoder_relative_key = relative_key[len("decoder.layers.") :]
+                decoder_weights[decoder_relative_key] = value
+            else:
+                transformer_weights[relative_key] = value
+
+    logger.info(
+        f"Loaded {len(transformer_weights)} transformer weights, {len(encoder_weights)} encoder weights, {len(decoder_weights)} decoder weights"
+    )
+    return transformer_weights, encoder_weights, decoder_weights
+
+
+def load_torch_transformer_model(torch_model: MapTRPerceptionTransformer, weights_path: str = MAPTR_WEIGHTS_PATH):
+    transformer_weights, encoder_weights, decoder_weights = load_maptr_transformer_weights(weights_path)
+    model_state_dict = torch_model.state_dict()
+    new_state_dict = {}
+
+    for model_key in model_state_dict.keys():
+        if model_key.startswith("encoder.layers."):
+            encoder_key = model_key[len("encoder.layers.") :]
+            if encoder_key in encoder_weights:
+                new_state_dict[model_key] = encoder_weights[encoder_key]
+            else:
+                logger.warning(f"Encoder weight not found: {model_key}")
+                new_state_dict[model_key] = model_state_dict[model_key]
+        elif model_key.startswith("decoder.layers."):
+            decoder_key = model_key[len("decoder.layers.") :]
+            if decoder_key in decoder_weights:
+                new_state_dict[model_key] = decoder_weights[decoder_key]
+            else:
+                logger.warning(f"Decoder weight not found: {model_key}")
+                new_state_dict[model_key] = model_state_dict[model_key]
+        elif model_key in transformer_weights:
+            checkpoint_weight = transformer_weights[model_key]
+            model_weight = model_state_dict[model_key]
+            if checkpoint_weight.shape != model_weight.shape:
+                if model_key == "level_embeds" and len(checkpoint_weight.shape) == 2 and len(model_weight.shape) == 2:
+                    new_state_dict[model_key] = checkpoint_weight[: model_weight.shape[0]]
+                else:
+                    logger.warning(f"Shape mismatch for {model_key}: {checkpoint_weight.shape} vs {model_weight.shape}")
+                    new_state_dict[model_key] = model_weight
+            else:
+                new_state_dict[model_key] = checkpoint_weight
+        else:
+            logger.warning(f"Transformer weight not found: {model_key}")
+            new_state_dict[model_key] = model_state_dict[model_key]
+
+    missing_keys, unexpected_keys = torch_model.load_state_dict(new_state_dict, strict=False)
+    if missing_keys:
+        logger.warning(f"Missing {len(missing_keys)} keys")
+    if unexpected_keys:
+        logger.warning(f"Unexpected {len(unexpected_keys)} keys")
+    torch_model.eval()
+    return torch_model
 
 
 def custom_preprocessor(model, name):
@@ -44,7 +122,6 @@ def custom_preprocessor(model, name):
                 "norms": {},
             }
 
-            # ---- Norms ----
             for n, norm in enumerate(getattr(layer, "norms", [])):
                 if isinstance(norm, nn.LayerNorm):
                     layer_dict["norms"][f"norm{n}"] = {
@@ -52,9 +129,7 @@ def custom_preprocessor(model, name):
                         "bias": preprocess_layernorm_parameter(norm.bias, dtype=ttnn.bfloat16),
                     }
 
-            # ---- FFNs ----
             for k, ffn in enumerate(getattr(layer, "ffns", [])):
-                # FFN structure: layers[0] = Linear, layers[1] = activation, layers[2] = dropout, layers[3] = Linear
                 layer_dict["ffn"][f"ffn{k}"] = {
                     "linear1": {
                         "weight": preprocess_linear_weight(ffn.layers[0].weight, dtype=ttnn.bfloat16),
@@ -65,8 +140,6 @@ def custom_preprocessor(model, name):
                         "bias": preprocess_linear_bias(ffn.layers[3].bias, dtype=ttnn.bfloat16),
                     },
                 }
-
-            # ---- Attentions ----
             for j, attn in enumerate(getattr(layer, "attentions", [])):
                 if isinstance(attn, TemporalSelfAttention):
                     layer_dict["attentions"][f"attn{j}"] = {
@@ -113,7 +186,7 @@ def custom_preprocessor(model, name):
                         },
                     }
 
-                elif hasattr(attn, "attn"):  # MultiheadAttention wrapper
+                elif hasattr(attn, "attn"):
                     layer_dict["attentions"][f"attn{j}"] = {
                         "in_proj": {
                             "weight": preprocess_linear_weight(attn.attn.in_proj_weight, dtype=ttnn.bfloat16),
@@ -124,8 +197,7 @@ def custom_preprocessor(model, name):
                             "bias": preprocess_linear_bias(attn.attn.out_proj.bias, dtype=ttnn.bfloat16),
                         },
                     }
-
-                else:  # CustomMSDeformableAttention
+                else:
                     layer_dict["attentions"][f"attn{j}"] = {
                         "sampling_offsets": {
                             "weight": preprocess_linear_weight(attn.sampling_offsets.weight, dtype=ttnn.bfloat16),
@@ -150,22 +222,14 @@ def custom_preprocessor(model, name):
 
     if isinstance(model, MapTRPerceptionTransformer):
         parameters = {}
-
-        # Extract encoder parameters
         if hasattr(model, "encoder") and isinstance(model.encoder, BEVFormerEncoder):
             parameters["encoder"] = extract_transformer_parameters(model.encoder)
-
-        # Extract decoder parameters
         if hasattr(model, "decoder") and isinstance(model.decoder, MapTRDecoder):
             parameters["decoder"] = extract_transformer_parameters(model.decoder)
-
-        # Reference points
         parameters["reference_points"] = {
             "weight": preprocess_linear_weight(model.reference_points.weight, dtype=ttnn.bfloat16),
             "bias": preprocess_linear_bias(model.reference_points.bias, dtype=ttnn.bfloat16),
         }
-
-        # CAN bus MLP: [0]=Linear, [1]=ReLU, [2]=Linear, [3]=ReLU, [norm]=LayerNorm
         parameters["can_bus_mlp"] = {
             "0": {
                 "weight": preprocess_linear_weight(model.can_bus_mlp[0].weight, dtype=ttnn.bfloat16),
@@ -180,8 +244,6 @@ def custom_preprocessor(model, name):
                 "bias": preprocess_layernorm_parameter(model.can_bus_mlp.norm.bias, dtype=ttnn.bfloat16),
             },
         }
-
-        # Embeddings
         parameters["level_embeds"] = ttnn.from_torch(model.level_embeds, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
         parameters["cams_embeds"] = ttnn.from_torch(model.cams_embeds, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
 
@@ -212,11 +274,7 @@ def create_maptr_model_parameters(model: MapTRPerceptionTransformer, device=None
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
-def test_maptr_transformer(
-    device,
-    reset_seeds,
-):
-    # Config
+def test_maptr_transformer(device, reset_seeds):
     embed_dims = 256
     num_feature_levels = 1
     num_cams = 6
@@ -225,9 +283,7 @@ def test_maptr_transformer(
     num_vec = 10
     num_pts_per_vec = 10
     num_query = num_vec * num_pts_per_vec
-    grid_length = [0.512, 0.512]
 
-    # Encoder config
     encoder_cfg = dict(
         type="BEVFormerEncoder",
         num_layers=1,
@@ -256,7 +312,6 @@ def test_maptr_transformer(
         ),
     )
 
-    # Decoder config
     decoder_cfg = dict(
         type="MapTRDecoder",
         num_layers=6,
@@ -273,7 +328,6 @@ def test_maptr_transformer(
         ),
     )
 
-    # Create PyTorch model
     torch_model = MapTRPerceptionTransformer(
         encoder=encoder_cfg,
         decoder=decoder_cfg,
@@ -288,14 +342,12 @@ def test_maptr_transformer(
         use_cams_embeds=True,
         rotate_center=[bev_h // 2, bev_w // 2],
     )
-    torch_model.eval()
+    torch_model = load_torch_transformer_model(torch_model)
 
-    # Disable dropout for deterministic results
     for module in torch_model.modules():
         if isinstance(module, nn.Dropout):
             module.p = 0
 
-    # Create test inputs
     feat_h, feat_w = 28, 50
     mlvl_feats_torch = torch.randn(1, num_cams, embed_dims, feat_h, feat_w)
     bev_queries = torch.randn(bev_h * bev_w, embed_dims)
@@ -332,7 +384,6 @@ def test_maptr_transformer(
         }
     ]
 
-    # Run PyTorch model
     with torch.no_grad():
         torch_outputs = torch_model(
             mlvl_feats=[mlvl_feats_torch],
@@ -345,18 +396,12 @@ def test_maptr_transformer(
             img_metas=img_metas,
         )
 
-    # Preprocess parameters
     parameters = create_maptr_model_parameters(torch_model, device=device)
-
-    # Create encoder params wrapper (encoder needs .layers.layer0 attribute access)
     encoder_params = ParamsWrapper(parameters.get("encoder", {}).get("layers", {}))
     encoder_params.layers = encoder_params
-
-    # Create decoder params wrapper
     decoder_params = ParamsWrapper(parameters.get("decoder", {}).get("layers", {}))
     decoder_params.layers = decoder_params
 
-    # Create TT encoder
     tt_encoder = TtBEVFormerEncoder(
         params=encoder_params,
         device=device,
@@ -370,7 +415,6 @@ def test_maptr_transformer(
         num_points=8,
     )
 
-    # Create TT decoder
     tt_decoder = TtMapTRDecoder(
         num_layers=6,
         embed_dims=embed_dims,
@@ -400,8 +444,6 @@ def test_maptr_transformer(
                     setattr(self, k, v)
 
     transformer_params = TransformerParams(parameters)
-
-    # Create TT transformer
     tt_model = TtMapTRPerceptionTransformer(
         params=transformer_params,
         device=device,
@@ -418,7 +460,6 @@ def test_maptr_transformer(
         rotate_center=[bev_h // 2, bev_w // 2],
     )
 
-    # Convert inputs to TTNN
     tt_mlvl_feats = [ttnn.from_torch(mlvl_feats_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)]
     tt_bev_queries = ttnn.from_torch(bev_queries, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
     tt_object_query_embed = ttnn.from_torch(
@@ -426,7 +467,6 @@ def test_maptr_transformer(
     )
     tt_bev_pos = ttnn.from_torch(bev_pos, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
 
-    # Run TT model
     tt_outputs = tt_model(
         mlvl_feats=tt_mlvl_feats,
         lidar_feat=None,
@@ -438,22 +478,9 @@ def test_maptr_transformer(
         img_metas=img_metas,
     )
 
-    # Compare outputs
-    # torch_outputs: (bev_embed, inter_states, init_reference, inter_references)
-    # tt_outputs: same structure
+    pcc_bev_passed, _ = assert_with_pcc(torch_outputs[0], ttnn.to_torch(tt_outputs[0]).float(), 0.90)
+    pcc_states_passed, _ = assert_with_pcc(torch_outputs[1], ttnn.to_torch(tt_outputs[1]).float(), 0.90)
+    pcc_init_ref_passed, _ = assert_with_pcc(torch_outputs[2], ttnn.to_torch(tt_outputs[2]).float(), 0.95)
+    pcc_inter_ref_passed, _ = assert_with_pcc(torch_outputs[3], ttnn.to_torch(tt_outputs[3]).float(), 0.90)
 
-    # BEV embed (encoder output)
-    result_bev = assert_with_pcc(torch_outputs[0], ttnn.to_torch(tt_outputs[0]).float(), 0.90)
-    print(f"BEV embed PCC: {result_bev}")
-
-    # Inter states (decoder intermediate outputs)
-    result_states = assert_with_pcc(torch_outputs[1], ttnn.to_torch(tt_outputs[1]).float(), 0.90)
-    print(f"Inter states PCC: {result_states}")
-
-    # Init reference points
-    result_init_ref = assert_with_pcc(torch_outputs[2], ttnn.to_torch(tt_outputs[2]).float(), 0.95)
-    print(f"Init reference PCC: {result_init_ref}")
-
-    # Inter references
-    result_inter_ref = assert_with_pcc(torch_outputs[3], ttnn.to_torch(tt_outputs[3]).float(), 0.90)
-    print(f"Inter references PCC: {result_inter_ref}")
+    assert pcc_bev_passed and pcc_states_passed and pcc_init_ref_passed and pcc_inter_ref_passed, "PCC checks failed"
