@@ -350,8 +350,12 @@ class TtMapTRHead:
             prev_bev=prev_bev,
         )
 
+        # Don't deallocate bev_queries if it's a model parameter (self.bev_embedding.weight)
+        # Model parameters should persist across calls, especially when using pipeline API
         if bev_queries is not None:
-            ttnn.deallocate(bev_queries)
+            # Only deallocate if it's not the model parameter weight
+            if self.bev_embedding is None or bev_queries is not self.bev_embedding.weight:
+                ttnn.deallocate(bev_queries)
         if bev_mask is not None:
             ttnn.deallocate(bev_mask)
         if bev_pos is not None:
