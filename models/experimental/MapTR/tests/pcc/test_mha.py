@@ -7,8 +7,8 @@ import pytest
 import torch
 import ttnn
 from loguru import logger
-from models.experimental.MapTR.dependency import MultiheadAttention
-from models.experimental.MapTR.tt.mha import TtMultiheadAttention
+from models.experimental.MapTR.reference.dependency import MultiheadAttention
+from models.experimental.MapTR.tt.ttnn_mha import TtMultiheadAttention
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (
     preprocess_model_parameters,

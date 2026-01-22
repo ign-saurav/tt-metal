@@ -7,10 +7,10 @@ import pytest
 import torch
 import ttnn
 from loguru import logger
-from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.temporal_self_attention import (
+from models.experimental.MapTR.reference.bevformer import (
     TemporalSelfAttention,
 )
-from models.experimental.MapTR.tt.temporal_self_attention import TtTemporalSelfAttention
+from models.experimental.MapTR.tt.ttnn_temporal_self_attention import TtTemporalSelfAttention
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (
     infer_ttnn_module_args,

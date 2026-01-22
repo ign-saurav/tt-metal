@@ -10,11 +10,11 @@ import torch.nn as nn
 import ttnn
 from loguru import logger
 
-# Import reference MapTRHead from MapTR projects folder
-from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.dense_heads.maptr_head import MapTRHead
+# Import reference MapTRHead from MapTR reference folder
+from models.experimental.MapTR.reference.maptr import MapTRHead
 
 # Import TTNN implementation
-from models.experimental.MapTR.tt.head import TtMapTRHead
+from models.experimental.MapTR.tt.ttnn_head import TtMapTRHead
 
 # Import utilities
 from models.common.utility_functions import comp_pcc

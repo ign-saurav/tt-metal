@@ -8,20 +8,20 @@ import ttnn
 import numpy as np
 import torch.nn as nn
 
-from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.modules.transformer import (
+from models.experimental.MapTR.reference.maptr import (
     MapTRPerceptionTransformer,
+    MapTRDecoder,
 )
-from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.encoder import BEVFormerEncoder
-from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.modules.decoder import MapTRDecoder
-from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.temporal_self_attention import (
+from models.experimental.MapTR.reference.bevformer import (
+    BEVFormerEncoder,
     TemporalSelfAttention,
 )
-from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.spatial_cross_attention import (
+from models.experimental.MapTR.reference.bevformer import (
     SpatialCrossAttention,
 )
-from models.experimental.MapTR.tt.transformer import TtMapTRPerceptionTransformer
-from models.experimental.MapTR.tt.encoder import TtBEVFormerEncoder
-from models.experimental.MapTR.tt.decoder import TtMapTRDecoder
+from models.experimental.MapTR.tt.ttnn_transformer import TtMapTRPerceptionTransformer
+from models.experimental.MapTR.tt.ttnn_encoder import TtBEVFormerEncoder
+from models.experimental.MapTR.tt.ttnn_decoder import TtMapTRDecoder
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (
     preprocess_model_parameters,

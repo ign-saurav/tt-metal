@@ -5,22 +5,20 @@
 import ttnn
 import torch
 import torch.nn as nn
-from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.detectors.maptr import MapTR
-from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.dense_heads.maptr_head import MapTRHead
-from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.modules.transformer import MapTRPerceptionTransformer
-from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.encoder import BEVFormerEncoder
-from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.decoder import (
+from models.experimental.MapTR.reference.maptr import (
+    MapTR,
+    MapTRHead,
+    MapTRPerceptionTransformer,
+    MapTRDecoder,
+)
+from models.experimental.MapTR.reference.bevformer import (
+    BEVFormerEncoder,
     DetectionTransformerDecoder,
     CustomMSDeformableAttention,
-)
-from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.modules.decoder import MapTRDecoder
-from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.temporal_self_attention import (
     TemporalSelfAttention,
-)
-from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.spatial_cross_attention import (
     SpatialCrossAttention,
 )
-from models.experimental.MapTR.dependency import ResNet, FPN
+from models.experimental.MapTR.reference.dependency import ResNet, FPN
 
 
 from ttnn.model_preprocessing import (

@@ -7,8 +7,8 @@ import pytest
 import torch
 import ttnn
 from loguru import logger
-from models.experimental.MapTR.dependency import FPN
-from models.experimental.MapTR.tt.fpn import TtFPN
+from models.experimental.MapTR.reference.dependency import FPN
+from models.experimental.MapTR.tt.ttnn_fpn import TtFPN
 from models.tt_cnn.tt.builder import Conv2dConfiguration
 from tests.ttnn.utils_for_testing import assert_with_pcc
 

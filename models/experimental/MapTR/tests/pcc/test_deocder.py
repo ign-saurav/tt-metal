@@ -9,14 +9,14 @@ import copy
 import ttnn
 import torch.nn as nn
 from loguru import logger
-from models.experimental.MapTR.projects.mmdet3d_plugin.maptr.modules.decoder import MapTRDecoder
-from models.experimental.MapTR.dependency import (
+from models.experimental.MapTR.reference.maptr import MapTRDecoder
+from models.experimental.MapTR.reference.dependency import (
     MultiheadAttention,
 )
-from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.decoder import (
+from models.experimental.MapTR.reference.bevformer import (
     CustomMSDeformableAttention,
 )
-from models.experimental.MapTR.tt.decoder import TtMapTRDecoder
+from models.experimental.MapTR.tt.ttnn_decoder import TtMapTRDecoder
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (
     preprocess_model_parameters,

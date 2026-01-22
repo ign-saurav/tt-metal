@@ -7,8 +7,8 @@ import torch
 from loguru import logger
 
 import ttnn
-from models.experimental.MapTR.dependency import ResNet
-from models.experimental.MapTR.tt.backbone import TtResNet50
+from models.experimental.MapTR.reference.dependency import ResNet
+from models.experimental.MapTR.tt.ttnn_backbone import TtResNet50
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (
     infer_ttnn_module_args,

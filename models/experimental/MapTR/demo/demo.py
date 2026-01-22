@@ -8,14 +8,13 @@ import shutil
 import torch
 import ttnn
 import json
-from models.experimental.MapTR.dependency import Config
-from models.experimental.MapTR.dependency import load_checkpoint, wrap_fp16_model
-from models.experimental.MapTR.dependency import get_logger, ProgressBar
-from models.experimental.MapTR.dependency import build_dataset
-from models.experimental.MapTR.projects.mmdet3d_plugin.datasets.builder import build_dataloader
-from models.experimental.MapTR.dependency import build_model
-from models.experimental.MapTR.dependency import replace_ImageToTensor
-from models.experimental.MapTR.tt import tt_maptr
+from models.experimental.MapTR.reference.dependency import Config
+from models.experimental.MapTR.reference.dependency import load_checkpoint, wrap_fp16_model
+from models.experimental.MapTR.reference.dependency import get_logger, ProgressBar
+from models.experimental.MapTR.reference.dependency import build_dataset
+from models.experimental.MapTR.reference.dependency import build_model
+from models.experimental.MapTR.reference.dependency import replace_ImageToTensor
+from models.experimental.MapTR.tt import ttnn_maptr
 from models.experimental.MapTR.tt.model_preprocessing import (
     create_maptr_model_parameters,
 )
@@ -84,25 +83,14 @@ def main():
 
     if hasattr(cfg, "plugin"):
         if cfg.plugin:
-            import importlib
-
+            # Import reference modules directly to trigger registration
+            # No need for __init__.py - import modules directly to register classes
             try:
-                if hasattr(cfg, "plugin_dir"):
-                    plugin_dir = cfg.plugin_dir
-                    _module_dir = plugin_dir.rstrip("/").replace("/", ".")
-                    if not _module_dir.startswith("models.experimental.MapTR."):
-                        _module_path = "models.experimental.MapTR." + _module_dir
-                    else:
-                        _module_path = _module_dir
-                else:
-                    _module_path = "models.experimental.MapTR.projects.mmdet3d_plugin"
-                print(f"Importing plugin from: {_module_path}")
-                plg_lib = importlib.import_module(_module_path)
+                from models.experimental.MapTR.reference.datasets import build_dataloader
+
+                print("Imported reference modules for registration")
             except Exception as e:
-                print(f"Warning: Failed to import plugin module {_module_path}: {e}")
-                print("Trying default plugin path...")
-                _module_path = "models.experimental.MapTR.projects.mmdet3d_plugin"
-                plg_lib = importlib.import_module(_module_path)
+                print(f"Warning: Failed to import reference modules: {e}")
 
     if cfg.get("cudnn_benchmark", False):
         torch.backends.cudnn.benchmark = True
@@ -199,7 +187,7 @@ def main():
     )
 
     mmlogger.info("Creating TTNN MapTR model...")
-    tt_model = tt_maptr.TtMapTR(
+    tt_model = ttnn_maptr.TtMapTR(
         device=device,
         params=parameters,
         use_grid_mask=False,

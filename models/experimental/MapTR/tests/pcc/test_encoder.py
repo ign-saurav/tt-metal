@@ -8,8 +8,8 @@ import numpy as np
 import ttnn
 from loguru import logger
 
-from models.experimental.MapTR.projects.mmdet3d_plugin.bevformer.modules.encoder import BEVFormerEncoder
-from models.experimental.MapTR.tt.encoder import TtBEVFormerEncoder
+from models.experimental.MapTR.reference.bevformer import BEVFormerEncoder
+from models.experimental.MapTR.tt.ttnn_encoder import TtBEVFormerEncoder
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (
     preprocess_model_parameters,
