@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
+#
+# SPDX-License-Identifier: Apache-2.0
+
 checkpoint_config = dict(interval=1)
 # yapf:disable push
 # By default we use textlogger hook and tensorboard
