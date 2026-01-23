@@ -342,6 +342,9 @@ def test_model_inference(
         rot_mats = tt_model.rope_setup.get_rot_mats(current_pos)
 
         # Run TT model
+        import time
+
+        start_time = time.time()
         tt_out = tt_model(
             decode_input,
             current_pos_tensor,
@@ -349,6 +352,10 @@ def test_model_inference(
             mode="decode",
             page_table=page_table_tt,
         )
+        end_time = time.time()
+        # import pdb; pdb.set_trace()
+        print(f"Time taken: {end_time - start_time:.2f} seconds")
+        print(f"\n✅ Transformer Gemma PCC (): {pcc:.6f} in {end_time - start_time:.2f} seconds")
 
         # Convert ttnn tensor to torch tensor
         mesh_composer = ttnn.ConcatMesh2dToTensor(
