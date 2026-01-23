@@ -146,7 +146,9 @@ def main():
                 ds_cfg.pipeline = replace_ImageToTensor(ds_cfg.pipeline)
 
     if args.show_dir is None:
-        args.show_dir = osp.join("./work_dirs", osp.splitext(osp.basename(args.config))[0], "vis_pred")
+        # Get the MapTR directory (parent of demo directory)
+        maptr_dir = osp.dirname(osp.dirname(osp.abspath(__file__)))
+        args.show_dir = osp.join(maptr_dir, "ttnn_vis")
     os.makedirs(osp.abspath(args.show_dir), exist_ok=True)
 
     with open(osp.join(args.show_dir, osp.basename(args.config)), "w") as f:
