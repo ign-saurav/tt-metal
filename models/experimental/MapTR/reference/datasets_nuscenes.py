@@ -7,7 +7,6 @@ import copy
 import numpy as np
 from models.experimental.MapTR.reference.dependency import DATASETS
 from models.experimental.MapTR.reference.dependency import NuScenesDataset
-import mmcv
 from os import path as osp
 import torch
 from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
@@ -243,7 +242,10 @@ class CustomNuScenesDataset(NuScenesDataset):
         )
         self.nusc_eval.main(plot_examples=0, render_curves=False)
         # record metrics
-        metrics = mmcv.load(osp.join(output_dir, "metrics_summary.json"))
+        import json
+
+        with open(osp.join(output_dir, "metrics_summary.json"), "r", encoding="utf-8") as f:
+            metrics = json.load(f)
         detail = dict()
         metric_prefix = f"{result_name}_NuScenes"
         for name in self.CLASSES:

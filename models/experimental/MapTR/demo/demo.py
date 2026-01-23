@@ -10,7 +10,7 @@ import ttnn
 import json
 from models.experimental.MapTR.reference.dependency import Config
 from models.experimental.MapTR.reference.dependency import load_checkpoint, wrap_fp16_model
-from models.experimental.MapTR.reference.dependency import get_logger, ProgressBar
+from models.experimental.MapTR.reference.dependency import get_logger, DataContainer
 from models.experimental.MapTR.reference.dependency import build_dataset, build_model
 
 # Import build_dataloader after dependency to avoid circular import
@@ -319,8 +319,6 @@ def main():
             except:
                 continue
 
-    prog_bar = ProgressBar(len(dataset))
-
     try:
         for i, data in enumerate(data_loader):
             has_gt = False
@@ -339,7 +337,16 @@ def main():
                 )
                 img = None
             else:
-                img = data["img"][0].data[0] if len(data["img"][0].data) > 0 else None
+                img_data = data["img"]
+                if isinstance(img_data, (list, tuple)) and len(img_data) > 0:
+                    if isinstance(img_data[0], DataContainer):
+                        img = img_data[0].data[0] if len(img_data[0].data) > 0 else None
+                    else:
+                        img = img_data[0] if isinstance(img_data[0], torch.Tensor) else None
+                elif isinstance(img_data, DataContainer):
+                    img = img_data.data[0] if len(img_data.data) > 0 else None
+                else:
+                    img = None
 
             img_metas_extracted = None
             if "img_metas" in data and data.get("img_metas") is not None:
@@ -1002,7 +1009,8 @@ def main():
             plt.savefig(map_path, bbox_inches="tight", format="png", dpi=1200)
             plt.close()
 
-            prog_bar.update()
+            if (i + 1) % 10 == 0:
+                mmlogger.info(f"Processed {i + 1}/{len(dataset)} samples")
 
         mmlogger.info("\n DONE vis test dataset samples gt label & pred using TTNN model")
 

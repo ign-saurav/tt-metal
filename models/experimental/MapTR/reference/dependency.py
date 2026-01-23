@@ -1,5 +1,4 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
-#
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import division
@@ -9,288 +8,63 @@ import torch
 import torch.nn.functional as F
 import warnings
 
-# from mmcv import Config, DictAction
 from mmengine import Config
-import argparse
 
-# ============================================================================
-# MMCV UTILS - DictAction
-# Source: https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/misc.py
-# This class is extracted from mmcv v1.4.0 to avoid dependency on mmcv.
-# Original implementation: mmcv.utils.misc.DictAction
-# ============================================================================
-
-
-class DictAction(argparse.Action):
-    """
-    argparse action to split an argument into KEY=VALUE form
-    on the first = and append to a dictionary. List options can
-    be passed as comma separated values, i.e 'KEY=V1,V2,V3', or
-    with explicit brackets, i.e. 'KEY=[V1,V2,V3]'. It also
-    support nested brackets, i.e. 'KEY=[(V1,V2),(V3,V4)]'.
-    """
-
-    @staticmethod
-    def _parse_int_float_bool(val):
-        try:
-            return int(val)
-        except ValueError:
-            pass
-        try:
-            return float(val)
-        except ValueError:
-            pass
-        if val.lower() in ["true", "false"]:
-            return val.lower() == "true"
-        if val == "None":
-            return None
-        return val
-
-    @staticmethod
-    def _parse_iterable(val):
-        """Parse iterable values in the string.
-
-        All elements inside '()' or '[]' are treated as iterable values.
-
-        Args:
-            val (str): Value string.
-
-        Returns:
-            list | tuple: The expanded list or tuple from the string.
-
-        Examples:
-            >>> DictAction._parse_iterable('1,2,3')
-            [1, 2, 3]
-            >>> DictAction._parse_iterable('[1,2,3]')
-            [1, 2, 3]
-            >>> DictAction._parse_iterable('(1,2,3)')
-            (1, 2, 3)
-            >>> DictAction._parse_iterable('[(1,2),(3,4)]')
-            [(1, 2), (3, 4)]
-        """
-        # Strip ' and " characters
-        val = val.strip("\"'")
-        # Remove '[' and ']' characters
-        if val.startswith("[") and val.endswith("]"):
-            val = val[1:-1]
-            return [DictAction._parse_iterable(x) for x in val.split(",")]
-        elif val.startswith("(") and val.endswith(")"):
-            val = val[1:-1]
-            return tuple([DictAction._parse_iterable(x) for x in val.split(",")])
-        else:
-            # Split by comma unless it's inside a bracket
-            parts = []
-            bracket_level = 0
-            current_part = []
-            for char in val:
-                if char == "[":
-                    bracket_level += 1
-                    current_part.append(char)
-                elif char == "]":
-                    bracket_level -= 1
-                    current_part.append(char)
-                elif char == "," and bracket_level == 0:
-                    parts.append("".join(current_part))
-                    current_part = []
-                else:
-                    current_part.append(char)
-            if current_part:
-                parts.append("".join(current_part))
-            if len(parts) == 1:
-                return DictAction._parse_int_float_bool(parts[0])
-            return [DictAction._parse_int_float_bool(x.strip()) for x in parts]
-
-    def __call__(self, parser, namespace, values, option_string=None):
-        options = {}
-        for kv in values:
-            if "=" not in kv:
-                raise ValueError(f"Expected KEY=VALUE format, got {kv}")
-            key, val = kv.split("=", 1)
-            options[key] = self._parse_iterable(val)
-        setattr(namespace, self.dest, options)
-
-
-# ============================================================================
-# MMCV CNN - fuse_conv_bn
-# Source: Based on mmcv.cnn.utils.fuse_conv_bn and tools/misc/fuse_conv_bn.py
-# This function fuses Conv2d and BatchNorm2d layers to improve inference speed.
-# ============================================================================
-
-from torch import nn as nn_module
-
-
-def _fuse_conv_bn_pair(conv, bn):
-    """Fuse a single Conv2d and BatchNorm2d layer.
-
-    During inference, the functionality of batch norm layers is turned off but
-    only the mean and var alone channels are used, which exposes the chance to
-    fuse it with the preceding conv layers to save computations and simplify
-    network structures.
-
-    Args:
-        conv (nn.Conv2d): Convolution layer
-        bn (nn.BatchNorm2d or nn.SyncBatchNorm): Batch normalization layer
-
-    Returns:
-        nn.Conv2d: Fused convolution layer
-    """
-    conv_w = conv.weight
-    conv_b = conv.bias if conv.bias is not None else torch.zeros_like(bn.running_mean)
-
-    factor = bn.weight / torch.sqrt(bn.running_var + bn.eps)
-    conv.weight = nn_module.Parameter(conv_w * factor.reshape([conv.out_channels, 1, 1, 1]))
-    conv.bias = nn_module.Parameter((conv_b - bn.running_mean) * factor + bn.bias)
-    return conv
-
-
-def _fuse_module(m):
-    """Recursively fuse Conv2d and BatchNorm2d layers in a model.
-
-    Args:
-        m (nn.Module): PyTorch model to fuse
-
-    Returns:
-        nn.Module: Model with fused conv+bn layers
-    """
-    last_conv = None
-    last_conv_name = None
-
-    for name, child in m.named_children():
-        if isinstance(child, (nn_module.BatchNorm2d, nn_module.SyncBatchNorm)):
-            if last_conv is None:  # only fuse BN that is after Conv
-                continue
-            fused_conv = _fuse_conv_bn_pair(last_conv, child)
-            m._modules[last_conv_name] = fused_conv
-            # To reduce changes, set BN as Identity instead of deleting it.
-            m._modules[name] = nn_module.Identity()
-            last_conv = None
-        elif isinstance(child, nn_module.Conv2d):
-            last_conv = child
-            last_conv_name = name
-        else:
-            _fuse_module(child)
-    return m
-
-
-def fuse_conv_bn(conv_or_model, bn=None):
-    """Fuse Conv2d and BatchNorm2d layers.
-
-    This function matches mmcv.cnn.fuse_conv_bn API. When called with a model,
-    it fuses all conv+bn pairs throughout the model. When called with (conv, bn),
-    it fuses a single conv+bn pair.
-
-    Args:
-        conv_or_model: Either a Conv2d layer or a full PyTorch model
-        bn: BatchNorm2d layer (only used if conv_or_model is Conv2d)
-
-    Returns:
-        Fused conv layer or fused model
-    """
-    if bn is not None:
-        # Single conv+bn fusion
-        return _fuse_conv_bn_pair(conv_or_model, bn)
-    else:
-        # Model-wide fusion (matches mmcv API)
-        return _fuse_module(conv_or_model)
-
-
-# from mmcv.parallel import MMDataParallel
-# from mmcv.runner import (get_dist_info, init_dist, load_checkpoint,
-#  wrap_fp16_model)
-
-# from mmdet3d.apis import single_gpu_test
-# from mmdet3d.datasets import build_dataset
-# from models.experimental.MapTR.reference.mmdet3d_plugin.datasets.builder import build_dataloader  # Moved to after BBOX_CODERS to avoid circular import
-
-# from mmdet3d.models import build_model
-# from mmdet.apis import set_random_seed
-# from reference.mmdet3d_plugin.bevformer.apis.test import custom_multi_gpu_test
-# from mmdet.datasets import replace_ImageToTensor
-import time
-import os.path as osp
-
-
-import itertools
-import logging
-import os.path as osp
-import tempfile
-import warnings
-from collections import OrderedDict
-
-import mmcv
-import numpy as np
-from terminaltables import AsciiTable
-
-# from .api_wrappers import COCO, COCOeval
-# from .builder import DATASETS
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/datasets/api_wrappers/coco_api.py
-# This file add snake case alias for coco api
-
-import warnings
-
-import pycocotools
-from pycocotools.coco import COCO as _COCO
-from pycocotools.cocoeval import COCOeval as _COCOeval
-
-
-# Copyright (c) OpenMMLab. All rights reserved.
-# ---------------------------------------------
-# This file contains all CPU-only dependencies from mmcv/mmdet/mmdet3d/mmseg
-# Extracted from the following versions:
-# - https://github.com/open-mmlab/mmcv/tree/v1.4.0/mmcv
-# - https://github.com/open-mmlab/mmdetection/tree/v2.14.0/mmdet
-# - https://github.com/open-mmlab/mmdetection3d/tree/v0.17.1/mmdet3d
-# - https://github.com/open-mmlab/mmsegmentation/tree/v0.14.1/mmseg
-# ---------------------------------------------
-# All code is brought directly from the GitHub URLs without modifications
-# to avoid licensing issues and ensure CPU-only compatibility.
-# ---------------------------------------------
 
 import copy
 import functools
+import json
 import logging
 import math
+import os
+import os.path as osp
+import pickle
+import tempfile
 import warnings
 from abc import ABCMeta
+from collections import OrderedDict
 from collections import abc as collections_abc
 from collections.abc import Mapping, Sequence
 from functools import partial
 from logging import FileHandler
+from torch.utils.data import Sampler
+from torch.utils.data.dataloader import default_collate
 
+import mmcv
 import numpy as np
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Sampler
-from torch.utils.data.dataloader import default_collate
-import mmcv
-import tempfile
-from os import path as osp
-
-# ============================================================================
-# MMCV FILEIO - https://github.com/open-mmlab/mmcv/tree/v1.4.0/mmcv/fileio
-# ============================================================================
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/fileio/io.py
-import pickle
-import json
+from mmengine import Config
 import yaml
 
-# from models.experimental.MapTR.reference.mmdet3d_plugin.dependency import master_only
-# from models.experimental.MapTR.reference.mmdet3d_plugin.dependency import get_logger, logger_initialized, print_log
 
-# ============================================================================
-# MMCV RUNNER - https://github.com/open-mmlab/mmcv/tree/v1.4.0/mmcv/runner
-# ============================================================================
+def load_file(filename):
+    """Load data from file (supports pickle, json, yaml).
 
+    Args:
+        filename (str): Path to file.
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/runner/dist_utils.py
-def master_only(func):
-    """Decorator to ensure function only runs on master process.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/runner/dist_utils.py
+    Returns:
+        Data loaded from file.
     """
+    if filename.endswith(".pkl"):
+        with open(filename, "rb") as f:
+            return pickle.load(f)
+    elif filename.endswith(".json"):
+        with open(filename, "r", encoding="utf-8") as f:
+            return json.load(f)
+    elif filename.endswith((".yml", ".yaml")):
+        with open(filename, "r", encoding="utf-8") as f:
+            return yaml.safe_load(f)
+    else:
+        with open(filename, "rb") as f:
+            return pickle.load(f)
+
+
+def master_only(func):
+    """Decorator to ensure function only runs on master process."""
 
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -301,135 +75,6 @@ def master_only(func):
     return wrapper
 
 
-def load(file_path, file_format=None):
-    """Load data from json/yaml/pickle files.
-
-    Source: https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/fileio/io.py
-    Original implementation: mmcv.fileio.io.load
-
-    This method provides a unified api for loading data from serialized files.
-
-    Args:
-        file_path (str): Path to the file to be loaded.
-        file_format (str, optional): If not specified, the file format will be
-            inferred from the file extension, otherwise use the specified one.
-            Currently supported formats include "json", "yaml/yml" and "pickle/pkl".
-
-    Returns:
-        The content from the file.
-    """
-    if file_format is None:
-        file_format = file_path.split(".")[-1]
-    if file_format not in ["json", "yaml", "yml", "pickle", "pkl"]:
-        raise TypeError("Unsupported format: {}".format(file_format))
-
-    if file_format in ["yaml", "yml"]:
-        with open(file_path, "r") as f:
-            return yaml.load(f, Loader=yaml.FullLoader)
-    elif file_format in ["pickle", "pkl"]:
-        with open(file_path, "rb") as f:
-            return pickle.load(f)
-    else:
-        with open(file_path, "r") as f:
-            return json.load(f)
-
-
-# ============================================================================
-# MMCV FILEIO - load, dump, is_filepath, check_file_exist
-# Source: https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/fileio/io.py
-# These functions are extracted from mmcv v1.4.0 to avoid dependency on mmcv.
-# ============================================================================
-
-
-def is_filepath(filepath):
-    """Check if a path is a valid file path.
-
-    Source: Based on mmcv.utils.path.is_filepath
-    https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/path.py
-
-    Args:
-        filepath (str): Path to check
-
-    Returns:
-        bool: True if the path exists and is a file, False otherwise
-    """
-    return os.path.isfile(filepath)
-
-
-def dump(obj, file=None, file_format=None):
-    """Dump data to json/yaml/pickle strings or files.
-
-    Source: https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/fileio/io.py
-    Original implementation: mmcv.fileio.io.dump
-
-    This method provides a unified api for dumping data as strings or to files.
-
-    Args:
-        obj (any): The python object to be dumped.
-        file (str or None): If not None, dump to file. Otherwise return string.
-        file_format (str, optional): Same as :func:`load`.
-
-    Returns:
-        bool: True for success, False otherwise.
-    """
-    if file_format is None:
-        if isinstance(file, str):
-            file_format = file.split(".")[-1]
-        else:
-            raise ValueError("file_format must be specified if file is a file object")
-
-    if file_format not in ["json", "yaml", "yml", "pickle", "pkl"]:
-        raise TypeError("Unsupported format: {}".format(file_format))
-
-    if file_format in ["yaml", "yml"]:
-        if file is None:
-            return yaml.dump(obj)
-        else:
-            with open(file, "w") as f:
-                yaml.dump(obj, f)
-    elif file_format in ["pickle", "pkl"]:
-        if file is None:
-            return pickle.dumps(obj)
-        else:
-            with open(file, "wb") as f:
-                pickle.dump(obj, f)
-    else:  # json
-        if file is None:
-            return json.dumps(obj, indent=2)
-        else:
-            with open(file, "w") as f:
-                json.dump(obj, f, indent=2)
-    return True
-
-
-def check_file_exist(filename, msg_tmpl='file "{}" does not exist', raise_error=True):
-    """Check if a file exists.
-
-    Source: https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/path.py
-    Original implementation: mmcv.utils.path.check_file_exist
-
-    Args:
-        filename (str): File path to check.
-        msg_tmpl (str): Message template to show when file doesn't exist.
-        raise_error (bool): If True, raise FileNotFoundError when file doesn't exist.
-                           If False, return False instead of raising.
-
-    Returns:
-        bool: True if file exists, False if file doesn't exist and raise_error=False.
-    """
-    if not os.path.isfile(filename):
-        if raise_error:
-            raise FileNotFoundError(msg_tmpl.format(filename))
-        return False
-    return True
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/datasets/samplers/group_sampler.py
-# ============================================================================
-# MMCV UTILITIES - https://github.com/open-mmlab/mmcv/tree/v1.4.0/mmcv/utils
-# ============================================================================
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/registry.py
 import inspect
 from collections import abc as abc_collections
 
@@ -785,7 +430,6 @@ class Registry:
         return _register
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/misc.py
 from itertools import repeat
 from inspect import getfullargspec
 
@@ -867,7 +511,6 @@ def deprecated_api_warning(name_dict, cls_name=None):
     return api_warning_wrapper
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/parallel/data_container.py
 def assert_tensor_type(func):
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
@@ -947,102 +590,6 @@ class DataContainer:
         return self.data.dim()
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/parallel/collate.py
-def collate(batch, samples_per_gpu=1):
-    """Puts each data field into a tensor/DataContainer with outer dimension
-    batch size.
-
-    Extend default_collate to add support for
-    :type:`~mmcv.parallel.DataContainer`. There are 3 cases.
-
-    1. cpu_only = True, e.g., meta data
-    2. cpu_only = False, stack = True, e.g., images tensors
-    3. cpu_only = False, stack = False, e.g., gt bboxes
-    """
-
-    if not isinstance(batch, Sequence):
-        raise TypeError(f"{batch.dtype} is not supported.")
-
-    if len(batch) == 0:
-        return batch
-
-    if isinstance(batch[0], DataContainer):
-        stacked = []
-        if batch[0].cpu_only:
-            for i in range(0, len(batch), samples_per_gpu):
-                stacked.append([sample.data for sample in batch[i : i + samples_per_gpu]])
-            return DataContainer(stacked, batch[0].stack, batch[0].padding_value, cpu_only=True)
-        elif batch[0].stack:
-            for i in range(0, len(batch), samples_per_gpu):
-                assert isinstance(batch[i].data, torch.Tensor)
-
-                if batch[i].pad_dims is not None:
-                    ndim = batch[i].dim()
-                    assert ndim > batch[i].pad_dims
-                    max_shape = [0 for _ in range(batch[i].pad_dims)]
-                    for dim in range(1, batch[i].pad_dims + 1):
-                        max_shape[dim - 1] = batch[i].size(-dim)
-                    for sample in batch[i : i + samples_per_gpu]:
-                        for dim in range(0, ndim - batch[i].pad_dims):
-                            assert batch[i].size(dim) == sample.size(dim)
-                        for dim in range(1, batch[i].pad_dims + 1):
-                            max_shape[dim - 1] = max(max_shape[dim - 1], sample.size(-dim))
-                    padded_samples = []
-                    for sample in batch[i : i + samples_per_gpu]:
-                        pad = [0 for _ in range(batch[i].pad_dims * 2)]
-                        for dim in range(1, batch[i].pad_dims + 1):
-                            pad[2 * dim - 1] = max_shape[dim - 1] - sample.size(-dim)
-                        padded_samples.append(F.pad(sample.data, pad, value=sample.padding_value))
-                    stacked.append(default_collate(padded_samples))
-                elif batch[i].pad_dims is None:
-                    stacked.append(default_collate([sample.data for sample in batch[i : i + samples_per_gpu]]))
-                else:
-                    raise ValueError("pad_dims should be either None or integers (1-3)")
-
-        else:
-            for i in range(0, len(batch), samples_per_gpu):
-                stacked.append([sample.data for sample in batch[i : i + samples_per_gpu]])
-        return DataContainer(stacked, batch[0].stack, batch[0].padding_value)
-    elif isinstance(batch[0], Sequence) and not isinstance(batch[0], (str, bytes)):
-        transposed = zip(*batch)
-        return [collate(samples, samples_per_gpu) for samples in transposed]
-    elif isinstance(batch[0], Mapping):
-        return {key: collate([d[key] for d in batch], samples_per_gpu) for key in batch[0]}
-    else:
-        # Handle non-collatable types like type objects, None, functions, etc.
-        # Check if batch[0] is a type object or None
-        first_item = batch[0]
-        if isinstance(first_item, type) or first_item is None:
-            # If all items are the same, return the first one
-            if all(item is first_item or item == first_item for item in batch):
-                return first_item
-            # Otherwise return as a list
-            return list(batch)
-
-        # Check if it's a function or other callable that's not a class
-        if callable(first_item) and not isinstance(first_item, type):
-            # If all items are the same function, return the first one
-            if all(item is first_item for item in batch):
-                return first_item
-            # Otherwise return as a list
-            return list(batch)
-
-        try:
-            return default_collate(batch)
-        except (TypeError, ValueError) as e:
-            # If default_collate fails (e.g., for type objects, functions, etc.)
-            # Check if all items are the same
-            if all(item is first_item or item == first_item for item in batch):
-                return first_item
-            # Otherwise return as a list
-            return list(batch)
-
-
-# ============================================================================
-# MMCV UTILITIES - Additional Dependencies
-# ============================================================================
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/parrots_wrapper.py
 from functools import partial
 
 TORCH_VERSION = torch.__version__
@@ -1061,10 +608,7 @@ def is_rocm_pytorch() -> bool:
 
 
 def _get_cuda_home():
-    """Get CUDA home directory. For CPU-only version, returns None.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/utils/parrots_wrapper.py
-    """
+    """Get CUDA home directory. For CPU-only version, returns None."""
     if TORCH_VERSION == "parrots":
         try:
             from parrots.utils.build_extension import CUDA_HOME
@@ -1087,10 +631,7 @@ def _get_cuda_home():
 
 
 def get_build_config():
-    """Get build configuration.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/utils/parrots_wrapper.py
-    """
+    """Get build configuration."""
     if TORCH_VERSION == "parrots":
         try:
             from parrots.config import get_build_info
@@ -1102,7 +643,6 @@ def get_build_config():
         return torch.__config__.show()
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/logging.py
 logger_initialized = {}
 
 
@@ -1209,7 +749,6 @@ def print_log(msg, logger=None, level=logging.INFO):
         )
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/version_utils.py
 from packaging.version import parse
 
 
@@ -1253,9 +792,7 @@ def digit_version(version_str: str, length: int = 4):
     return tuple(release)
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/ext_loader.py
 import importlib
-import pkgutil
 import warnings
 from types import ModuleType
 
@@ -1297,11 +834,6 @@ def load_ext(name, funcs):
         raise NotImplementedError("Parrots not supported in CPU-only version")
 
 
-def check_ops_exist():
-    ext_loader = pkgutil.find_loader("mmcv._ext")
-    return ext_loader is not None
-
-
 # Create ext_loader object with load_ext method
 class ExtLoader:
     """Extension loader object that mimics mmcv.utils.ext_loader."""
@@ -1313,7 +845,6 @@ class ExtLoader:
 ext_loader = ExtLoader()
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/ops/multi_scale_deform_attn.py
 def multi_scale_deformable_attn_pytorch(value, value_spatial_shapes, sampling_locations, attention_weights):
     """CPU version of multi-scale deformable attention.
 
@@ -1371,10 +902,6 @@ def multi_scale_deformable_attn_pytorch(value, value_spatial_shapes, sampling_lo
     )
     return output.transpose(1, 2).contiguous()
 
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/config.py
-# Note: This file has dependencies on addict.Dict and yapf
-# For CPU-only compatibility, we include a minimal Dict implementation
 
 try:
     from addict import Dict
@@ -1437,19 +964,15 @@ class ConfigDict(Dict):
         raise ex
 
 
-# Note: The full Config class from mmcv.utils.config is 688 lines
 # It depends on yapf, mmcv.utils.misc, mmcv.utils.path
 # For now, we include ConfigDict which is the most critical part
 # The full Config class can be added if needed, but it requires many more dependencies
 
 
-# Placeholder for Config class - to be fully implemented if needed
 # Full implementation at: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/utils/config.py
-# https://github.com/open-mmlab/mmengine/blob/main/mmengine/config/config.py
 class Config(ConfigDict):
     """Config class for loading configuration files.
 
-    Source: https://github.com/open-mmlab/mmengine/blob/main/mmengine/config/config.py
 
     This implementation supports:
     - Loading from .py files
@@ -1469,7 +992,6 @@ class Config(ConfigDict):
         Returns:
             Config: Config instance.
 
-        Source: https://github.com/open-mmlab/mmengine/blob/main/mmengine/config/config.py
         """
         if isinstance(filename, str):
             if not osp.isabs(filename):
@@ -1655,7 +1177,6 @@ class Config(ConfigDict):
             import_module(imp)
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/runner/base_module.py
 from collections import defaultdict
 from logging import FileHandler
 
@@ -1678,7 +1199,6 @@ class BaseModule(nn.Module, metaclass=ABCMeta):
     Args:
         init_cfg (dict, optional): Initialization config dict.
 
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/runner/base_module.py
     """
 
     def __init__(self, init_cfg=None):
@@ -1740,7 +1260,6 @@ class BaseModule(nn.Module, metaclass=ABCMeta):
         logger_names = list(logger_initialized.keys())
         logger_name = logger_names[0] if logger_names else "mmcv"
 
-        # Note: BaseModule.init_weights depends on mmcv.cnn.initialize
         # and mmcv.cnn.utils.weight_init.update_init_info
         # These will need to be added as dependencies
         # For now, we provide a minimal implementation
@@ -1752,7 +1271,6 @@ class BaseModule(nn.Module, metaclass=ABCMeta):
                 if isinstance(self.init_cfg, dict):
                     # prevent the parameters of
                     # the pre-trained model
-                    # from being overwritten by
                     # the `init_weights`
                     if self.init_cfg.get("type") == "Pretrained":
                         return
@@ -1815,7 +1333,6 @@ class Sequential(BaseModule, nn.Sequential):
     Args:
         init_cfg (dict, optional): Initialization config dict.
 
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/runner/base_module.py
     """
 
     def __init__(self, *args, init_cfg=None):
@@ -1830,7 +1347,6 @@ class ModuleList(BaseModule, nn.ModuleList):
         modules (iterable, optional): an iterable of modules to add.
         init_cfg (dict, optional): Initialization config dict.
 
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/runner/base_module.py
     """
 
     def __init__(self, modules=None, init_cfg=None):
@@ -1838,7 +1354,6 @@ class ModuleList(BaseModule, nn.ModuleList):
         nn.ModuleList.__init__(self, modules)
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/cnn/bricks/transformer/transformer_layer_sequence.py
 class TransformerLayerSequence(BaseModule):
     """Base class for TransformerEncoder and TransformerDecoder in vision transformer.
 
@@ -1869,12 +1384,8 @@ class TransformerLayerSequence(BaseModule):
             self.layers.append(build_transformer_layer(layer_cfg))
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/runner/dist_utils.py
 def get_dist_info():
-    """Get distributed information.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/runner/dist_utils.py
-    """
+    """Get distributed information."""
     if dist.is_available() and dist.is_initialized():
         rank = dist.get_rank()
         world_size = dist.get_world_size()
@@ -1884,15 +1395,11 @@ def get_dist_info():
     return rank, world_size
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/runner/fp16_utils.py
 from inspect import getfullargspec
 
 
 def cast_tensor_type(inputs, src_type, dst_type):
-    """Cast type of tensor.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/runner/fp16_utils.py
-    """
+    """Cast type of tensor."""
     if isinstance(inputs, torch.Tensor):
         return inputs.type(dst_type) if inputs.type() == src_type else inputs
     elif isinstance(inputs, str):
@@ -1921,7 +1428,6 @@ def auto_fp16(apply_to=None, out_fp32=False):
             `None` indicates all arguments.
         out_fp32 (bool): Whether to convert the output back to fp32.
 
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/runner/fp16_utils.py
     """
 
     def auto_fp16_wrapper(old_func):
@@ -1988,7 +1494,6 @@ def force_fp32(apply_to=None, out_fp16=False):
             `None` indicates all arguments.
         out_fp16 (bool): Whether to convert the output back to fp16.
 
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/runner/fp16_utils.py
     """
 
     def force_fp32_wrapper(old_func):
@@ -2037,52 +1542,8 @@ def force_fp32(apply_to=None, out_fp16=False):
     return force_fp32_wrapper
 
 
-# ============================================================================
-# MMCV CNN - https://github.com/open-mmlab/mmcv/tree/v1.4.0/mmcv/cnn
-# ============================================================================
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/cnn/utils/weight_init.py
-
-INITIALIZERS = Registry("initializer")
-
-
-def update_init_info(module, init_info):
-    """Update the `_params_init_info` in the module if the value of parameters
-    are changed.
-
-    Args:
-        module (obj:`nn.Module`): The module of PyTorch with a user-defined
-            attribute `_params_init_info` which records the initialization
-            information.
-        init_info (str): The string that describes the initialization.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/cnn/utils/weight_init.py
-    """
-    assert hasattr(module, "_params_init_info"), f"Can not find `_params_init_info` in {module}"
-    for name, param in module.named_parameters():
-        assert param in module._params_init_info, (
-            f"Find a new :obj:`Parameter` "
-            f"named `{name}` during executing the "
-            f"`init_weights` of "
-            f"`{module.__class__.__name__}`. "
-            f"Please do not add or "
-            f"replace parameters during executing "
-            f"the `init_weights`. "
-        )
-
-        # The parameter has been changed during executing the
-        # `init_weights` of module
-        mean_value = param.data.mean()
-        if module._params_init_info[param]["tmp_mean_value"] != mean_value:
-            module._params_init_info[param]["init_info"] = init_info
-            module._params_init_info[param]["tmp_mean_value"] = mean_value
-
-
 def constant_init(module, val, bias=0):
-    """Initialize module parameters with constant values.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/cnn/utils/weight_init.py
-    """
+    """Initialize module parameters with constant values."""
     if hasattr(module, "weight") and module.weight is not None:
         nn.init.constant_(module.weight, val)
     if hasattr(module, "bias") and module.bias is not None:
@@ -2090,10 +1551,7 @@ def constant_init(module, val, bias=0):
 
 
 def kaiming_init(module, a=0, mode="fan_out", nonlinearity="relu", bias=0, distribution="normal"):
-    """Initialize module parameters with Kaiming initialization.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/cnn/utils/weight_init.py
-    """
+    """Initialize module parameters with Kaiming initialization."""
     assert distribution in ["uniform", "normal"]
     if hasattr(module, "weight") and module.weight is not None:
         if distribution == "uniform":
@@ -2105,10 +1563,7 @@ def kaiming_init(module, a=0, mode="fan_out", nonlinearity="relu", bias=0, distr
 
 
 def xavier_init(module, gain=1, bias=0, distribution="normal"):
-    """Initialize module parameters with Xavier initialization.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/cnn/utils/weight_init.py
-    """
+    """Initialize module parameters with Xavier initialization."""
     assert distribution in ["uniform", "normal"]
     if hasattr(module, "weight") and module.weight is not None:
         if distribution == "uniform":
@@ -2120,15 +1575,11 @@ def xavier_init(module, gain=1, bias=0, distribution="normal"):
 
 
 def bias_init_with_prob(prior_prob):
-    """Initialize conv/fc bias value according to a given probability value.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/cnn/utils/weight_init.py
-    """
+    """Initialize conv/fc bias value according to a given probability value."""
     bias_init = float(-np.log((1 - prior_prob) / prior_prob))
     return bias_init
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/cnn/builder.py
 def build_model_from_cfg(cfg, registry, default_args=None):
     """Build a PyTorch model from config dict(s). Different from
     ``build_from_cfg``, if cfg is a list, a ``nn.Sequential`` will be built.
@@ -2144,7 +1595,6 @@ def build_model_from_cfg(cfg, registry, default_args=None):
     Returns:
         nn.Module: A built nn module.
 
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/cnn/builder.py
     """
     if isinstance(cfg, list):
         modules = [build_from_cfg(cfg_, registry, default_args) for cfg_ in cfg]
@@ -2153,23 +1603,10 @@ def build_model_from_cfg(cfg, registry, default_args=None):
         return build_from_cfg(cfg, registry, default_args)
 
 
-MODELS = Registry("model", build_func=build_model_from_cfg)
-
-# Note: mmcv.cnn.builder also defines CONV_LAYERS, NORM_LAYERS, ACTIVATION_LAYERS, etc.
-# These are used via build_conv_layer, build_norm_layer, build_activation_layer
-# For now, we include the MODELS registry. Other builders can be added if needed.
-
-
-# ============================================================================
-# MMCV CNN BRICKS - https://github.com/open-mmlab/mmcv/tree/v1.4.0/mmcv/cnn/bricks
-# ============================================================================
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/cnn/bricks/registry.py
 CONV_LAYERS = Registry("conv layer")
 NORM_LAYERS = Registry("norm layer")
 ACTIVATION_LAYERS = Registry("activation layer")
 PADDING_LAYERS = Registry("padding layer")
-UPSAMPLE_LAYERS = Registry("upsample layer")
 PLUGIN_LAYERS = Registry("plugin layer")
 
 DROPOUT_LAYERS = Registry("drop out layers")
@@ -2179,7 +1616,6 @@ FEEDFORWARD_NETWORK = Registry("feed-forward Network")
 TRANSFORMER_LAYER = Registry("transformerLayer")
 TRANSFORMER_LAYER_SEQUENCE = Registry("transformer-layers sequence")
 TRANSFORMER = Registry("Transformer")
-TRANSFORMER = Registry("Transformer")
 
 
 def build_positional_encoding(cfg, default_args=None):
@@ -2187,13 +1623,9 @@ def build_positional_encoding(cfg, default_args=None):
     return build_from_cfg(cfg, POSITIONAL_ENCODING, default_args)
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/utils/positional_encoding.py
 @POSITIONAL_ENCODING.register_module()
 class LearnedPositionalEncoding(nn.Module):
-    """Learned positional encoding for BEV.
-
-    Source: https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/utils/positional_encoding.py
-    """
+    """Learned positional encoding for BEV."""
 
     def __init__(self, num_feats, row_num_embed=50, col_num_embed=50, init_cfg=None):
         super(LearnedPositionalEncoding, self).__init__()
@@ -2218,7 +1650,6 @@ class LearnedPositionalEncoding(nn.Module):
         return pos
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/cnn/bricks/transformer/builder.py
 def build_attention(cfg, default_args=None):
     """Build attention module."""
     return build_from_cfg(cfg, ATTENTION, default_args)
@@ -2229,7 +1660,6 @@ def build_feedforward_network(cfg, default_args=None):
     return build_from_cfg(cfg, FEEDFORWARD_NETWORK, default_args)
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/cnn/bricks/transformer/ffn.py
 @FEEDFORWARD_NETWORK.register_module()
 class FFN(BaseModule):
     """Implements feed-forward networks (FFNs) with identity connection.
@@ -2299,12 +1729,10 @@ class FFN(BaseModule):
         return identity + out
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/cnn/bricks/transformer/base_transformer_layer.py
 @TRANSFORMER_LAYER.register_module()
 class BaseTransformerLayer(BaseModule):
     """
     Base `TransformerLayer` for vision transformer.
-    Source: https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/cnn/bricks/transformer/base_transformer_layer.py
     """  # noqa: E501
 
     def __init__(
@@ -2503,9 +1931,6 @@ class BaseTransformerLayer(BaseModule):
         return query
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/utils/transformer.py
-
-
 @TRANSFORMER_LAYER.register_module()
 class DetrTransformerDecoderLayer(BaseTransformerLayer):
     """Implements decoder layer in DETR transformer.
@@ -2554,8 +1979,6 @@ class DetrTransformerDecoderLayer(BaseTransformerLayer):
         assert set(operation_order) == set(["self_attn", "norm", "cross_attn", "ffn"])
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/ops/multi_scale_deform_attn.py
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/cnn/bricks/transformer.py
 @ATTENTION.register_module()
 class MultiheadAttention(BaseModule):
     """A wrapper for ``torch.nn.MultiheadAttention``.
@@ -2610,7 +2033,6 @@ class MultiheadAttention(BaseModule):
 
         self.attn = nn.MultiheadAttention(embed_dims, num_heads, attn_drop, **kwargs)
         self.proj_drop = nn.Dropout(proj_drop)
-        # from models.experimental.MapTR.reference.mmdet3d_plugin.dependency import build_dropout
 
         self.dropout_layer = build_dropout(dropout_layer) if dropout_layer else nn.Identity()
 
@@ -2869,7 +2291,6 @@ def build_transformer_layer_sequence(cfg, default_args=None):
     return build_from_cfg(cfg, TRANSFORMER_LAYER_SEQUENCE, default_args)
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/cnn/utils.py
 def build_norm_layer(cfg, num_features, postfix=""):
     """Build normalization layer.
 
@@ -3060,7 +2481,6 @@ def build_padding_layer(cfg, padding):
     return layer
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/cnn/bricks/conv_module.py
 from torch.nn.modules.batchnorm import _BatchNorm
 
 try:
@@ -3245,8 +2665,6 @@ class ConvModule(nn.Module):
         #    manners (that is, they don't have their own ``init_weights()``)
         #    and PyTorch's conv layers, they will be initialized by
         #    this method with default ``kaiming_init``.
-        # Note: For PyTorch's conv layers, they will be overwritten by our
-        #    initialization implementation using default ``kaiming_init``.
         if not hasattr(self.conv, "init_weights"):
             if self.with_activation and self.act_cfg["type"] == "LeakyReLU":
                 nonlinearity = "leaky_relu"
@@ -3271,7 +2689,6 @@ class ConvModule(nn.Module):
         return x
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/backbones/resnet.py
 class BasicBlock(BaseModule):
     """Basic block for ResNet."""
 
@@ -3353,7 +2770,6 @@ class BasicBlock(BaseModule):
         return out
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/backbones/resnet.py
 class Bottleneck(BaseModule):
     expansion = 4
 
@@ -3542,7 +2958,6 @@ class Bottleneck(BaseModule):
         return out
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/utils/res_layer.py
 class ResLayer(Sequential):
     """ResLayer to build ResNet style backbone.
 
@@ -3634,12 +3049,9 @@ class ResLayer(Sequential):
         super(ResLayer, self).__init__(*layers)
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/backbones/resnet.py
 from torch.nn.modules.batchnorm import _BatchNorm
 
 
-# Note: BACKBONES is defined later in the file (line 2073), but we need it here
-# The decorator will be applied when the module is loaded
 def build_plugin_layer(cfg, postfix="", in_channels=None, **kwargs):
     """Build plugin layer."""
     if cfg is None:
@@ -3659,7 +3071,6 @@ def build_plugin_layer(cfg, postfix="", in_channels=None, **kwargs):
         return None, None
 
 
-# ResNet class - will be registered with BACKBONES after BACKBONES is defined
 class ResNet(BaseModule):
     """ResNet backbone.
 
@@ -3928,7 +3339,6 @@ class ResNet(BaseModule):
                     m.eval()
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/cnn/bricks/drop.py
 def drop_path(x, drop_prob=0.0, training=False):
     """Drop paths (Stochastic Depth) per sample (when applied in main path of
     residual blocks).
@@ -3936,7 +3346,6 @@ def drop_path(x, drop_prob=0.0, training=False):
     We follow the implementation
     https://github.com/rwightman/pytorch-image-models/blob/a2727c1bf78ba0d7b5727f5f95e37fb7f8866b1f/timm/models/layers/drop.py  # noqa: E501
 
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/cnn/bricks/drop.py
     """
     if drop_prob == 0.0 or not training:
         return x
@@ -3959,7 +3368,6 @@ class DropPath(nn.Module):
     Args:
         drop_prob (float): Probability of the path to be zeroed. Default: 0.1
 
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/cnn/bricks/drop.py
     """
 
     def __init__(self, drop_prob=0.1):
@@ -3981,7 +3389,6 @@ class Dropout(nn.Dropout):
             zeroed. Default: 0.5.
         inplace (bool):  Do the operation inplace or not. Default: False.
 
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/cnn/bricks/drop.py
     """
 
     def __init__(self, drop_prob=0.5, inplace=False):
@@ -3989,28 +3396,20 @@ class Dropout(nn.Dropout):
 
 
 def build_dropout(cfg, default_args=None):
-    """Builder for drop out layers.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/cnn/bricks/drop.py
-    """
+    """Builder for drop out layers."""
     return build_from_cfg(cfg, DROPOUT_LAYERS, default_args)
 
 
-# ============================================================================
-# MMDET MODELS - https://github.com/open-mmlab/mmdetection/tree/v2.14.0/mmdet/models
-# ============================================================================
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/builder.py
 MMCV_MODELS = Registry("models")
 _MODELS_DET = Registry("models", parent=MMCV_MODELS)
 
 BACKBONES = _MODELS_DET
 NECKS = _MODELS_DET
-ROI_EXTRACTORS = _MODELS_DET
-SHARED_HEADS = _MODELS_DET
 HEADS = _MODELS_DET
-LOSSES = _MODELS_DET
 DETECTORS = _MODELS_DET
+VOXEL_ENCODERS = _MODELS_DET
+MIDDLE_ENCODERS = _MODELS_DET
+FUSION_LAYERS = _MODELS_DET
 
 # Register ResNet with BACKBONES now that BACKBONES is defined
 # ResNet is defined earlier in the file (around line 2334)
@@ -4023,296 +3422,18 @@ def build_head(cfg):
 
 
 def build_loss(cfg):
-    """Build loss."""
-    return LOSSES.build(cfg)
+    raise NotImplementedError("Loss functions are not supported in inference-only mode.")
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/losses/utils.py
-def reduce_loss(loss, reduction):
-    """Reduce loss as specified.
-
-    Args:
-        loss (Tensor): Elementwise loss tensor.
-        reduction (str): Options are "none", "mean" and "sum".
-
-    Return:
-        Tensor: Reduced loss tensor.
-    """
-    reduction_enum = F._Reduction.get_enum(reduction)
-    # none: 0, elementwise_mean:1, sum: 2
-    if reduction_enum == 0:
-        return loss
-    elif reduction_enum == 1:
-        return loss.mean()
-    elif reduction_enum == 2:
-        return loss.sum()
+def build_detector(cfg, train_cfg=None, test_cfg=None):
+    """Build detector."""
+    if train_cfg is not None or test_cfg is not None:
+        warnings.warn("train_cfg and test_cfg is deprecated, " "please specify them in model", UserWarning)
+    assert cfg.get("train_cfg") is None or train_cfg is None, "train_cfg specified in both outer field and model field "
+    assert cfg.get("test_cfg") is None or test_cfg is None, "test_cfg specified in both outer field and model field "
+    return DETECTORS.build(cfg, default_args=dict(train_cfg=train_cfg, test_cfg=test_cfg))
 
 
-def weight_reduce_loss(loss, weight=None, reduction="mean", avg_factor=None):
-    """Apply element-wise weight and reduce loss.
-
-    Args:
-        loss (Tensor): Element-wise loss.
-        weight (Tensor): Element-wise weights.
-        reduction (str): Same as built-in losses of PyTorch.
-        avg_factor (float): Avarage factor when computing the mean of losses.
-
-    Returns:
-        Tensor: Processed loss values.
-    """
-    # if weight is specified, apply element-wise weight
-    if weight is not None:
-        loss = loss * weight
-
-    # if avg_factor is not specified, just reduce the loss
-    if avg_factor is None:
-        loss = reduce_loss(loss, reduction)
-    else:
-        # if reduction is mean, then average the loss by avg_factor
-        if reduction == "mean":
-            loss = loss.sum() / avg_factor
-        # if reduction is 'none', then do nothing, otherwise raise an error
-        elif reduction != "none":
-            raise ValueError('avg_factor can not be used with reduction="sum"')
-    return loss
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/losses/focal_loss.py
-def py_sigmoid_focal_loss(pred, target, weight=None, gamma=2.0, alpha=0.25, reduction="mean", avg_factor=None):
-    """PyTorch version of `Focal Loss <https://arxiv.org/abs/1708.02002>`_.
-
-    Args:
-        pred (torch.Tensor): The prediction with shape (N, C), C is the
-            number of classes
-        target (torch.Tensor): The learning label of the prediction.
-        weight (torch.Tensor, optional): Sample-wise loss weight.
-        gamma (float, optional): The gamma for calculating the modulating
-            factor. Defaults to 2.0.
-        alpha (float, optional): A balanced form for Focal Loss.
-            Defaults to 0.25.
-        reduction (str, optional): The method used to reduce the loss into
-            a scalar. Defaults to 'mean'.
-        avg_factor (int, optional): Average factor that is used to average
-            the loss. Defaults to None.
-    """
-    pred_sigmoid = pred.sigmoid()
-    target = target.type_as(pred)
-    pt = (1 - pred_sigmoid) * target + pred_sigmoid * (1 - target)
-    focal_weight = (alpha * target + (1 - alpha) * (1 - target)) * pt.pow(gamma)
-    loss = F.binary_cross_entropy_with_logits(pred, target, reduction="none") * focal_weight
-    if weight is not None:
-        if weight.shape != loss.shape:
-            if weight.size(0) == loss.size(0):
-                # For most cases, weight is of shape (num_priors, ),
-                #  which means it does not have the second axis num_class
-                weight = weight.view(-1, 1)
-            else:
-                # Sometimes, weight per anchor per class is also needed. e.g.
-                #  in FSAF. But it may be flattened of shape
-                #  (num_priors x num_class, ), while loss is still of shape
-                #  (num_priors, num_class).
-                assert weight.numel() == loss.numel()
-                weight = weight.view(loss.size(0), -1)
-        assert weight.ndim == loss.ndim
-    loss = weight_reduce_loss(loss, weight, reduction, avg_factor)
-    return loss
-
-
-@LOSSES.register_module()
-class FocalLoss(nn.Module):
-    def __init__(self, use_sigmoid=True, gamma=2.0, alpha=0.25, reduction="mean", loss_weight=1.0):
-        """`Focal Loss <https://arxiv.org/abs/1708.02002>`_
-
-        Args:
-            use_sigmoid (bool, optional): Whether to the prediction is
-                used for sigmoid or softmax. Defaults to True.
-            gamma (float, optional): The gamma for calculating the modulating
-                factor. Defaults to 2.0.
-            alpha (float, optional): A balanced form for Focal Loss.
-                Defaults to 0.25.
-            reduction (str, optional): The method used to reduce the loss into
-                a scalar. Defaults to 'mean'. Options are "none", "mean" and
-                "sum".
-            loss_weight (float, optional): Weight of loss. Defaults to 1.0.
-        """
-        super(FocalLoss, self).__init__()
-        assert use_sigmoid is True, "Only sigmoid focal loss supported now."
-        self.use_sigmoid = use_sigmoid
-        self.gamma = gamma
-        self.alpha = alpha
-        self.reduction = reduction
-        self.loss_weight = loss_weight
-
-    def forward(self, pred, target, weight=None, avg_factor=None, reduction_override=None):
-        """Forward function.
-
-        Args:
-            pred (torch.Tensor): The prediction.
-            target (torch.Tensor): The learning label of the prediction.
-            weight (torch.Tensor, optional): The weight of loss for each
-                prediction. Defaults to None.
-            avg_factor (int, optional): Average factor that is used to average
-                the loss. Defaults to None.
-            reduction_override (str, optional): The reduction method used to
-                override the original reduction method of the loss.
-                Options are "none", "mean" and "sum".
-
-        Returns:
-            torch.Tensor: The calculated loss
-        """
-        assert reduction_override in (None, "none", "mean", "sum")
-        reduction = reduction_override if reduction_override else self.reduction
-        if self.use_sigmoid:
-            # For CPU-only inference, use PyTorch fallback
-            num_classes = pred.size(1)
-            target = F.one_hot(target, num_classes=num_classes + 1)
-            target = target[:, :num_classes]
-            calculate_loss_func = py_sigmoid_focal_loss
-
-            loss_cls = self.loss_weight * calculate_loss_func(
-                pred, target, weight, gamma=self.gamma, alpha=self.alpha, reduction=reduction, avg_factor=avg_factor
-            )
-
-        else:
-            raise NotImplementedError
-        return loss_cls
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/losses/utils.py
-def weighted_loss(loss_func):
-    """Create a weighted version of a given loss function.
-
-    To use this decorator, the loss function must have the signature like
-    `loss_func(pred, target, **kwargs)`. The function only needs to compute
-    element-wise loss without any reduction. This decorator will add weight
-    and reduction arguments to the function. The decorated function will have
-    the signature like `loss_func(pred, target, weight=None, reduction='mean',
-    avg_factor=None, **kwargs)`.
-    """
-
-    @functools.wraps(loss_func)
-    def wrapper(pred, target, weight=None, reduction="mean", avg_factor=None, **kwargs):
-        # get element-wise loss
-        loss = loss_func(pred, target, **kwargs)
-        loss = weight_reduce_loss(loss, weight, reduction, avg_factor)
-        return loss
-
-    return wrapper
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/losses/smooth_l1_loss.py
-@weighted_loss
-def smooth_l1_loss(pred, target, beta=1.0):
-    """Smooth L1 loss.
-
-    Args:
-        pred (torch.Tensor): The prediction.
-        target (torch.Tensor): The learning target of the prediction.
-        beta (float, optional): The threshold in the piecewise function.
-            Defaults to 1.0.
-
-    Returns:
-        torch.Tensor: Calculated loss
-    """
-    assert beta > 0
-    assert pred.size() == target.size() and target.numel() > 0
-    diff = torch.abs(pred - target)
-    loss = torch.where(diff < beta, 0.5 * diff * diff / beta, diff - 0.5 * beta)
-    return loss
-
-
-@weighted_loss
-def l1_loss(pred, target):
-    """L1 loss.
-
-    Args:
-        pred (torch.Tensor): The prediction.
-        target (torch.Tensor): The learning target of the prediction.
-
-    Returns:
-        torch.Tensor: Calculated loss
-    """
-    assert pred.size() == target.size() and target.numel() > 0
-    loss = torch.abs(pred - target)
-    return loss
-
-
-@LOSSES.register_module()
-class SmoothL1Loss(nn.Module):
-    """Smooth L1 loss.
-
-    Args:
-        beta (float, optional): The threshold in the piecewise function.
-            Defaults to 1.0.
-        reduction (str, optional): The method to reduce the loss.
-            Options are "none", "mean" and "sum". Defaults to "mean".
-        loss_weight (float, optional): The weight of loss.
-    """
-
-    def __init__(self, beta=1.0, reduction="mean", loss_weight=1.0):
-        super(SmoothL1Loss, self).__init__()
-        self.beta = beta
-        self.reduction = reduction
-        self.loss_weight = loss_weight
-
-    def forward(self, pred, target, weight=None, avg_factor=None, reduction_override=None, **kwargs):
-        """Forward function.
-
-        Args:
-            pred (torch.Tensor): The prediction.
-            target (torch.Tensor): The learning target of the prediction.
-            weight (torch.Tensor, optional): The weight of loss for each
-                prediction. Defaults to None.
-            avg_factor (int, optional): Average factor that is used to average
-                the loss. Defaults to None.
-            reduction_override (str, optional): The reduction method used to
-                override the original reduction method of the loss.
-                Defaults to None.
-        """
-        assert reduction_override in (None, "none", "mean", "sum")
-        reduction = reduction_override if reduction_override else self.reduction
-        loss_bbox = self.loss_weight * smooth_l1_loss(
-            pred, target, weight, beta=self.beta, reduction=reduction, avg_factor=avg_factor, **kwargs
-        )
-        return loss_bbox
-
-
-@LOSSES.register_module()
-class L1Loss(nn.Module):
-    """L1 loss.
-
-    Args:
-        reduction (str, optional): The method to reduce the loss.
-            Options are "none", "mean" and "sum".
-        loss_weight (float, optional): The weight of loss.
-    """
-
-    def __init__(self, reduction="mean", loss_weight=1.0):
-        super(L1Loss, self).__init__()
-        self.reduction = reduction
-        self.loss_weight = loss_weight
-
-    def forward(self, pred, target, weight=None, avg_factor=None, reduction_override=None):
-        """Forward function.
-
-        Args:
-            pred (torch.Tensor): The prediction.
-            target (torch.Tensor): The learning target of the prediction.
-            weight (torch.Tensor, optional): The weight of loss for each
-                prediction. Defaults to None.
-            avg_factor (int, optional): Average factor that is used to average
-                the loss. Defaults to None.
-            reduction_override (str, optional): The reduction method used to
-                override the original reduction method of the loss.
-                Defaults to None.
-        """
-        assert reduction_override in (None, "none", "mean", "sum")
-        reduction = reduction_override if reduction_override else self.reduction
-        loss_bbox = self.loss_weight * l1_loss(pred, target, weight, reduction=reduction, avg_factor=avg_factor)
-        return loss_bbox
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/core/bbox/iou_calculators/iou2d_calculator.py
 def fp16_clamp(x, min=None, max=None):
     if not x.is_cuda and x.dtype == torch.float16:
         # clamp for cpu float16, tensor fp16 has no clamp implementation
@@ -4409,173 +3530,6 @@ def bbox_overlaps(bboxes1, bboxes2, mode="iou", is_aligned=False, eps=1e-6):
     return gious
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/losses/iou_loss.py
-@weighted_loss
-def giou_loss(pred, target, eps=1e-7):
-    r"""`Generalized Intersection over Union: A Metric and A Loss for Bounding
-    Box Regression <https://arxiv.org/abs/1902.09630>`_.
-
-    Args:
-        pred (torch.Tensor): Predicted bboxes of format (x1, y1, x2, y2),
-            shape (n, 4).
-        target (torch.Tensor): Corresponding gt bboxes, shape (n, 4).
-        eps (float): Eps to avoid log(0).
-
-    Return:
-        Tensor: Loss tensor.
-    """
-    gious = bbox_overlaps(pred, target, mode="giou", is_aligned=True, eps=eps)
-    loss = 1 - gious
-    return loss
-
-
-@LOSSES.register_module()
-class GIoULoss(nn.Module):
-    def __init__(self, eps=1e-6, reduction="mean", loss_weight=1.0):
-        super(GIoULoss, self).__init__()
-        self.eps = eps
-        self.reduction = reduction
-        self.loss_weight = loss_weight
-
-    def forward(self, pred, target, weight=None, avg_factor=None, reduction_override=None, **kwargs):
-        """Forward function.
-
-        Args:
-            pred (torch.Tensor): The prediction.
-            target (torch.Tensor): The learning target of the prediction.
-            weight (torch.Tensor, optional): The weight of loss for each
-                prediction. Defaults to None.
-            avg_factor (int, optional): Average factor that is used to average
-                the loss. Defaults to None.
-            reduction_override (str, optional): The reduction method used to
-                override the original reduction method of the loss.
-                Defaults to None. Options are "none", "mean" and "sum".
-        """
-        if (weight is not None) and (not torch.any(weight > 0)) and (reduction_override != "none"):
-            if pred.dim() == weight.dim() + 1:
-                weight = weight.unsqueeze(1)
-            return (pred * weight).sum()  # 0
-        assert reduction_override in (None, "none", "mean", "sum")
-        reduction = reduction_override if reduction_override else self.reduction
-        if weight is not None and weight.dim() > 1:
-            # TODO: remove this in the future
-            # reduce the weight of shape (n, 4) to (n,) to match the
-            # giou_loss of shape (n,)
-            assert weight.shape == pred.shape
-            weight = weight.mean(-1)
-        loss_bbox = self.loss_weight * giou_loss(
-            pred, target, weight, eps=self.eps, reduction=reduction, avg_factor=avg_factor, **kwargs
-        )
-        return loss_bbox
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/losses/cross_entropy_loss.py
-@LOSSES.register_module()
-class CrossEntropyLoss(nn.Module):
-    """Cross entropy loss.
-
-    Args:
-        use_sigmoid (bool, optional): Whether the prediction uses sigmoid
-            of softmax. Defaults to False.
-        use_mask (bool, optional): Whether to use mask cross entropy loss.
-            Defaults to False.
-        reduction (str, optional): The method used to reduce the loss.
-            Options are "none", "mean" and "sum". Defaults to "mean".
-        loss_weight (float, optional): Weight of loss. Defaults to 1.0.
-        class_weight (list[float], optional): Weight of each class.
-            Defaults to None.
-        bg_cls_weight (float, optional): Weight of background class.
-            Defaults to None.
-    """
-
-    def __init__(
-        self,
-        use_sigmoid=False,
-        use_mask=False,
-        reduction="mean",
-        loss_weight=1.0,
-        class_weight=None,
-        bg_cls_weight=None,
-    ):
-        super(CrossEntropyLoss, self).__init__()
-        assert (use_sigmoid is False) or (use_mask is False)
-        self.use_sigmoid = use_sigmoid
-        self.use_mask = use_mask
-        self.reduction = reduction
-        self.loss_weight = loss_weight
-        self.class_weight = class_weight
-        self.bg_cls_weight = bg_cls_weight
-
-        if self.use_sigmoid:
-            self.cls_criterion = F.binary_cross_entropy_with_logits
-        elif self.use_mask:
-            self.cls_criterion = self._masked_cross_entropy
-        else:
-            self.cls_criterion = F.cross_entropy
-
-    def _masked_cross_entropy(self, pred, target, mask=None):
-        """Masked cross entropy loss."""
-        if mask is not None:
-            mask = mask.float()
-            pred = pred * mask
-            target = target * mask
-        return F.cross_entropy(pred, target, reduction="none")
-
-    def forward(self, cls_score, label, weight=None, avg_factor=None, reduction_override=None, **kwargs):
-        """Forward function.
-
-        Args:
-            cls_score (torch.Tensor): The prediction.
-            label (torch.Tensor): The learning label of the prediction.
-            weight (torch.Tensor, optional): Sample-wise loss weight.
-            avg_factor (int, optional): Average factor that is used to average
-                the loss. Defaults to None.
-            reduction_override (str, optional): The reduction method used to
-                override the original reduction method of the loss.
-                Options are "none", "mean" and "sum".
-
-        Returns:
-            torch.Tensor: The calculated loss
-        """
-        assert reduction_override in (None, "none", "mean", "sum")
-        reduction = reduction_override if reduction_override else self.reduction
-        if self.class_weight is not None:
-            class_weight = cls_score.new_tensor(self.class_weight)
-        else:
-            class_weight = None
-
-        # Handle bg_cls_weight
-        if self.bg_cls_weight is not None and class_weight is None:
-            # Create class_weight with bg_cls_weight for background (class 0)
-            num_classes = cls_score.size(1)
-            class_weight = cls_score.new_ones(num_classes)
-            class_weight[0] = self.bg_cls_weight
-
-        # Only apply weight argument if it's provided
-        if self.use_sigmoid:
-            if weight is not None:
-                loss_cls = self.cls_criterion(cls_score, label.float(), weight=weight, reduction="none")
-                loss_cls = weight_reduce_loss(loss_cls, weight, reduction, avg_factor)
-            else:
-                loss_cls = self.cls_criterion(cls_score, label.float(), reduction=reduction)
-        else:
-            loss_cls = self.cls_criterion(cls_score, label, weight=class_weight, reduction="none")
-            if weight is not None:
-                loss_cls = weight_reduce_loss(loss_cls, weight, reduction, avg_factor)
-            else:
-                if reduction == "mean":
-                    if avg_factor is not None:
-                        loss_cls = loss_cls.sum() / avg_factor
-                    else:
-                        loss_cls = loss_cls.mean()
-                elif reduction == "sum":
-                    loss_cls = loss_cls.sum()
-
-        loss_cls = self.loss_weight * loss_cls
-        return loss_cls
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/detectors/base.py
 from abc import ABCMeta, abstractmethod
 
 
@@ -4687,7 +3641,6 @@ class BaseDetector(nn.Module, metaclass=ABCMeta):
         return self.forward_test(**kwargs)
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/dense_heads/base_dense_head.py
 class BaseDenseHead(nn.Module):
     """Base class for DenseHeads."""
 
@@ -4699,7 +3652,6 @@ class BaseDenseHead(nn.Module):
         """Initialize weights of the head."""
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/dense_heads/dense_test_mixins.py
 class BBoxTestMixin:
     """Mixin class for test time bbox augmentation."""
 
@@ -4707,7 +3659,6 @@ class BBoxTestMixin:
         """Test det bboxes without test-time augmentation."""
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/dense_heads/anchor_free_head.py
 @HEADS.register_module()
 class AnchorFreeHead(BaseDenseHead, BBoxTestMixin):
     """Anchor-free head (FCOS, Fovea, RepPoints, etc.)."""
@@ -4744,8 +3695,8 @@ class AnchorFreeHead(BaseDenseHead, BBoxTestMixin):
         self.dcn_on_last_conv = dcn_on_last_conv
         assert conv_bias == "auto" or isinstance(conv_bias, bool)
         self.conv_bias = conv_bias
-        self.loss_cls = build_loss(loss_cls) if isinstance(loss_cls, dict) else loss_cls
-        self.loss_bbox = build_loss(loss_bbox) if isinstance(loss_bbox, dict) else loss_bbox
+        self.loss_cls = None
+        self.loss_bbox = None
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
         self.conv_cfg = conv_cfg
@@ -4760,7 +3711,6 @@ class AnchorFreeHead(BaseDenseHead, BBoxTestMixin):
         """Forward features of a single scale level."""
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/dense_heads/detr_head.py
 @HEADS.register_module()
 class DETRHead(AnchorFreeHead):
     """Implements the DETR transformer head."""
@@ -4811,20 +3761,7 @@ class DETRHead(AnchorFreeHead):
             self.bg_cls_weight = bg_cls_weight
 
         if train_cfg:
-            assert "assigner" in train_cfg, "assigner should be provided " "when train_cfg is set."
-            assigner = train_cfg["assigner"]
-            assert loss_cls["loss_weight"] == assigner["cls_cost"]["weight"], (
-                "The classification weight for loss and matcher should be" "exactly the same."
-            )
-            assert loss_bbox["loss_weight"] == assigner["reg_cost"]["weight"], (
-                "The regression L1 weight for loss and matcher " "should be exactly the same."
-            )
-            assert loss_iou["loss_weight"] == assigner["iou_cost"]["weight"], (
-                "The regression iou weight for loss and matcher should be" "exactly the same."
-            )
-            self.assigner = build_assigner(assigner)
-            sampler_cfg = dict(type="PseudoSampler")
-            self.sampler = build_sampler(sampler_cfg, context=self)
+            pass
         self.num_query = num_query
         self.num_classes = num_classes
         self.in_channels = in_channels
@@ -4856,18 +3793,7 @@ class DETRHead(AnchorFreeHead):
     def forward_single(self, x, img_metas):
         """Forward function for a single feature level."""
 
-    @force_fp32(apply_to=("all_cls_scores_list", "all_bbox_preds_list"))
-    def loss(
-        self, all_cls_scores_list, all_bbox_preds_list, gt_bboxes_list, gt_labels_list, img_metas, gt_bboxes_ignore=None
-    ):
-        """Loss function."""
 
-
-# ============================================================================
-# MMDET DATASETS - https://github.com/open-mmlab/mmdetection/tree/v2.14.0/mmdet/datasets
-# ============================================================================
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/datasets/builder.py
 DATASETS = Registry("dataset")
 PIPELINES = Registry("pipeline")
 
@@ -4875,14 +3801,10 @@ PIPELINES = Registry("pipeline")
 def _concat_dataset(cfg, default_args=None):
     """Concat multiple datasets.
 
-    Source: https://raw.githubusercontent.com/open-mmlab/mmdetection/v2.14.0/mmdet/datasets/builder.py
 
     Note: This function requires ConcatDataset from mmdet.datasets.dataset_wrappers
     which should be added as a dependency if needed.
     """
-    # Note: This function depends on build_dataset and ConcatDataset
-    # For now, we provide a simplified version
-    # Full implementation would require adding ConcatDataset and build_dataset
     ann_files = cfg["ann_file"]
     img_prefixes = cfg.get("img_prefix", None)
     seg_prefixes = cfg.get("seg_prefix", None)
@@ -4905,7 +3827,6 @@ def _concat_dataset(cfg, default_args=None):
             data_cfg["proposal_file"] = proposal_files[i]
         datasets.append(build_from_cfg(data_cfg, DATASETS, default_args))
 
-    # Note: Full implementation requires ConcatDataset from mmdet.datasets.dataset_wrappers
     # For now, return a list - the actual usage should handle this
     # TODO: Add ConcatDataset class if needed
     if len(datasets) > 1:
@@ -4914,12 +3835,6 @@ def _concat_dataset(cfg, default_args=None):
     return datasets[0] if datasets else None
 
 
-# ============================================================================
-# MMDET3D CORE - https://github.com/open-mmlab/mmdetection3d/tree/v0.17.1/mmdet3d/core
-# ============================================================================
-
-
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/bbox/transforms.py
 def bbox3d2result(bboxes, scores, labels, attrs=None):
     """Convert detection results to a list of numpy arrays.
 
@@ -4956,8 +3871,6 @@ def bbox3d2result(bboxes, scores, labels, attrs=None):
     return result_dict
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/models/detectors/base.py
-# from mmcv.parallel import DataContainer as DC
 DC = DataContainer
 
 
@@ -5040,10 +3953,7 @@ class Base3DDetector(BaseDetector):
             show_result(points, None, pred_bboxes, out_dir, file_name)
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/models/detectors/mvx_two_stage.py
 import warnings
-
-# from mmcv.runner import force_fp32
 
 
 def multi_apply(func, *args, **kwargs):
@@ -5066,122 +3976,11 @@ def build_backbone(cfg):
     return BACKBONES.build(cfg)
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/core/bbox/prior_generators.py
-def build_prior_generator(cfg, default_args=None):
-    """Builder for prior generator."""
-    # For now, return a placeholder - full implementation would require AnchorGenerator classes
-    return None
+def build_neck(cfg):
+    """Build neck."""
+    return NECKS.build(cfg)
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/dense_heads/anchor_head.py
-class AnchorTrainMixin:
-    """Mixin class for anchor head training."""
-
-    def add_sin_difference(self, boxes1, boxes2):
-        """Convert the rotation difference to difference in sin."""
-        return boxes1, boxes2
-
-
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/models/dense_heads/anchor3d_head.py
-@HEADS.register_module()
-class Anchor3DHead(BaseModule, AnchorTrainMixin):
-    """Anchor head for SECOND/PointPillars/MVXNet/PartA2."""
-
-    def __init__(
-        self,
-        num_classes,
-        in_channels,
-        train_cfg,
-        test_cfg,
-        feat_channels=256,
-        use_direction_classifier=True,
-        anchor_generator=dict(
-            type="Anchor3DRangeGenerator",
-            range=[0, -39.68, -1.78, 69.12, 39.68, -1.78],
-            strides=[2],
-            sizes=[[1.6, 3.9, 1.56]],
-            rotations=[0, 1.57],
-            custom_values=[],
-            reshape_out=False,
-        ),
-        assigner_per_size=False,
-        assign_per_class=False,
-        diff_rad_by_sin=True,
-        dir_offset=0,
-        dir_limit_offset=1,
-        bbox_coder=dict(type="DeltaXYZWLHRBBoxCoder"),
-        loss_cls=dict(type="CrossEntropyLoss", use_sigmoid=True, loss_weight=1.0),
-        loss_bbox=dict(type="SmoothL1Loss", beta=1.0 / 9.0, loss_weight=2.0),
-        loss_dir=dict(type="CrossEntropyLoss", loss_weight=0.2),
-        init_cfg=None,
-    ):
-        super().__init__(init_cfg=init_cfg)
-        self.in_channels = in_channels
-        self.num_classes = num_classes
-        self.feat_channels = feat_channels
-        self.diff_rad_by_sin = diff_rad_by_sin
-        self.use_direction_classifier = use_direction_classifier
-        self.train_cfg = train_cfg
-        self.test_cfg = test_cfg
-        self.assigner_per_size = assigner_per_size
-        self.assign_per_class = assign_per_class
-        self.dir_offset = dir_offset
-        self.dir_limit_offset = dir_limit_offset
-        self.fp16_enabled = False
-
-        self.anchor_generator = build_prior_generator(anchor_generator)
-        self.num_anchors = self.anchor_generator.num_base_anchors if self.anchor_generator else 1
-        self.bbox_coder = build_bbox_coder(bbox_coder)
-        self.box_code_size = self.bbox_coder.code_size if hasattr(self.bbox_coder, "code_size") else 7
-
-        self.use_sigmoid_cls = loss_cls.get("use_sigmoid", False)
-        self.sampling = loss_cls["type"] not in ["FocalLoss", "GHMC"]
-        if not self.use_sigmoid_cls:
-            self.num_classes += 1
-        self.loss_cls = build_loss(loss_cls) if isinstance(loss_cls, dict) else loss_cls
-        self.loss_bbox = build_loss(loss_bbox) if isinstance(loss_bbox, dict) else loss_bbox
-        self.loss_dir = build_loss(loss_dir) if isinstance(loss_dir, dict) else loss_dir
-        self.fp16_enabled = False
-
-    def forward_single(self, x):
-        """Forward function on a single-scale feature map."""
-
-    def forward(self, feats):
-        """Forward pass."""
-        return multi_apply(self.forward_single, feats)
-
-    def get_anchors(self, featmap_sizes, input_metas, device="cuda"):
-        """Get anchors according to feature map sizes."""
-        return []
-
-    def loss(self, *args, **kwargs):
-        """Calculate loss."""
-
-    def get_bboxes(self, *args, **kwargs):
-        """Get bboxes."""
-
-
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/models/dense_heads/free_anchor3d_head.py
-@HEADS.register_module()
-class FreeAnchor3DHead(Anchor3DHead):
-    """FreeAnchor head for 3D detection."""
-
-    def __init__(self, pre_anchor_topk=50, bbox_thr=0.6, gamma=2.0, alpha=0.5, init_cfg=None, **kwargs):
-        super().__init__(init_cfg=init_cfg, **kwargs)
-        self.pre_anchor_topk = pre_anchor_topk
-        self.bbox_thr = bbox_thr
-        self.gamma = gamma
-        self.alpha = alpha
-
-    @force_fp32(apply_to=("cls_scores", "bbox_preds", "dir_cls_preds"))
-    def loss(self, cls_scores, bbox_preds, dir_cls_preds, gt_bboxes, gt_labels, input_metas, gt_bboxes_ignore=None):
-        """Calculate loss of FreeAnchor head."""
-
-    def get_bboxes(self, *args, **kwargs):
-        """Get bboxes."""
-
-
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/models/detectors/mvx_two_stage.py
 @DETECTORS.register_module()
 class MVXTwoStageDetector(Base3DDetector):
     """Base class of Multi-modality VoxelNet."""
@@ -5418,7 +4217,6 @@ class MVXTwoStageDetector(Base3DDetector):
         return merged_bboxes
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/bbox/structures/box_3d_mode.py
 class Box3DMode:
     LIDAR = 0
     DEPTH = 1
@@ -5458,7 +4256,6 @@ class Box3DMode:
             return boxes.copy()
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/bbox/structures/coord_3d_mode.py
 class Coord3DMode:
     LIDAR = 0
     DEPTH = 1
@@ -5494,7 +4291,6 @@ class Coord3DMode:
             return points.copy()
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/bbox/structures/utils.py
 def get_box_type(box_type):
     """Get the type and mode of box structure.
 
@@ -5560,7 +4356,6 @@ def xywhr2xyxyr(boxes_xywhr):
     return boxes
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/points/base_points.py
 from abc import abstractmethod
 
 
@@ -5925,7 +4720,6 @@ class BasePoints(object):
         return original_type(new_tensor, points_dim=self.points_dim, attribute_dims=self.attribute_dims)
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/points/lidar_points.py
 class LiDARPoints(BasePoints):
     """Points of instances in LIDAR coordinates.
 
@@ -5993,7 +4787,6 @@ class LiDARPoints(BasePoints):
         return Coord3DMode.convert_point(point=self, src=Coord3DMode.LIDAR, dst=dst, rt_mat=rt_mat)
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/points/cam_points.py
 class CameraPoints(BasePoints):
     """Points of instances in CAM coordinates.
 
@@ -6061,7 +4854,6 @@ class CameraPoints(BasePoints):
         return Coord3DMode.convert_point(point=self, src=Coord3DMode.CAM, dst=dst, rt_mat=rt_mat)
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/points/depth_points.py
 class DepthPoints(BasePoints):
     """Points of instances in DEPTH coordinates.
 
@@ -6129,7 +4921,6 @@ class DepthPoints(BasePoints):
         return Coord3DMode.convert_point(point=self, src=Coord3DMode.DEPTH, dst=dst, rt_mat=rt_mat)
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/points/__init__.py
 def get_points_type(points_type):
     """Get the class of points according to coordinate type.
 
@@ -6152,7 +4943,6 @@ def get_points_type(points_type):
     return points_cls
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/bbox/structures/base_box3d.py
 class BaseInstance3DBoxes(object):
     """Base class for 3D Boxes.
 
@@ -6545,7 +5335,6 @@ class BaseInstance3DBoxes(object):
         return original_type(new_tensor, box_dim=self.box_dim, with_yaw=self.with_yaw)
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/bbox/structures/lidar_box3d.py
 class LiDARInstance3DBoxes:
     def __init__(self, tensor, box_dim=7, with_yaw=True, origin=(0.5, 0.5, 0)):
         if isinstance(tensor, torch.Tensor):
@@ -6590,12 +5379,6 @@ class LiDARInstance3DBoxes:
         return type(self)(self.tensor[item], box_dim=self.box_dim, with_yaw=self.with_yaw)
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/visualizer/show_result.py
-def show_result(points, gt_bboxes, pred_bboxes, out_dir, file_name, show=False):
-    pass
-
-
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/datasets/pipelines/compose.py
 class Compose:
     def __init__(self, transforms):
         assert isinstance(transforms, collections_abc.Sequence)
@@ -6617,12 +5400,6 @@ class Compose:
         return data
 
 
-# ============================================================================
-# MMDET PIPELINES - https://github.com/open-mmlab/mmdetection/tree/v2.14.0/mmdet/datasets/pipelines
-# ============================================================================
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/datasets/pipelines/formating.py
 def to_tensor(data):
     """Convert objects of various python types to :obj:`torch.Tensor`.
 
@@ -6643,217 +5420,6 @@ def to_tensor(data):
         raise TypeError(f"type {type(data)} cannot be converted to tensor.")
 
 
-# ============================================================================
-# MMDET3D PIPELINES - https://github.com/open-mmlab/mmdetection3d/tree/v0.17.1/mmdet3d/datasets/pipelines
-# ============================================================================
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.18.1/mmdet/datasets/pipelines/loading.py
-@PIPELINES.register_module()
-class LoadAnnotations(object):
-    """Load annotations for object detection.
-
-    Args:
-        with_bbox (bool, optional): Whether to parse and load the bbox annotation.
-            Defaults to True.
-        with_label (bool, optional): Whether to parse and load the label annotation.
-            Defaults to True.
-        with_mask (bool, optional): Whether to parse and load the mask annotation.
-            Defaults to False.
-        with_seg (bool, optional): Whether to parse and load the semantic segmentation
-            annotation. Defaults to False.
-        poly2mask (bool, optional): Whether to convert the instance masks from polygons
-            to bitmaps. Defaults to True.
-        file_client_args (dict, optional): Arguments to instantiate a FileClient.
-            See :class:`mmcv.fileio.FileClient` for details.
-            Defaults to None. It will be deprecated in future. Please use
-            ``backend_args`` instead.
-        backend_args (dict, optional): Arguments to instantiate a file backend.
-            See https://mmcv.readthedocs.io/en/latest/api.html#mmcv.fileio.FileClient
-            for details. Defaults to None.
-    """
-
-    def __init__(
-        self,
-        with_bbox=True,
-        with_label=True,
-        with_mask=False,
-        with_seg=False,
-        poly2mask=True,
-        file_client_args=None,
-        backend_args=None,
-    ):
-        self.with_bbox = with_bbox
-        self.with_label = with_label
-        self.with_mask = with_mask
-        self.with_seg = with_seg
-        self.poly2mask = poly2mask
-        self.file_client_args = file_client_args
-        self.backend_args = backend_args
-
-    def _load_bboxes(self, results):
-        """Private function to load bounding box annotations.
-
-        Args:
-            results (dict): Result dict from :obj:`mmdet.CustomDataset`.
-
-        Returns:
-            dict: The dict contains loaded bounding box annotations.
-        """
-        ann_info = results["ann_info"]
-        results["gt_bboxes"] = ann_info["bboxes"].copy()
-
-        gt_bboxes_ignore = ann_info.get("bboxes_ignore", None)
-        if gt_bboxes_ignore is not None:
-            results["gt_bboxes_ignore"] = gt_bboxes_ignore.copy()
-            results["bbox_fields"].append("gt_bboxes_ignore")
-        results["bbox_fields"].append("gt_bboxes")
-        return results
-
-    def _load_labels(self, results):
-        """Private function to load label annotations.
-
-        Args:
-            results (dict): Result dict from :obj:`mmdet.CustomDataset`.
-
-        Returns:
-            dict: The dict contains loaded label annotations.
-        """
-        results["gt_labels"] = results["ann_info"]["labels"].copy()
-        return results
-
-    def _poly2mask(self, mask_ann, img_h, img_w):
-        """Private function to convert masks represented with polygon to
-        bitmaps.
-
-        Args:
-            mask_ann (list | dict): Polygon mask annotation input.
-            img_h (int): The height of output mask.
-            img_w (int): The width of output mask.
-
-        Returns:
-            numpy.ndarray: The decode bitmap mask of shape (img_h, img_w).
-        """
-        try:
-            from pycocotools import mask as maskUtils
-        except ImportError:
-            raise ImportError("pycocotools is not installed")
-        if isinstance(mask_ann, list):
-            # polygon -- a single object might consist of multiple parts
-            # we merge all parts into one mask rle code
-            rles = maskUtils.frPyObjects(mask_ann, img_h, img_w)
-            rle = maskUtils.merge(rles)
-        elif isinstance(mask_ann["counts"], list):
-            # uncompressed RLE
-            rle = maskUtils.frPyObjects(mask_ann, img_h, img_w)
-        else:
-            # rle
-            rle = mask_ann
-        mask = maskUtils.decode(rle)
-        return mask
-
-    def _process_polygons(self, polygons):
-        """Private function to process polygons.
-
-        Args:
-            polygons (list[list]): Polygon annotations.
-
-        Returns:
-            list[list]: Processed polygon annotations.
-        """
-        polygons = [np.array(p) for p in polygons]
-        for polygon in polygons:
-            assert len(polygon) % 2 == 0 and len(polygon) >= 6
-        return polygons
-
-    def _load_masks(self, results):
-        """Private function to load mask annotations.
-
-        Args:
-            results (dict): Result dict from :obj:`mmdet.CustomDataset`.
-
-        Returns:
-            dict: The dict contains loaded mask annotations.
-        """
-        h, w = results["img_info"]["height"], results["img_info"]["width"]
-        gt_masks = results["ann_info"]["masks"]
-        if self.poly2mask:
-            gt_masks = BitMasks([self._poly2mask(mask, h, w) for mask in gt_masks], h, w)
-        else:
-            gt_masks = BitMasks([self._process_polygons(mask) for mask in gt_masks], h, w)
-        results["gt_masks"] = gt_masks
-        results["mask_fields"].append("gt_masks")
-        return results
-
-    def _load_semantic_seg(self, results):
-        """Private function to load semantic segmentation annotations.
-
-        Args:
-            results (dict): Result dict from :obj:`mmdet.CustomDataset`.
-
-        Returns:
-            dict: The dict contains loaded semantic segmentation annotations.
-        """
-        import warnings
-        import os.path as osp
-
-        try:
-            from mmcv import fileio
-            import mmcv
-        except ImportError:
-            raise ImportError("mmcv is not installed")
-        if self.file_client_args is not None:
-            warnings.warn(
-                "The `file_client_args` is deprecated, " "please use `backend_args` instead", DeprecationWarning
-            )
-            if self.backend_args is None:
-                self.backend_args = self.file_client_args
-
-        filename = osp.join(results["seg_prefix"], results["ann_info"]["seg_map"])
-        try:
-            img_bytes = fileio.get(filename, backend_args=self.backend_args)
-            gt_semantic_seg = mmcv.imfrombytes(img_bytes, flag="unchanged").squeeze().astype(np.uint8)
-        except Exception as e:
-            raise Exception(f"Failed to load semantic segmentation map {filename}") from e
-        results["gt_semantic_seg"] = gt_semantic_seg
-        results["seg_fields"].append("gt_semantic_seg")
-        return results
-
-    def __call__(self, results):
-        """Call function to load multiple types annotations.
-
-        Args:
-            results (dict): Result dict from :obj:`mmdet.CustomDataset`.
-
-        Returns:
-            dict: The dict contains loaded bounding box, label, mask and
-                semantic segmentation annotations.
-        """
-        if self.with_bbox:
-            results = self._load_bboxes(results)
-            if results is None:
-                return None
-        if self.with_label:
-            results = self._load_labels(results)
-        if self.with_mask:
-            results = self._load_masks(results)
-        if self.with_seg:
-            results = self._load_semantic_seg(results)
-        return results
-
-    def __repr__(self):
-        repr_str = self.__class__.__name__
-        repr_str += f"(with_bbox={self.with_bbox}, "
-        repr_str += f"with_label={self.with_label}, "
-        repr_str += f"with_mask={self.with_mask}, "
-        repr_str += f"with_seg={self.with_seg}, "
-        repr_str += f"poly2mask={self.poly2mask}, "
-        repr_str += f"file_client_args={self.file_client_args}, "
-        repr_str += f"backend_args={self.backend_args})"
-        return repr_str
-
-
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/datasets/pipelines/loading.py
 @PIPELINES.register_module()
 class LoadMultiViewImageFromFiles(object):
     """Load multi channel images from a list of separate channel files.
@@ -6957,7 +5523,6 @@ class LoadMultiViewImageFromFiles(object):
         return repr_str
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/datasets/pipelines/formating.py
 @PIPELINES.register_module()
 class DefaultFormatBundle3D(object):
     # DataContainer is defined earlier in this file
@@ -7027,7 +5592,6 @@ class DefaultFormatBundle3D(object):
         return self.__class__.__name__ + f"(class_names={self.class_names}, with_label={self.with_label})"
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/datasets/pipelines/test_time_aug.py
 @PIPELINES.register_module()
 class MultiScaleFlipAug3D(object):
     """Test-time augmentation with multiple scales and flipping.
@@ -7090,12 +5654,6 @@ class MultiScaleFlipAug3D(object):
         return repr_str
 
 
-# ============================================================================
-# MMDET3D DATASETS - https://github.com/open-mmlab/mmdetection3d/tree/v0.17.1/mmdet3d/datasets
-# ============================================================================
-
-
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/datasets/custom_3d.py
 class Custom3DDataset:
     CLASSES = None
 
@@ -7126,7 +5684,7 @@ class Custom3DDataset:
         return self.CLASSES
 
     def load_annotations(self, ann_file):
-        return mmcv.load(ann_file) if ann_file else []
+        return load_file(ann_file) if ann_file else []
 
     def get_data_info(self, index):
         raise NotImplementedError
@@ -7157,23 +5715,16 @@ class Custom3DDataset:
         results["box_type_3d"] = self.box_type_3d
         results["box_mode_3d"] = self.box_mode_3d
 
-    def prepare_train_data(self, index):
-        raise NotImplementedError
-
     def prepare_test_data(self, index):
         raise NotImplementedError
 
     def __getitem__(self, index):
-        if self.test_mode:
-            return self.prepare_test_data(index)
-        else:
-            return self.prepare_train_data(index)
+        return self.prepare_test_data(index)
 
     def __len__(self):
         return len(self.data_infos)
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/datasets/nuscenes_dataset.py
 @DATASETS.register_module()
 class NuScenesDataset(Custom3DDataset):
     r"""NuScenes Dataset.
@@ -7347,7 +5898,7 @@ class NuScenesDataset(Custom3DDataset):
 
     def load_annotations(self, ann_file):
         """Load annotations from ann_file."""
-        data = load(ann_file)
+        data = load_file(ann_file)
         data_infos = list(sorted(data["infos"], key=lambda e: e["timestamp"]))
         data_infos = data_infos[:: self.load_interval]
         self.metadata = data["metadata"]
@@ -7432,7 +5983,6 @@ class NuScenesDataset(Custom3DDataset):
             data_info = self.data_infos[i]
             pts_path = data_info["lidar_path"]
             file_name = osp.split(pts_path)[-1].split(".")[0]
-            show_result(None, None, None, out_dir, file_name, show)
 
     def _get_pipeline(self, pipeline):
         return Compose(pipeline) if pipeline else self.pipeline
@@ -7442,108 +5992,9 @@ class NuScenesDataset(Custom3DDataset):
         data = {key: None}
         return torch.tensor([])
 
-    def format_results(self, results, jsonfile_prefix=None):
-        """Format the results to json (standard format for COCO evaluation)."""
-        result_files, tmp_dir = self._format_bbox(results, jsonfile_prefix)
-        return result_files, tmp_dir
-
-    def _format_bbox(self, results, jsonfile_prefix):
-        """Convert the results to the standard format."""
-        if jsonfile_prefix is None:
-            tmp_dir = tempfile.TemporaryDirectory()
-            jsonfile_prefix = osp.join(tmp_dir.name, "results")
-        else:
-            tmp_dir = None
-
-        result_files = dict()
-        for name in results[0]:
-            results_ = [out[name] for out in results]
-            tmp_file_ = osp.join(jsonfile_prefix, name)
-            result_files.update({name: tmp_file_})
-        return result_files, tmp_dir
-
-    def evaluate(
-        self,
-        results,
-        metric="bbox",
-        logger=None,
-        jsonfile_prefix=None,
-        result_names=["pts_bbox"],
-        show=False,
-        out_dir=None,
-        pipeline=None,
-    ):
-        """Evaluation in nuScenes protocol."""
-        result_files, tmp_dir = self.format_results(results, jsonfile_prefix)
-        if isinstance(result_files, dict):
-            results_dict = dict()
-            for name in result_names:
-                ret_dict = self._evaluate_single(result_files[name], logger=logger, metric=metric, result_name=name)
-                results_dict.update(ret_dict)
-        elif isinstance(result_files, str):
-            results_dict = self._evaluate_single(
-                result_files, logger=logger, metric=metric, result_name=result_names[0] if result_names else "pts_bbox"
-            )
-
-        if tmp_dir is not None:
-            tmp_dir.cleanup()
-
-        if show:
-            self.show(results, out_dir, pipeline=pipeline)
-        return results_dict
-
-    def _evaluate_single(self, result_path, logger=None, metric="bbox", result_name="pts_bbox"):
-        """Evaluation for a single model in nuScenes protocol."""
-        from nuscenes import NuScenes
-
-        self.nusc = NuScenes(version=self.version, dataroot=self.data_root, verbose=True)
-        output_dir = osp.join(*osp.split(result_path)[:-1])
-        eval_set_map = {
-            "v1.0-mini": "mini_val",
-            "v1.0-trainval": "val",
-        }
-        try:
-            from models.experimental.MapTR.reference.mmdet3d_plugin.datasets.nuscnes_eval import (
-                NuScenesEval_custom,
-            )
-        except ImportError:
-            from nuscenes.eval.detection.evaluate import NuScenesEval as NuScenesEval_custom
-        self.nusc_eval = NuScenesEval_custom(
-            self.nusc,
-            config=self.eval_detection_configs,
-            result_path=result_path,
-            eval_set=eval_set_map[self.version],
-            output_dir=output_dir,
-            verbose=True,
-        )
-        self.nusc_eval.main(plot_examples=0, render_curves=False)
-        metrics = mmcv.load(osp.join(output_dir, "metrics_summary.json"))
-        detail = dict()
-        metric_prefix = f"{result_name}_NuScenes"
-        for name in self.CLASSES:
-            for k, v in metrics["label_aps"][name].items():
-                val = float("{:.4f}".format(v))
-                detail["{}/{}_AP_dist_{}".format(metric_prefix, name, k)] = val
-            for k, v in metrics["label_tp_errors"][name].items():
-                val = float("{:.4f}".format(v))
-                detail["{}/{}_{}".format(metric_prefix, name, k)] = val
-        for k, v in metrics["tp_errors"].items():
-            val = float("{:.4f}".format(v))
-            detail["{}/{}".format(metric_prefix, self.ErrNameMapping[k])] = val
-        detail["{}/NDS".format(metric_prefix)] = metrics["nd_score"]
-        detail["{}/mAP".format(metric_prefix)] = metrics["mean_ap"]
-        return detail
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/datasets/samplers/group_sampler.py
-# from __future__ import division
-
 
 class GroupSampler(Sampler):
-    """Sampler that groups samples together.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmdetection/v2.14.0/mmdet/datasets/samplers/group_sampler.py
-    """
+    """Sampler that groups samples together."""
 
     def __init__(self, dataset, samples_per_gpu=1):
         assert hasattr(dataset, "flag")
@@ -7580,63 +6031,22 @@ class GroupSampler(Sampler):
         return self.num_samples
 
 
-# ============================================================================
-# MMDET CORE - https://github.com/open-mmlab/mmdetection/tree/v2.14.0/mmdet/core
-# ============================================================================
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/core/utils/misc.py
-def reduce_mean(tensor):
-    """Obtain the mean of tensor on different GPUs."""
-    if not (dist.is_available() and dist.is_initialized()):
-        return tensor
-    tensor = tensor.clone()
-    dist.all_reduce(tensor.div_(dist.get_world_size()), op=dist.ReduceOp.SUM)
-    return tensor
-
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/cnn/bricks/linear.py
-# Linear is just an alias for torch.nn.Linear in mmcv v1.4.0
 Linear = nn.Linear
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/utils/builder.py
 def build_transformer(cfg, default_args=None):
     """Builder for Transformer."""
     return build_from_cfg(cfg, TRANSFORMER, default_args)
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/core/bbox/builder.py
-BBOX_ASSIGNERS = Registry("bbox_assigner")
-BBOX_SAMPLERS = Registry("bbox_sampler")
 BBOX_CODERS = Registry("bbox_coder")
 
 
-def build_assigner(cfg, **default_args):
-    """Builder of box assigner.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmdetection/v2.14.0/mmdet/core/bbox/builder.py
-    """
-    return build_from_cfg(cfg, BBOX_ASSIGNERS, default_args)
-
-
-def build_sampler(cfg, **default_args):
-    """Builder of box sampler.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmdetection/v2.14.0/mmdet/core/bbox/builder.py
-    """
-    return build_from_cfg(cfg, BBOX_SAMPLERS, default_args)
-
-
 def build_bbox_coder(cfg, **default_args):
-    """Builder of box coder.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmdetection/v2.14.0/mmdet/core/bbox/builder.py
-    """
+    """Builder of box coder."""
     return build_from_cfg(cfg, BBOX_CODERS, default_args)
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/utils/transformer.py
 def inverse_sigmoid(x, eps=1e-5):
     """Inverse function of sigmoid.
 
@@ -7647,7 +6057,6 @@ def inverse_sigmoid(x, eps=1e-5):
         Tensor: The x has passed the inverse function of sigmoid, has same
             shape with input.
 
-    Source: https://raw.githubusercontent.com/open-mmlab/mmdetection/v2.14.0/mmdet/models/utils/transformer.py
     """
     x = x.clamp(min=0, max=1)
     x1 = x.clamp(min=eps)
@@ -7655,119 +6064,7 @@ def inverse_sigmoid(x, eps=1e-5):
     return torch.log(x1 / x2)
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/core/bbox/match_costs/builder.py
-MATCH_COST = Registry("Match Cost")
-
-
-def build_match_cost(cfg, default_args=None):
-    """Builder of IoU calculator.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmdetection/v2.14.0/mmdet/core/bbox/match_costs/builder.py
-    """
-    return build_from_cfg(cfg, MATCH_COST, default_args)
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/core/bbox/assigners/base_assigner.py
-from abc import abstractmethod
-
-
-class BaseAssigner(metaclass=ABCMeta):
-    """Base assigner that assigns boxes to ground truth boxes.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmdetection/v2.14.0/mmdet/core/bbox/assigners/base_assigner.py
-    """
-
-    @abstractmethod
-    def assign(self, bboxes, gt_bboxes, gt_bboxes_ignore=None, gt_labels=None):
-        """Assign boxes to either a ground truth boxes or a negative boxes."""
-
-
-# Minimal NiceRepr mixin for AssignResult
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/utils/util_mixins.py
-class NiceRepr:
-    """Mixin class for creating nice representation of objects using __nice__ method.
-
-    Source: Simplified version based on mmdet.utils.util_mixins
-    """
-
-    def __repr__(self):
-        nice = self.__nice__()
-        classname = self.__class__.__name__
-        return f"<{classname}({nice})>"
-
-    def __nice__(self):
-        return ""
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/core/bbox/assigners/assign_result.py
-class AssignResult(NiceRepr):
-    """Stores assignments between predicted and truth boxes.
-
-    Attributes:
-        num_gts (int): the number of truth boxes considered when computing this
-            assignment
-        gt_inds (LongTensor): for each predicted box indicates the 1-based
-            index of the assigned truth box. 0 means unassigned and -1 means
-            ignore.
-        max_overlaps (FloatTensor): the iou between the predicted box and its
-            assigned truth box.
-        labels (None | LongTensor): If specified, for each predicted box
-            indicates the category label of the assigned truth box.
-
-    Source: https://raw.githubusercontent.com/open-mmlab/mmdetection/v2.14.0/mmdet/core/bbox/assigners/assign_result.py
-    """
-
-    def __init__(self, num_gts, gt_inds, max_overlaps, labels=None):
-        self.num_gts = num_gts
-        self.gt_inds = gt_inds
-        self.max_overlaps = max_overlaps
-        self.labels = labels
-        # Interface for possible user-defined properties
-        self._extra_properties = {}
-
-    @property
-    def num_preds(self):
-        """int: the number of predictions in this assignment"""
-        return len(self.gt_inds)
-
-    def set_extra_property(self, key, value):
-        """Set user-defined new property."""
-        assert key not in self.info
-        self._extra_properties[key] = value
-
-    def get_extra_property(self, key):
-        """Get user-defined property."""
-        return self._extra_properties.get(key, None)
-
-    @property
-    def info(self):
-        """dict: a dictionary of info about the object"""
-        basic_info = {
-            "num_gts": self.num_gts,
-            "num_preds": self.num_preds,
-            "gt_inds": self.gt_inds,
-            "max_overlaps": self.max_overlaps,
-            "labels": self.labels,
-        }
-        basic_info.update(self._extra_properties)
-        return basic_info
-
-    def __nice__(self):
-        """str: a "nice" summary string describing this assign result"""
-        parts = []
-        parts.append(f"num_gts={self.num_gts!r}")
-        if self.gt_inds is not None:
-            parts.append(f"gt_inds.shape={tuple(self.gt_inds.shape)!r}")
-        if self.max_overlaps is not None:
-            parts.append(f"max_overlaps.shape={tuple(self.max_overlaps.shape)!r}")
-        if self.labels is not None:
-            parts.append(f"labels.shape={tuple(self.labels.shape)!r}")
-        return ", ".join(parts)
-
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/parallel/_functions.py
 import torch
-from torch.nn.parallel._functions import _get_stream
 
 
 def scatter(input, devices, streams=None):
@@ -7795,23 +6092,9 @@ def scatter(input, devices, streams=None):
         raise Exception(f"Unknown type {type(input)}.")
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/parallel/data_container.py
-# Copyright (c) OpenMMLab. All rights reserved.
 import functools
 
 import torch
-
-
-def assert_tensor_type(func):
-    @functools.wraps(func)
-    def wrapper(*args, **kwargs):
-        if not isinstance(args[0].data, torch.Tensor):
-            raise AttributeError(
-                f"{args[0].__class__.__name__} has no attribute " f"{func.__name__} for type {args[0].datatype}"
-            )
-        return func(*args, **kwargs)
-
-    return wrapper
 
 
 class DataContainer:
@@ -7881,148 +6164,122 @@ class DataContainer:
         return self.data.dim()
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/parallel/_functions.py
+def collate(batch, samples_per_gpu=1):
+    """Collate a batch of data.
 
-# Copyright (c) OpenMMLab. All rights reserved.
-import torch
-from torch.nn.parallel._functions import _get_stream
+    Args:
+        batch (list): A list of dicts containing data.
+        samples_per_gpu (int): Number of samples per GPU.
 
-
-def scatter(input, devices, streams=None):
-    """Scatters tensor across multiple GPUs."""
-    if streams is None:
-        streams = [None] * len(devices)
-
-    if isinstance(input, list):
-        chunk_size = (len(input) - 1) // len(devices) + 1
-        outputs = [scatter(input[i], [devices[i // chunk_size]], [streams[i // chunk_size]]) for i in range(len(input))]
-        return outputs
-    elif isinstance(input, torch.Tensor):
-        output = input.contiguous()
-        # TODO: copy to a pinned buffer first (if copying from CPU)
-        stream = streams[0] if output.numel() > 0 else None
-        if devices != [-1]:
-            with torch.cuda.device(devices[0]), torch.cuda.stream(stream):
-                output = output.cuda(devices[0], non_blocking=True)
-        else:
-            # unsqueeze the first dimension thus the tensor's shape is the
-            # same as those scattered with GPU.
-            output = output.unsqueeze(0)
-        return output
-    else:
-        raise Exception(f"Unknown type {type(input)}.")
-
-
-def synchronize_stream(output, devices, streams):
-    if isinstance(output, list):
-        chunk_size = len(output) // len(devices)
-        for i in range(len(devices)):
-            for j in range(chunk_size):
-                synchronize_stream(output[i * chunk_size + j], [devices[i]], [streams[i]])
-    elif isinstance(output, torch.Tensor):
-        if output.numel() != 0:
-            with torch.cuda.device(devices[0]):
-                main_stream = torch.cuda.current_stream()
-                main_stream.wait_stream(streams[0])
-                output.record_stream(main_stream)
-    else:
-        raise Exception(f"Unknown type {type(output)}.")
-
-
-def get_input_device(input):
-    if isinstance(input, list):
-        for item in input:
-            input_device = get_input_device(item)
-            if input_device != -1:
-                return input_device
-        return -1
-    elif isinstance(input, torch.Tensor):
-        return input.get_device() if input.is_cuda else -1
-    else:
-        raise Exception(f"Unknown type {type(input)}.")
-
-
-class Scatter:
-    @staticmethod
-    def forward(target_gpus, input):
-        input_device = get_input_device(input)
-        streams = None
-        if input_device == -1 and target_gpus != [-1]:
-            # Perform CPU to GPU copies in a background stream
-            streams = [_get_stream(device) for device in target_gpus]
-
-        outputs = scatter(input, target_gpus)
-        # Synchronize with the copy stream
-        if streams is not None:
-            synchronize_stream(outputs, target_gpus, streams)
-
-        return tuple(outputs)
-
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/parallel/scatter_gather.py
-# Copyright (c) OpenMMLab. All rights reserved.
-import torch
-from torch.nn.parallel._functions import Scatter as OrigScatter
-
-# from ._functions import Scatter
-# from .data_container import DataContainer
-
-
-def scatter(inputs, target_gpus, dim=0):
-    """Scatter inputs to target gpus.
-
-    The only difference from original :func:`scatter` is to add support for
-    :type:`~mmcv.parallel.DataContainer`.
+    Returns:
+        dict: Collated batch data.
     """
+    if not isinstance(batch, list):
+        return batch
 
-    def scatter_map(obj):
-        if isinstance(obj, torch.Tensor):
-            if target_gpus != [-1]:
-                return OrigScatter.apply(target_gpus, None, dim, obj)
+    if len(batch) == 0:
+        return batch
+
+    elem = batch[0]
+    if elem is None:
+        return None
+
+    if isinstance(elem, dict):
+        result = {}
+        for key in elem:
+            values = []
+            for d in batch:
+                if d is not None and key in d:
+                    values.append(d[key])
+                else:
+                    values.append(None)
+
+            if all(v is None for v in values):
+                result[key] = None
+            elif any(v is None for v in values):
+                filtered_values = [v for v in values if v is not None]
+                if len(filtered_values) > 0:
+                    result[key] = collate(filtered_values, samples_per_gpu)
+                else:
+                    result[key] = None
             else:
-                # for CPU inference, just return the tensor wrapped in a list
-                return [obj]
-        if isinstance(obj, DataContainer):
-            if obj.cpu_only:
-                return obj.data
+                result[key] = collate(values, samples_per_gpu)
+        return result
+    elif isinstance(elem, DataContainer):
+        if elem.stack:
+            if isinstance(elem.data, torch.Tensor):
+                return DataContainer(
+                    default_collate([e.data for e in batch if e is not None and e.data is not None]),
+                    stack=elem.stack,
+                    padding_value=elem.padding_value,
+                    cpu_only=elem.cpu_only,
+                    pad_dims=elem.pad_dims,
+                )
+            elif isinstance(elem.data, (list, tuple)):
+                return DataContainer(
+                    type(elem.data)(
+                        [
+                            default_collate([e.data[i] for e in batch if e is not None and e.data is not None])
+                            for i in range(len(elem.data))
+                        ]
+                    ),
+                    stack=elem.stack,
+                    padding_value=elem.padding_value,
+                    cpu_only=elem.cpu_only,
+                    pad_dims=elem.pad_dims,
+                )
             else:
-                return Scatter.forward(target_gpus, obj.data)
-        if isinstance(obj, tuple) and len(obj) > 0:
-            return list(zip(*map(scatter_map, obj)))
-        if isinstance(obj, list) and len(obj) > 0:
-            out = list(map(list, zip(*map(scatter_map, obj))))
-            return out
-        if isinstance(obj, dict) and len(obj) > 0:
-            out = list(map(type(obj), zip(*map(scatter_map, obj.items()))))
-            return out
-        return [obj for targets in target_gpus]
+                return DataContainer(
+                    [e.data for e in batch if e is not None],
+                    stack=elem.stack,
+                    padding_value=elem.padding_value,
+                    cpu_only=elem.cpu_only,
+                    pad_dims=elem.pad_dims,
+                )
+        else:
+            return DataContainer(
+                [e.data for e in batch if e is not None],
+                stack=elem.stack,
+                padding_value=elem.padding_value,
+                cpu_only=elem.cpu_only,
+                pad_dims=elem.pad_dims,
+            )
+    elif isinstance(elem, (list, tuple)):
+        if len(elem) > 0 and isinstance(elem[0], DataContainer):
+            collated_items = []
+            for i in range(len(elem)):
+                items_at_i = [b[i] for b in batch if b is not None and i < len(b) and b[i] is not None]
+                if len(items_at_i) > 0:
+                    collated_items.append(collate(items_at_i, samples_per_gpu))
+                else:
+                    collated_items.append(None)
+            return type(elem)(collated_items)
+        else:
+            zipped = list(zip(*batch))
+            return type(elem)([collate(list(samples), samples_per_gpu) for samples in zipped])
+    elif elem is None:
+        return None
+    elif isinstance(elem, type):
+        return batch
+    elif isinstance(elem, (str, int, float, bool)):
+        if len(set(batch)) == 1:
+            return batch[0]
+        return batch
+    elif isinstance(elem, (torch.Tensor, np.ndarray)):
+        filtered_batch = [b for b in batch if b is not None]
+        if len(filtered_batch) == 0:
+            return None
+        return default_collate(filtered_batch)
+    else:
+        filtered_batch = [b for b in batch if b is not None]
+        if len(filtered_batch) == 0:
+            return None
+        try:
+            return default_collate(filtered_batch)
+        except (TypeError, ValueError):
+            return batch
 
-    # After scatter_map is called, a scatter_map cell will exist. This cell
-    # has a reference to the actual function scatter_map, which has references
-    # to a closure that has a reference to the scatter_map cell (because the
-    # fn is recursive). To avoid this reference cycle, we set the function to
-    # None, clearing the cell
-    try:
-        return scatter_map(inputs)
-    finally:
-        scatter_map = None
 
-
-def scatter_kwargs(inputs, kwargs, target_gpus, dim=0):
-    """Scatter with support for kwargs dictionary."""
-    inputs = scatter(inputs, target_gpus, dim) if inputs else []
-    kwargs = scatter(kwargs, target_gpus, dim) if kwargs else []
-    if len(inputs) < len(kwargs):
-        inputs.extend([() for _ in range(len(kwargs) - len(inputs))])
-    elif len(kwargs) < len(inputs):
-        kwargs.extend([{} for _ in range(len(inputs) - len(kwargs))])
-    inputs = tuple(inputs)
-    kwargs = tuple(kwargs)
-    return inputs, kwargs
-
-
-# FPN class from mmdetection v2.14.0
-# Source: https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/necks/fpn.py
 @NECKS.register_module()
 class FPN(BaseModule):
     r"""Feature Pyramid Network.
@@ -8228,180 +6485,9 @@ class FPN(BaseModule):
 
 
 # Register ResNet with BACKBONES at the end of the file
-# This ensures BACKBONES is defined and ResNet class is fully defined
 BACKBONES.register_module(name="ResNet", module=ResNet)
 
 
-# https://github.com/facebookresearch/detectron2/blob/main/detectron2/layers/wrappers.py
-class Conv2d(nn.Conv2d):
-    """
-    A wrapper around :class:`torch.nn.Conv2d` to support empty inputs and more features.
-    Supports norm and activation parameters like detectron2's Conv2d.
-    """
-
-    def __init__(self, *args, **kwargs):
-        """
-        Extra keyword arguments supported in addition to those in `torch.nn.Conv2d`:
-
-        Args:
-            norm (nn.Module, optional): a normalization layer
-            activation (callable(Tensor) -> Tensor): a callable activation function
-
-        It assumes that norm layer is used before activation.
-        """
-        norm = kwargs.pop("norm", None)
-        activation = kwargs.pop("activation", None)
-        super().__init__(*args, **kwargs)
-
-        self.norm = norm
-        self.activation = activation
-
-    def forward(self, x):
-        if not torch.jit.is_scripting():
-            if x.numel() == 0 and self.training:
-                # https://github.com/pytorch/pytorch/issues/12013
-                if self.norm is not None:
-                    assert not isinstance(self.norm, nn.SyncBatchNorm), "SyncBatchNorm does not support empty inputs!"
-
-        x = F.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.groups)
-        if self.norm is not None:
-            x = self.norm(x)
-        if self.activation is not None:
-            x = self.activation(x)
-        return x
-
-
-def cat(tensors, dim=0):
-    """
-    Efficient version of torch.cat that avoids a copy if there is only a single element in a list.
-    """
-    assert isinstance(tensors, (list, tuple))
-    if len(tensors) == 1:
-        return tensors[0]
-    return torch.cat(tensors, dim)
-
-
-# https://github.com/facebookresearch/detectron2/blob/main/detectron2/structures/boxes.py
-from enum import IntEnum, unique
-from typing import Union, List, Tuple
-
-_RawBoxType = Union[List[float], Tuple[float, ...], torch.Tensor, np.ndarray]
-
-
-@unique
-class BoxMode(IntEnum):
-    """
-    Enum of different ways to represent a box.
-    """
-
-    XYXY_ABS = 0
-    """
-    (x0, y0, x1, y1) in absolute floating points coordinates.
-    The coordinates in range [0, width or height].
-    """
-    XYWH_ABS = 1
-    """
-    (x0, y0, w, h) in absolute floating points coordinates.
-    """
-    XYXY_REL = 2
-    """
-    Not yet supported!
-    (x0, y0, x1, y1) in range [0, 1]. They are relative to the size of the image.
-    """
-    XYWH_REL = 3
-    """
-    Not yet supported!
-    (x0, y0, w, h) in range [0, 1]. They are relative to the size of the image.
-    """
-    XYWHA_ABS = 4
-    """
-    (xc, yc, w, h, a) in absolute floating points coordinates.
-    (xc, yc) is the center of the rotated box, and the angle a is in degrees ccw.
-    """
-
-    @staticmethod
-    def convert(box: _RawBoxType, from_mode: "BoxMode", to_mode: "BoxMode") -> _RawBoxType:
-        """
-        Args:
-            box: can be a k-tuple, k-list or an Nxk array/tensor, where k = 4 or 5
-            from_mode, to_mode (BoxMode)
-
-        Returns:
-            The converted box of the same type.
-        """
-        if from_mode == to_mode:
-            return box
-
-        original_type = type(box)
-        is_numpy = isinstance(box, np.ndarray)
-        single_box = isinstance(box, (list, tuple))
-        if single_box:
-            assert len(box) == 4 or len(box) == 5, (
-                "BoxMode.convert takes either a k-tuple/list or an Nxk array/tensor," " where k == 4 or 5"
-            )
-            arr = torch.tensor(box)[None, :]
-        else:
-            # avoid modifying the input box
-            if is_numpy:
-                arr = torch.from_numpy(np.asarray(box)).clone()
-            else:
-                arr = box.clone()
-
-        assert to_mode not in [BoxMode.XYXY_REL, BoxMode.XYWH_REL] and from_mode not in [
-            BoxMode.XYXY_REL,
-            BoxMode.XYWH_REL,
-        ], "Relative mode not yet supported!"
-
-        if from_mode == BoxMode.XYWHA_ABS and to_mode == BoxMode.XYXY_ABS:
-            assert arr.shape[-1] == 5, "The last dimension of input shape must be 5 for XYWHA format"
-            original_dtype = arr.dtype
-            arr = arr.double()
-
-            w = arr[:, 2]
-            h = arr[:, 3]
-            a = arr[:, 4]
-            c = torch.abs(torch.cos(a * math.pi / 180.0))
-            s = torch.abs(torch.sin(a * math.pi / 180.0))
-            # This basically computes the horizontal bounding rectangle of the rotated box
-            new_w = c * w + s * h
-            new_h = c * h + s * w
-
-            # convert center to top-left corner
-            arr[:, 0] -= new_w / 2.0
-            arr[:, 1] -= new_h / 2.0
-            # bottom-right corner
-            arr[:, 2] = arr[:, 0] + new_w
-            arr[:, 3] = arr[:, 1] + new_h
-
-            arr = arr[:, :4].to(dtype=original_dtype)
-        elif from_mode == BoxMode.XYWH_ABS and to_mode == BoxMode.XYWHA_ABS:
-            original_dtype = arr.dtype
-            arr = arr.double()
-            arr[:, 0] += arr[:, 2] / 2.0
-            arr[:, 1] += arr[:, 3] / 2.0
-            angles = torch.zeros((arr.shape[0], 1), dtype=arr.dtype)
-            arr = torch.cat((arr, angles), axis=1).to(dtype=original_dtype)
-        else:
-            if to_mode == BoxMode.XYXY_ABS and from_mode == BoxMode.XYWH_ABS:
-                arr[:, 2] += arr[:, 0]
-                arr[:, 3] += arr[:, 1]
-            elif from_mode == BoxMode.XYXY_ABS and to_mode == BoxMode.XYWH_ABS:
-                arr[:, 2] -= arr[:, 0]
-                arr[:, 3] -= arr[:, 1]
-            else:
-                raise NotImplementedError(
-                    "Conversion from BoxMode {} to {} is not supported yet".format(from_mode, to_mode)
-                )
-
-        if single_box:
-            return original_type(arr.flatten().tolist())
-        if is_numpy:
-            return arr.numpy()
-        else:
-            return arr
-
-
-# https://github.com/facebookresearch/detectron2/blob/main/detectron2/utils/env.py
 # TORCH_VERSION is already defined at line 774 as torch.__version__ (string)
 # The tuple version below would overwrite it and break digit_version() which expects a string
 # TORCH_VERSION = tuple(int(x) for x in torch.__version__.split(".")[:2])
@@ -8410,1330 +6496,6 @@ class BoxMode(IntEnum):
 # """
 
 
-# https://github.com/facebookresearch/fvcore/blob/main/fvcore/nn/focal_loss.py
-def sigmoid_focal_loss(
-    inputs: torch.Tensor,
-    targets: torch.Tensor,
-    alpha: float = -1,
-    gamma: float = 2,
-    reduction: str = "none",
-) -> torch.Tensor:
-    """
-    Loss used in RetinaNet for dense detection: https://arxiv.org/abs/1708.02002.
-    Args:
-        inputs: A float tensor of arbitrary shape.
-                The predictions for each example.
-        targets: A float tensor with the same shape as inputs. Stores the binary
-                 classification label for each element in inputs
-                (0 for the negative class and 1 for the positive class).
-        alpha: (optional) Weighting factor in range (0,1) to balance
-                positive vs negative examples. Default = -1 (no weighting).
-        gamma: Exponent of the modulating factor (1 - p_t) to
-               balance easy vs hard examples.
-        reduction: 'none' | 'mean' | 'sum'
-                 'none': No reduction will be applied to the output.
-                 'mean': The output will be averaged.
-                 'sum': The output will be summed.
-    Returns:
-        Loss tensor with the reduction option applied.
-    """
-    inputs = inputs.float()
-    targets = targets.float()
-    p = torch.sigmoid(inputs)
-    ce_loss = F.binary_cross_entropy_with_logits(inputs, targets, reduction="none")
-    p_t = p * targets + (1 - p) * (1 - targets)
-    loss = ce_loss * ((1 - p_t) ** gamma)
-
-    if alpha >= 0:
-        alpha_t = alpha * targets + (1 - alpha) * (1 - targets)
-        loss = alpha_t * loss
-
-    if reduction == "mean":
-        loss = loss.mean()
-    elif reduction == "sum":
-        loss = loss.sum()
-
-    return loss
-
-
-# https://github.com/facebookresearch/detectron2/blob/main/detectron2/layers/shape_spec.py
-from dataclasses import dataclass
-from typing import Optional
-
-
-@dataclass
-class ShapeSpec:
-    """
-    A simple structure that contains basic shape specification about a tensor.
-    It is often used as the auxiliary inputs/outputs of models,
-    to complement the lack of shape inference ability among pytorch modules.
-    """
-
-    channels: Optional[int] = None
-    height: Optional[int] = None
-    width: Optional[int] = None
-    stride: Optional[int] = None
-
-
-# https://github.com/facebookresearch/detectron2/blob/main/detectron2/structures/instances.py
-import itertools
-from typing import Any, Dict, List, Tuple, Union
-
-
-class Instances:
-    """
-    This class represents a list of instances in an image.
-    It stores the attributes of instances (e.g., boxes, masks, labels, scores) as "fields".
-    All fields must have the same ``__len__`` which is the number of instances.
-    """
-
-    def __init__(self, image_size: Tuple[int, int], **kwargs: Any):
-        """
-        Args:
-            image_size (height, width): the spatial size of the image.
-            kwargs: fields to add to this `Instances`.
-        """
-        self._image_size = image_size
-        self._fields: Dict[str, Any] = {}
-        for k, v in kwargs.items():
-            self.set(k, v)
-
-    @property
-    def image_size(self) -> Tuple[int, int]:
-        """
-        Returns:
-            tuple: height, width
-        """
-        return self._image_size
-
-    def __setattr__(self, name: str, val: Any) -> None:
-        if name.startswith("_"):
-            super().__setattr__(name, val)
-        else:
-            self.set(name, val)
-
-    def __getattr__(self, name: str) -> Any:
-        if name == "_fields" or name not in self._fields:
-            raise AttributeError("Cannot find field '{}' in the given Instances!".format(name))
-        return self._fields[name]
-
-    def set(self, name: str, value: Any) -> None:
-        """
-        Set the field named `name` to `value`.
-        The length of `value` must be the number of instances,
-        and must agree with other existing fields in this object.
-        """
-        with warnings.catch_warnings(record=True):
-            data_len = len(value)
-        if len(self._fields):
-            assert len(self) == data_len, "Adding a field of length {} to a Instances of length {}".format(
-                data_len, len(self)
-            )
-        self._fields[name] = value
-
-    def has(self, name: str) -> bool:
-        """
-        Returns:
-            bool: whether the field called `name` exists.
-        """
-        return name in self._fields
-
-    def remove(self, name: str) -> None:
-        """
-        Remove the field called `name`.
-        """
-        del self._fields[name]
-
-    def get(self, name: str) -> Any:
-        """
-        Returns the field called `name`.
-        """
-        return self._fields[name]
-
-    def get_fields(self) -> Dict[str, Any]:
-        """
-        Returns:
-            dict: a dict which maps names (str) to data of the fields
-
-        Modifying the returned dict will modify this instance.
-        """
-        return self._fields
-
-    # Tensor-like methods
-    def to(self, *args: Any, **kwargs: Any) -> "Instances":
-        """
-        Returns:
-            Instances: all fields are called with a `to(device)`, if the field has this method.
-        """
-        ret = Instances(self._image_size)
-        for k, v in self._fields.items():
-            if hasattr(v, "to"):
-                v = v.to(*args, **kwargs)
-            ret.set(k, v)
-        return ret
-
-    def __getitem__(self, item: Union[int, slice, torch.BoolTensor]) -> "Instances":
-        """
-        Args:
-            item: an index-like object and will be used to index all the fields.
-
-        Returns:
-            If `item` is a string, return the data in the corresponding field.
-            Otherwise, returns an `Instances` where all fields are indexed by `item`.
-        """
-        if type(item) is int:
-            if item >= len(self) or item < -len(self):
-                raise IndexError("Instances index out of range!")
-            else:
-                item = slice(item, None, len(self))
-
-        ret = Instances(self._image_size)
-        for k, v in self._fields.items():
-            ret.set(k, v[item])
-        return ret
-
-    def __len__(self) -> int:
-        for v in self._fields.values():
-            # use __len__ because len() has to be int and is not friendly to tracing
-            return v.__len__()
-        raise NotImplementedError("Empty Instances does not support __len__!")
-
-    def __iter__(self):
-        raise NotImplementedError("`Instances` object is not iterable!")
-
-    @staticmethod
-    def cat(instance_lists: List["Instances"]) -> "Instances":
-        """
-        Args:
-            instance_lists (list[Instances])
-
-        Returns:
-            Instances
-        """
-        assert all(isinstance(i, Instances) for i in instance_lists)
-        assert len(instance_lists) > 0
-        if len(instance_lists) == 1:
-            return instance_lists[0]
-
-        image_size = instance_lists[0].image_size
-        if not isinstance(image_size, torch.Tensor):  # could be a tensor in tracing
-            for i in instance_lists[1:]:
-                assert i.image_size == image_size
-        ret = Instances(image_size)
-        for k in instance_lists[0]._fields.keys():
-            values = [i.get(k) for i in instance_lists]
-            v0 = values[0]
-            if isinstance(v0, torch.Tensor):
-                values = torch.cat(values, dim=0)
-            elif isinstance(v0, list):
-                values = list(itertools.chain(*values))
-            elif hasattr(type(v0), "cat"):
-                values = type(v0).cat(values)
-            else:
-                raise ValueError("Unsupported type {} for concatenation".format(type(v0)))
-            ret.set(k, values)
-        return ret
-
-    def __str__(self) -> str:
-        s = self.__class__.__name__ + "("
-        s += "num_instances={}, ".format(len(self))
-        s += "image_height={}, ".format(self._image_size[0])
-        s += "image_width={}, ".format(self._image_size[1])
-        s += "fields=[{}])".format(", ".join((f"{k}: {v}" for k, v in self._fields.items())))
-        return s
-
-    __repr__ = __str__
-
-
-# https://github.com/facebookresearch/detectron2/blob/main/detectron2/structures/masks.py
-class BitMasks:
-    """
-    This class stores the segmentation masks for all objects in one image, in
-    the form of bitmaps.
-
-    Attributes:
-        tensor: bool Tensor of N,H,W, representing N instances in the image.
-    """
-
-    def __init__(self, tensor):
-        """
-        Args:
-            tensor: bool Tensor of N,H,W, representing N instances in the image.
-        """
-        if isinstance(tensor, torch.Tensor):
-            tensor = tensor.to(torch.bool)
-        else:
-            tensor = torch.as_tensor(tensor, dtype=torch.bool, device=torch.device("cpu"))
-        assert tensor.dim() == 3, tensor.size()
-        self.image_size = tensor.shape[1:]
-        self.tensor = tensor
-
-    def to(self, *args, **kwargs):
-        return BitMasks(self.tensor.to(*args, **kwargs))
-
-    @property
-    def device(self):
-        return self.tensor.device
-
-
-class ROIMasks:
-    """
-    Represent masks by N smaller masks defined in some ROIs. Once ROI boxes are given,
-    full-image bitmask can be obtained by "pasting" the mask on the region defined
-    by the corresponding ROI box.
-    """
-
-    def __init__(self, tensor: torch.Tensor):
-        """
-        Args:
-            tensor: (N, M, M) mask tensor that defines the mask within each ROI.
-        """
-        if tensor.dim() != 3:
-            raise ValueError("ROIMasks must take a masks of 3 dimension.")
-        self.tensor = tensor
-
-    def to(self, device: torch.device) -> "ROIMasks":
-        return ROIMasks(self.tensor.to(device))
-
-    @property
-    def device(self):
-        return self.tensor.device
-
-    def __len__(self):
-        return self.tensor.shape[0]
-
-    def __getitem__(self, item) -> "ROIMasks":
-        """
-        Returns:
-            ROIMasks: Create a new :class:`ROIMasks` by indexing.
-        """
-        t = self.tensor[item]
-        if t.dim() != 3:
-            raise ValueError(f"Indexing on ROIMasks with {item} returns a tensor with shape {t.shape}!")
-        return ROIMasks(t)
-
-    def to_bitmasks(self, boxes, height, width, threshold=0.5):
-        """
-        Convert ROI masks to bitmasks. This is a simplified version for CPU-only.
-        For full functionality, detectron2's mask_ops would be needed.
-        """
-        # Simplified implementation for CPU-only inference
-        # Full implementation would use paste_masks_in_image from detectron2.layers.mask_ops
-        # This creates a minimal bitmask by upsampling the ROI masks
-        # For inference, this may not be called if masks are not used
-        if isinstance(boxes, torch.Tensor):
-            num_boxes = boxes.shape[0]
-        else:
-            num_boxes = len(boxes)
-
-        # Create a minimal bitmask tensor (N, H, W) by upsampling ROI masks
-        # This is a simplified version - full implementation would paste masks at box locations
-        bitmasks = (
-            F.interpolate(
-                self.tensor.unsqueeze(1).float(), size=(height, width), mode="bilinear", align_corners=False
-            ).squeeze(1)
-            > threshold
-        )
-        return BitMasks(bitmasks)
-
-
-# https://github.com/facebookresearch/detectron2/blob/main/detectron2/modeling/postprocessing.py
-def detector_postprocess(results: Instances, output_height: int, output_width: int, mask_threshold: float = 0.5):
-    """
-    Resize the output instances.
-    The input images are often resized when entering an object detector.
-    As a result, we often need the outputs of the detector in a different
-    resolution from its inputs.
-
-    This function will resize the raw outputs of an R-CNN detector
-    to produce outputs according to the desired output resolution.
-
-    Args:
-        results (Instances): the raw outputs from the detector.
-            `results.image_size` contains the input image resolution the detector sees.
-            This object might be modified in-place.
-        output_height, output_width: the desired output resolution.
-    Returns:
-        Instances: the resized output from the model, based on the output resolution
-    """
-    if isinstance(output_width, torch.Tensor):
-        # This shape might (but not necessarily) be tensors during tracing.
-        # Converts integer tensors to float temporaries to ensure true
-        # division is performed when computing scale_x and scale_y.
-        output_width_tmp = output_width.float()
-        output_height_tmp = output_height.float()
-        new_size = torch.stack([output_height, output_width])
-    else:
-        new_size = (output_height, output_width)
-        output_width_tmp = output_width
-        output_height_tmp = output_height
-
-    scale_x, scale_y = (
-        output_width_tmp / results.image_size[1],
-        output_height_tmp / results.image_size[0],
-    )
-    results = Instances(new_size, **results.get_fields())
-
-    if results.has("pred_boxes"):
-        output_boxes = results.pred_boxes
-    elif results.has("proposal_boxes"):
-        output_boxes = results.proposal_boxes
-    else:
-        output_boxes = None
-    assert output_boxes is not None, "Predictions must contain boxes!"
-
-    output_boxes.scale(scale_x, scale_y)
-    output_boxes.clip(results.image_size)
-
-    results = results[output_boxes.nonempty()]
-
-    if results.has("pred_masks"):
-        if isinstance(results.pred_masks, ROIMasks):
-            roi_masks = results.pred_masks
-        else:
-            # pred_masks is a tensor of shape (N, 1, M, M)
-            roi_masks = ROIMasks(results.pred_masks[:, 0, :, :])
-        results.pred_masks = roi_masks.to_bitmasks(
-            results.pred_boxes, output_height, output_width, mask_threshold
-        ).tensor  # TODO return ROIMasks/BitMask object in the future
-
-    if results.has("pred_keypoints"):
-        results.pred_keypoints[:, :, 0] *= scale_x
-        results.pred_keypoints[:, :, 1] *= scale_y
-
-    return results
-
-
-# https://github.com/facebookresearch/detectron2/blob/main/detectron2/layers/nms.py
-try:
-    from torchvision.ops import boxes as box_ops
-except ImportError:
-    box_ops = None
-
-
-def batched_nms(boxes: torch.Tensor, scores: torch.Tensor, idxs: torch.Tensor, iou_threshold: float):
-    """
-    Same as torchvision.ops.boxes.batched_nms, but with float().
-    """
-    assert boxes.shape[-1] == 4
-    if box_ops is None:
-        raise ImportError("torchvision is required for batched_nms")
-    # Fp16 does not have enough range for batched NMS, so adding float().
-    return box_ops.batched_nms(boxes.float(), scores, idxs, iou_threshold)
-
-
-# https://github.com/facebookresearch/detectron2/blob/main/detectron2/structures/boxes.py
-class Boxes:
-    """
-    This structure stores a list of boxes as a Nx4 torch.Tensor.
-    It supports some common methods about boxes
-    (`area`, `clip`, `nonempty`, etc),
-    and also behaves like a Tensor
-    (support indexing, `to(device)`, `.device`, and iteration over all boxes)
-
-    Attributes:
-        tensor (torch.Tensor): float matrix of Nx4. Each row is (x1, y1, x2, y2).
-    """
-
-    def __init__(self, tensor: torch.Tensor):
-        """
-        Args:
-            tensor (Tensor[float]): a Nx4 matrix.  Each row is (x1, y1, x2, y2).
-        """
-        if not isinstance(tensor, torch.Tensor):
-            tensor = torch.as_tensor(tensor, dtype=torch.float32, device=torch.device("cpu"))
-        else:
-            tensor = tensor.to(torch.float32)
-        if tensor.numel() == 0:
-            # Use reshape, so we don't end up creating a new tensor that does not depend on
-            # the inputs (and consequently confuses jit)
-            tensor = tensor.reshape((-1, 4)).to(dtype=torch.float32)
-        assert tensor.dim() == 2 and tensor.size(-1) == 4, tensor.size()
-
-        self.tensor = tensor
-
-    def clone(self) -> "Boxes":
-        """
-        Clone the Boxes.
-
-        Returns:
-            Boxes
-        """
-        return Boxes(self.tensor.clone())
-
-    def to(self, device: torch.device):
-        # Boxes are assumed float32 and does not support to(dtype)
-        return Boxes(self.tensor.to(device=device))
-
-    def area(self) -> torch.Tensor:
-        """
-        Computes the area of all the boxes.
-
-        Returns:
-            torch.Tensor: a vector with areas of each box.
-        """
-        box = self.tensor
-        area = (box[:, 2] - box[:, 0]) * (box[:, 3] - box[:, 1])
-        return area
-
-    def clip(self, box_size: Tuple[int, int]) -> None:
-        """
-        Clip (in place) the boxes by limiting x coordinates to the range [0, width]
-        and y coordinates to the range [0, height].
-
-        Args:
-            box_size (height, width): The clipping box's size.
-        """
-        assert torch.isfinite(self.tensor).all(), "Box tensor contains infinite or NaN!"
-        h, w = box_size
-        x1 = self.tensor[:, 0].clamp(min=0, max=w)
-        y1 = self.tensor[:, 1].clamp(min=0, max=h)
-        x2 = self.tensor[:, 2].clamp(min=0, max=w)
-        y2 = self.tensor[:, 3].clamp(min=0, max=h)
-        self.tensor = torch.stack((x1, y1, x2, y2), dim=-1)
-
-    def nonempty(self, threshold: float = 0.0) -> torch.Tensor:
-        """
-        Find boxes that are non-empty.
-        A box is considered empty, if either of its side is no larger than threshold.
-
-        Returns:
-            Tensor:
-                a binary vector which represents whether each box is empty
-                (False) or non-empty (True).
-        """
-        box = self.tensor
-        widths = box[:, 2] - box[:, 0]
-        heights = box[:, 3] - box[:, 1]
-        keep = (widths > threshold) & (heights > threshold)
-        return keep
-
-    def __getitem__(self, item) -> "Boxes":
-        """
-        Args:
-            item: int, slice, or a BoolTensor
-
-        Returns:
-            Boxes: Create a new :class:`Boxes` by indexing.
-        """
-        if isinstance(item, int):
-            return Boxes(self.tensor[item].view(1, -1))
-        b = self.tensor[item]
-        assert b.dim() == 2, "Indexing on Boxes with {} failed to return a matrix!".format(item)
-        return Boxes(b)
-
-    def __len__(self) -> int:
-        return self.tensor.shape[0]
-
-    def __repr__(self) -> str:
-        return "Boxes(" + str(self.tensor) + ")"
-
-    def inside_box(self, box_size: Tuple[int, int], boundary_threshold: int = 0) -> torch.Tensor:
-        """
-        Args:
-            box_size (height, width): Size of the reference box.
-            boundary_threshold (int): Boxes that extend beyond the reference box
-                boundary by more than boundary_threshold are considered "outside".
-
-        Returns:
-            a binary vector, indicating whether each box is inside the reference box.
-        """
-        height, width = box_size
-        inds_inside = (
-            (self.tensor[..., 0] >= -boundary_threshold)
-            & (self.tensor[..., 1] >= -boundary_threshold)
-            & (self.tensor[..., 2] < width + boundary_threshold)
-            & (self.tensor[..., 3] < height + boundary_threshold)
-        )
-        return inds_inside
-
-    def get_centers(self) -> torch.Tensor:
-        """
-        Returns:
-            The box centers in a Nx2 array of (x, y).
-        """
-        return (self.tensor[:, :2] + self.tensor[:, 2:]) / 2
-
-    def scale(self, scale_x: float, scale_y: float) -> None:
-        """
-        Scale the box with horizontal and vertical scaling factors
-        """
-        self.tensor[:, 0::2] *= scale_x
-        self.tensor[:, 1::2] *= scale_y
-
-    @classmethod
-    def cat(cls, boxes_list: List["Boxes"]) -> "Boxes":
-        """
-        Concatenates a list of Boxes into a single Boxes
-
-        Arguments:
-            boxes_list (list[Boxes])
-
-        Returns:
-            Boxes: the concatenated Boxes
-        """
-        assert isinstance(boxes_list, (list, tuple))
-        if len(boxes_list) == 0:
-            return cls(torch.empty(0))
-        assert all([isinstance(box, Boxes) for box in boxes_list])
-
-        # use torch.cat (v.s. layers.cat) so the returned boxes never share storage with input
-        cat_boxes = cls(torch.cat([b.tensor for b in boxes_list], dim=0))
-        return cat_boxes
-
-    @property
-    def device(self):
-        return self.tensor.device
-
-    @torch.jit.unused
-    def __iter__(self):
-        """
-        Yield a box as a Tensor of shape (4,) at a time.
-        """
-        yield from self.tensor
-
-
-# https://github.com/facebookresearch/detectron2/blob/main/detectron2/utils/comm.py
-def get_world_size() -> int:
-    if not dist.is_available():
-        return 1
-    if not dist.is_initialized():
-        return 1
-    return dist.get_world_size()
-
-
-def get_rank() -> int:
-    if not dist.is_available():
-        return 0
-    if not dist.is_initialized():
-        return 0
-    return dist.get_rank()
-
-
-_LOCAL_PROCESS_GROUP = None
-_MISSING_LOCAL_PG_ERROR = (
-    "Local process group is not yet created! Please use detectron2's `launch()` "
-    "to start processes and initialize pytorch process group. If you need to start "
-    "processes in other ways, please call comm.create_local_process_group("
-    "num_workers_per_machine) after calling torch.distributed.init_process_group()."
-)
-
-
-@functools.lru_cache()
-def create_local_process_group(num_workers_per_machine: int) -> None:
-    """
-    Create a process group that contains ranks within the same machine.
-
-    Detectron2's launch() in engine/launch.py will call this function. If you start
-    workers without launch(), you'll have to also call this. Otherwise utilities
-    like `get_local_rank()` will not work.
-
-    This function contains a barrier. All processes must call it together.
-
-    Args:
-        num_workers_per_machine: the number of worker processes per machine. Typically
-          the number of GPUs.
-    """
-    global _LOCAL_PROCESS_GROUP
-    assert _LOCAL_PROCESS_GROUP is None
-    assert get_world_size() % num_workers_per_machine == 0
-    num_machines = get_world_size() // num_workers_per_machine
-    machine_rank = get_rank() // num_workers_per_machine
-    for i in range(num_machines):
-        ranks_on_i = list(range(i * num_workers_per_machine, (i + 1) * num_workers_per_machine))
-        pg = dist.new_group(ranks_on_i)
-        if i == machine_rank:
-            _LOCAL_PROCESS_GROUP = pg
-
-
-def get_local_process_group():
-    """
-    Returns:
-        A torch process group which only includes processes that are on the same
-        machine as the current process. This group can be useful for communication
-        within a machine, e.g. a per-machine SyncBN.
-    """
-    assert _LOCAL_PROCESS_GROUP is not None, _MISSING_LOCAL_PG_ERROR
-    return _LOCAL_PROCESS_GROUP
-
-
-def get_local_rank() -> int:
-    """
-    Returns:
-        The rank of the current process within the local (per-machine) process group.
-    """
-    if not dist.is_available():
-        return 0
-    if not dist.is_initialized():
-        return 0
-    assert _LOCAL_PROCESS_GROUP is not None, _MISSING_LOCAL_PG_ERROR
-    return dist.get_rank(group=_LOCAL_PROCESS_GROUP)
-
-
-def get_local_size() -> int:
-    """
-    Returns:
-        The size of the per-machine process group,
-        i.e. the number of processes per machine.
-    """
-    if not dist.is_available():
-        return 1
-    if not dist.is_initialized():
-        return 1
-    assert _LOCAL_PROCESS_GROUP is not None, _MISSING_LOCAL_PG_ERROR
-    return dist.get_world_size(group=_LOCAL_PROCESS_GROUP)
-
-
-def is_main_process() -> bool:
-    return get_rank() == 0
-
-
-def synchronize():
-    """
-    Helper function to synchronize (barrier) among all processes when
-    using distributed training
-    """
-    if not dist.is_available():
-        return
-    if not dist.is_initialized():
-        return
-    world_size = dist.get_world_size()
-    if world_size == 1:
-        return
-    if dist.get_backend() == dist.Backend.NCCL:
-        # This argument is needed to avoid warnings.
-        # It's valid only for NCCL backend.
-        dist.barrier(device_ids=[torch.cuda.current_device()])
-    else:
-        dist.barrier()
-
-
-@functools.lru_cache()
-def _get_global_gloo_group():
-    """
-    Return a process group based on gloo backend, containing all the ranks
-    The result is cached.
-    """
-    if dist.get_backend() == "nccl":
-        return dist.new_group(backend="gloo")
-    else:
-        return dist.group.WORLD
-
-
-def all_gather(data, group=None):
-    """
-    Run all_gather on arbitrary picklable data (not necessarily tensors).
-
-    Args:
-        data: any picklable object
-        group: a torch process group. By default, will use a group which
-            contains all ranks on gloo backend.
-
-    Returns:
-        list[data]: list of data gathered from each rank
-    """
-    if get_world_size() == 1:
-        return [data]
-    if group is None:
-        group = _get_global_gloo_group()  # use CPU group by default, to reduce GPU RAM usage.
-    world_size = dist.get_world_size(group)
-    if world_size == 1:
-        return [data]
-
-    output = [None for _ in range(world_size)]
-    dist.all_gather_object(output, data, group=group)
-    return output
-
-
-def gather(data, dst=0, group=None):
-    """
-    Run gather on arbitrary picklable data (not necessarily tensors).
-
-    Args:
-        data: any picklable object
-        dst (int): destination rank
-        group: a torch process group. By default, will use a group which
-            contains all ranks on gloo backend.
-
-    Returns:
-        list[data]: on dst, a list of data gathered from each rank. Otherwise,
-            an empty list.
-    """
-    if get_world_size() == 1:
-        return [data]
-    if group is None:
-        group = _get_global_gloo_group()
-    world_size = dist.get_world_size(group=group)
-    if world_size == 1:
-        return [data]
-    rank = dist.get_rank(group=group)
-
-    if rank == dst:
-        output = [None for _ in range(world_size)]
-        dist.gather_object(data, output, dst=dst, group=group)
-        return output
-    else:
-        dist.gather_object(data, None, dst=dst, group=group)
-        return []
-
-
-def shared_random_seed():
-    """
-    Returns:
-        int: a random number that is the same across all workers.
-        If workers need a shared RNG, they can use this shared seed to
-        create one.
-
-    All workers must call this function, otherwise it will deadlock.
-    """
-    ints = np.random.randint(2**31)
-    all_ints = all_gather(ints)
-    return all_ints[0]
-
-
-def reduce_dict(input_dict, average=True):
-    """
-    Reduce the values in the dictionary from all processes so that process with rank
-    0 has the reduced results.
-
-    Args:
-        input_dict (dict): inputs to be reduced. All the values must be scalar CUDA Tensor.
-        average (bool): whether to do average or sum
-
-    Returns:
-        a dict with the same keys as input_dict, after reduction.
-    """
-    world_size = get_world_size()
-    if world_size < 2:
-        return input_dict
-    with torch.no_grad():
-        names = []
-        values = []
-        # sort the keys so that they are consistent across processes
-        for k in sorted(input_dict.keys()):
-            names.append(k)
-            values.append(input_dict[k])
-        values = torch.stack(values, dim=0)
-        dist.reduce(values, dst=0)
-        if dist.get_rank() == 0 and average:
-            # only main process gets accumulated, so only divide by
-            # world_size in this case
-            values /= world_size
-        reduced_dict = {k: v for k, v in zip(names, values)}
-    return reduced_dict
-
-
-# https://github.com/facebookresearch/detectron2/blob/main/detectron2/layers/batch_norm.py
-# Simplified get_norm - only supports basic normalization types for CPU-only inference
-def get_norm(norm, out_channels):
-    """
-    Args:
-        norm (str or callable): either one of BN, SyncBN, FrozenBN, GN;
-            or a callable that takes a channel number and returns
-            the normalization layer as a nn.Module.
-
-    Returns:
-        nn.Module or None: the normalization layer
-    """
-    if norm is None:
-        return None
-    if isinstance(norm, str):
-        if len(norm) == 0:
-            return None
-        norm_map = {
-            "BN": nn.BatchNorm2d,
-            "SyncBN": nn.SyncBatchNorm,  # Simplified - use standard SyncBatchNorm
-            "FrozenBN": nn.BatchNorm2d,  # Simplified - use standard BatchNorm2d
-            "GN": lambda channels: nn.GroupNorm(32, channels),
-            "nnSyncBN": nn.SyncBatchNorm,
-        }
-        if norm not in norm_map:
-            raise ValueError(f"Unknown norm type: {norm}")
-        norm = norm_map[norm]
-    return norm(out_channels)
-
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/timer.py
-# Copyright (c) OpenMMLab. All rights reserved.
-from time import time
-
-
-class TimerError(Exception):
-    def __init__(self, message):
-        self.message = message
-        super(TimerError, self).__init__(message)
-
-
-class Timer:
-    """A flexible Timer class.
-
-    :Example:
-
-    >>> import time
-    >>> import mmcv
-    >>> with mmcv.Timer():
-    >>>     # simulate a code block that will run for 1s
-    >>>     time.sleep(1)
-    1.000
-    >>> with mmcv.Timer(print_tmpl='it takes {:.1f} seconds'):
-    >>>     # simulate a code block that will run for 1s
-    >>>     time.sleep(1)
-    it takes 1.0 seconds
-    >>> timer = mmcv.Timer()
-    >>> time.sleep(0.5)
-    >>> print(timer.since_start())
-    0.500
-    >>> time.sleep(0.5)
-    >>> print(timer.since_last_check())
-    0.500
-    >>> print(timer.since_start())
-    1.000
-    """
-
-    def __init__(self, start=True, print_tmpl=None):
-        self._is_running = False
-        self.print_tmpl = print_tmpl if print_tmpl else "{:.3f}"
-        if start:
-            self.start()
-
-    @property
-    def is_running(self):
-        """bool: indicate whether the timer is running"""
-        return self._is_running
-
-    def __enter__(self):
-        self.start()
-        return self
-
-    def __exit__(self, type, value, traceback):
-        print(self.print_tmpl.format(self.since_last_check()))
-        self._is_running = False
-
-    def start(self):
-        """Start the timer."""
-        if not self._is_running:
-            self._t_start = time()
-            self._is_running = True
-        self._t_last = time()
-
-    def since_start(self):
-        """Total time since the timer is started.
-
-        Returns (float): Time in seconds.
-        """
-        if not self._is_running:
-            raise TimerError("timer is not running")
-        self._t_last = time()
-        return self._t_last - self._t_start
-
-    def since_last_check(self):
-        """Time since the last checking.
-
-        Either :func:`since_start` or :func:`since_last_check` is a checking
-        operation.
-
-        Returns (float): Time in seconds.
-        """
-        if not self._is_running:
-            raise TimerError("timer is not running")
-        dur = time() - self._t_last
-        self._t_last = time()
-        return dur
-
-
-_g_timers = {}  # global timers
-
-
-def check_time(timer_id):
-    """Add check points in a single line.
-
-    This method is suitable for running a task on a list of items. A timer will
-    be registered when the method is called for the first time.
-
-    :Example:
-
-    >>> import time
-    >>> import mmcv
-    >>> for i in range(1, 6):
-    >>>     # simulate a code block
-    >>>     time.sleep(i)
-    >>>     mmcv.check_time('task1')
-    2.000
-    3.000
-    4.000
-    5.000
-
-    Args:
-        timer_id (str): Timer identifier.
-    """
-    if timer_id not in _g_timers:
-        _g_timers[timer_id] = Timer()
-        return 0
-    else:
-        return _g_timers[timer_id].since_last_check()
-
-
-# ============================================================================
-# MMCV PROGRESS BAR - https://github.com/open-mmlab/mmcv/tree/v1.4.0/mmcv/utils/progressbar.py
-# ============================================================================
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/progressbar.py
-# Copyright (c) OpenMMLab. All rights reserved.
-import sys
-from collections.abc import Iterable
-from multiprocessing import Pool
-from shutil import get_terminal_size
-
-# from .timer import Timer
-
-
-class ProgressBar:
-    """A progress bar which can print the progress."""
-
-    def __init__(self, task_num=0, bar_width=50, start=True, file=sys.stdout):
-        self.task_num = task_num
-        self.bar_width = bar_width
-        self.completed = 0
-        self.file = file
-        if start:
-            self.start()
-
-    @property
-    def terminal_width(self):
-        width, _ = get_terminal_size()
-        return width
-
-    def start(self):
-        if self.task_num > 0:
-            self.file.write(f'[{" " * self.bar_width}] 0/{self.task_num}, ' "elapsed: 0s, ETA:")
-        else:
-            self.file.write("completed: 0, elapsed: 0s")
-        self.file.flush()
-        self.timer = Timer()
-
-    def update(self, num_tasks=1):
-        assert num_tasks > 0
-        self.completed += num_tasks
-        elapsed = self.timer.since_start()
-        if elapsed > 0:
-            fps = self.completed / elapsed
-        else:
-            fps = float("inf")
-        if self.task_num > 0:
-            percentage = self.completed / float(self.task_num)
-            eta = int(elapsed * (1 - percentage) / percentage + 0.5)
-            msg = (
-                f"\r[{{}}] {self.completed}/{self.task_num}, "
-                f"{fps:.1f} task/s, elapsed: {int(elapsed + 0.5)}s, "
-                f"ETA: {eta:5}s"
-            )
-
-            bar_width = min(self.bar_width, int(self.terminal_width - len(msg)) + 2, int(self.terminal_width * 0.6))
-            bar_width = max(2, bar_width)
-            mark_width = int(bar_width * percentage)
-            bar_chars = ">" * mark_width + " " * (bar_width - mark_width)
-            self.file.write(msg.format(bar_chars))
-        else:
-            self.file.write(f"completed: {self.completed}, elapsed: {int(elapsed + 0.5)}s," f" {fps:.1f} tasks/s")
-        self.file.flush()
-
-
-def track_progress(func, tasks, bar_width=50, file=sys.stdout, **kwargs):
-    """Track the progress of tasks execution with a progress bar.
-
-    Tasks are done with a simple for-loop.
-
-    Args:
-        func (callable): The function to be applied to each task.
-        tasks (list or tuple[Iterable, int]): A list of tasks or
-            (tasks, total num).
-        bar_width (int): Width of progress bar.
-
-    Returns:
-        list: The task results.
-    """
-    if isinstance(tasks, tuple):
-        assert len(tasks) == 2
-        assert isinstance(tasks[0], Iterable)
-        assert isinstance(tasks[1], int)
-        task_num = tasks[1]
-        tasks = tasks[0]
-    elif isinstance(tasks, Iterable):
-        task_num = len(tasks)
-    else:
-        raise TypeError('"tasks" must be an iterable object or a (iterator, int) tuple')
-    prog_bar = ProgressBar(task_num, bar_width, file=file)
-    results = []
-    for task in tasks:
-        results.append(func(task, **kwargs))
-        prog_bar.update()
-    prog_bar.file.write("\n")
-    return results
-
-
-def init_pool(process_num, initializer=None, initargs=None):
-    if initializer is None:
-        return Pool(process_num)
-    elif initargs is None:
-        return Pool(process_num, initializer)
-    else:
-        if not isinstance(initargs, tuple):
-            raise TypeError('"initargs" must be a tuple')
-        return Pool(process_num, initializer, initargs)
-
-
-def track_parallel_progress(
-    func,
-    tasks,
-    nproc,
-    initializer=None,
-    initargs=None,
-    bar_width=50,
-    chunksize=1,
-    skip_first=False,
-    keep_order=True,
-    file=sys.stdout,
-):
-    """Track the progress of parallel task execution with a progress bar.
-
-    The built-in :mod:`multiprocessing` module is used for process pools and
-    tasks are done with :func:`Pool.map` or :func:`Pool.imap_unordered`.
-
-    Args:
-        func (callable): The function to be applied to each task.
-        tasks (list or tuple[Iterable, int]): A list of tasks or
-            (tasks, total num).
-        nproc (int): Process (worker) number.
-        initializer (None or callable): Refer to :class:`multiprocessing.Pool`
-            for details.
-        initargs (None or tuple): Refer to :class:`multiprocessing.Pool` for
-            details.
-        chunksize (int): Refer to :class:`multiprocessing.Pool` for details.
-        bar_width (int): Width of progress bar.
-        skip_first (bool): Whether to skip the first sample for each worker
-            when estimating fps, since the initialization step may takes
-            longer.
-        keep_order (bool): If True, :func:`Pool.imap` is used, otherwise
-            :func:`Pool.imap_unordered` is used.
-
-    Returns:
-        list: The task results.
-    """
-    if isinstance(tasks, tuple):
-        assert len(tasks) == 2
-        assert isinstance(tasks[0], Iterable)
-        assert isinstance(tasks[1], int)
-        task_num = tasks[1]
-        tasks = tasks[0]
-    elif isinstance(tasks, Iterable):
-        task_num = len(tasks)
-    else:
-        raise TypeError('"tasks" must be an iterable object or a (iterator, int) tuple')
-    pool = init_pool(nproc, initializer, initargs)
-    start = not skip_first
-    task_num -= nproc * chunksize * int(skip_first)
-    prog_bar = ProgressBar(task_num, bar_width, start, file=file)
-    results = []
-    if keep_order:
-        gen = pool.imap(func, tasks, chunksize)
-    else:
-        gen = pool.imap_unordered(func, tasks, chunksize)
-    for result in gen:
-        results.append(result)
-        if skip_first:
-            if len(results) < nproc * chunksize:
-                continue
-            elif len(results) == nproc * chunksize:
-                prog_bar.start()
-                continue
-        prog_bar.update()
-    prog_bar.file.write("\n")
-    pool.close()
-    pool.join()
-    return results
-
-
-def track_iter_progress(tasks, bar_width=50, file=sys.stdout):
-    """Track the progress of tasks iteration or enumeration with a progress
-    bar.
-
-    Tasks are yielded with a simple for-loop.
-
-    Args:
-        tasks (list or tuple[Iterable, int]): A list of tasks or
-            (tasks, total num).
-        bar_width (int): Width of progress bar.
-
-    Yields:
-        list: The task results.
-    """
-    if isinstance(tasks, tuple):
-        assert len(tasks) == 2
-        assert isinstance(tasks[0], Iterable)
-        assert isinstance(tasks[1], int)
-        task_num = tasks[1]
-        tasks = tasks[0]
-    elif isinstance(tasks, Iterable):
-        task_num = len(tasks)
-    else:
-        raise TypeError('"tasks" must be an iterable object or a (iterator, int) tuple')
-    prog_bar = ProgressBar(task_num, bar_width, file=file)
-    for task in tasks:
-        yield task
-        prog_bar.update()
-    prog_bar.file.write("\n")
-
-
-class COCO(_COCO):
-    """This class is almost the same as official pycocotools package.
-
-    It implements some snake case function aliases. So that the COCO class has
-    the same interface as LVIS class.
-    """
-
-    def __init__(self, annotation_file=None):
-        if getattr(pycocotools, "__version__", "0") >= "12.0.2":
-            warnings.warn(
-                'mmpycocotools is deprecated. Please install official pycocotools by "pip install pycocotools"',  # noqa: E501
-                UserWarning,
-            )
-        super().__init__(annotation_file=annotation_file)
-        self.img_ann_map = self.imgToAnns
-        self.cat_img_map = self.catToImgs
-
-    def get_ann_ids(self, img_ids=[], cat_ids=[], area_rng=[], iscrowd=None):
-        return self.getAnnIds(img_ids, cat_ids, area_rng, iscrowd)
-
-    def get_cat_ids(self, cat_names=[], sup_names=[], cat_ids=[]):
-        return self.getCatIds(cat_names, sup_names, cat_ids)
-
-    def get_img_ids(self, img_ids=[], cat_ids=[]):
-        return self.getImgIds(img_ids, cat_ids)
-
-    def load_anns(self, ids):
-        return self.loadAnns(ids)
-
-    def load_cats(self, ids):
-        return self.loadCats(ids)
-
-    def load_imgs(self, ids):
-        return self.loadImgs(ids)
-
-
-# just for the ease of import
-COCOeval = _COCOeval
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/utils/logging.py
-import torch.distributed as dist
-
-logger_initialized = {}
-
-
-def get_logger(name, log_file=None, log_level=logging.INFO, file_mode="w"):
-    """Initialize and get a logger by name.
-
-    If the logger has not been initialized, this method will initialize the
-    logger by adding one or two handlers, otherwise the initialized logger will
-    be directly returned. During initialization, a StreamHandler will always be
-    added. If `log_file` is specified and the process rank is 0, a FileHandler
-    will also be added.
-
-    Args:
-        name (str): Logger name.
-        log_file (str | None): The log filename. If specified, a FileHandler
-            will be added to the logger.
-        log_level (int): The logger level. Note that only the process of
-            rank 0 is affected, and other processes will set the level to
-            "Error" thus be silent most of the time.
-        file_mode (str): The file mode used in opening log file.
-            Defaults to 'w'.
-
-    Returns:
-        logging.Logger: The expected logger.
-    """
-    logger = logging.getLogger(name)
-    if name in logger_initialized:
-        return logger
-    # handle hierarchical names
-    # e.g., logger "a" is initialized, then logger "a.b" will skip the
-    # initialization since it is a child of "a".
-    for logger_name in logger_initialized:
-        if name.startswith(logger_name):
-            return logger
-
-    # handle duplicate logs to the console
-    # Starting in 1.8.0, PyTorch DDP attaches a StreamHandler <stderr> (NOTSET)
-    # to the root logger. As logger.propagate is True by default, this root
-    # level handler causes logging messages from rank>0 processes to
-    # unexpectedly show up on the console, creating much unwanted clutter.
-    # To fix this issue, we set the root logger's StreamHandler, if any, to log
-    # at the ERROR level.
-    for handler in logger.root.handlers:
-        if type(handler) is logging.StreamHandler:
-            handler.setLevel(logging.ERROR)
-
-    stream_handler = logging.StreamHandler()
-    handlers = [stream_handler]
-
-    if dist.is_available() and dist.is_initialized():
-        rank = dist.get_rank()
-    else:
-        rank = 0
-
-    # only rank 0 will add a FileHandler
-    if rank == 0 and log_file is not None:
-        # Here, the default behaviour of the official logger is 'a'. Thus, we
-        # provide an interface to change the file mode to the default
-        # behaviour.
-        file_handler = logging.FileHandler(log_file, file_mode)
-        handlers.append(file_handler)
-
-    formatter = logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
-    for handler in handlers:
-        handler.setFormatter(formatter)
-        handler.setLevel(log_level)
-        logger.addHandler(handler)
-
-    if rank == 0:
-        logger.setLevel(log_level)
-    else:
-        logger.setLevel(logging.ERROR)
-
-    logger_initialized[name] = True
-
-    return logger
-
-
-def print_log(msg, logger=None, level=logging.INFO):
-    """Print a log message.
-
-    Args:
-        msg (str): The message to be logged.
-        logger (logging.Logger | str | None): The logger to be used.
-            Some special loggers are:
-
-            - "silent": no message will be printed.
-            - other str: the logger obtained with `get_root_logger(logger)`.
-            - None: The `print()` method will be used to print log messages.
-        level (int): Logging level. Only available when `logger` is a Logger
-            object or "root".
-    """
-    if logger is None:
-        print(msg)
-    elif isinstance(logger, logging.Logger):
-        logger.log(level, msg)
-    elif logger == "silent":
-        pass
-    elif isinstance(logger, str):
-        _logger = logging.getLogger(logger)
-        _logger.log(level, msg)
-    else:
-        raise TypeError(
-            "logger should be either a logging.Logger object, str, " f'"silent" or None, but got {type(logger)}'
-        )
-
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/runner/dist_utils.py
 def get_dist_info():
     """Get distribution information."""
     if dist.is_available() and dist.is_initialized():
@@ -9745,39 +6507,6 @@ def get_dist_info():
     return rank, world_size
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/apis/__init__.py
-# Note: set_random_seed is typically imported from mmcv.runner.utils but re-exported by mmdet.apis
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/runner/utils.py
-def set_random_seed(seed, deterministic=False, use_rank_shift=False):
-    """Set random seed.
-
-    Args:
-        seed (int): Seed to be used.
-        deterministic (bool): Whether to set the deterministic option for
-            CUDNN backend, i.e., set `torch.backends.cudnn.deterministic`
-            to True and `torch.backends.cudnn.benchmark` to False.
-            Default: False.
-        rank_shift (bool): Whether to add rank number to the random seed to
-            have different random seed in different threads. Default: False.
-    """
-    import random
-    import os
-
-    if use_rank_shift:
-        rank, _ = get_dist_info()
-        seed += rank
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
-    if deterministic:
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/datasets/pipelines/__init__.py
 def replace_ImageToTensor(pipelines):
     """Replace ImageToTensor to DefaultFormatBundle in the pipeline.
 
@@ -9795,7 +6524,6 @@ def replace_ImageToTensor(pipelines):
     return pipelines
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/evaluation/functional/bbox_overlaps.py
 def bbox_overlaps(bboxes1, bboxes2, mode="iou", eps=1e-6, use_legacy_coordinate=False):
     """Calculate the ious between each bbox of bboxes1 and bboxes2.
 
@@ -9852,137 +6580,9 @@ def bbox_overlaps(bboxes1, bboxes2, mode="iou", eps=1e-6, use_legacy_coordinate=
     return ious
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/core/evaluation/recall.py
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/evaluation/functional/recall.py
 from collections.abc import Sequence
 
 
-def _recalls(all_ious, proposal_nums, thrs):
-    img_num = all_ious.shape[0]
-    total_gt_num = sum([ious.shape[0] for ious in all_ious])
-
-    _ious = np.zeros((proposal_nums.size, total_gt_num), dtype=np.float32)
-    for k, proposal_num in enumerate(proposal_nums):
-        tmp_ious = np.zeros(0)
-        for i in range(img_num):
-            ious = all_ious[i][:, :proposal_num].copy()
-            gt_ious = np.zeros((ious.shape[0]))
-            if ious.size == 0:
-                tmp_ious = np.hstack((tmp_ious, gt_ious))
-                continue
-            for j in range(ious.shape[0]):
-                gt_max_overlaps = ious.argmax(axis=1)
-                max_ious = ious[np.arange(0, ious.shape[0]), gt_max_overlaps]
-                gt_idx = max_ious.argmax()
-                gt_ious[j] = max_ious[gt_idx]
-                box_idx = gt_max_overlaps[gt_idx]
-                ious[gt_idx, :] = -1
-                ious[:, box_idx] = -1
-            tmp_ious = np.hstack((tmp_ious, gt_ious))
-        _ious[k, :] = tmp_ious
-
-    _ious = np.fliplr(np.sort(_ious, axis=1))
-    recalls = np.zeros((proposal_nums.size, thrs.size))
-    for i, thr in enumerate(thrs):
-        recalls[:, i] = (_ious >= thr).sum(axis=1) / float(total_gt_num)
-
-    return recalls
-
-
-def set_recall_param(proposal_nums, iou_thrs):
-    """Check proposal_nums and iou_thrs and set correct format."""
-    if isinstance(proposal_nums, Sequence):
-        _proposal_nums = np.array(proposal_nums)
-    elif isinstance(proposal_nums, int):
-        _proposal_nums = np.array([proposal_nums])
-    else:
-        _proposal_nums = proposal_nums
-
-    if iou_thrs is None:
-        _iou_thrs = np.array([0.5])
-    elif isinstance(iou_thrs, Sequence):
-        _iou_thrs = np.array(iou_thrs)
-    elif isinstance(iou_thrs, float):
-        _iou_thrs = np.array([iou_thrs])
-    else:
-        _iou_thrs = iou_thrs
-
-    return _proposal_nums, _iou_thrs
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/core/evaluation/recall.py
-# from mmdet.core import eval_recalls
-def eval_recalls(gts, proposals, proposal_nums=None, iou_thrs=0.5, logger=None):
-    """Calculate recalls.
-
-    Args:
-        gts (list[ndarray]): a list of arrays of shape (n, 4)
-        proposals (list[ndarray]): a list of arrays of shape (k, 4) or (k, 5)
-        proposal_nums (int | Sequence[int]): Top N proposals to be evaluated.
-        iou_thrs (float | Sequence[float]): IoU thresholds. Default: 0.5.
-        logger (logging.Logger | str | None): The way to print the recall
-            summary. See `mmcv.utils.print_log()` for details. Default: None.
-
-    Returns:
-        ndarray: recalls of different ious and proposal nums
-    """
-
-    img_num = len(gts)
-    assert img_num == len(proposals)
-
-    proposal_nums, iou_thrs = set_recall_param(proposal_nums, iou_thrs)
-
-    all_ious = []
-    for i in range(img_num):
-        if proposals[i].ndim == 2 and proposals[i].shape[1] == 5:
-            scores = proposals[i][:, 4]
-            sort_idx = np.argsort(scores)[::-1]
-            img_proposal = proposals[i][sort_idx, :]
-        else:
-            img_proposal = proposals[i]
-        prop_num = min(img_proposal.shape[0], proposal_nums[-1])
-        if gts[i] is None or gts[i].shape[0] == 0:
-            ious = np.zeros((0, img_proposal.shape[0]), dtype=np.float32)
-        else:
-            ious = bbox_overlaps(gts[i], img_proposal[:prop_num, :4])
-        all_ious.append(ious)
-    all_ious = np.array(all_ious)
-    recalls = _recalls(all_ious, proposal_nums, iou_thrs)
-
-    print_recall_summary(recalls, proposal_nums, iou_thrs, logger=logger)
-    return recalls
-
-
-def print_recall_summary(recalls, proposal_nums, iou_thrs, row_idxs=None, col_idxs=None, logger=None):
-    """Print recalls in a table.
-
-    Args:
-        recalls (ndarray): calculated from `bbox_recalls`
-        proposal_nums (ndarray or list): top N proposals
-        iou_thrs (ndarray or list): iou thresholds
-        row_idxs (ndarray): which rows(proposal nums) to print
-        col_idxs (ndarray): which cols(iou thresholds) to print
-        logger (logging.Logger | str | None): The way to print the recall
-            summary. See `mmcv.utils.print_log()` for details. Default: None.
-    """
-    proposal_nums = np.array(proposal_nums, dtype=np.int32)
-    iou_thrs = np.array(iou_thrs)
-    if row_idxs is None:
-        row_idxs = np.arange(proposal_nums.size)
-    if col_idxs is None:
-        col_idxs = np.arange(iou_thrs.size)
-    row_header = [""] + iou_thrs[col_idxs].tolist()
-    table_data = [row_header]
-    for i, num in enumerate(proposal_nums[row_idxs]):
-        row = [f"{val:.3f}" for val in recalls[row_idxs[i], col_idxs].tolist()]
-        row.insert(0, num)
-        table_data.append(row)
-    table = AsciiTable(table_data)
-    print_log("\n" + table.table, logger=logger)
-
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/runner/base_module.py
-# Copyright (c) OpenMMLab. All rights reserved.
 import copy
 import warnings
 from abc import ABCMeta
@@ -9992,313 +6592,18 @@ from logging import FileHandler
 import torch.nn as nn
 
 
-# BaseModule is already defined at line 1393, don't redefine it here
-# class BaseModule(nn.Module, metaclass=ABCMeta):
-#     """Base module for all modules in openmmlab.
-#
-#     ``BaseModule`` is a wrapper of ``torch.nn.Module`` with additional
-#     functionality of parameter initialization. Compared with
-#     ``torch.nn.Module``, ``BaseModule`` mainly adds three attributes.
-#
-#         - ``init_cfg``: the config to control the initialization.
-#         - ``init_weights``: The function of parameter
-#             initialization and recording initialization
-#             information.
-#         - ``_params_init_info``: Used to track the parameter
-#             initialization information. This attribute only
-#             exists during executing the ``init_weights``.
-#
-#     Args:
-#         init_cfg (dict, optional): Initialization config dict.
-#     """
-#
-#     def __init__(self, init_cfg=None):
-#         """Initialize BaseModule, inherited from `torch.nn.Module`"""
-#
-#         # NOTE init_cfg can be defined in different levels, but init_cfg
-#         # in low levels has a higher priority.
-#         super(BaseModule, self).__init__()
-#         # define default value of init_cfg instead of hard code
-#         # in init_weights() function
-#         self._is_init = False
-#
-#         self.init_cfg = copy.deepcopy(init_cfg)
-#
-#         # Backward compatibility in derived classes
-#         # if pretrained is not None:
-#         #     warnings.warn('DeprecationWarning: pretrained is a deprecated \
-#         #         key, please consider using init_cfg')
-#         #     self.init_cfg = dict(type='Pretrained', checkpoint=pretrained)
-#
-#     @property
-#     def is_init(self):
-#         return self._is_init
-#
-#     def init_weights(self):
-#         """Initialize the weights."""
-#
-#         is_top_level_module = False
-#         # check if it is top-level module
-#         if not hasattr(self, "_params_init_info"):
-#             # The `_params_init_info` is used to record the initialization
-#             # information of the parameters
-#             # the key should be the obj:`nn.Parameter` of model and the value
-#             # should be a dict containing
-#             # - init_info (str): The string that describes the initialization.
-#             # - tmp_mean_value (FloatTensor): The mean of the parameter,
-#             #       which indicates whether the parameter has been modified.
-#             # this attribute would be deleted after all parameters
-#             # is initialized.
-#             self._params_init_info = defaultdict(dict)
-#             is_top_level_module = True
-#
-#             # Initialize the `_params_init_info`,
-#             # When detecting the `tmp_mean_value` of
-#             # the corresponding parameter is changed, update related
-#             # initialization information
-#             for name, param in self.named_parameters():
-#                 self._params_init_info[param]["init_info"] = (
-#                     f"The value is the same before and "
-#                     f"after calling `init_weights` "
-#                     f"of {self.__class__.__name__} "
-#                 )
-#                 self._params_init_info[param]["tmp_mean_value"] = param.data.mean()
-#
-#             # pass `params_init_info` to all submodules
-#             # All submodules share the same `params_init_info`,
-#             # so it will be updated when parameters are
-#             # modified at any level of the model.
-#             for sub_module in self.modules():
-#                 sub_module._params_init_info = self._params_init_info
-#
-#         # Get the initialized logger, if not exist,
-#         # create a logger named `mmcv`
-#         logger_names = list(logger_initialized.keys())
-#         logger_name = logger_names[0] if logger_names else "mmcv"
-#
-#         from mmcv.cnn import initialize
-#         from mmcv.cnn.utils.weight_init import update_init_info
-#
-#         module_name = self.__class__.__name__
-#         if not self._is_init:
-#             if self.init_cfg:
-#                 print_log(f"initialize {module_name} with init_cfg {self.init_cfg}", logger=logger_name)
-#                 initialize(self, self.init_cfg)
-#                 if isinstance(self.init_cfg, dict):
-#                     # prevent the parameters of
-#                     # the pre-trained model
-#                     # from being overwritten by
-#                     # the `init_weights`
-#                     if self.init_cfg["type"] == "Pretrained":
-#                         return
-#
-#             for m in self.children():
-#                 if hasattr(m, "init_weights"):
-#                     m.init_weights()
-#                     # users may overload the `init_weights`
-#                     update_init_info(
-#                         m, init_info=f"Initialized by " f"user-defined `init_weights`" f" in {m.__class__.__name__} "
-#                     )
-#
-#             self._is_init = True
-#         else:
-#             warnings.warn(f"init_weights of {self.__class__.__name__} has " f"been called more than once.")
-#
-#         if is_top_level_module:
-#             self._dump_init_info(logger_name)
-#
-#             for sub_module in self.modules():
-#                 del sub_module._params_init_info
-#
-#     @master_only
-#     def _dump_init_info(self, logger_name):
-#         """Dump the initialization information to a file named
-#         `initialization.log.json` in workdir.
-#
-#         Args:
-#             logger_name (str): The name of logger.
-#         """
-#
-#         logger = get_logger(logger_name)
-#
-#         with_file_handler = False
-#         # dump the information to the logger file if there is a `FileHandler`
-#         for handler in logger.handlers:
-#             if isinstance(handler, FileHandler):
-#                 handler.stream.write("Name of parameter - Initialization information\n")
-#                 for name, param in self.named_parameters():
-#                     handler.stream.write(
-#                         f"\n{name} - {param.shape}: " f"\n{self._params_init_info[param]['init_info']} \n"
-#                     )
-#                 handler.stream.flush()
-#                 with_file_handler = True
-#         if not with_file_handler:
-#             for name, param in self.named_parameters():
-#                 print_log(
-#                     f"\n{name} - {param.shape}: " f"\n{self._params_init_info[param]['init_info']} \n ",
-#                     logger=logger_name,
-#                 )
-#
-#     def __repr__(self):
-#         s = super().__repr__()
-#         if self.init_cfg:
-#             s += f"\ninit_cfg={self.init_cfg}"
-#         return s
-
-
-class Sequential(BaseModule, nn.Sequential):
-    """Sequential module in openmmlab.
-
-    Args:
-        init_cfg (dict, optional): Initialization config dict.
-    """
-
-    def __init__(self, *args, init_cfg=None):
-        BaseModule.__init__(self, init_cfg)
-        nn.Sequential.__init__(self, *args)
-
-
-class ModuleList(BaseModule, nn.ModuleList):
-    """ModuleList in openmmlab.
-
-    Args:
-        modules (iterable, optional): an iterable of modules to add.
-        init_cfg (dict, optional): Initialization config dict.
-    """
-
-    def __init__(self, modules=None, init_cfg=None):
-        BaseModule.__init__(self, init_cfg)
-        nn.ModuleList.__init__(self, modules)
-
-
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/models/builder.py
-import warnings
-
-# from mmcv.cnn import MODELS as MMCV_MODELS
-# from models.experimental.MapTR.reference.mmdet3d_plugin.dependency import Registry, build_from_cfg
-
-
-def build_model_from_cfg(cfg, registry, default_args=None):
-    """Build a PyTorch model from config dict(s). Different from
-    ``build_from_cfg``, if cfg is a list, a ``nn.Sequential`` will be built.
-
-    Args:
-        cfg (dict, list[dict]): The config of modules, is is either a config
-            dict or a list of config dicts. If cfg is a list, a
-            the built modules will be wrapped with ``nn.Sequential``.
-        registry (:obj:`Registry`): A registry the module belongs to.
-        default_args (dict, optional): Default arguments to build the module.
-            Defaults to None.
-
-    Returns:
-        nn.Module: A built nn module.
-    """
-    if isinstance(cfg, list):
-        modules = [build_from_cfg(cfg_, registry, default_args) for cfg_ in cfg]
-        return Sequential(*modules)
-    else:
-        return build_from_cfg(cfg, registry, default_args)
-
-
-MMCV_MODELS = Registry("model", build_func=build_model_from_cfg)
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/models/builder.py
-# from mmdet.models.builder import (BACKBONES, DETECTORS, HEADS, LOSSES, NECKS,
-#                                   ROI_EXTRACTORS, SHARED_HEADS)
-# _MODELS_DET is already defined at line 3724, don't redefine it here
-# BACKBONES, NECKS, etc. are already defined at line 3726, don't redefine them here
-# _MODELS_DET = Registry("models", parent=MMCV_MODELS)
-# BACKBONES = _MODELS_DET
-# NECKS = _MODELS_DET
-# ROI_EXTRACTORS = _MODELS_DET
-# SHARED_HEADS = _MODELS_DET
-# HEADS = _MODELS_DET
-# LOSSES = _MODELS_DET
-# DETECTORS = _MODELS_DET
-
-
-def build_backbone(cfg):
-    """Build backbone."""
-    return BACKBONES.build(cfg)
-
-
-def build_neck(cfg):
-    """Build neck."""
-    return NECKS.build(cfg)
-
-
-def build_roi_extractor(cfg):
-    """Build roi extractor."""
-    return ROI_EXTRACTORS.build(cfg)
-
-
-def build_shared_head(cfg):
-    """Build shared head."""
-    return SHARED_HEADS.build(cfg)
-
-
-def build_head(cfg):
-    """Build head."""
-    return HEADS.build(cfg)
-
-
-def build_loss(cfg):
-    """Build loss."""
-    return LOSSES.build(cfg)
-
-
-def build_detector(cfg, train_cfg=None, test_cfg=None):
-    """Build detector."""
-    if train_cfg is not None or test_cfg is not None:
-        warnings.warn("train_cfg and test_cfg is deprecated, " "please specify them in model", UserWarning)
-    assert cfg.get("train_cfg") is None or train_cfg is None, "train_cfg specified in both outer field and model field "
-    assert cfg.get("test_cfg") is None or test_cfg is None, "test_cfg specified in both outer field and model field "
-    return DETECTORS.build(cfg, default_args=dict(train_cfg=train_cfg, test_cfg=test_cfg))
-
-
-# https://github.com/open-mmlab/mmsegmentation/blob/v0.14.1/mmseg/models/builder.py
-# from mmseg.models.builder import SEGMENTORS
-_MODELS_SEG = Registry("models", parent=MMCV_MODELS)
-
-SEGMENTORS = _MODELS_SEG
-
-
-def build_segmentor(cfg, train_cfg=None, test_cfg=None):
-    """Build segmentor."""
-    if train_cfg is not None or test_cfg is not None:
-        warnings.warn("train_cfg and test_cfg is deprecated, " "please specify them in model", UserWarning)
-    assert cfg.get("train_cfg") is None or train_cfg is None, "train_cfg specified in both outer field and model field "
-    assert cfg.get("test_cfg") is None or test_cfg is None, "test_cfg specified in both outer field and model field "
-    return SEGMENTORS.build(cfg, default_args=dict(train_cfg=train_cfg, test_cfg=test_cfg))
-
-
-MODELS = Registry("models", parent=MMCV_MODELS)
-
-VOXEL_ENCODERS = MODELS
-MIDDLE_ENCODERS = MODELS
-FUSION_LAYERS = MODELS
-
-
 def build_model(cfg, train_cfg=None, test_cfg=None):
-    """A function warpper for building 3D detector or segmentor according to
-    cfg.
+    """A function wrapper for building 3D detector or segmentor according to cfg.
 
     Should be deprecated in the future.
     """
-    if cfg.type in ["EncoderDecoder3D"]:
-        return build_segmentor(cfg, train_cfg=train_cfg, test_cfg=test_cfg)
-    else:
-        return build_detector(cfg, train_cfg=train_cfg, test_cfg=test_cfg)
+    # For inference-only, always use build_detector
+    # build_detector is defined earlier in this file (line ~3851)
+    return DETECTORS.build(cfg, default_args=dict(train_cfg=train_cfg, test_cfg=test_cfg))
 
-
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/datasets/builder.py#L39
-# from models.experimental.MapTR.reference.mmdet3d_plugin.dependency import DATASETS
 
 # PIPELINES registry is already defined at line 4494, don't redefine it here
-# from .custom import CustomDataset
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/datasets/pipelines/compose.py
 import collections
-
-# from models.experimental.MapTR.reference.mmdet3d_plugin.dependency import build_from_cfg
 
 
 @PIPELINES.register_module()
@@ -10347,946 +6652,6 @@ class Compose:
         return format_string
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/datasets/custom.py
-from torch.utils.data import Dataset
-
-
-class CustomDataset(Dataset):
-    """Custom dataset for detection.
-
-    The annotation format is shown as follows. The `ann` field is optional for
-    testing.
-
-    .. code-block:: none
-
-        [
-            {
-                'filename': 'a.jpg',
-                'width': 1280,
-                'height': 720,
-                'ann': {
-                    'bboxes': <np.ndarray> (n, 4) in (x1, y1, x2, y2) order.
-                    'labels': <np.ndarray> (n, ),
-                    'bboxes_ignore': <np.ndarray> (k, 4), (optional field)
-                    'labels_ignore': <np.ndarray> (k, 4) (optional field)
-                }
-            },
-            ...
-        ]
-
-    Args:
-        ann_file (str): Annotation file path.
-        pipeline (list[dict]): Processing pipeline.
-        classes (str | Sequence[str], optional): Specify classes to load.
-            If is None, ``cls.CLASSES`` will be used. Default: None.
-        data_root (str, optional): Data root for ``ann_file``,
-            ``img_prefix``, ``seg_prefix``, ``proposal_file`` if specified.
-        test_mode (bool, optional): If set True, annotation will not be loaded.
-        filter_empty_gt (bool, optional): If set true, images without bounding
-            boxes of the dataset's classes will be filtered out. This option
-            only works when `test_mode=False`, i.e., we never filter images
-            during tests.
-    """
-
-    CLASSES = None
-
-    def __init__(
-        self,
-        ann_file,
-        pipeline,
-        classes=None,
-        data_root=None,
-        img_prefix="",
-        seg_prefix=None,
-        proposal_file=None,
-        test_mode=False,
-        filter_empty_gt=True,
-    ):
-        self.ann_file = ann_file
-        self.data_root = data_root
-        self.img_prefix = img_prefix
-        self.seg_prefix = seg_prefix
-        self.proposal_file = proposal_file
-        self.test_mode = test_mode
-        self.filter_empty_gt = filter_empty_gt
-        self.CLASSES = self.get_classes(classes)
-
-        # join paths if data_root is specified
-        if self.data_root is not None:
-            if not osp.isabs(self.ann_file):
-                self.ann_file = osp.join(self.data_root, self.ann_file)
-            if not (self.img_prefix is None or osp.isabs(self.img_prefix)):
-                self.img_prefix = osp.join(self.data_root, self.img_prefix)
-            if not (self.seg_prefix is None or osp.isabs(self.seg_prefix)):
-                self.seg_prefix = osp.join(self.data_root, self.seg_prefix)
-            if not (self.proposal_file is None or osp.isabs(self.proposal_file)):
-                self.proposal_file = osp.join(self.data_root, self.proposal_file)
-        # load annotations (and proposals)
-        self.data_infos = self.load_annotations(self.ann_file)
-
-        if self.proposal_file is not None:
-            self.proposals = self.load_proposals(self.proposal_file)
-        else:
-            self.proposals = None
-
-        # filter images too small and containing no annotations
-        if not test_mode:
-            valid_inds = self._filter_imgs()
-            self.data_infos = [self.data_infos[i] for i in valid_inds]
-            if self.proposals is not None:
-                self.proposals = [self.proposals[i] for i in valid_inds]
-            # set group flag for the sampler
-            self._set_group_flag()
-
-        # processing pipeline
-        self.pipeline = Compose(pipeline)
-
-    def __len__(self):
-        """Total number of samples of data."""
-        return len(self.data_infos)
-
-    def load_annotations(self, ann_file):
-        """Load annotation from annotation file."""
-        return mmcv.load(ann_file)
-
-    def load_proposals(self, proposal_file):
-        """Load proposal from proposal file."""
-        return mmcv.load(proposal_file)
-
-    def get_ann_info(self, idx):
-        """Get annotation by index.
-
-        Args:
-            idx (int): Index of data.
-
-        Returns:
-            dict: Annotation info of specified index.
-        """
-
-        return self.data_infos[idx]["ann"]
-
-    def get_cat_ids(self, idx):
-        """Get category ids by index.
-
-        Args:
-            idx (int): Index of data.
-
-        Returns:
-            list[int]: All categories in the image of specified index.
-        """
-
-        return self.data_infos[idx]["ann"]["labels"].astype(np.int).tolist()
-
-    def pre_pipeline(self, results):
-        """Prepare results dict for pipeline."""
-        results["img_prefix"] = self.img_prefix
-        results["seg_prefix"] = self.seg_prefix
-        results["proposal_file"] = self.proposal_file
-        results["bbox_fields"] = []
-        results["mask_fields"] = []
-        results["seg_fields"] = []
-
-    def _filter_imgs(self, min_size=32):
-        """Filter images too small."""
-        if self.filter_empty_gt:
-            warnings.warn("CustomDataset does not support filtering empty gt images.")
-        valid_inds = []
-        for i, img_info in enumerate(self.data_infos):
-            if min(img_info["width"], img_info["height"]) >= min_size:
-                valid_inds.append(i)
-        return valid_inds
-
-    def _set_group_flag(self):
-        """Set flag according to image aspect ratio.
-
-        Images with aspect ratio greater than 1 will be set as group 1,
-        otherwise group 0.
-        """
-        self.flag = np.zeros(len(self), dtype=np.uint8)
-        for i in range(len(self)):
-            img_info = self.data_infos[i]
-            if img_info["width"] / img_info["height"] > 1:
-                self.flag[i] = 1
-
-    def _rand_another(self, idx):
-        """Get another random index from the same group as the given index."""
-        pool = np.where(self.flag == self.flag[idx])[0]
-        return np.random.choice(pool)
-
-    def __getitem__(self, idx):
-        """Get training/test data after pipeline.
-
-        Args:
-            idx (int): Index of data.
-
-        Returns:
-            dict: Training/test data (with annotation if `test_mode` is set \
-                True).
-        """
-
-        if self.test_mode:
-            return self.prepare_test_img(idx)
-        while True:
-            data = self.prepare_train_img(idx)
-            if data is None:
-                idx = self._rand_another(idx)
-                continue
-            return data
-
-    def prepare_train_img(self, idx):
-        """Get training data and annotations after pipeline.
-
-        Args:
-            idx (int): Index of data.
-
-        Returns:
-            dict: Training data and annotation after pipeline with new keys \
-                introduced by pipeline.
-        """
-
-        img_info = self.data_infos[idx]
-        ann_info = self.get_ann_info(idx)
-        results = dict(img_info=img_info, ann_info=ann_info)
-        if self.proposals is not None:
-            results["proposals"] = self.proposals[idx]
-        self.pre_pipeline(results)
-        return self.pipeline(results)
-
-    def prepare_test_img(self, idx):
-        """Get testing data  after pipeline.
-
-        Args:
-            idx (int): Index of data.
-
-        Returns:
-            dict: Testing data after pipeline with new keys introduced by \
-                pipeline.
-        """
-
-        img_info = self.data_infos[idx]
-        results = dict(img_info=img_info)
-        if self.proposals is not None:
-            results["proposals"] = self.proposals[idx]
-        self.pre_pipeline(results)
-        return self.pipeline(results)
-
-    @classmethod
-    def get_classes(cls, classes=None):
-        """Get class names of current dataset.
-
-        Args:
-            classes (Sequence[str] | str | None): If classes is None, use
-                default CLASSES defined by builtin dataset. If classes is a
-                string, take it as a file name. The file contains the name of
-                classes where each line contains one class name. If classes is
-                a tuple or list, override the CLASSES defined by the dataset.
-
-        Returns:
-            tuple[str] or list[str]: Names of categories of the dataset.
-        """
-        if classes is None:
-            return cls.CLASSES
-
-        if isinstance(classes, str):
-            # take it as a file path
-            class_names = mmcv.list_from_file(classes)
-        elif isinstance(classes, (tuple, list)):
-            class_names = classes
-        else:
-            raise ValueError(f"Unsupported type {type(classes)} of classes.")
-
-        return class_names
-
-    def format_results(self, results, **kwargs):
-        """Place holder to format result to dataset specific output."""
-
-    def evaluate(
-        self, results, metric="mAP", logger=None, proposal_nums=(100, 300, 1000), iou_thr=0.5, scale_ranges=None
-    ):
-        """Evaluate the dataset.
-
-        Args:
-            results (list): Testing results of the dataset.
-            metric (str | list[str]): Metrics to be evaluated.
-            logger (logging.Logger | None | str): Logger used for printing
-                related information during evaluation. Default: None.
-            proposal_nums (Sequence[int]): Proposal number used for evaluating
-                recalls, such as recall@100, recall@1000.
-                Default: (100, 300, 1000).
-            iou_thr (float | list[float]): IoU threshold. Default: 0.5.
-            scale_ranges (list[tuple] | None): Scale ranges for evaluating mAP.
-                Default: None.
-        """
-
-        if not isinstance(metric, str):
-            assert len(metric) == 1
-            metric = metric[0]
-        allowed_metrics = ["mAP", "recall"]
-        if metric not in allowed_metrics:
-            raise KeyError(f"metric {metric} is not supported")
-        annotations = [self.get_ann_info(i) for i in range(len(self))]
-        eval_results = OrderedDict()
-        iou_thrs = [iou_thr] if isinstance(iou_thr, float) else iou_thr
-        if metric == "mAP":
-            assert isinstance(iou_thrs, list)
-            mean_aps = []
-            for iou_thr in iou_thrs:
-                print_log(f'\n{"-" * 15}iou_thr: {iou_thr}{"-" * 15}')
-                mean_ap, _ = eval_map(
-                    results,
-                    annotations,
-                    scale_ranges=scale_ranges,
-                    iou_thr=iou_thr,
-                    dataset=self.CLASSES,
-                    logger=logger,
-                )
-                mean_aps.append(mean_ap)
-                eval_results[f"AP{int(iou_thr * 100):02d}"] = round(mean_ap, 3)
-            eval_results["mAP"] = sum(mean_aps) / len(mean_aps)
-        elif metric == "recall":
-            gt_bboxes = [ann["bboxes"] for ann in annotations]
-            recalls = eval_recalls(gt_bboxes, results, proposal_nums, iou_thr, logger=logger)
-            for i, num in enumerate(proposal_nums):
-                for j, iou in enumerate(iou_thrs):
-                    eval_results[f"recall@{num}@{iou}"] = recalls[i, j]
-            if recalls.shape[1] > 1:
-                ar = recalls.mean(axis=1)
-                for i, num in enumerate(proposal_nums):
-                    eval_results[f"AR@{num}"] = ar[i]
-        return eval_results
-
-    def __repr__(self):
-        """Print the number of instance number."""
-        dataset_type = "Test" if self.test_mode else "Train"
-        result = (
-            f"\n{self.__class__.__name__} {dataset_type} dataset "
-            f"with number of images {len(self)}, "
-            f"and instance counts: \n"
-        )
-        if self.CLASSES is None:
-            result += "Category names are not provided. \n"
-            return result
-        instance_count = np.zeros(len(self.CLASSES) + 1).astype(int)
-        # count the instance number in each image
-        for idx in range(len(self)):
-            label = self.get_ann_info(idx)["labels"]
-            unique, counts = np.unique(label, return_counts=True)
-            if len(unique) > 0:
-                # add the occurrence number to each class
-                instance_count[unique] += counts
-            else:
-                # background is the last index
-                instance_count[-1] += 1
-        # create a table with category count
-        table_data = [["category", "count"] * 5]
-        row_data = []
-        for cls, count in enumerate(instance_count):
-            if cls < len(self.CLASSES):
-                row_data += [f"{cls} [{self.CLASSES[cls]}]", f"{count}"]
-            else:
-                # add the background number
-                row_data += ["-1 background", f"{count}"]
-            if len(row_data) == 10:
-                table_data.append(row_data)
-                row_data = []
-
-        table = AsciiTable(table_data)
-        result += table.table
-        return result
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/datasets/coco.py
-@DATASETS.register_module()
-class CocoDataset(CustomDataset):
-    CLASSES = (
-        "person",
-        "bicycle",
-        "car",
-        "motorcycle",
-        "airplane",
-        "bus",
-        "train",
-        "truck",
-        "boat",
-        "traffic light",
-        "fire hydrant",
-        "stop sign",
-        "parking meter",
-        "bench",
-        "bird",
-        "cat",
-        "dog",
-        "horse",
-        "sheep",
-        "cow",
-        "elephant",
-        "bear",
-        "zebra",
-        "giraffe",
-        "backpack",
-        "umbrella",
-        "handbag",
-        "tie",
-        "suitcase",
-        "frisbee",
-        "skis",
-        "snowboard",
-        "sports ball",
-        "kite",
-        "baseball bat",
-        "baseball glove",
-        "skateboard",
-        "surfboard",
-        "tennis racket",
-        "bottle",
-        "wine glass",
-        "cup",
-        "fork",
-        "knife",
-        "spoon",
-        "bowl",
-        "banana",
-        "apple",
-        "sandwich",
-        "orange",
-        "broccoli",
-        "carrot",
-        "hot dog",
-        "pizza",
-        "donut",
-        "cake",
-        "chair",
-        "couch",
-        "potted plant",
-        "bed",
-        "dining table",
-        "toilet",
-        "tv",
-        "laptop",
-        "mouse",
-        "remote",
-        "keyboard",
-        "cell phone",
-        "microwave",
-        "oven",
-        "toaster",
-        "sink",
-        "refrigerator",
-        "book",
-        "clock",
-        "vase",
-        "scissors",
-        "teddy bear",
-        "hair drier",
-        "toothbrush",
-    )
-
-    def load_annotations(self, ann_file):
-        """Load annotation from COCO style annotation file.
-
-        Args:
-            ann_file (str): Path of annotation file.
-
-        Returns:
-            list[dict]: Annotation info from COCO api.
-        """
-
-        self.coco = COCO(ann_file)
-        # The order of returned `cat_ids` will not
-        # change with the order of the CLASSES
-        self.cat_ids = self.coco.get_cat_ids(cat_names=self.CLASSES)
-
-        self.cat2label = {cat_id: i for i, cat_id in enumerate(self.cat_ids)}
-        self.img_ids = self.coco.get_img_ids()
-        data_infos = []
-        total_ann_ids = []
-        for i in self.img_ids:
-            info = self.coco.load_imgs([i])[0]
-            info["filename"] = info["file_name"]
-            data_infos.append(info)
-            ann_ids = self.coco.get_ann_ids(img_ids=[i])
-            total_ann_ids.extend(ann_ids)
-        assert len(set(total_ann_ids)) == len(total_ann_ids), f"Annotation ids in '{ann_file}' are not unique!"
-        return data_infos
-
-    def get_ann_info(self, idx):
-        """Get COCO annotation by index.
-
-        Args:
-            idx (int): Index of data.
-
-        Returns:
-            dict: Annotation info of specified index.
-        """
-
-        img_id = self.data_infos[idx]["id"]
-        ann_ids = self.coco.get_ann_ids(img_ids=[img_id])
-        ann_info = self.coco.load_anns(ann_ids)
-        return self._parse_ann_info(self.data_infos[idx], ann_info)
-
-    def get_cat_ids(self, idx):
-        """Get COCO category ids by index.
-
-        Args:
-            idx (int): Index of data.
-
-        Returns:
-            list[int]: All categories in the image of specified index.
-        """
-
-        img_id = self.data_infos[idx]["id"]
-        ann_ids = self.coco.get_ann_ids(img_ids=[img_id])
-        ann_info = self.coco.load_anns(ann_ids)
-        return [ann["category_id"] for ann in ann_info]
-
-    def _filter_imgs(self, min_size=32):
-        """Filter images too small or without ground truths."""
-        valid_inds = []
-        # obtain images that contain annotation
-        ids_with_ann = set(_["image_id"] for _ in self.coco.anns.values())
-        # obtain images that contain annotations of the required categories
-        ids_in_cat = set()
-        for i, class_id in enumerate(self.cat_ids):
-            ids_in_cat |= set(self.coco.cat_img_map[class_id])
-        # merge the image id sets of the two conditions and use the merged set
-        # to filter out images if self.filter_empty_gt=True
-        ids_in_cat &= ids_with_ann
-
-        valid_img_ids = []
-        for i, img_info in enumerate(self.data_infos):
-            img_id = self.img_ids[i]
-            if self.filter_empty_gt and img_id not in ids_in_cat:
-                continue
-            if min(img_info["width"], img_info["height"]) >= min_size:
-                valid_inds.append(i)
-                valid_img_ids.append(img_id)
-        self.img_ids = valid_img_ids
-        return valid_inds
-
-    def _parse_ann_info(self, img_info, ann_info):
-        """Parse bbox and mask annotation.
-
-        Args:
-            ann_info (list[dict]): Annotation info of an image.
-            with_mask (bool): Whether to parse mask annotations.
-
-        Returns:
-            dict: A dict containing the following keys: bboxes, bboxes_ignore,\
-                labels, masks, seg_map. "masks" are raw annotations and not \
-                decoded into binary masks.
-        """
-        gt_bboxes = []
-        gt_labels = []
-        gt_bboxes_ignore = []
-        gt_masks_ann = []
-        for i, ann in enumerate(ann_info):
-            if ann.get("ignore", False):
-                continue
-            x1, y1, w, h = ann["bbox"]
-            inter_w = max(0, min(x1 + w, img_info["width"]) - max(x1, 0))
-            inter_h = max(0, min(y1 + h, img_info["height"]) - max(y1, 0))
-            if inter_w * inter_h == 0:
-                continue
-            if ann["area"] <= 0 or w < 1 or h < 1:
-                continue
-            if ann["category_id"] not in self.cat_ids:
-                continue
-            bbox = [x1, y1, x1 + w, y1 + h]
-            if ann.get("iscrowd", False):
-                gt_bboxes_ignore.append(bbox)
-            else:
-                gt_bboxes.append(bbox)
-                gt_labels.append(self.cat2label[ann["category_id"]])
-                gt_masks_ann.append(ann.get("segmentation", None))
-
-        if gt_bboxes:
-            gt_bboxes = np.array(gt_bboxes, dtype=np.float32)
-            gt_labels = np.array(gt_labels, dtype=np.int64)
-        else:
-            gt_bboxes = np.zeros((0, 4), dtype=np.float32)
-            gt_labels = np.array([], dtype=np.int64)
-
-        if gt_bboxes_ignore:
-            gt_bboxes_ignore = np.array(gt_bboxes_ignore, dtype=np.float32)
-        else:
-            gt_bboxes_ignore = np.zeros((0, 4), dtype=np.float32)
-
-        seg_map = img_info["filename"].replace("jpg", "png")
-
-        ann = dict(
-            bboxes=gt_bboxes, labels=gt_labels, bboxes_ignore=gt_bboxes_ignore, masks=gt_masks_ann, seg_map=seg_map
-        )
-
-        return ann
-
-    def xyxy2xywh(self, bbox):
-        """Convert ``xyxy`` style bounding boxes to ``xywh`` style for COCO
-        evaluation.
-
-        Args:
-            bbox (numpy.ndarray): The bounding boxes, shape (4, ), in
-                ``xyxy`` order.
-
-        Returns:
-            list[float]: The converted bounding boxes, in ``xywh`` order.
-        """
-
-        _bbox = bbox.tolist()
-        return [
-            _bbox[0],
-            _bbox[1],
-            _bbox[2] - _bbox[0],
-            _bbox[3] - _bbox[1],
-        ]
-
-    def _proposal2json(self, results):
-        """Convert proposal results to COCO json style."""
-        json_results = []
-        for idx in range(len(self)):
-            img_id = self.img_ids[idx]
-            bboxes = results[idx]
-            for i in range(bboxes.shape[0]):
-                data = dict()
-                data["image_id"] = img_id
-                data["bbox"] = self.xyxy2xywh(bboxes[i])
-                data["score"] = float(bboxes[i][4])
-                data["category_id"] = 1
-                json_results.append(data)
-        return json_results
-
-    def _det2json(self, results):
-        """Convert detection results to COCO json style."""
-        json_results = []
-        for idx in range(len(self)):
-            img_id = self.img_ids[idx]
-            result = results[idx]
-            for label in range(len(result)):
-                bboxes = result[label]
-                for i in range(bboxes.shape[0]):
-                    data = dict()
-                    data["image_id"] = img_id
-                    data["bbox"] = self.xyxy2xywh(bboxes[i])
-                    data["score"] = float(bboxes[i][4])
-                    data["category_id"] = self.cat_ids[label]
-                    json_results.append(data)
-        return json_results
-
-    def _segm2json(self, results):
-        """Convert instance segmentation results to COCO json style."""
-        bbox_json_results = []
-        segm_json_results = []
-        for idx in range(len(self)):
-            img_id = self.img_ids[idx]
-            det, seg = results[idx]
-            for label in range(len(det)):
-                # bbox results
-                bboxes = det[label]
-                for i in range(bboxes.shape[0]):
-                    data = dict()
-                    data["image_id"] = img_id
-                    data["bbox"] = self.xyxy2xywh(bboxes[i])
-                    data["score"] = float(bboxes[i][4])
-                    data["category_id"] = self.cat_ids[label]
-                    bbox_json_results.append(data)
-
-                # segm results
-                # some detectors use different scores for bbox and mask
-                if isinstance(seg, tuple):
-                    segms = seg[0][label]
-                    mask_score = seg[1][label]
-                else:
-                    segms = seg[label]
-                    mask_score = [bbox[4] for bbox in bboxes]
-                for i in range(bboxes.shape[0]):
-                    data = dict()
-                    data["image_id"] = img_id
-                    data["bbox"] = self.xyxy2xywh(bboxes[i])
-                    data["score"] = float(mask_score[i])
-                    data["category_id"] = self.cat_ids[label]
-                    if isinstance(segms[i]["counts"], bytes):
-                        segms[i]["counts"] = segms[i]["counts"].decode()
-                    data["segmentation"] = segms[i]
-                    segm_json_results.append(data)
-        return bbox_json_results, segm_json_results
-
-    def results2json(self, results, outfile_prefix):
-        """Dump the detection results to a COCO style json file.
-
-        There are 3 types of results: proposals, bbox predictions, mask
-        predictions, and they have different data types. This method will
-        automatically recognize the type, and dump them to json files.
-
-        Args:
-            results (list[list | tuple | ndarray]): Testing results of the
-                dataset.
-            outfile_prefix (str): The filename prefix of the json files. If the
-                prefix is "somepath/xxx", the json files will be named
-                "somepath/xxx.bbox.json", "somepath/xxx.segm.json",
-                "somepath/xxx.proposal.json".
-
-        Returns:
-            dict[str: str]: Possible keys are "bbox", "segm", "proposal", and \
-                values are corresponding filenames.
-        """
-        result_files = dict()
-        if isinstance(results[0], list):
-            json_results = self._det2json(results)
-            result_files["bbox"] = f"{outfile_prefix}.bbox.json"
-            result_files["proposal"] = f"{outfile_prefix}.bbox.json"
-            mmcv.dump(json_results, result_files["bbox"])
-        elif isinstance(results[0], tuple):
-            json_results = self._segm2json(results)
-            result_files["bbox"] = f"{outfile_prefix}.bbox.json"
-            result_files["proposal"] = f"{outfile_prefix}.bbox.json"
-            result_files["segm"] = f"{outfile_prefix}.segm.json"
-            mmcv.dump(json_results[0], result_files["bbox"])
-            mmcv.dump(json_results[1], result_files["segm"])
-        elif isinstance(results[0], np.ndarray):
-            json_results = self._proposal2json(results)
-            result_files["proposal"] = f"{outfile_prefix}.proposal.json"
-            mmcv.dump(json_results, result_files["proposal"])
-        else:
-            raise TypeError("invalid type of results")
-        return result_files
-
-    def fast_eval_recall(self, results, proposal_nums, iou_thrs, logger=None):
-        gt_bboxes = []
-        for i in range(len(self.img_ids)):
-            ann_ids = self.coco.get_ann_ids(img_ids=self.img_ids[i])
-            ann_info = self.coco.load_anns(ann_ids)
-            if len(ann_info) == 0:
-                gt_bboxes.append(np.zeros((0, 4)))
-                continue
-            bboxes = []
-            for ann in ann_info:
-                if ann.get("ignore", False) or ann["iscrowd"]:
-                    continue
-                x1, y1, w, h = ann["bbox"]
-                bboxes.append([x1, y1, x1 + w, y1 + h])
-            bboxes = np.array(bboxes, dtype=np.float32)
-            if bboxes.shape[0] == 0:
-                bboxes = np.zeros((0, 4))
-            gt_bboxes.append(bboxes)
-
-        recalls = eval_recalls(gt_bboxes, results, proposal_nums, iou_thrs, logger=logger)
-        ar = recalls.mean(axis=1)
-        return ar
-
-    def format_results(self, results, jsonfile_prefix=None, **kwargs):
-        """Format the results to json (standard format for COCO evaluation).
-
-        Args:
-            results (list[tuple | numpy.ndarray]): Testing results of the
-                dataset.
-            jsonfile_prefix (str | None): The prefix of json files. It includes
-                the file path and the prefix of filename, e.g., "a/b/prefix".
-                If not specified, a temp file will be created. Default: None.
-
-        Returns:
-            tuple: (result_files, tmp_dir), result_files is a dict containing \
-                the json filepaths, tmp_dir is the temporal directory created \
-                for saving json files when jsonfile_prefix is not specified.
-        """
-        assert isinstance(results, list), "results must be a list"
-        assert len(results) == len(self), "The length of results is not equal to the dataset len: {} != {}".format(
-            len(results), len(self)
-        )
-
-        if jsonfile_prefix is None:
-            tmp_dir = tempfile.TemporaryDirectory()
-            jsonfile_prefix = osp.join(tmp_dir.name, "results")
-        else:
-            tmp_dir = None
-        result_files = self.results2json(results, jsonfile_prefix)
-        return result_files, tmp_dir
-
-    def evaluate(
-        self,
-        results,
-        metric="bbox",
-        logger=None,
-        jsonfile_prefix=None,
-        classwise=False,
-        proposal_nums=(100, 300, 1000),
-        iou_thrs=None,
-        metric_items=None,
-    ):
-        """Evaluation in COCO protocol.
-
-        Args:
-            results (list[list | tuple]): Testing results of the dataset.
-            metric (str | list[str]): Metrics to be evaluated. Options are
-                'bbox', 'segm', 'proposal', 'proposal_fast'.
-            logger (logging.Logger | str | None): Logger used for printing
-                related information during evaluation. Default: None.
-            jsonfile_prefix (str | None): The prefix of json files. It includes
-                the file path and the prefix of filename, e.g., "a/b/prefix".
-                If not specified, a temp file will be created. Default: None.
-            classwise (bool): Whether to evaluating the AP for each class.
-            proposal_nums (Sequence[int]): Proposal number used for evaluating
-                recalls, such as recall@100, recall@1000.
-                Default: (100, 300, 1000).
-            iou_thrs (Sequence[float], optional): IoU threshold used for
-                evaluating recalls/mAPs. If set to a list, the average of all
-                IoUs will also be computed. If not specified, [0.50, 0.55,
-                0.60, 0.65, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95] will be used.
-                Default: None.
-            metric_items (list[str] | str, optional): Metric items that will
-                be returned. If not specified, ``['AR@100', 'AR@300',
-                'AR@1000', 'AR_s@1000', 'AR_m@1000', 'AR_l@1000' ]`` will be
-                used when ``metric=='proposal'``, ``['mAP', 'mAP_50', 'mAP_75',
-                'mAP_s', 'mAP_m', 'mAP_l']`` will be used when
-                ``metric=='bbox' or metric=='segm'``.
-
-        Returns:
-            dict[str, float]: COCO style evaluation metric.
-        """
-
-        metrics = metric if isinstance(metric, list) else [metric]
-        allowed_metrics = ["bbox", "segm", "proposal", "proposal_fast"]
-        for metric in metrics:
-            if metric not in allowed_metrics:
-                raise KeyError(f"metric {metric} is not supported")
-        if iou_thrs is None:
-            iou_thrs = np.linspace(0.5, 0.95, int(np.round((0.95 - 0.5) / 0.05)) + 1, endpoint=True)
-        if metric_items is not None:
-            if not isinstance(metric_items, list):
-                metric_items = [metric_items]
-
-        result_files, tmp_dir = self.format_results(results, jsonfile_prefix)
-
-        eval_results = OrderedDict()
-        cocoGt = self.coco
-        for metric in metrics:
-            msg = f"Evaluating {metric}..."
-            if logger is None:
-                msg = "\n" + msg
-            print_log(msg, logger=logger)
-
-            if metric == "proposal_fast":
-                ar = self.fast_eval_recall(results, proposal_nums, iou_thrs, logger="silent")
-                log_msg = []
-                for i, num in enumerate(proposal_nums):
-                    eval_results[f"AR@{num}"] = ar[i]
-                    log_msg.append(f"\nAR@{num}\t{ar[i]:.4f}")
-                log_msg = "".join(log_msg)
-                print_log(log_msg, logger=logger)
-                continue
-
-            iou_type = "bbox" if metric == "proposal" else metric
-            if metric not in result_files:
-                raise KeyError(f"{metric} is not in results")
-            try:
-                predictions = mmcv.load(result_files[metric])
-                if iou_type == "segm":
-                    # Refer to https://github.com/cocodataset/cocoapi/blob/master/PythonAPI/pycocotools/coco.py#L331  # noqa
-                    # When evaluating mask AP, if the results contain bbox,
-                    # cocoapi will use the box area instead of the mask area
-                    # for calculating the instance area. Though the overall AP
-                    # is not affected, this leads to different
-                    # small/medium/large mask AP results.
-                    for x in predictions:
-                        x.pop("bbox")
-                    warnings.simplefilter("once")
-                    warnings.warn(
-                        'The key "bbox" is deleted for more accurate mask AP '
-                        "of small/medium/large instances since v2.12.0. This "
-                        "does not change the overall mAP calculation.",
-                        UserWarning,
-                    )
-                cocoDt = cocoGt.loadRes(predictions)
-            except IndexError:
-                print_log("The testing results of the whole dataset is empty.", logger=logger, level=logging.ERROR)
-                break
-
-            cocoEval = COCOeval(cocoGt, cocoDt, iou_type)
-            cocoEval.params.catIds = self.cat_ids
-            cocoEval.params.imgIds = self.img_ids
-            cocoEval.params.maxDets = list(proposal_nums)
-            cocoEval.params.iouThrs = iou_thrs
-            # mapping of cocoEval.stats
-            coco_metric_names = {
-                "mAP": 0,
-                "mAP_50": 1,
-                "mAP_75": 2,
-                "mAP_s": 3,
-                "mAP_m": 4,
-                "mAP_l": 5,
-                "AR@100": 6,
-                "AR@300": 7,
-                "AR@1000": 8,
-                "AR_s@1000": 9,
-                "AR_m@1000": 10,
-                "AR_l@1000": 11,
-            }
-            if metric_items is not None:
-                for metric_item in metric_items:
-                    if metric_item not in coco_metric_names:
-                        raise KeyError(f"metric item {metric_item} is not supported")
-
-            if metric == "proposal":
-                cocoEval.params.useCats = 0
-                cocoEval.evaluate()
-                cocoEval.accumulate()
-                cocoEval.summarize()
-                if metric_items is None:
-                    metric_items = ["AR@100", "AR@300", "AR@1000", "AR_s@1000", "AR_m@1000", "AR_l@1000"]
-
-                for item in metric_items:
-                    val = float(f"{cocoEval.stats[coco_metric_names[item]]:.3f}")
-                    eval_results[item] = val
-            else:
-                cocoEval.evaluate()
-                cocoEval.accumulate()
-                cocoEval.summarize()
-                if classwise:  # Compute per-category AP
-                    # Compute per-category AP
-                    # from https://github.com/facebookresearch/detectron2/
-                    precisions = cocoEval.eval["precision"]
-                    # precision: (iou, recall, cls, area range, max dets)
-                    assert len(self.cat_ids) == precisions.shape[2]
-
-                    results_per_category = []
-                    for idx, catId in enumerate(self.cat_ids):
-                        # area range index 0: all area ranges
-                        # max dets index -1: typically 100 per image
-                        nm = self.coco.loadCats(catId)[0]
-                        precision = precisions[:, :, idx, 0, -1]
-                        precision = precision[precision > -1]
-                        if precision.size:
-                            ap = np.mean(precision)
-                        else:
-                            ap = float("nan")
-                        results_per_category.append((f'{nm["name"]}', f"{float(ap):0.3f}"))
-
-                    num_columns = min(6, len(results_per_category) * 2)
-                    results_flatten = list(itertools.chain(*results_per_category))
-                    headers = ["category", "AP"] * (num_columns // 2)
-                    results_2d = itertools.zip_longest(*[results_flatten[i::num_columns] for i in range(num_columns)])
-                    table_data = [headers]
-                    table_data += [result for result in results_2d]
-                    table = AsciiTable(table_data)
-                    print_log("\n" + table.table, logger=logger)
-
-                if metric_items is None:
-                    metric_items = ["mAP", "mAP_50", "mAP_75", "mAP_s", "mAP_m", "mAP_l"]
-
-                for metric_item in metric_items:
-                    key = f"{metric}_{metric_item}"
-                    val = float(f"{cocoEval.stats[coco_metric_names[metric_item]]:.3f}")
-                    eval_results[key] = val
-                ap = cocoEval.stats[:6]
-                eval_results[f"{metric}_mAP_copypaste"] = (
-                    f"{ap[0]:.3f} {ap[1]:.3f} {ap[2]:.3f} {ap[3]:.3f} " f"{ap[4]:.3f} {ap[5]:.3f}"
-                )
-        if tmp_dir is not None:
-            tmp_dir.cleanup()
-        return eval_results
-
-
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/datasets/builder.py
-# from mmcv.utils import print_log
-import bisect
 from torch.utils.data.dataset import ConcatDataset as _ConcatDataset
 
 
@@ -11308,12 +6673,7 @@ class ConcatDataset(_ConcatDataset):
         self.CLASSES = datasets[0].CLASSES
         self.separate_eval = separate_eval
         if not separate_eval:
-            if any([isinstance(ds, CocoDataset) for ds in datasets]):
-                raise NotImplementedError(
-                    "Evaluating concatenated CocoDataset as a whole is not"
-                    ' supported! Please set "separate_eval=True"'
-                )
-            elif len(set([type(ds) for ds in datasets])) != 1:
+            if len(set([type(ds) for ds in datasets])) != 1:
                 raise NotImplementedError("All the datasets should have same types")
 
         if hasattr(datasets[0], "flag"):
@@ -11344,59 +6704,10 @@ class ConcatDataset(_ConcatDataset):
         return self.datasets[dataset_idx].get_cat_ids(sample_idx)
 
     def evaluate(self, results, logger=None, **kwargs):
-        """Evaluate the results.
-
-        Args:
-            results (list[list | tuple]): Testing results of the dataset.
-            logger (logging.Logger | str | None): Logger used for printing
-                related information during evaluation. Default: None.
-
-        Returns:
-            dict[str: float]: AP results of the total dataset or each separate
-            dataset if `self.separate_eval=True`.
-        """
-        assert len(results) == self.cumulative_sizes[-1], (
-            "Dataset and results have different sizes: " f"{self.cumulative_sizes[-1]} v.s. {len(results)}"
-        )
-
-        # Check whether all the datasets support evaluation
-        for dataset in self.datasets:
-            assert hasattr(dataset, "evaluate"), f"{type(dataset)} does not implement evaluate function"
-
-        if self.separate_eval:
-            dataset_idx = -1
-            total_eval_results = dict()
-            for size, dataset in zip(self.cumulative_sizes, self.datasets):
-                start_idx = 0 if dataset_idx == -1 else self.cumulative_sizes[dataset_idx]
-                end_idx = self.cumulative_sizes[dataset_idx + 1]
-
-                results_per_dataset = results[start_idx:end_idx]
-                print_log(
-                    f"\nEvaluateing {dataset.ann_file} with " f"{len(results_per_dataset)} images now", logger=logger
-                )
-
-                eval_results_per_dataset = dataset.evaluate(results_per_dataset, logger=logger, **kwargs)
-                dataset_idx += 1
-                for k, v in eval_results_per_dataset.items():
-                    total_eval_results.update({f"{dataset_idx}_{k}": v})
-
-            return total_eval_results
-        elif any([isinstance(ds, CocoDataset) for ds in self.datasets]):
-            raise NotImplementedError(
-                "Evaluating concatenated CocoDataset as a whole is not" ' supported! Please set "separate_eval=True"'
-            )
-        elif len(set([type(ds) for ds in self.datasets])) != 1:
-            raise NotImplementedError("All the datasets should have same types")
-        else:
-            original_data_infos = self.datasets[0].data_infos
-            self.datasets[0].data_infos = sum([dataset.data_infos for dataset in self.datasets], [])
-            eval_results = self.datasets[0].evaluate(results, logger=logger, **kwargs)
-            self.datasets[0].data_infos = original_data_infos
-            return eval_results
+        raise NotImplementedError("Evaluation is not supported in inference-only mode.")
 
 
 def _concat_dataset(cfg, default_args=None):
-    # from .dataset_wrappers import ConcatDataset
     ann_files = cfg["ann_file"]
     img_prefixes = cfg.get("img_prefix", None)
     seg_prefixes = cfg.get("seg_prefix", None)
@@ -11422,23 +6733,7 @@ def _concat_dataset(cfg, default_args=None):
     return ConcatDataset(datasets, separate_eval)
 
 
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/datasets/builder.py#L39
-# from models.experimental.MapTR.reference.mmdet3d_plugin.dependency import (
-#     Registry,
-#     build_from_cfg,
-#     DATASETS,
-#     DETECTORS,
-#     ProgressBar,
-# )
-
-# dd3d_mapper is only needed for training, import lazily if needed
-# from models.experimental.MapTR.reference.mmdet3d_plugin.datasets.pipelines import dd3d_mapper
-
-
 def build_dataset(cfg, default_args=None):
-    # from mmdet3d.datasets.dataset_wrappers import CBGSDataset
-    # from mmdet.datasets.dataset_wrappers import ClassBalancedDataset, ConcatDataset, RepeatDataset
-
     # if isinstance(cfg, (list, tuple)):
     #     dataset = ConcatDataset([build_dataset(c, default_args) for c in cfg])
     # elif cfg["type"] == "ConcatDataset":
@@ -11459,130 +6754,11 @@ def build_dataset(cfg, default_args=None):
     return dataset
 
 
-# https://github.com/open-mmlab/mmdetection/blob/v2.14.0/mmdet/apis/test.py
-from mmcv.image import tensor2imgs
-
-
-def single_gpu_test(model, data_loader, show=False, out_dir=None, show_score_thr=0.3):
-    model.eval()
-    results = []
-    dataset = data_loader.dataset
-    prog_bar = ProgressBar(len(dataset))
-    for i, data in enumerate(data_loader):
-        with torch.no_grad():
-            result = model(return_loss=False, rescale=True, **data)
-
-        batch_size = len(result)
-        if show or out_dir:
-            if batch_size == 1 and isinstance(data["img"][0], torch.Tensor):
-                img_tensor = data["img"][0]
-            else:
-                img_tensor = data["img"][0].data[0]
-            img_metas = data["img_metas"][0].data[0]
-            imgs = tensor2imgs(img_tensor, **img_metas[0]["img_norm_cfg"])
-            assert len(imgs) == len(img_metas)
-
-            for i, (img, img_meta) in enumerate(zip(imgs, img_metas)):
-                h, w, _ = img_meta["img_shape"]
-                img_show = img[:h, :w, :]
-
-                ori_h, ori_w = img_meta["ori_shape"][:-1]
-                img_show = mmcv.imresize(img_show, (ori_w, ori_h))
-
-                if out_dir:
-                    out_file = osp.join(out_dir, img_meta["ori_filename"])
-                else:
-                    out_file = None
-
-                model.module.show_result(img_show, result[i], show=show, out_file=out_file, score_thr=show_score_thr)
-
-        # encode mask results
-        if isinstance(result[0], tuple):
-            result = [(bbox_results, encode_mask_results(mask_results)) for bbox_results, mask_results in result]
-        results.extend(result)
-
-        for _ in range(batch_size):
-            prog_bar.update()
-    return results
-
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/runner/fp16_utils.py
 import warnings
-from collections import abc
 
 import numpy as np
 import torch
 import torch.nn as nn
-
-# from models.experimental.MapTR.reference.mmdet3d_plugin.dependency import TORCH_VERSION, digit_version
-
-
-def cast_tensor_type(inputs, src_type, dst_type):
-    """Recursively convert Tensor in inputs from src_type to dst_type.
-
-    Args:
-        inputs: Inputs that to be casted.
-        src_type (torch.dtype): Source type..
-        dst_type (torch.dtype): Destination type.
-
-    Returns:
-        The same type with inputs, but all contained Tensors have been cast.
-    """
-    if isinstance(inputs, nn.Module):
-        return inputs
-    elif isinstance(inputs, torch.Tensor):
-        return inputs.to(dst_type)
-    elif isinstance(inputs, str):
-        return inputs
-    elif isinstance(inputs, np.ndarray):
-        return inputs
-    elif isinstance(inputs, abc.Mapping):
-        return type(inputs)({k: cast_tensor_type(v, src_type, dst_type) for k, v in inputs.items()})
-    elif isinstance(inputs, abc.Iterable):
-        return type(inputs)(cast_tensor_type(item, src_type, dst_type) for item in inputs)
-    else:
-        return inputs
-
-
-def patch_forward_method(func, src_type, dst_type, convert_output=True):
-    """Patch the forward method of a module.
-
-    Args:
-        func (callable): The original forward method.
-        src_type (torch.dtype): Type of input arguments to be converted from.
-        dst_type (torch.dtype): Type of input arguments to be converted to.
-        convert_output (bool): Whether to convert the output back to src_type.
-
-    Returns:
-        callable: The patched forward method.
-    """
-
-    def new_forward(*args, **kwargs):
-        output = func(*cast_tensor_type(args, src_type, dst_type), **cast_tensor_type(kwargs, src_type, dst_type))
-        if convert_output:
-            output = cast_tensor_type(output, dst_type, src_type)
-        return output
-
-    return new_forward
-
-
-def patch_norm_fp32(module):
-    """Recursively convert normalization layers from FP16 to FP32.
-
-    Args:
-        module (nn.Module): The modules to be converted in FP16.
-
-    Returns:
-        nn.Module: The converted module, the normalization layers have been
-            converted to FP32.
-    """
-    if isinstance(module, (nn.modules.batchnorm._BatchNorm, nn.GroupNorm)):
-        module.float()
-        if isinstance(module, nn.GroupNorm) or torch.__version__ < "1.3":
-            module.forward = patch_forward_method(module.forward, torch.half, torch.float)
-    for child in module.children():
-        patch_norm_fp32(child)
-    return module
 
 
 def wrap_fp16_model(model):
@@ -11613,97 +6789,13 @@ def wrap_fp16_model(model):
             m.fp16_enabled = True
 
 
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/runner/dist_utils.py
-from torch import distributed as dist
-import torch.multiprocessing as mp
-import subprocess
-
-
-def _init_dist_slurm(backend, port=None):
-    """Initialize slurm distributed training environment.
-
-    If argument ``port`` is not specified, then the master port will be system
-    environment variable ``MASTER_PORT``. If ``MASTER_PORT`` is not in system
-    environment variable, then a default port ``29500`` will be used.
-
-    Args:
-        backend (str): Backend of torch.distributed.
-        port (int, optional): Master port. Defaults to None.
-    """
-    proc_id = int(os.environ["SLURM_PROCID"])
-    ntasks = int(os.environ["SLURM_NTASKS"])
-    node_list = os.environ["SLURM_NODELIST"]
-    num_gpus = torch.cuda.device_count()
-    torch.cuda.set_device(proc_id % num_gpus)
-    addr = subprocess.getoutput(f"scontrol show hostname {node_list} | head -n1")
-    # specify master port
-    if port is not None:
-        os.environ["MASTER_PORT"] = str(port)
-    elif "MASTER_PORT" in os.environ:
-        pass  # use MASTER_PORT in the environment variable
-    else:
-        # 29500 is torch.distributed default port
-        os.environ["MASTER_PORT"] = "29500"
-    # use MASTER_ADDR in the environment variable if it already exists
-    if "MASTER_ADDR" not in os.environ:
-        os.environ["MASTER_ADDR"] = addr
-    os.environ["WORLD_SIZE"] = str(ntasks)
-    os.environ["LOCAL_RANK"] = str(proc_id % num_gpus)
-    os.environ["RANK"] = str(proc_id)
-    dist.init_process_group(backend=backend)
-
-
-def _init_dist_mpi(backend, **kwargs):
-    # TODO: use local_rank instead of rank % num_gpus
-    rank = int(os.environ["OMPI_COMM_WORLD_RANK"])
-    num_gpus = torch.cuda.device_count()
-    torch.cuda.set_device(rank % num_gpus)
-    dist.init_process_group(backend=backend, **kwargs)
-
-
-def _init_dist_pytorch(backend, **kwargs):
-    # TODO: use local_rank instead of rank % num_gpus
-    rank = int(os.environ["RANK"])
-    num_gpus = torch.cuda.device_count()
-    torch.cuda.set_device(rank % num_gpus)
-    dist.init_process_group(backend=backend, **kwargs)
-
-
-def init_dist(launcher, backend="nccl", **kwargs):
-    if mp.get_start_method(allow_none=True) is None:
-        mp.set_start_method("spawn")
-    if launcher == "pytorch":
-        _init_dist_pytorch(backend, **kwargs)
-    elif launcher == "mpi":
-        _init_dist_mpi(backend, **kwargs)
-    elif launcher == "slurm":
-        _init_dist_slurm(backend, **kwargs)
-    else:
-        raise ValueError(f"Invalid launcher type: {launcher}")
-
-
-def get_dist_info():
-    if dist.is_available() and dist.is_initialized():
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
-    else:
-        rank = 0
-        world_size = 1
-    return rank, world_size
-
-
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/runner/checkpoint.py
-# Copyright (c) OpenMMLab. All rights reserved.
 import os
 import os.path as osp
-import pkgutil
 import re
 import warnings
 from collections import OrderedDict
-from importlib import import_module
 
 import torch
-import torchvision
 
 
 def is_module_wrapper(module):
@@ -11800,36 +6892,7 @@ def _load_checkpoint(filename, map_location=None, logger=None):
             OrderedDict storing model weights or a dict containing other
             information, which depends on the checkpoint.
     """
-    if filename.startswith("modelzoo://"):
-        pass
-
-        warnings.warn("modelzoo:// is deprecated, please use " "open-mmlab:// instead")
-        filename = filename[11:]
-        filename = filename.replace("//", "/")
-        model_urls = get_external_models()
-        filename = model_urls.get(filename, None)
-        if filename is None:
-            raise IOError(f"{filename} is not available in modelzoo")
-    elif filename.startswith("torchvision://"):
-        model_name = filename[14:]
-        torchvision_models = get_torchvision_models()
-        model_urls = torchvision_models.get(model_name, None)
-        if model_urls is None:
-            raise IOError(f"{model_name} is not available in torchvision")
-        filename = model_urls
-    elif filename.startswith("open-mmlab://"):
-        model_name = filename[13:]
-        model_urls = get_external_models()
-        filename = model_urls.get(model_name, None)
-        if filename is None:
-            raise IOError(f"{model_name} is not available in model zoo")
-    elif filename.startswith("mmcls://"):
-        model_name = filename[8:]
-        model_urls = get_mmcls_models()
-        filename = model_urls.get(model_name, None)
-        if filename is None:
-            raise IOError(f"{model_name} is not available in mmcls model zoo")
-    elif not osp.isfile(filename):
+    if not osp.isfile(filename):
         raise IOError(f"{filename} is not a checkpoint file")
     return torch.load(filename, map_location=map_location)
 
@@ -11925,147 +6988,6 @@ def load_checkpoint(model, filename, map_location=None, strict=False, logger=Non
     return checkpoint
 
 
-def get_torchvision_models():
-    model_urls = dict()
-    for _, name, ispkg in pkgutil.walk_packages(torchvision.models.__path__):
-        if ispkg:
-            continue
-        _zoo = import_module(f"torchvision.models.{name}")
-        if hasattr(_zoo, "model_urls"):
-            _urls = getattr(_zoo, "model_urls")
-            model_urls.update(_urls)
-    return model_urls
-
-
-def get_external_models():
-    try:
-        from mmcv.fileio import load as load_file
-
-        mmcv_home = os.path.expanduser(
-            os.getenv("MMCV_HOME", os.path.join(os.getenv("XDG_CACHE_HOME", "~/.cache"), "mmcv"))
-        )
-        default_json_path = osp.join(mmcv.__path__[0], "model_zoo/open_mmlab.json")
-        if osp.exists(default_json_path):
-            default_urls = load_file(default_json_path)
-        else:
-            default_urls = {}
-        assert isinstance(default_urls, dict)
-        external_json_path = osp.join(mmcv_home, "open_mmlab.json")
-        if osp.exists(external_json_path):
-            external_urls = load_file(external_json_path)
-            assert isinstance(external_urls, dict)
-            default_urls.update(external_urls)
-        return default_urls
-    except:
-        return {}
-
-
-def get_mmcls_models():
-    try:
-        from mmcv.fileio import load as load_file
-
-        mmcls_json_path = osp.join(mmcv.__path__[0], "model_zoo/mmcls.json")
-        if osp.exists(mmcls_json_path):
-            mmcls_urls = load_file(mmcls_json_path)
-            return mmcls_urls
-        return {}
-    except:
-        return {}
-
-
-def get_deprecated_model_names():
-    try:
-        from mmcv.fileio import load as load_file
-
-        deprecate_json_path = osp.join(mmcv.__path__[0], "model_zoo/deprecated.json")
-        if osp.exists(deprecate_json_path):
-            deprecate_urls = load_file(deprecate_json_path)
-            return deprecate_urls
-        return {}
-    except:
-        return {}
-
-
-# Adapted from : https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/parallel/data_parallel.py
-# Copyright (c) OpenMMLab. All rights reserved.
-
-from torch.nn.parallel import DataParallel
-
-# from models.experimental.MapTR.reference.mmdet3d_plugin.dependency import scatter_kwargs
-
-
-class MMDataParallel(DataParallel):
-    """The DataParallel module that supports DataContainer.
-
-    MMDataParallel has two main differences with PyTorch DataParallel:
-
-    - It supports a custom type :class:`DataContainer` which allows more
-      flexible control of input data during both GPU and CPU inference.
-    - It implement two more APIs ``train_step()`` and ``val_step()``.
-
-    .. warning::
-        MMDataParallel only supports single GPU training, if you need to
-        train with multiple GPUs, please use MMDistributedDataParallel
-        instead. If you have multiple GPUs and you just want to use
-        MMDataParallel, you can set the environment variable
-        ``CUDA_VISIBLE_DEVICES=0`` or instantiate ``MMDataParallel`` with
-        ``device_ids=[0]``.
-
-    Args:
-        module (:class:`nn.Module`): Module to be encapsulated.
-        device_ids (list[int]): Device IDS of modules to be scattered to.
-            Defaults to None when GPU is not available.
-        output_device (str | int): Device ID for output. Defaults to None.
-        dim (int): Dimension used to scatter the data. Defaults to 0.
-    """
-
-    def __init__(self, *args, dim=0, **kwargs):
-        super(MMDataParallel, self).__init__(*args, dim=dim, **kwargs)
-        self.dim = dim
-
-    def forward(self, *inputs, **kwargs):
-        """Override the original forward function.
-
-        The main difference lies in the CPU inference where the data in
-        :class:`DataContainers` will still be gathered.
-        """
-        if not self.device_ids:
-            # We add the following line thus the module could gather and
-            # convert data containers as those in GPU inference
-            inputs, kwargs = self.scatter(inputs, kwargs, [-1])
-            return self.module(*inputs[0], **kwargs[0])
-        else:
-            return super().forward(*inputs, **kwargs)
-
-    def scatter(self, inputs, kwargs, device_ids):
-        return scatter_kwargs(inputs, kwargs, device_ids, dim=self.dim)
-
-
-# Eval hooks - these need to be defined before build_dataloader import to avoid circular import
-# https://github.com/open-mmlab/mmcv/blob/v1.4.0/mmcv/runner/hooks/evaluation.py
-try:
-    from mmengine.runner import EvalHook as BaseEvalHook, DistEvalHook as BaseDistEvalHook
-    from mmengine.runner import DistEvalHook as DistEvalHook
-except ImportError:
-    # Fallback: try mmcv.runner for older versions
-
-    # If neither is available, create minimal stubs
-    class BaseEvalHook:
-        pass
-
-    class BaseDistEvalHook:
-        pass
-
-    class DistEvalHook:
-        pass
-
-
-# ============================================================================
-# MMDET3D VOXEL OPERATIONS - Pure PyTorch Implementation
-# ============================================================================
-
-
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/ops/voxel/voxelize.py
 # PyTorch implementation without CUDA dependencies
 def dynamic_voxelize_pytorch(points, voxel_size, coors_range, max_points=-1):
     """Pure PyTorch implementation of dynamic voxelization."""
@@ -12332,11 +7254,6 @@ class DynamicScatter(nn.Module):
         return tmpstr
 
 
-# ============================================================================
-# MMDET3D MODELS BUILDER - https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/models/builder.py
-# ============================================================================
-
-
 # Create a builder module-like object with build_middle_encoder function
 class BuilderModule:
     """Builder module for mmdet3d models."""
@@ -12357,18 +7274,9 @@ class BuilderModule:
 builder = BuilderModule()
 
 
-# ============================================================================
-# MMDET3D BEV POOL - Pure PyTorch Implementation
-# ============================================================================
-
-
-# https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/ops/bev_pool/bev_pool.py
 # Pure PyTorch implementation without CUDA dependencies
 class QuickCumsumPytorch(torch.autograd.Function):
-    """Pure PyTorch implementation of QuickCumsum.
-
-    Source: https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/ops/bev_pool/bev_pool.py
-    """
+    """Pure PyTorch implementation of QuickCumsum."""
 
     @staticmethod
     def forward(ctx, x, geom_feats, ranks, B, D, H, W):
@@ -12423,7 +7331,6 @@ class QuickCumsumPytorch(torch.autograd.Function):
 def bev_pool(feats, coords, B, D, H, W):
     """Pure PyTorch implementation of BEV pooling.
 
-    Source: https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/ops/bev_pool/bev_pool.py
 
     Args:
         feats: (N, C) feature tensor
@@ -12449,50 +7356,6 @@ def bev_pool(feats, coords, B, D, H, W):
     x = QuickCumsumPytorch.apply(feats, coords, ranks, B, D, H, W)
     x = x.permute(0, 4, 1, 2, 3).contiguous()
     return x
-
-
-# ============================================================================
-# MMDET3D CORE BBOX - points_cam2img
-# Source: https://github.com/open-mmlab/mmdetection3d/blob/v0.17.1/mmdet3d/core/bbox/box_np_ops.py
-# This function projects points from camera coordinates to image coordinates.
-# ============================================================================
-
-
-def points_cam2img(points_3d, proj_mat, with_depth=False):
-    """Project points in camera coordinates to image coordinates.
-
-    Args:
-        points_3d (np.ndarray): Points in shape (N, 3)
-        proj_mat (np.ndarray): Transformation matrix between coordinates.
-        with_depth (bool, optional): Whether to keep depth in the output.
-            Defaults to False.
-
-    Returns:
-        np.ndarray: Points in image coordinates with shape [N, 2].
-    """
-    points_shape = list(points_3d.shape)
-    points_shape[-1] = 1
-
-    assert len(proj_mat.shape) == 2, (
-        "The dimension of the projection" f" matrix should be 2 instead of {len(proj_mat.shape)}."
-    )
-    d1, d2 = proj_mat.shape[:2]
-    assert (d1 == 3 and d2 == 3) or (d1 == 3 and d2 == 4) or (d1 == 4 and d2 == 4), (
-        "The shape of the projection matrix" f" ({d1}*{d2}) is not supported."
-    )
-    if d1 == 3:
-        proj_mat_expanded = np.eye(4, dtype=proj_mat.dtype)
-        proj_mat_expanded[:d1, :d2] = proj_mat
-        proj_mat = proj_mat_expanded
-
-    points_4 = np.concatenate([points_3d, np.ones(points_shape)], axis=-1)
-    point_2d = points_4 @ proj_mat.T
-    point_2d_res = point_2d[..., :2] / point_2d[..., 2:3]
-
-    if with_depth:
-        points_2d_depth = np.concatenate([point_2d_res, point_2d[..., 2:3]], axis=-1)
-        return points_2d_depth
-    return point_2d_res
 
 
 # Import build_dataloader at the end of the file after all dependencies are defined to avoid circular import
