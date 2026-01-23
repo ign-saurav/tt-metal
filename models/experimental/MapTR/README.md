@@ -13,8 +13,6 @@ MapTR is a transformer-based model for detecting map elements (lane dividers, pe
 
 ## Features
 
-- ✅ **Inference-only**: All training code has been removed for a clean inference codebase
-- ✅ **Automatic checkpoint download**: Checkpoints are automatically downloaded when needed
 - ✅ **Comprehensive testing**: PCC (Pearson Correlation Coefficient) tests for all components
 - ✅ **Demo visualization**: Full demo script with visualization capabilities
 - ✅ **Modular architecture**: Clean separation of PyTorch reference and TTNN implementations
@@ -65,6 +63,10 @@ MapTR/
     └── model_preprocessing.py       # Model preprocessing utilities
 ```
 
+## Performance
+Average model time: 9401.77 ms
+Average model performance: 0.11 fps
+
 ## Installation
 
 ### Prerequisites
@@ -74,16 +76,15 @@ MapTR/
 - TTNN framework
 - Required Python packages:
   - `gdown` (for checkpoint download)
-  - `loguru` (for logging)
   - `mmcv` (MMDetection3D dependencies)
-  - `numpy`, `opencv-python`, `matplotlib` (for visualization)
+  - `nuscenes-devkit`
+  - `terminaltables`
+  - `pycocotools`
 
 ### Setup
 
 1. Ensure you're in the TTNN environment:
-```bash
-cd /home/ubuntu/christyv1/tt-metal
-```
+
 
 2. The checkpoint will be automatically downloaded when you run the demo or tests. If you want to download it manually:
 
@@ -214,12 +215,6 @@ When adding new TTNN components:
 2. Create a corresponding PCC test in `tests/pcc/`
 3. Ensure the test uses `ensure_checkpoint_downloaded()` for checkpoint loading
 
-### Code Style
-
-- Follow PEP 8 style guidelines
-- Use type hints where appropriate
-- Add docstrings for public functions
-- Keep inference-only: no training code
 
 ## Troubleshooting
 
@@ -261,7 +256,3 @@ Copyright © 2026 Tenstorrent AI ULC
 - MapTR: [Original MapTR Paper](https://arxiv.org/abs/2208.14437)
 - BEVFormer: [BEVFormer Paper](https://arxiv.org/abs/2203.17270)
 - MMDetection3D: [MMDetection3D Framework](https://github.com/open-mmlab/mmdetection3d)
-
-## Support
-
-For issues and questions, please refer to the main TTNN documentation or contact the Tenstorrent support team.
