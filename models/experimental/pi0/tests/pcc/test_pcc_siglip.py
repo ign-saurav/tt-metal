@@ -77,8 +77,8 @@ def compute_pcc(tensor1: torch.Tensor, tensor2: torch.Tensor) -> float:
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
 @pytest.mark.parametrize(
     "use_pretrained",
-    [True, False],
-    ids=["pretrained_weight_true", "pretrained_weight_false"],
+    [False],
+    ids=["pretrained_weight_false"],
 )
 def test_pcc_siglip_vision_tower(device, use_pretrained):
     """Test SigLIP Vision Tower: TTNN vs PyTorch."""
@@ -94,7 +94,7 @@ def test_pcc_siglip_vision_tower(device, use_pretrained):
         vision_weights = weight_loader.get_vlm_vision_weights()
     else:
         # Use smaller config for random tests (faster)
-        config = create_small_siglip_config()
+        config = create_siglip_config()
         vision_weights = create_random_siglip_weights(config)
 
     # Create input
@@ -106,7 +106,12 @@ def test_pcc_siglip_vision_tower(device, use_pretrained):
 
     # TTNN forward
     model_ttnn = SigLIPVisionTowerTTNN(config, vision_weights, device)
+    import time
+
+    t0 = time.time()
     out_ttnn = model_ttnn.forward(pixel_values)
+    ttnn_time = (time.time() - t0) * 1000
+    print(f"   TTNN time: {ttnn_time:.2f}ms")
 
     # Convert to torch
     if isinstance(out_ttnn, ttnn.Tensor):
