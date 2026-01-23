@@ -1309,9 +1309,10 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         assert self.map_ann_file is not None
         if not os.path.exists(self.map_ann_file):
             dataset_length = len(self)
-            prog_bar = mmcv.ProgressBar(dataset_length)
             mapped_class_names = self.MAPCLASSES
             for sample_id in range(dataset_length):
+                if sample_id % 100 == 0:
+                    print(f"Processing {sample_id}/{dataset_length} samples...")
                 sample_token = self.data_infos[sample_id]["token"]
                 gt_anno = {}
                 gt_anno["sample_token"] = sample_token
@@ -1332,8 +1333,6 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
                     gt_vec_list.append(anno)
                 gt_anno["vectors"] = gt_vec_list
                 gt_annos.append(gt_anno)
-
-                prog_bar.update()
             nusc_submissions = {"GTs": gt_annos}
             print("\n GT anns writes to", self.map_ann_file)
             mmcv.dump(nusc_submissions, self.map_ann_file)
@@ -1357,7 +1356,7 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         mapped_class_names = self.MAPCLASSES
         # import pdb;pdb.set_trace()
         print("Start to convert map detection format...")
-        for sample_id, det in enumerate(mmcv.track_iter_progress(results)):
+        for sample_id, det in enumerate(results):
             pred_anno = {}
             vecs = output_to_vecs(det)
             sample_token = self.data_infos[sample_id]["token"]
