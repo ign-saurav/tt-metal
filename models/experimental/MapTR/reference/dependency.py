@@ -11,6 +11,7 @@ import warnings
 from mmengine import Config
 
 
+import bisect
 import copy
 import functools
 import json
@@ -430,24 +431,7 @@ class Registry:
         return _register
 
 
-from itertools import repeat
 from inspect import getfullargspec
-
-
-def _ntuple(n):
-    def parse(x):
-        if isinstance(x, collections_abc.Iterable):
-            return x
-        return tuple(repeat(x, n))
-
-    return parse
-
-
-to_1tuple = _ntuple(1)
-to_2tuple = _ntuple(2)
-to_3tuple = _ntuple(3)
-to_4tuple = _ntuple(4)
-to_ntuple = _ntuple
 
 
 def deprecated_api_warning(name_dict, cls_name=None):
@@ -593,55 +577,6 @@ class DataContainer:
 from functools import partial
 
 TORCH_VERSION = torch.__version__
-
-
-def is_rocm_pytorch() -> bool:
-    is_rocm = False
-    if TORCH_VERSION != "parrots":
-        try:
-            from torch.utils.cpp_extension import ROCM_HOME
-
-            is_rocm = True if ((torch.version.hip is not None) and (ROCM_HOME is not None)) else False
-        except ImportError:
-            pass
-    return is_rocm
-
-
-def _get_cuda_home():
-    """Get CUDA home directory. For CPU-only version, returns None."""
-    if TORCH_VERSION == "parrots":
-        try:
-            from parrots.utils.build_extension import CUDA_HOME
-        except ImportError:
-            return None
-    else:
-        if is_rocm_pytorch():
-            try:
-                from torch.utils.cpp_extension import ROCM_HOME
-
-                CUDA_HOME = ROCM_HOME
-            except ImportError:
-                return None
-        else:
-            try:
-                from torch.utils.cpp_extension import CUDA_HOME
-            except ImportError:
-                return None
-    return CUDA_HOME
-
-
-def get_build_config():
-    """Get build configuration."""
-    if TORCH_VERSION == "parrots":
-        try:
-            from parrots.config import get_build_info
-
-            return get_build_info()
-        except ImportError:
-            return "parrots not available"
-    else:
-        return torch.__config__.show()
-
 
 logger_initialized = {}
 
@@ -3798,43 +3733,6 @@ DATASETS = Registry("dataset")
 PIPELINES = Registry("pipeline")
 
 
-def _concat_dataset(cfg, default_args=None):
-    """Concat multiple datasets.
-
-
-    Note: This function requires ConcatDataset from mmdet.datasets.dataset_wrappers
-    which should be added as a dependency if needed.
-    """
-    ann_files = cfg["ann_file"]
-    img_prefixes = cfg.get("img_prefix", None)
-    seg_prefixes = cfg.get("seg_prefix", None)
-    proposal_files = cfg.get("proposal_file", None)
-    separate_eval = cfg.get("separate_eval", True)
-
-    datasets = []
-    num_dset = len(ann_files)
-    for i in range(num_dset):
-        data_cfg = copy.deepcopy(cfg)
-        # pop 'separate_eval' since it is not a valid key for common datasets.
-        if "separate_eval" in data_cfg:
-            data_cfg.pop("separate_eval")
-        data_cfg["ann_file"] = ann_files[i]
-        if isinstance(img_prefixes, (list, tuple)):
-            data_cfg["img_prefix"] = img_prefixes[i]
-        if isinstance(seg_prefixes, (list, tuple)):
-            data_cfg["seg_prefix"] = seg_prefixes[i]
-        if isinstance(proposal_files, (list, tuple)):
-            data_cfg["proposal_file"] = proposal_files[i]
-        datasets.append(build_from_cfg(data_cfg, DATASETS, default_args))
-
-    # For now, return a list - the actual usage should handle this
-    # TODO: Add ConcatDataset class if needed
-    if len(datasets) > 1:
-        # Simplified: return first dataset if multiple, full implementation needs ConcatDataset
-        return datasets[0] if len(datasets) == 1 else datasets
-    return datasets[0] if datasets else None
-
-
 def bbox3d2result(bboxes, scores, labels, attrs=None):
     """Convert detection results to a list of numpy arrays.
 
@@ -3950,7 +3848,7 @@ class Base3DDetector(BaseDetector):
             elif box_mode_3d != Box3DMode.DEPTH:
                 ValueError(f"Unsupported box_mode_3d {box_mode_3d} for convertion!")
             pred_bboxes = pred_bboxes.tensor.cpu().numpy()
-            show_result(points, None, pred_bboxes, out_dir, file_name)
+            # show_result removed - not needed for inference-only
 
 
 import warnings
@@ -6067,101 +5965,9 @@ def inverse_sigmoid(x, eps=1e-5):
 import torch
 
 
-def scatter(input, devices, streams=None):
-    """Scatters tensor across multiple GPUs."""
-    if streams is None:
-        streams = [None] * len(devices)
-
-    if isinstance(input, list):
-        chunk_size = (len(input) - 1) // len(devices) + 1
-        outputs = [scatter(input[i], [devices[i // chunk_size]], [streams[i // chunk_size]]) for i in range(len(input))]
-        return outputs
-    elif isinstance(input, torch.Tensor):
-        output = input.contiguous()
-        # TODO: copy to a pinned buffer first (if copying from CPU)
-        stream = streams[0] if output.numel() > 0 else None
-        if devices != [-1]:
-            with torch.cuda.device(devices[0]), torch.cuda.stream(stream):
-                output = output.cuda(devices[0], non_blocking=True)
-        else:
-            # unsqueeze the first dimension thus the tensor's shape is the
-            # same as those scattered with GPU.
-            output = output.unsqueeze(0)
-        return output
-    else:
-        raise Exception(f"Unknown type {type(input)}.")
-
-
 import functools
 
 import torch
-
-
-class DataContainer:
-    """A container for any type of objects.
-
-    Typically tensors will be stacked in the collate function and sliced along
-    some dimension in the scatter function. This behavior has some limitations.
-    1. All tensors have to be the same size.
-    2. Types are limited (numpy array or Tensor).
-
-    We design `DataContainer` and `MMDataParallel` to overcome these
-    limitations. The behavior can be either of the following.
-
-    - copy to GPU, pad all tensors to the same size and stack them
-    - copy to GPU without stacking
-    - leave the objects as is and pass it to the model
-    - pad_dims specifies the number of last few dimensions to do padding
-    """
-
-    def __init__(self, data, stack=False, padding_value=0, cpu_only=False, pad_dims=2):
-        self._data = data
-        self._cpu_only = cpu_only
-        self._stack = stack
-        self._padding_value = padding_value
-        assert pad_dims in [None, 1, 2, 3]
-        self._pad_dims = pad_dims
-
-    def __repr__(self):
-        return f"{self.__class__.__name__}({repr(self.data)})"
-
-    def __len__(self):
-        return len(self._data)
-
-    @property
-    def data(self):
-        return self._data
-
-    @property
-    def datatype(self):
-        if isinstance(self.data, torch.Tensor):
-            return self.data.type()
-        else:
-            return type(self.data)
-
-    @property
-    def cpu_only(self):
-        return self._cpu_only
-
-    @property
-    def stack(self):
-        return self._stack
-
-    @property
-    def padding_value(self):
-        return self._padding_value
-
-    @property
-    def pad_dims(self):
-        return self._pad_dims
-
-    @assert_tensor_type
-    def size(self, *args, **kwargs):
-        return self.data.size(*args, **kwargs)
-
-    @assert_tensor_type
-    def dim(self):
-        return self.data.dim()
 
 
 def collate(batch, samples_per_gpu=1):
@@ -6496,17 +6302,6 @@ BACKBONES.register_module(name="ResNet", module=ResNet)
 # """
 
 
-def get_dist_info():
-    """Get distribution information."""
-    if dist.is_available() and dist.is_initialized():
-        rank = dist.get_rank()
-        world_size = dist.get_world_size()
-    else:
-        rank = 0
-        world_size = 1
-    return rank, world_size
-
-
 def replace_ImageToTensor(pipelines):
     """Replace ImageToTensor to DefaultFormatBundle in the pipeline.
 
@@ -6781,8 +6576,7 @@ def wrap_fp16_model(model):
     if TORCH_VERSION == "parrots" or digit_version(TORCH_VERSION) < digit_version("1.6.0"):
         # convert model to fp16
         model.half()
-        # patch the normalization layers to make it work in fp32 mode
-        patch_norm_fp32(model)
+        # patch_norm_fp32 removed - not needed for inference-only
     # set `fp16_enabled` flag
     for m in model.modules():
         if hasattr(m, "fp16_enabled"):
