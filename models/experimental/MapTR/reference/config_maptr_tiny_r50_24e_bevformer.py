@@ -182,7 +182,7 @@ model = dict(
 # )
 
 dataset_type = "CustomNuScenesLocalMapDataset"
-data_root = "models/experimental/MapTR/data/nuscenes/"
+data_root = "models/experimental/MapTR/resources/nuScenes/"
 file_client_args = dict(backend="disk")
 
 
