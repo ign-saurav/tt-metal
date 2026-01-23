@@ -9,14 +9,76 @@ import warnings
 from collections import namedtuple
 
 import torch
+import torchvision.ops as ops
+
+
+class CPUNMSWrapper:
+    """Wrapper providing NMS functions using torchvision (CPU compatible)."""
+
+    @staticmethod
+    def nms(boxes, scores, iou_threshold, offset=0):
+        """Non-maximum suppression using torchvision."""
+        if boxes.numel() == 0:
+            return torch.empty((0,), dtype=torch.long, device=boxes.device)
+        return ops.nms(boxes, scores, iou_threshold)
+
+    @staticmethod
+    def softnms(boxes, scores, iou_threshold, sigma=0.5, min_score=0.001, method=1, offset=0):
+        """Soft-NMS fallback - uses regular NMS as approximation."""
+        return CPUNMSWrapper.nms(boxes, scores, iou_threshold, offset)
+
+    @staticmethod
+    def nms_match(dets, iou_threshold):
+        """NMS match - fallback to regular NMS."""
+        if dets.numel() == 0:
+            return torch.empty((0,), dtype=torch.long, device=dets.device)
+        boxes = dets[:, :4]
+        scores = dets[:, 4]
+        return ops.nms(boxes, scores, iou_threshold)
+
+    @staticmethod
+    def nms_rotated(dets, scores, iou_threshold, labels=None):
+        """Rotated NMS fallback - uses regular NMS as approximation."""
+        if dets.numel() == 0:
+            return torch.empty((0,), dtype=torch.long, device=dets.device)
+        # Convert rotated boxes to axis-aligned for approximation
+        if dets.shape[1] == 5:
+            x_c, y_c, w, h = dets[:, 0], dets[:, 1], dets[:, 2], dets[:, 3]
+            half_w, half_h = w / 2, h / 2
+            boxes = torch.stack([x_c - half_w, y_c - half_h, x_c + half_w, y_c + half_h], dim=1)
+        else:
+            boxes = dets[:, :4]
+        return ops.nms(boxes, scores, iou_threshold)
+
+
+class ExtWrapper:
+    """Wrapper to provide attribute access to extension functions."""
+
+    def __init__(self, ext):
+        self._ext = ext
+
+    def __getattr__(self, name):
+        return getattr(self._ext, name)
+
 
 if torch.__version__ != "parrots":
 
     def load_ext(name, funcs):
-        ext = importlib.import_module("mmcv." + name)
-        for fun in funcs:
-            assert hasattr(ext, fun), f"{fun} miss in module {name}"
-        return ext
+        """Load extension module with CPU-compatible implementations."""
+        if name == "_ext":
+            # Return CPU-compatible NMS wrapper for _ext
+            return ExtWrapper(CPUNMSWrapper)
+        else:
+            # For other extensions, try to import from mmcv
+            try:
+                ext = importlib.import_module("mmcv." + name)
+                for fun in funcs:
+                    assert hasattr(ext, fun), f"{fun} miss in module {name}"
+                return ext
+            except (ImportError, ModuleNotFoundError) as e:
+                raise ImportError(
+                    f"Cannot load extension '{name}'. " f"MMCV CUDA extensions are not available. " f"Error: {e}"
+                )
 
 else:
     from parrots import extension
