@@ -158,11 +158,11 @@ def main():
     if write_map_annotations_to_file is not None and write_sample_info_to_file is not None:
         # Handle both dict and object-style config access
         if isinstance(cfg.data.test, dict):
-            data_root = cfg.data.test.get("data_root", "models/experimental/MapTR/data/nuscenes/")
+            data_root = cfg.data.test.get("data_root", "models/experimental/MapTR/resources/nuScenes/")
             map_ann_file = cfg.data.test.get("map_ann_file")
             ann_file = cfg.data.test.get("ann_file")
         else:
-            data_root = getattr(cfg.data.test, "data_root", "models/experimental/MapTR/data/nuscenes/")
+            data_root = getattr(cfg.data.test, "data_root", "models/experimental/MapTR/resources/nuScenes/")
             map_ann_file = getattr(cfg.data.test, "map_ann_file", None)
             ann_file = getattr(cfg.data.test, "ann_file", None)
 

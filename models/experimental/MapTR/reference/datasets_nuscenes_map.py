@@ -537,8 +537,17 @@ class VectorizedLocalMap(object):
         self.nusc_maps = {}
         self.map_explorer = {}
         for loc in self.MAPS:
-            self.nusc_maps[loc] = NuScenesMap(dataroot=self.data_root, map_name=loc)
-            self.map_explorer[loc] = NuScenesMapExplorer(self.nusc_maps[loc])
+            exp_path = os.path.join(self.data_root, "maps", "expansion", f"{loc}.json")
+            if os.path.exists(exp_path):
+                try:
+                    self.nusc_maps[loc] = NuScenesMap(dataroot=self.data_root, map_name=loc)
+                    self.map_explorer[loc] = NuScenesMapExplorer(self.nusc_maps[loc])
+                except Exception:
+                    self.nusc_maps[loc] = None
+                    self.map_explorer[loc] = None
+            else:
+                self.nusc_maps[loc] = None
+                self.map_explorer[loc] = None
 
         self.patch_size = patch_size
         self.sample_dist = sample_dist
@@ -551,6 +560,17 @@ class VectorizedLocalMap(object):
         """
         use lidar2global to get gt map layers
         """
+        if self.map_explorer.get(location) is None:
+            gt_instance = LiDARInstanceLines(
+                [],
+                self.sample_dist,
+                self.num_samples,
+                self.padding,
+                self.fixed_num,
+                self.padding_value,
+                patch_size=self.patch_size,
+            )
+            return dict(gt_vecs_pts_loc=gt_instance, gt_vecs_label=[])
 
         map_pose = lidar2global_translation[:2]
         rotation = Quaternion(lidar2global_rotation)
@@ -1161,6 +1181,13 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
                 data_path = cam_info["data_path"]
                 if not os.path.isabs(data_path):
                     data_path = os.path.join(self.data_root, data_path)
+                    # Fallback: if path doesn't exist, try data/nuscenes directory (legacy support)
+                    if not os.path.exists(data_path):
+                        # Get the MapTR root directory (3 levels up from reference/)
+                        maptr_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+                        legacy_path = os.path.join(maptr_root, "data", "nuscenes", cam_info["data_path"])
+                        if os.path.exists(legacy_path):
+                            data_path = legacy_path
                 image_paths.append(data_path)
                 # obtain lidar to image transformation matrix
                 lidar2cam_r = np.linalg.inv(cam_info["sensor2lidar_rotation"])
@@ -1240,6 +1267,23 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         """
         input_dict = self.get_data_info(index)
         self.pre_pipeline(input_dict)
+
+        if self.modality["use_camera"] and "img_filename" in input_dict:
+            img_filename = input_dict["img_filename"]
+            if isinstance(img_filename, list):
+                existing_paths = [path for path in img_filename if os.path.exists(path)]
+                if len(existing_paths) == 0:
+                    missing_paths = img_filename[:3] if len(img_filename) > 3 else img_filename
+                    raise FileNotFoundError(
+                        f"No camera images found for sample {input_dict.get('sample_idx', index)}. "
+                        f"Expected {len(img_filename)} images but found 0. "
+                        f"Sample paths: {missing_paths}... "
+                        f"Please ensure NuScenes images are available at the expected paths or check data_root configuration. "
+                        f"Current data_root: {self.data_root}"
+                    )
+                if len(existing_paths) < len(img_filename):
+                    input_dict["img_filename"] = existing_paths
+
         example = self.pipeline(input_dict)
         if self.is_vis_on_test:
             example = self.vectormap_pipeline(example, input_dict)
