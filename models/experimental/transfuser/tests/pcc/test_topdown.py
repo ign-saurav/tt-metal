@@ -7,15 +7,15 @@ import ttnn
 import pytest
 from loguru import logger
 from tests.ttnn.utils_for_testing import check_with_pcc
-<<<<<<< HEAD
-from models.experimental.transfuser.reference.topdown import TopDown
-from models.experimental.transfuser.tt.topdown import TtTopDown
+from ttnn.model_preprocessing import infer_ttnn_module_args as infer_ttnn_module_args_torch
 from ttnn.model_preprocessing import preprocess_model_parameters
+from models.experimental.transfuser.reference.topdown import TopDown
+from models.experimental.transfuser.tt.custom_preprocessing import create_custom_mesh_preprocessor
 from models.experimental.transfuser.tt.topdown import TtTopDown
->>>>>>> 9afd8e8d20 (transfuser ttcnn functional)
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
+def test_topdown_pcc_comparison(device):
     torch_model = TopDown(perception_output_features=512, bev_features_chanels=64, bev_upsample_factor=2)
     torch_model.eval()
 

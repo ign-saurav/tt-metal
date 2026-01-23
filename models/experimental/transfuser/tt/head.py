@@ -1,9 +1,5 @@
-<<<<<<< HEAD
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
-=======
 # SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
 #
->>>>>>> 9afd8e8d20 (transfuser ttcnn functional)
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
