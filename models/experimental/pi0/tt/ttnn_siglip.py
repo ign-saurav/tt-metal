@@ -102,24 +102,19 @@ class PatchEmbeddingTTNN:
         # Transpose for TTNN linear: (hidden_size, in_features) -> (in_features, hidden_size)
         linear_weight = linear_weight.T.contiguous()
 
-        # Transfer to device first, then pad on device
-        linear_weight_ttnn = ttnn.from_torch(
+        # OPTIMIZATION: Pad on CPU side before device transfer to avoid device-side padding
+        # This eliminates a FillPad operation in the profiler
+        if pad_len > 0:
+            linear_weight = torch.nn.functional.pad(linear_weight, (0, 0, 0, pad_len), mode="constant", value=0.0)
+
+        # Transfer pre-padded weight to device - no padding needed on device!
+        self._linear_weight = ttnn.from_torch(
             linear_weight,
             dtype=ttnn.bfloat16,
             layout=ttnn.TILE_LAYOUT,
             device=device,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
-
-        # Pad on device using ttnn.pad
-        if pad_len > 0:
-            linear_weight_ttnn = ttnn.pad(
-                linear_weight_ttnn,
-                padding=((0, pad_len), (0, 0)),  # Pad first dim (in_features)
-                value=0.0,
-            )
-
-        self._linear_weight = linear_weight_ttnn
 
         # Bias (if present)
         if conv_bias is not None:
@@ -261,49 +256,30 @@ class SigLIPAttentionTTNN:
         self.padded_head_dim = ((self.head_dim + 31) // 32) * 32  # 72 -> 96
         padding_size = self.padded_head_dim - self.head_dim
 
-        # Helper function to pad weights on device using ttnn.pad
+        # Helper functions to pad head dimension (72 -> 96) for TTNN tile alignment.
+        # PERF NOTE: Doing pad/reshape on-device creates 64x FillPadDeviceOperation + 64x ReshapeDeviceOperation
+        # (reshape_view kernels) in the profiler. We do it on CPU instead and only transfer final padded tensors.
         def pad_head_dim_weight_ttnn(weight, heads_out=True):
-            """Pad weight tensor's head dimension using TTNN operations."""
+            """Pad weight tensor's head dimension (CPU-side)."""
             dim = weight.shape[0]  # hidden_size
 
             if padding_size > 0:
                 if heads_out:
-                    weight = weight.T  # (hidden, hidden) -> transpose for reshape
-                # Reshape to expose head dimension
-                weight = weight.reshape(dim, self.num_heads, self.head_dim)
-                # Transfer to device
-                weight_ttnn = ttnn.from_torch(
-                    weight.contiguous(),
-                    dtype=ttnn.bfloat16,
-                    layout=ttnn.TILE_LAYOUT,
-                    device=device,
-                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                )
-                # Pad head dimension using ttnn.pad
-                weight_ttnn = ttnn.pad(weight_ttnn, padding=((0, 0), (0, 0), (0, padding_size)), value=0.0)
-                weight_ttnn = ttnn.reshape(weight_ttnn, (dim, self.num_heads * self.padded_head_dim))
-                weight = ttnn.to_torch(weight_ttnn)
+                    weight = weight.T.contiguous()  # match previous behavior
+                # Expose head dim, pad, and fold back (CPU)
+                weight = weight.reshape(dim, self.num_heads, self.head_dim).contiguous()
+                weight = torch.nn.functional.pad(weight, (0, padding_size), mode="constant", value=0.0)
+                weight = weight.reshape(dim, self.num_heads * self.padded_head_dim).contiguous()
                 if heads_out:
-                    weight = weight.T
+                    weight = weight.T.contiguous()
             return weight
 
         def pad_head_dim_bias_ttnn(bias):
-            """Pad 1D bias using TTNN operations."""
+            """Pad 1D bias (CPU-side)."""
             if padding_size > 0:
-                # Reshape to expose head dimension
-                bias = bias.view(self.num_heads, self.head_dim)
-                # Transfer to device
-                bias_ttnn = ttnn.from_torch(
-                    bias.contiguous(),
-                    dtype=ttnn.bfloat16,
-                    layout=ttnn.TILE_LAYOUT,
-                    device=device,
-                    memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                )
-                # Pad using ttnn.pad
-                bias_ttnn = ttnn.pad(bias_ttnn, padding=((0, 0), (0, padding_size)), value=0.0)
-                bias_ttnn = ttnn.reshape(bias_ttnn, (self.num_heads * self.padded_head_dim,))
-                bias = ttnn.to_torch(bias_ttnn)
+                bias = bias.view(self.num_heads, self.head_dim).contiguous()
+                bias = torch.nn.functional.pad(bias, (0, padding_size), mode="constant", value=0.0)
+                bias = bias.reshape(self.num_heads * self.padded_head_dim).contiguous()
             return bias
 
         # OPTIMIZATION: Fused QKV weights - single linear instead of 3

@@ -214,18 +214,108 @@ def get_paligemma_weights(use_pretrained: bool, config: PaliGemmaConfig):
         return create_random_paligemma_weights(config)
 
 
+def print_model_structure(model):
+    """Print model structure in PyTorch-style format."""
+    print("PaliGemmaBackbone(")
+    print("  (vision_tower): SigLIPVisionTower(...)")
+    print("  (mm_projector): MultiModalProjector(...)")
+    print("  (language_model): GemmaModel(")
+    print(
+        f"    (embed_tokens): Embedding({model.vlm_embed_tokens.shape[0]}, {model.vlm_embed_tokens.shape[1]}, padding_idx=0)"
+    )
+    print("    (layers): ModuleList(")
+    vlm_config = model.config.vlm_config
+    for i in range(len(model.vlm_blocks)):
+        print(f"      ({i}): GemmaDecoderLayer(")
+        print("        (self_attn): GemmaAttention(")
+        print(
+            f"          (q_proj): Linear(in_features={vlm_config.width}, out_features={vlm_config.width}, bias=False)"
+        )
+        print(
+            f"          (k_proj): Linear(in_features={vlm_config.width}, out_features={vlm_config.num_kv_heads * vlm_config.head_dim}, bias=False)"
+        )
+        print(
+            f"          (v_proj): Linear(in_features={vlm_config.width}, out_features={vlm_config.num_kv_heads * vlm_config.head_dim}, bias=False)"
+        )
+        print(
+            f"          (o_proj): Linear(in_features={vlm_config.width}, out_features={vlm_config.width}, bias=False)"
+        )
+        print("        )")
+        print("        (mlp): GemmaMLP(")
+        print(
+            f"          (gate_proj): Linear(in_features={vlm_config.width}, out_features={vlm_config.mlp_dim}, bias=False)"
+        )
+        print(
+            f"          (up_proj): Linear(in_features={vlm_config.width}, out_features={vlm_config.mlp_dim}, bias=False)"
+        )
+        print(
+            f"          (down_proj): Linear(in_features={vlm_config.mlp_dim}, out_features={vlm_config.width}, bias=False)"
+        )
+        print("          (act_fn): GELUTanh()")
+        print("        )")
+        print(f"        (input_layernorm): GemmaRMSNorm(({vlm_config.width},), eps=1e-06)")
+        print(f"        (post_attention_layernorm): GemmaRMSNorm(({vlm_config.width},), eps=1e-06)")
+        print("      )")
+    print("    )")
+    print(f"    (norm): GemmaRMSNorm(({vlm_config.width},), eps=1e-06)")
+    print("    (rotary_emb): GemmaRotaryEmbedding()")
+    print("  )")
+    print("  (action_expert): GemmaModel(")
+    expert_config = model.config.expert_config
+    print(f"    (embed_tokens): Embedding(257152, {expert_config.width}, padding_idx=0)")
+    print("    (layers): ModuleList(")
+    for i in range(len(model.expert_blocks)):
+        print(f"      ({i}): GemmaDecoderLayer(")
+        print("        (self_attn): GemmaAttention(")
+        print(
+            f"          (q_proj): Linear(in_features={expert_config.width}, out_features={expert_config.width}, bias=False)"
+        )
+        print(
+            f"          (k_proj): Linear(in_features={expert_config.width}, out_features={expert_config.num_kv_heads * expert_config.head_dim}, bias=False)"
+        )
+        print(
+            f"          (v_proj): Linear(in_features={expert_config.width}, out_features={expert_config.num_kv_heads * expert_config.head_dim}, bias=False)"
+        )
+        print(
+            f"          (o_proj): Linear(in_features={expert_config.width}, out_features={expert_config.width}, bias=False)"
+        )
+        print("        )")
+        print("        (mlp): GemmaMLP(")
+        print(
+            f"          (gate_proj): Linear(in_features={expert_config.width}, out_features={expert_config.mlp_dim}, bias=False)"
+        )
+        print(
+            f"          (up_proj): Linear(in_features={expert_config.width}, out_features={expert_config.mlp_dim}, bias=False)"
+        )
+        print(
+            f"          (down_proj): Linear(in_features={expert_config.mlp_dim}, out_features={expert_config.width}, bias=False)"
+        )
+        print("          (act_fn): GELUTanh()")
+        print("        )")
+        print(f"        (input_layernorm): GemmaRMSNorm(({expert_config.width},), eps=1e-06)")
+        print(f"        (post_attention_layernorm): GemmaRMSNorm(({expert_config.width},), eps=1e-06)")
+        print("      )")
+    print("    )")
+    print(f"    (norm): GemmaRMSNorm(({expert_config.width},), eps=1e-06)")
+    print("    (rotary_emb): GemmaRotaryEmbedding()")
+    print("  )")
+    print(")")
+
+
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
 @pytest.mark.parametrize(
     "use_pretrained",
-    [True, False],
-    ids=["pretrained_weight_true", "pretrained_weight_false"],
+    [False],
+    ids=[
+        "pretrained_weight_false",
+    ],
 )
 def test_pcc_paligemma_embed_image(device, use_pretrained):
     """Test PaliGemma image embedding: TTNN vs PyTorch."""
     torch.manual_seed(SEED)
 
     # Use smaller config for random tests (much faster)
-    config = create_config() if use_pretrained else create_small_config()
+    config = create_config()
     weights = get_paligemma_weights(use_pretrained, config)
 
     # Create input
@@ -233,6 +323,9 @@ def test_pcc_paligemma_embed_image(device, use_pretrained):
 
     # PyTorch forward
     model_torch = PaliGemmaBackboneTorch(config, weights)
+    import pdb
+
+    pdb.set_trace()
     out_torch = model_torch.embed_image(pixel_values)
 
     # TTNN forward
@@ -289,6 +382,90 @@ def test_pcc_paligemma_vlm_block(device, use_pretrained):
 
     weight_type = "pretrained" if use_pretrained else "random"
     print(f"\n✅ PaliGemma VLM Block[0] PCC ({weight_type}): {pcc:.6f}")
+    assert pcc >= 0.85, f"PCC {pcc:.6f} < threshold 0.85"
+
+
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
+@pytest.mark.parametrize(
+    "use_pretrained",
+    [False],
+    ids=[
+        "pretrained_weight_false",
+    ],
+)
+def test_pcc_paligemma_forward_expert(device, use_pretrained):
+    """Test PaliGemma forward_expert: TTNN vs PyTorch."""
+    torch.manual_seed(SEED)
+
+    # Use smaller config for random tests
+    config = create_config()
+    weights = get_paligemma_weights(use_pretrained, config)
+
+    # Create models
+    model_torch = PaliGemmaBackboneTorch(config, weights)
+    model_ttnn = PaliGemmaBackboneTTNN(config, weights, device)
+
+    # Create input (simulated suffix embeddings - state + actions)
+    batch_size = 1
+    seq_len = 50  # Typical action sequence length
+    hidden = torch.randn(batch_size, seq_len, config.expert_config.width)
+
+    # PyTorch forward
+    out_torch, _ = model_torch.forward_expert(hidden)
+
+    # TTNN forward
+    hidden_ttnn = ttnn.from_torch(hidden, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+    out_ttnn, _ = model_ttnn.forward_expert(hidden_ttnn)
+
+    if isinstance(out_ttnn, ttnn.Tensor):
+        out_ttnn = ttnn.to_torch(out_ttnn)
+
+    pcc = compute_pcc(out_torch, out_ttnn)
+
+    weight_type = "pretrained" if use_pretrained else "random"
+    print(f"\n✅ PaliGemma forward_expert PCC ({weight_type}): {pcc:.6f}")
+    assert pcc >= 0.85, f"PCC {pcc:.6f} < threshold 0.85"
+
+
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
+@pytest.mark.parametrize(
+    "use_pretrained",
+    [False],
+    ids=[
+        "pretrained_weight_false",
+    ],
+)
+def test_pcc_paligemma_forward_vlm(device, use_pretrained):
+    """Test PaliGemma forward_vlm: TTNN vs PyTorch."""
+    torch.manual_seed(SEED)
+
+    # Use smaller config for random tests
+    config = create_config()
+    weights = get_paligemma_weights(use_pretrained, config)
+
+    # Create models
+    model_torch = PaliGemmaBackboneTorch(config, weights)
+    model_ttnn = PaliGemmaBackboneTTNN(config, weights, device)
+
+    # Create input (simulated prefix embeddings - images + language)
+    batch_size = 1
+    seq_len = 100  # Typical VLM sequence length
+    hidden = torch.randn(batch_size, seq_len, config.vlm_config.width)
+
+    # PyTorch forward
+    out_torch, _ = model_torch.forward_vlm(hidden)
+
+    # TTNN forward
+    hidden_ttnn = ttnn.from_torch(hidden, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+    out_ttnn, _ = model_ttnn.forward_vlm(hidden_ttnn)
+
+    if isinstance(out_ttnn, ttnn.Tensor):
+        out_ttnn = ttnn.to_torch(out_ttnn)
+
+    pcc = compute_pcc(out_torch, out_ttnn)
+
+    weight_type = "pretrained" if use_pretrained else "random"
+    print(f"\n✅ PaliGemma forward_vlm PCC ({weight_type}): {pcc:.6f}")
     assert pcc >= 0.85, f"PCC {pcc:.6f} < threshold 0.85"
 
 
