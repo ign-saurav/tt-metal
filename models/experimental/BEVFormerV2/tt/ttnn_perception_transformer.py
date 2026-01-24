@@ -2,7 +2,6 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 import ttnn
 import numpy as np
 from torchvision.transforms.functional import rotate
@@ -200,25 +199,31 @@ class TtPerceptionTransformer:
             feat_flatten.append(feat)
 
         feat_flatten = ttnn.concat(feat_flatten, 2)
-        spatial_shapes_torch = torch.as_tensor(spatial_shapes, dtype=torch.long, device="cpu")
-        spatial_shapes = ttnn.from_torch(
-            spatial_shapes_torch, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
-        )
+
+        num_levels = len(spatial_shapes)
+        if num_levels == 0:
+            spatial_shapes_np = np.zeros((0, 2), dtype=np.uint32)
+            level_start_index_np = np.array([0], dtype=np.uint32)
+        else:
+            spatial_shapes_np = np.array(spatial_shapes, dtype=np.uint32)
+            areas = spatial_shapes_np[:, 0] * spatial_shapes_np[:, 1]  # h * w per level
+            level_start_index_list = [0]
+            acc = 0
+            for a in areas[:-1]:
+                acc += int(a)
+                level_start_index_list.append(acc)
+            level_start_index_np = np.array(level_start_index_list, dtype=np.uint32)
+
+        spatial_shapes = ttnn.Tensor(spatial_shapes_np, ttnn.uint32)
+        spatial_shapes = spatial_shapes.to(self.device)
+        spatial_shapes = ttnn.to_layout(spatial_shapes, layout=ttnn.ROW_MAJOR_LAYOUT)
+
+        level_start_index = ttnn.Tensor(level_start_index_np, ttnn.uint32)
+        level_start_index = level_start_index.to(self.device)
+        level_start_index = ttnn.to_layout(level_start_index, layout=ttnn.ROW_MAJOR_LAYOUT)
 
         feat_flatten = ttnn.permute(feat_flatten, (0, 2, 1, 3))
         feat_flatten = ttnn.to_layout(feat_flatten, layout=ttnn.ROW_MAJOR_LAYOUT)
-        if spatial_shapes_torch.numel() == 0:
-            level_start_index_torch = torch.zeros((1,), dtype=torch.long, device="cpu")
-        else:
-            level_start_index_torch = torch.cat(
-                (spatial_shapes_torch.new_zeros((1,)), spatial_shapes_torch.prod(1).cumsum(0)[:-1])
-            )
-        level_start_index = ttnn.from_torch(
-            level_start_index_torch.to(torch.uint32),
-            dtype=ttnn.uint32,
-            layout=ttnn.ROW_MAJOR_LAYOUT,
-            device=self.device,
-        )
         bev_embed = self.encoder(
             bev_queries,
             feat_flatten,
@@ -330,9 +335,13 @@ class TtPerceptionTransformer:
         bev_embed = ttnn.to_layout(bev_embed, layout=ttnn.TILE_LAYOUT)
 
         if self.decoder is not None:
-            spatial_shapes = torch.tensor([[bev_h, bev_w]], device="cpu")
-            spatial_shapes = ttnn.from_torch(
-                spatial_shapes, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
+            spatial_shapes_np = np.array([[bev_h, bev_w]], dtype=np.float32).flatten()
+            spatial_shapes = ttnn.Tensor(
+                spatial_shapes_np,
+                shape=[1, 2],
+                data_type=ttnn.bfloat16,
+                device=self.device,
+                layout=ttnn.ROW_MAJOR_LAYOUT,
             )
             inter_states, inter_references = self.decoder(
                 query=query,
@@ -352,9 +361,13 @@ class TtPerceptionTransformer:
             inter_references_out = ttnn.unsqueeze(reference_points, 0)
 
         if self.map_decoder is not None:
-            spatial_shapes = torch.tensor([[bev_h, bev_w]], device="cpu")
-            spatial_shapes = ttnn.from_torch(
-                spatial_shapes, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
+            spatial_shapes_np = np.array([[bev_h, bev_w]], dtype=np.float32).flatten()
+            spatial_shapes = ttnn.Tensor(
+                spatial_shapes_np,
+                shape=[1, 2],
+                data_type=ttnn.bfloat16,
+                device=self.device,
+                layout=ttnn.ROW_MAJOR_LAYOUT,
             )
             map_inter_states, map_inter_references = self.map_decoder(
                 query=map_query,

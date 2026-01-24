@@ -2,7 +2,6 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 import numpy as np
 import copy
 import warnings
@@ -437,9 +436,12 @@ class TtEncoderLayer:
 
         for layer in self.operation_order:
             if layer == "self_attn":
-                spatial_shapes_1 = torch.tensor([[bev_h, bev_w]])
-                spatial_shapes_1 = ttnn.from_torch(
-                    spatial_shapes_1, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
+                spatial_shapes_1_np = np.array([[bev_h, bev_w]], dtype=np.uint32)
+                spatial_shapes_1 = ttnn.Tensor(
+                    spatial_shapes_1_np,
+                    data_type=ttnn.uint32,
+                    device=self.device,
+                    layout=ttnn.ROW_MAJOR_LAYOUT,
                 )
                 query = self.attentions[attn_index](
                     query,

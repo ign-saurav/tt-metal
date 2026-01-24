@@ -38,7 +38,7 @@ The model is validated using internal test suites under `tests/` with PCC (Pears
 - **Number of Classes**: 10 (nuScenes)
 - **Backbone**: ResNet-50
 - **FPN Levels**: 5 (P0-P4)
-- **Transformer Layers**: 6 encoder + 6 decoder layers
+- **Transformer Layers**: 1 encoder + 1 decoder layers
 - **Feature Channels**: 256
 
 ---
@@ -145,9 +145,10 @@ BEVFormerV2 is verified against PyTorch reference implementations for correctnes
 
 | Output | PCC Score |
 |--------|-----------|
-| bev_embed | 0.956 |
+
 | all_cls_scores | 0.99 |
 | all_bbox_preds | 0.99 |
+| bev_embed | 0.955 |
 
 All tests use PCC validation to compare Tenstorrent Neural Network outputs with PyTorch reference outputs (threshold: 0.97).
 
