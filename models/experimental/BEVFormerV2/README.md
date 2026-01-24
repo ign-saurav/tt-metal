@@ -144,7 +144,6 @@ BEVFormerV2 is verified against PyTorch reference implementations for correctnes
 
 | Output | PCC Score |
 |--------|-----------|
-
 | all_cls_scores | 0.99 |
 | all_bbox_preds | 0.99 |
 | bev_embed | 0.955 |
