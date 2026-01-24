@@ -133,4 +133,4 @@ export FALLBACK_ON_GROUPNORM=0
 - **Resolution**: (H, W) = (512, 512) is supported end-to-end
 - **Device**: The demo opens a Wormhole device (default id typically 0). If you need to change it, adjust the device open call in the demo
 - **Batch Size**: Demo/tests are written for BS=1. For larger BS you'll need to verify memory layouts and tile alignment
-- **GroupNorm Fallback**: By default, GroupNorm operations fall back to PyTorch for better accuracy. Set `FALLBACK_ON_GROUPNORM=0` to use TTNN implementation
+- **GroupNorm Fallback**: By default, GroupNorm operations fall back to PyTorch for better accuracy. Set `FALLBACK_ON_GROUPNORM=0` to use TTNN implementation. Ticket#36449 [https://github.com/tenstorrent/tt-metal/issues/36449] was raised to track the issue.
