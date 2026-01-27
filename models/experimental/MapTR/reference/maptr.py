@@ -2,10 +2,19 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# Consolidated MapTR module combining detector, head, transformer, decoder, and builder
+##########################################################################
+# Adapted from MapTR (https://github.com/hustvl/MapTR/tree/main/projects/mmdet3d_plugin/maptr).
+# Original work Copyright (c) OpenMMLab. Licensed under the Apache License, Version 2.0.
+#
+# Class reference links:
+#   MapTR:        https://github.com/hustvl/MapTR/blob/main/projects/mmdet3d_plugin/maptr/detectors/maptr.py
+#   MapTRHead:    https://github.com/hustvl/MapTR/blob/main/projects/mmdet3d_plugin/maptr/dense_heads/maptr_head.py
+#   ConvFuser, MapTRPerceptionTransformer:
+#                 https://github.com/hustvl/MapTR/blob/main/projects/mmdet3d_plugin/maptr/modules/transformer.py
+#   MapTRDecoder: https://github.com/hustvl/MapTR/blob/main/projects/mmdet3d_plugin/maptr/modules/decoder.py
+##########################################################################
 
 import copy
-import os
 import numpy as np
 import torch
 import torch.nn as nn
@@ -377,14 +386,6 @@ class MapTRPerceptionTransformer(BaseModule):
         reference_points = self.reference_points(query_pos)
         reference_points = reference_points.sigmoid()
         init_reference_out = reference_points
-
-        debug_enabled = os.environ.get("MAPTR_DEBUG_EVAL", "0") == "1"
-        if debug_enabled:
-            print(f"\n=== Transformer Reference Points Initialization ===")
-            print(f"reference_points (after sigmoid) shape: {reference_points.shape}")
-            print(f"reference_points range: [{reference_points.min():.4f}, {reference_points.max():.4f}]")
-            print(f"First 5 reference points: {reference_points[0, :5]}")
-            print(f"Reference points should be in normalized [0, 1] range")
 
         query = query.permute(1, 0, 2)
         query_pos = query_pos.permute(1, 0, 2)
