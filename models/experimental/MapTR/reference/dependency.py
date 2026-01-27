@@ -1,8 +1,26 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
 
+##########################################################################
+# Adapted from MMDetection and MMDetection3D
+# Original sources:
+# - MMDetection: https://github.com/open-mmlab/mmdetection
+# - MMDetection3D: https://github.com/open-mmlab/mmdetection3d
+# - MapTR: https://github.com/hustvl/MapTR/tree/main/projects/mmdet3d_plugin
+# Original work Copyright (c) OpenMMLab.
+# Licensed under the Apache License, Version 2.0.
+##########################################################################
+# This file consolidates dependencies from MMDetection/MMDetection3D including:
+# - Registry system, config management, and build utilities
+# - Base classes for detectors, heads, transformers, and modules
+# - Neural network components (ResNet, FPN, attention mechanisms)
+# - Data structures and utilities (bbox, points, containers)
+# - Training utilities (losses, optimizers, samplers)
+##########################################################################
+
 from __future__ import division
 
+# Standard library imports
 import bisect
 import collections
 import copy
@@ -20,13 +38,14 @@ import tempfile
 import warnings
 from abc import ABCMeta, abstractmethod
 from collections import OrderedDict, defaultdict
-from collections import abc as collections_abc
 from collections import abc as abc_collections
 from collections.abc import Mapping, Sequence
 from functools import partial
+from inspect import getfullargspec
 from logging import FileHandler
 from types import ModuleType
 
+# Third-party imports
 import mmcv
 import numpy as np
 import torch
@@ -36,13 +55,11 @@ import torch.nn.functional as F
 import yaml
 from mmengine import Config
 from packaging.version import parse
+from torch.nn.modules.batchnorm import _BatchNorm
+from torch.nn.parallel import DataParallel, DistributedDataParallel
 from torch.utils.data import Sampler
 from torch.utils.data.dataloader import default_collate
 from torch.utils.data.dataset import ConcatDataset as _ConcatDataset
-from torch.nn.modules.batchnorm import _BatchNorm
-from torch.nn.parallel import DataParallel, DistributedDataParallel
-
-from inspect import getfullargspec
 
 
 def load_file(filename):
@@ -3819,7 +3836,6 @@ class Base3DDetector(BaseDetector):
             elif box_mode_3d != Box3DMode.DEPTH:
                 ValueError(f"Unsupported box_mode_3d {box_mode_3d} for convertion!")
             pred_bboxes = pred_bboxes.tensor.cpu().numpy()
-            # show_result removed - not needed for inference-only
 
 
 def multi_apply(func, *args, **kwargs):
@@ -5156,7 +5172,7 @@ class LiDARInstance3DBoxes:
 
 class Compose:
     def __init__(self, transforms):
-        assert isinstance(transforms, collections_abc.Sequence)
+        assert isinstance(transforms, abc_collections.Sequence)
         self.transforms = []
         for transform in transforms:
             if isinstance(transform, dict):
