@@ -1,5 +1,6 @@
 import ttnn
 import torch
+import os
 from loguru import logger
 
 from models.tt_transformers.tt.common import (
@@ -13,7 +14,7 @@ from models.experimental.granite_speech_33_8b.tt.generator import (
 from typing import List
 from models.experimental.granite_speech_33_8b.tt.ttnn_encoder_block import GraniteSpeechCTCEncoderTTNN
 from models.experimental.granite_speech_33_8b.tt.ttnn_projector_block import GraniteSpeechEncoderProjectorTTNN
-from models.tt_transformers.tt.generator import SamplingParams
+from models.experimental.granite_speech_33_8b.tt.utils import save_language_model_weights
 
 
 class GraniteSpeechTTNN:
@@ -55,6 +56,21 @@ class GraniteSpeechTTNN:
         self.global_batch_size = (
             self.batch_size * self.data_parallel
         )  # input batch_size is interpreted as size per DP group
+
+        # Check if language_model weights exist, if not save them
+        weights_dir = "granite_instruct_weights_from_speech"
+        if not os.path.exists(weights_dir):
+            logger.info(f"Weights directory '{weights_dir}' not found. Saving language_model weights...")
+            if self.torch_ref is not None and hasattr(self.torch_ref, "language_model"):
+                self.torch_ref.language_model.save_pretrained(weights_dir)
+                self.tokenizer.save_pretrained(weights_dir)
+                logger.info(f"Successfully saved language_model weights to '{weights_dir}'")
+            else:
+                logger.warning(
+                    f"torch_ref not available or missing language_model. Calling save_language_model_weights()..."
+                )
+                save_language_model_weights(weights_dir)
+
         optimisations = lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name)
         page_params = {"page_block_size": 32, "page_max_num_blocks_per_dp": 256}
         (
@@ -131,16 +147,6 @@ class GraniteSpeechTTNN:
             self.max_generated_tokens + max_encoded_prompt_len <= self.paged_cache_max_seq_len
         ), f"max_generated_tokens ({self.max_generated_tokens}) needs to be <= than paged_cache_max_seq_len ({self.paged_cache_max_seq_len})"
 
-        # logger.info("Starting prefill warmup...")
-        # logits = self.generator.prefill_forward_text(
-        #     input_tokens_prefill_pt,  # Prefill warmup for all users, in case some users have different seqlens than others
-        #     page_table=self.page_table,
-        #     kv_cache=self.tt_kv_cache,
-        #     prompt_lens=decoding_pos,
-        #     enable_trace=False,
-        # )
-        # logger.info("Finished prefill warmup")
-
         logger.info(f"Starting prefill...")
         logits = self.generator.prefill_forward_text(
             input_tokens_prefill_pt,
@@ -161,22 +167,7 @@ class GraniteSpeechTTNN:
         user_done = [False] * self.global_batch_size  # Keeps track when a user reaches EoD token
 
         sampling_params = {"temperature": 0, "top_p": 0.08, "top_k": 32}
-        device_sampling_params = (
-            SamplingParams(
-                temperature=sampling_params["temperature"],
-                top_k=sampling_params["top_k"],
-                top_p=sampling_params["top_p"],
-                frequency_penalty=(
-                    sampling_params["frequency_penalty"] if "frequency_penalty" in sampling_params else 0.0
-                ),
-                presence_penalty=sampling_params["presence_penalty"] if "presence_penalty" in sampling_params else 0.0,
-                repetition_penalty=(
-                    sampling_params["repetition_penalty"] if "repetition_penalty" in sampling_params else 1.0
-                ),
-            )
-            if self.model[0]._supports_on_device_sampling
-            else None
-        )
+        device_sampling_params = None
         if device_sampling_params is None and isinstance(sampling_params["temperature"], List):
             # host sampling only supports single sample param for all users in a batch
             sampling_params["temperature"] = sampling_params["temperature"][0]

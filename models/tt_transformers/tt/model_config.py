@@ -577,7 +577,6 @@ class ModelArgs:
                     "TG": 128,
                     "P150x4": 128,
                 },  # Conservative: Allow on all devices
-                "granite-3.3-8b": {"N150": 32, "N300": 64, "T3K": 128, "TG": 128, "P150x4": 128},
             }
             try:
                 max_prefill_chunk_size_div1024 = MAX_PREFILL_CHUNK_SIZES_DIV1024[self.base_model_name][self.device_name]

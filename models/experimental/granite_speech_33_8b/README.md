@@ -17,7 +17,8 @@ Granite Speech is a state-of-the-art speech-to-text model developed by IBM, capa
 ## How to Run
 - Use the following command to run the `Granite-speech-3.3-8b` model:
   ```
-  export HF_MODEL="ibm-granite/granite-3.3-8b-instruct"
+  python3 models/experimental/granite_speech_33_8b/tt/utils.py (Optional)
+  export HF_MODEL="granite_instruct_weights_from_speech"
   pytest models/experimental/granite_speech_33_8b/test/test_granite.py
   ```
 
