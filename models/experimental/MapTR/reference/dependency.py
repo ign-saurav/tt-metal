@@ -2,34 +2,30 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from __future__ import division
-import mmcv
-import os
-import torch
-import torch.nn.functional as F
-import warnings
-
-from mmengine import Config
-
 
 import bisect
+import collections
 import copy
 import functools
+import importlib
+import inspect
 import json
 import logging
 import math
 import os
 import os.path as osp
 import pickle
+import re
 import tempfile
 import warnings
-from abc import ABCMeta
-from collections import OrderedDict
+from abc import ABCMeta, abstractmethod
+from collections import OrderedDict, defaultdict
 from collections import abc as collections_abc
+from collections import abc as abc_collections
 from collections.abc import Mapping, Sequence
 from functools import partial
 from logging import FileHandler
-from torch.utils.data import Sampler
-from torch.utils.data.dataloader import default_collate
+from types import ModuleType
 
 import mmcv
 import numpy as np
@@ -37,8 +33,16 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
-from mmengine import Config
 import yaml
+from mmengine import Config
+from packaging.version import parse
+from torch.utils.data import Sampler
+from torch.utils.data.dataloader import default_collate
+from torch.utils.data.dataset import ConcatDataset as _ConcatDataset
+from torch.nn.modules.batchnorm import _BatchNorm
+from torch.nn.parallel import DataParallel, DistributedDataParallel
+
+from inspect import getfullargspec
 
 
 def load_file(filename):
@@ -74,10 +78,6 @@ def master_only(func):
             return func(*args, **kwargs)
 
     return wrapper
-
-
-import inspect
-from collections import abc as abc_collections
 
 
 def is_seq_of(seq, expected_type, seq_type=None):
@@ -431,9 +431,6 @@ class Registry:
         return _register
 
 
-from inspect import getfullargspec
-
-
 def deprecated_api_warning(name_dict, cls_name=None):
     """A decorator to check if some arguments are deprecate and try to replace
     deprecate src_arg_name to dst_arg_name.
@@ -574,8 +571,6 @@ class DataContainer:
         return self.data.dim()
 
 
-from functools import partial
-
 TORCH_VERSION = torch.__version__
 
 logger_initialized = {}
@@ -684,9 +679,6 @@ def print_log(msg, logger=None, level=logging.INFO):
         )
 
 
-from packaging.version import parse
-
-
 def digit_version(version_str: str, length: int = 4):
     """Convert a version string into a tuple of integers.
 
@@ -725,11 +717,6 @@ def digit_version(version_str: str, length: int = 4):
     else:
         release.extend([0, 0])
     return tuple(release)
-
-
-import importlib
-import warnings
-from types import ModuleType
 
 
 def load_ext(name, funcs):
@@ -1112,10 +1099,6 @@ class Config(ConfigDict):
             import_module(imp)
 
 
-from collections import defaultdict
-from logging import FileHandler
-
-
 class BaseModule(nn.Module, metaclass=ABCMeta):
     """Base module for all modules in openmmlab.
 
@@ -1328,9 +1311,6 @@ def get_dist_info():
         rank = 0
         world_size = 1
     return rank, world_size
-
-
-from inspect import getfullargspec
 
 
 def cast_tensor_type(inputs, src_type, dst_type):
@@ -2416,8 +2396,6 @@ def build_padding_layer(cfg, padding):
     return layer
 
 
-from torch.nn.modules.batchnorm import _BatchNorm
-
 try:
     from torch.nn.modules.instancenorm import _InstanceNorm
 except ImportError:
@@ -2984,9 +2962,6 @@ class ResLayer(Sequential):
         super(ResLayer, self).__init__(*layers)
 
 
-from torch.nn.modules.batchnorm import _BatchNorm
-
-
 def build_plugin_layer(cfg, postfix="", in_channels=None, **kwargs):
     """Build plugin layer."""
     if cfg is None:
@@ -3464,9 +3439,6 @@ def bbox_overlaps(bboxes1, bboxes2, mode="iou", is_aligned=False, eps=1e-6):
     return gious
 
 
-from abc import ABCMeta, abstractmethod
-
-
 class BaseDetector(nn.Module, metaclass=ABCMeta):
     """Base class for detectors."""
 
@@ -3848,9 +3820,6 @@ class Base3DDetector(BaseDetector):
                 ValueError(f"Unsupported box_mode_3d {box_mode_3d} for convertion!")
             pred_bboxes = pred_bboxes.tensor.cpu().numpy()
             # show_result removed - not needed for inference-only
-
-
-import warnings
 
 
 def multi_apply(func, *args, **kwargs):
@@ -4251,9 +4220,6 @@ def xywhr2xyxyr(boxes_xywhr):
     boxes[:, 3] = boxes_xywhr[:, 1] + half_h
     boxes[:, 4] = boxes_xywhr[:, 4]
     return boxes
-
-
-from abc import abstractmethod
 
 
 class BasePoints(object):
@@ -5873,14 +5839,6 @@ def inverse_sigmoid(x, eps=1e-5):
     return torch.log(x1 / x2)
 
 
-import torch
-
-
-import functools
-
-import torch
-
-
 def collate(batch, samples_per_gpu=1):
     """Collate a batch of data.
 
@@ -6205,14 +6163,6 @@ class FPN(BaseModule):
 BACKBONES.register_module(name="ResNet", module=ResNet)
 
 
-# TORCH_VERSION is already defined at line 774 as torch.__version__ (string)
-# The tuple version below would overwrite it and break digit_version() which expects a string
-# TORCH_VERSION = tuple(int(x) for x in torch.__version__.split(".")[:2])
-# """
-# PyTorch version as a tuple of 2 ints. Useful for comparison.
-# """
-
-
 def replace_ImageToTensor(pipelines):
     """Replace ImageToTensor to DefaultFormatBundle in the pipeline.
 
@@ -6286,18 +6236,6 @@ def bbox_overlaps(bboxes1, bboxes2, mode="iou", eps=1e-6, use_legacy_coordinate=
     return ious
 
 
-from collections.abc import Sequence
-
-
-import copy
-import warnings
-from abc import ABCMeta
-from collections import defaultdict
-from logging import FileHandler
-
-import torch.nn as nn
-
-
 def build_model(cfg, train_cfg=None, test_cfg=None):
     """A function wrapper for building 3D detector or segmentor according to cfg.
 
@@ -6309,7 +6247,6 @@ def build_model(cfg, train_cfg=None, test_cfg=None):
 
 
 # PIPELINES registry is already defined at line 4494, don't redefine it here
-import collections
 
 
 @PIPELINES.register_module()
@@ -6356,9 +6293,6 @@ class Compose:
             format_string += f"    {t}"
         format_string += "\n)"
         return format_string
-
-
-from torch.utils.data.dataset import ConcatDataset as _ConcatDataset
 
 
 class ConcatDataset(_ConcatDataset):
@@ -6460,13 +6394,6 @@ def build_dataset(cfg, default_args=None):
     return dataset
 
 
-import warnings
-
-import numpy as np
-import torch
-import torch.nn as nn
-
-
 def wrap_fp16_model(model):
     """Wrap the FP32 model to FP16.
 
@@ -6494,15 +6421,6 @@ def wrap_fp16_model(model):
             m.fp16_enabled = True
 
 
-import os
-import os.path as osp
-import re
-import warnings
-from collections import OrderedDict
-
-import torch
-
-
 def is_module_wrapper(module):
     """Check if a module is a wrapper.
 
@@ -6517,8 +6435,6 @@ def is_module_wrapper(module):
     Returns:
         bool: True if the input module is a wrapper module.
     """
-    from torch.nn.parallel import DataParallel, DistributedDataParallel
-
     module_wrappers = (DataParallel, DistributedDataParallel)
     return isinstance(module, module_wrappers)
 

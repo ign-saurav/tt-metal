@@ -9,26 +9,25 @@
 ##########################################################################
 
 import copy
-
-import numpy as np
-from models.experimental.MapTR.reference.dependency import DATASETS
-import mmcv
+import json
 import os
-from os import path as osp
-import torch
-from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
-
-# from .nuscnes_eval import NuScenesEval_custom  # Removed - not needed for demo
-# from reference.mmdet3d_plugin.models.utils.visual import save_tensor  # Removed - not needed for demo
-from models.experimental.MapTR.reference.dependency import DataContainer as DC
 import random
+from os import path as osp
 
-from models.experimental.MapTR.reference.datasets_nuscenes import CustomNuScenesDataset
+import mmcv
+import numpy as np
+import torch
+from nuscenes.eval.common.utils import Quaternion, quaternion_yaw
 from nuscenes.map_expansion.map_api import NuScenesMap, NuScenesMapExplorer
 from shapely import affinity, ops
-from shapely.geometry import LineString, box, MultiPolygon, MultiLineString
-from models.experimental.MapTR.reference.dependency import to_tensor
-import json
+from shapely.geometry import LineString, MultiLineString, MultiPolygon, box
+
+from models.experimental.MapTR.reference.dependency import (
+    DATASETS,
+    DataContainer as DC,
+    to_tensor,
+)
+from models.experimental.MapTR.reference.datasets_nuscenes import CustomNuScenesDataset
 
 
 def add_rotation_noise(extrinsics, std=0.01, mean=0.0):
