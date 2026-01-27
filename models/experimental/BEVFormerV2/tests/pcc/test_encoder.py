@@ -115,7 +115,7 @@ def test_encoder_pcc(
                     ]
                 ),
             ],
-            "img_shape": [(640, 360, 3), (640, 360, 3), (640, 360, 3), (640, 360, 3), (640, 360, 3), (640, 360, 3)],
+            "img_shape": [(256, 704, 3), (256, 704, 3), (256, 704, 3), (256, 704, 3), (256, 704, 3), (256, 704, 3)],
         }
     ]
 
@@ -126,10 +126,11 @@ def test_encoder_pcc(
     sequence_length = bev_h * bev_w
 
     bev_query = torch.rand(sequence_length, batch_size, embed_dim, dtype=torch.float32)
-    key = torch.rand(6, 240, 1, 256, dtype=torch.float32)
-    value = torch.rand(6, 240, 1, 256, dtype=torch.float32)
+    # For 256x704 input, P4 feature map is 16x44 = 704 elements
+    key = torch.rand(6, 704, 1, 256, dtype=torch.float32)
+    value = torch.rand(6, 704, 1, 256, dtype=torch.float32)
     bev_pos = torch.rand(sequence_length, batch_size, embed_dim, dtype=torch.float32)
-    spatial_shapes = torch.tensor([[12, 20]], dtype=torch.int32)
+    spatial_shapes = torch.tensor([[16, 44]], dtype=torch.int32)
     level_start_index = torch.tensor([0], dtype=torch.int64)
     shift = torch.tensor([[0.0, 0.0]], dtype=torch.float32)
 

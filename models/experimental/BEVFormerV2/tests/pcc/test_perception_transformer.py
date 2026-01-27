@@ -62,7 +62,7 @@ def test_bevformerv2_transformer(
     object_query_embed = torch.randn(900, 512)
     map_query_embed = torch.randn(500, 512)
     mlvl_feats = []
-    a = torch.randn(1, 6, 256, 12, 20)
+    a = torch.randn(1, 6, 256, 16, 44)
     mlvl_feats.append(a)
     bev_pos = torch.randn(1, 256, 100, 100)
 
@@ -119,7 +119,7 @@ def test_bevformerv2_transformer(
                     ]
                 ),
             ],
-            "img_shape": [(640, 360, 3), (640, 360, 3), (640, 360, 3), (640, 360, 3), (640, 360, 3), (640, 360, 3)],
+            "img_shape": [(256, 704, 3), (256, 704, 3), (256, 704, 3), (256, 704, 3), (256, 704, 3), (256, 704, 3)],
         }
     ]
 

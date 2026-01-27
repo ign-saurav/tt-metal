@@ -160,15 +160,15 @@ def prepare_sample_data(info, data_root):
         lidar2cam_rts.append(lidar2cam_rt.T)
 
     ida_aug_conf_eval = {
-        "reisze": [640],
+        "reisze": [256],
         "crop": (0, 260, 1600, 900),
         "H": 900,
         "W": 1600,
         "rand_flip": False,
     }
     crop = ida_aug_conf_eval["crop"]
-    resized_h = 384
-    resize_w = 640
+    resized_h = 256
+    resize_w = 704
     resize_dims = (resize_w, resized_h)
     flip = False
 
@@ -398,8 +398,6 @@ def main():
     for m in torch_model.modules():
         if isinstance(m, (torch.nn.BatchNorm2d, torch.nn.SyncBatchNorm)):
             m.eval()
-    if not torch.cuda.is_available():
-        torch_model = torch_model.cpu()
 
     torch_model.pts_bbox_head.transformer.encoder.layers = torch.nn.ModuleList(
         list(torch_model.pts_bbox_head.transformer.encoder.layers)[:1]

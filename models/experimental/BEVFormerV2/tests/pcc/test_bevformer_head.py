@@ -102,10 +102,10 @@ def test_bevformer_head_pcc(
     )
 
     mlvl_feats = []
-    c0 = torch.randn(1, 6, 256, 16, 32)
-    c1 = torch.randn(1, 6, 256, 8, 16)
-    c2 = torch.randn(1, 6, 256, 4, 8)
-    c3 = torch.randn(1, 6, 256, 2, 4)
+    c0 = torch.randn(1, 6, 256, 64, 176)
+    c1 = torch.randn(1, 6, 256, 32, 88)
+    c2 = torch.randn(1, 6, 256, 16, 44)
+    c3 = torch.randn(1, 6, 256, 8, 22)
     mlvl_feats.append(c0)
     mlvl_feats.append(c1)
     mlvl_feats.append(c2)
@@ -163,7 +163,7 @@ def test_bevformer_head_pcc(
                     ]
                 ),
             ],
-            "img_shape": [(640, 360, 3), (640, 360, 3), (640, 360, 3), (640, 360, 3), (640, 360, 3), (640, 360, 3)],
+            "img_shape": [(256, 704, 3), (256, 704, 3), (256, 704, 3), (256, 704, 3), (256, 704, 3), (256, 704, 3)],
         }
     ]
 

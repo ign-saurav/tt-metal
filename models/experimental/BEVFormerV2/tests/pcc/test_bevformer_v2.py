@@ -55,7 +55,7 @@ def test_bevformerv2(
                             "./data/nuscenes/samples/CAM_BACK_RIGHT/n008-2018-08-01-15-16-36-0400__CAM_BACK_RIGHT__1533151603528113.jpg",
                         ],
                         "ori_shape": [(360, 640, 3)] * 6,
-                        "img_shape": [(384, 640, 3)] * 6,
+                        "img_shape": [(256, 704, 3)] * 6,
                         "lidar2img": [
                             np.array(
                                 [
@@ -106,7 +106,7 @@ def test_bevformerv2(
                                 ]
                             ),
                         ],
-                        "pad_shape": [(384, 640, 3)] * 6,
+                        "pad_shape": [(256, 704, 3)] * 6,
                         "scale_factor": 1.0,
                         "flip": False,
                         "pcd_horizontal_flip": False,
@@ -143,7 +143,7 @@ def test_bevformerv2(
             ]
         ],
     }
-    tensor = torch.randn(1, 6, 3, 384, 640)
+    tensor = torch.randn(1, 6, 3, 256, 704)
     img = []
     img.append(tensor)
     with torch.no_grad():
@@ -173,7 +173,15 @@ def test_bevformerv2(
         use_grid_mask=False,
         img_backbone=dict(depth=50, in_channels=3, out_indices=(1, 2, 3), style="caffe"),
         img_neck=dict(in_channels=[512, 1024, 2048], out_channels=256, num_outs=5),
-        pts_bbox_head=dict(bev_h=100, bev_w=100, num_query=900, num_classes=10, in_channels=256),
+        pts_bbox_head=dict(
+            bev_h=100,
+            bev_w=100,
+            num_query=900,
+            num_classes=10,
+            in_channels=256,
+            encoder_num_layers=torch_model.pts_bbox_head.transformer.encoder.num_layers,
+            decoder_num_layers=torch_model.pts_bbox_head.transformer.decoder.num_layers,
+        ),
         video_test_mode=True,
     )
     tracy.signpost("start")
