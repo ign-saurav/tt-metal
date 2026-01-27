@@ -6,9 +6,7 @@ import pytest
 import torch
 import ttnn
 from loguru import logger
-from models.experimental.MapTR.reference.bevformer import (
-    TemporalSelfAttention,
-)
+from models.experimental.MapTR.reference.bevformer_temporal_attention import TemporalSelfAttention
 from models.experimental.MapTR.resources.download_chkpoint import ensure_checkpoint_downloaded, MAPTR_WEIGHTS_PATH
 from models.experimental.MapTR.tt.ttnn_temporal_self_attention import TtTemporalSelfAttention
 from tests.ttnn.utils_for_testing import assert_with_pcc

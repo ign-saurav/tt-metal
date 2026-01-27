@@ -13,13 +13,9 @@ from models.experimental.MapTR.reference.maptr import (
     MapTRPerceptionTransformer,
     MapTRDecoder,
 )
-from models.experimental.MapTR.reference.bevformer import (
-    BEVFormerEncoder,
-    TemporalSelfAttention,
-)
-from models.experimental.MapTR.reference.bevformer import (
-    SpatialCrossAttention,
-)
+from models.experimental.MapTR.reference.bevformer_encoder import BEVFormerEncoder
+from models.experimental.MapTR.reference.bevformer_temporal_attention import TemporalSelfAttention
+from models.experimental.MapTR.reference.bevformer_spatial_attention import SpatialCrossAttention
 from models.experimental.MapTR.resources.download_chkpoint import ensure_checkpoint_downloaded, MAPTR_WEIGHTS_PATH
 from models.experimental.MapTR.tt.ttnn_transformer import TtMapTRPerceptionTransformer
 from models.experimental.MapTR.tt.ttnn_encoder import TtBEVFormerEncoder

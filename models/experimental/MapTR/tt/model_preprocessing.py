@@ -11,13 +11,13 @@ from models.experimental.MapTR.reference.maptr import (
     MapTRPerceptionTransformer,
     MapTRDecoder,
 )
-from models.experimental.MapTR.reference.bevformer import (
-    BEVFormerEncoder,
+from models.experimental.MapTR.reference.bevformer_encoder import BEVFormerEncoder
+from models.experimental.MapTR.reference.bevformer_decoder import (
     DetectionTransformerDecoder,
     CustomMSDeformableAttention,
-    TemporalSelfAttention,
-    SpatialCrossAttention,
 )
+from models.experimental.MapTR.reference.bevformer_temporal_attention import TemporalSelfAttention
+from models.experimental.MapTR.reference.bevformer_spatial_attention import SpatialCrossAttention
 from models.experimental.MapTR.reference.dependency import ResNet, FPN
 
 

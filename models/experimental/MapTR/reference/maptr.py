@@ -46,12 +46,10 @@ from models.experimental.MapTR.reference.utils import (
     denormalize_2d_pts,
 )
 
-# Import BEVFormer modules from consolidated bevformer.py
-from models.experimental.MapTR.reference.bevformer import (
-    TemporalSelfAttention,
-    MSDeformableAttention3D,
-    CustomMSDeformableAttention,
-)
+# Import BEVFormer modules from source files
+from models.experimental.MapTR.reference.bevformer_temporal_attention import TemporalSelfAttention
+from models.experimental.MapTR.reference.bevformer_spatial_attention import MSDeformableAttention3D
+from models.experimental.MapTR.reference.bevformer_decoder import CustomMSDeformableAttention
 
 
 # ========== FUSERS Registry ==========
