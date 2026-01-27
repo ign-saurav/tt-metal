@@ -158,34 +158,45 @@ class PaliGemmaBackboneTTNN:
 
         if q_key in weights and k_key in weights and v_key in weights:
             # Get Q, K, V weights, transpose for TTNN linear, and convert to TTNN
-            wq_ttnn = ttnn.from_torch(
-                weights[q_key].T.contiguous(),  # [hidden, num_heads * head_dim]
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=self.device,
-            )
-            wk_ttnn = ttnn.from_torch(
-                weights[k_key].T.contiguous(),  # [hidden, num_kv_heads * head_dim]
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=self.device,
-            )
-            wv_ttnn = ttnn.from_torch(
-                weights[v_key].T.contiguous(),  # [hidden, num_kv_heads * head_dim]
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=self.device,
-            )
+            # wq_ttnn = ttnn.from_torch(
+            #     weights[q_key].T.contiguous(),  # [hidden, num_heads * head_dim]
+            #     dtype=ttnn.bfloat16,
+            #     layout=ttnn.TILE_LAYOUT,
+            #     device=self.device,
+            # )
+            # wk_ttnn = ttnn.from_torch(
+            #     weights[k_key].T.contiguous(),  # [hidden, num_kv_heads * head_dim]
+            #     dtype=ttnn.bfloat16,
+            #     layout=ttnn.TILE_LAYOUT,
+            #     device=self.device,
+            # )
+            # wv_ttnn = ttnn.from_torch(
+            #     weights[v_key].T.contiguous(),  # [hidden, num_kv_heads * head_dim]
+            #     dtype=ttnn.bfloat16,
+            #     layout=ttnn.TILE_LAYOUT,
+            #     device=self.device,
+            # )
 
-            # Concatenate using TTNN: [hidden, Q_dim + K_dim + V_dim]
-            block_weights["self_attn.wqkv"] = ttnn.concat(
-                [wq_ttnn, wk_ttnn, wv_ttnn],
-                dim=-1,
+            # # Concatenate using TTNN: [hidden, Q_dim + K_dim + V_dim]
+            # block_weights["self_attn.wqkv"] = ttnn.concat(
+            #     [wq_ttnn, wk_ttnn, wv_ttnn],
+            #     dim=-1,
+            #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            # )
+            # ttnn.deallocate(wq_ttnn)
+            # ttnn.deallocate(wk_ttnn)
+            # ttnn.deallocate(wv_ttnn)
+
+            block_weights["self_attn.wqkv"] = ttnn.from_torch(
+                torch.cat(
+                    [weights[q_key].T.contiguous(), weights[k_key].T.contiguous(), weights[v_key].T.contiguous()],
+                    dim=-1,
+                ),
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
-            ttnn.deallocate(wq_ttnn)
-            ttnn.deallocate(wk_ttnn)
-            ttnn.deallocate(wv_ttnn)
 
         for key, value in weights.items():
             if key.startswith(prefix):
@@ -234,34 +245,36 @@ class PaliGemmaBackboneTTNN:
 
         if q_key in weights and k_key in weights and v_key in weights:
             # Get Q, K, V weights, transpose for TTNN linear, and convert to TTNN
-            wq_ttnn = ttnn.from_torch(
-                weights[q_key].T.contiguous(),
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=self.device,
-            )
-            wk_ttnn = ttnn.from_torch(
-                weights[k_key].T.contiguous(),
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=self.device,
-            )
-            wv_ttnn = ttnn.from_torch(
-                weights[v_key].T.contiguous(),
-                dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
-                device=self.device,
-            )
+            # wq_ttnn = ttnn.from_torch(
+            #     weights[q_key].T.contiguous(),
+            #     dtype=ttnn.bfloat16,
+            #     layout=ttnn.TILE_LAYOUT,
+            #     device=self.device,
+            # )
+            # wk_ttnn = ttnn.from_torch(
+            #     weights[k_key].T.contiguous(),
+            #     dtype=ttnn.bfloat16,
+            #     layout=ttnn.TILE_LAYOUT,
+            #     device=self.device,
+            # )
+            # wv_ttnn = ttnn.from_torch(
+            #     weights[v_key].T.contiguous(),
+            #     dtype=ttnn.bfloat16,
+            #     layout=ttnn.TILE_LAYOUT,
+            #     device=self.device,
+            # )
 
             # Concatenate using TTNN: [hidden, Q_dim + K_dim + V_dim]
-            block_weights["self_attn.wqkv"] = ttnn.concat(
-                [wq_ttnn, wk_ttnn, wv_ttnn],
-                dim=-1,
+            block_weights["self_attn.wqkv"] = ttnn.from_torch(
+                torch.cat(
+                    [weights[q_key].T.contiguous(), weights[k_key].T.contiguous(), weights[v_key].T.contiguous()],
+                    dim=-1,
+                ),
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
-            ttnn.deallocate(wq_ttnn)
-            ttnn.deallocate(wk_ttnn)
-            ttnn.deallocate(wv_ttnn)
 
         for key, value in weights.items():
             if key.startswith(prefix):
