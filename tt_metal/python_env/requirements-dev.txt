@@ -104,6 +104,9 @@ mmcv==2.2.0 # Required for UniAD model
 casadi==3.7.1 # Required for UniAD model
 mmcv-full==1.7.2 #Required for UniAD model
 
+mmengine==0.10.7            # Required for BEVFormerV2 model
+nuscenes-devkit==1.2.0      # Required for BEVFormerV2 model
+pyquaternion==0.9.9         # Required for BEVFormerV2 model
 # CPU-only torch for x86_64 to avoid installing CUDA dependencies on dev machines
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.7.1 ; platform_machine == 'x86_64'

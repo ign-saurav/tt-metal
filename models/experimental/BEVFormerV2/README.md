@@ -162,13 +162,15 @@ All tests use PCC validation with threshold: 0.97.
 ## References
 
 ### Paper
-
-- **BEVFormer: Learning Bird's-Eye-View Representation from Multi-Camera Images with Spatiotemporal Transformers**
-  - Authors: Zhiqi Li, Wenhai Wang, Hongyang Li, et al.
-  - arXiv: [https://arxiv.org/abs/2203.17270](https://arxiv.org/abs/2203.17270)
-  - Year: 2022
-
 - **BEVFormer v2: Adapting Modern Image Backbones to Bird's-Eye-View Recognition via Perspective Supervision**
   - Authors: Zhiqi Li, Wenhai Chen, Hongyang Li, et al.
   - arXiv: [https://arxiv.org/abs/2211.10439](https://arxiv.org/abs/2211.10439)
   - Year: 2023
+
+### Source Code implementation and licenses
+- ***BEVFormerV2**: https://github.com/fundamentalvision/BEVFormer(Apache License 2.0)
+- **MMCV**: https://github.com/open-mmlab/mmcv/tree/v1.4.0/mmcv (Apache License 2.0)
+- **MMSegmentation**: https://github.com/open-mmlab/mmsegmentation/tree/v0.14.1/mmseg (Apache License 2.0)
+- **MMDetection3D**: https://github.com/open-mmlab/mmdetection3d/tree/v0.17.1/mmdet3d (Apache License 2.0)
+- **MMDetection**: https://github.com/open-mmlab/mmdetection/tree/v2.14.0/mmdet (Apache License 2.0)
+- **MMEngine**: https://github.com/open-mmlab/mmengine/blob/main/mmengine (Apache License 2.0)
