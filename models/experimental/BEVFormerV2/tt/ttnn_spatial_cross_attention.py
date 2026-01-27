@@ -2,7 +2,6 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-import warnings
 import ttnn
 from models.experimental.BEVFormerV2.tt.ttnn_utils import multi_scale_deformable_attn
 
@@ -184,14 +183,6 @@ class TtMSDeformableAttention3D:
             if (not isinstance(n, int)) or (n < 0):
                 raise ValueError("invalid input for _is_power_of_2: {} (type: {})".format(n, type(n)))
             return (n & (n - 1) == 0) and n != 0
-
-        if not _is_power_of_2(dim_per_head):
-            warnings.warn(
-                "You'd better set embed_dims in "
-                "MultiScaleDeformAttention to make "
-                "the dimension of each attention head a power of 2 "
-                "which is more efficient in our CUDA implementation."
-            )
 
         self.im2col_step = im2col_step
         self.embed_dims = embed_dims

@@ -219,7 +219,7 @@ class BEVFormerEncoder(nn.Module):
             self.layers.append(BEVFormerLayer(**transformer_layers))
 
     @staticmethod
-    def get_reference_points(H, W, Z=8, num_points_in_pillar=4, dim="3d", bs=1, device="cuda", dtype=torch.float):
+    def get_reference_points(H, W, Z=8, num_points_in_pillar=4, dim="3d", bs=1, device=None, dtype=torch.float):
         if dim == "3d":
             zs = (
                 torch.linspace(0.5, Z - 0.5, num_points_in_pillar, dtype=dtype, device=device)
