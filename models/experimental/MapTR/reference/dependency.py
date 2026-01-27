@@ -2,20 +2,16 @@
 # SPDX-License-Identifier: Apache-2.0
 
 ##########################################################################
-# Adapted from MMDetection and MMDetection3D
+# Adapted from MMCV, MMSegmentation, MMDetection, and MMDetection3D
 # Original sources:
-# - MMDetection: https://github.com/open-mmlab/mmdetection
-# - MMDetection3D: https://github.com/open-mmlab/mmdetection3d
+# - MMDetection: https://github.com/open-mmlab/mmdetection3d/tree/v0.17.1/mmdet3d
+# - MMDetection3D: https://github.com/open-mmlab/mmdetection3d/tree/v0.17.1/mmdet3d
+# - MMSegmentation: https://github.com/open-mmlab/mmsegmentation/tree/v0.14.1/mmseg
+# - MMEngine: https://github.com/open-mmlab/mmengine/blob/main/mmengine
+# - MMCV: https://github.com/open-mmlab/mmcv/tree/v1.4.0/mmcv
 # - MapTR: https://github.com/hustvl/MapTR/tree/main/projects/mmdet3d_plugin
 # Original work Copyright (c) OpenMMLab.
 # Licensed under the Apache License, Version 2.0.
-##########################################################################
-# This file consolidates dependencies from MMDetection/MMDetection3D including:
-# - Registry system, config management, and build utilities
-# - Base classes for detectors, heads, transformers, and modules
-# - Neural network components (ResNet, FPN, attention mechanisms)
-# - Data structures and utilities (bbox, points, containers)
-# - Training utilities (losses, optimizers, samplers)
 ##########################################################################
 
 from __future__ import division
@@ -230,10 +226,6 @@ class Registry:
         self._children = dict()
         self._scope = self.infer_scope() if scope is None else scope
 
-        # self.build_func will be set with the following priority:
-        # 1. build_func
-        # 2. parent.build_func
-        # 3. build_from_cfg
         if build_func is None:
             if parent is not None:
                 self.build_func = parent.build_func
@@ -276,8 +268,6 @@ class Registry:
         Returns:
             scope (str): The inferred scope name.
         """
-        # inspect.stack() trace where this function is called, the index-2
-        # indicates the frame where `infer_scope()` is called
         filename = inspect.getmodule(inspect.stack()[2][0]).__name__
         split_filename = filename.split(".")
         return split_filename[0]
@@ -365,7 +355,6 @@ class Registry:
 
         assert isinstance(registry, Registry)
         assert registry.scope is not None
-        # assert registry.scope not in self.children, f"scope {registry.scope} exists in {self.name} registry"
         self.children[registry.scope] = registry
 
     def _register_module(self, module_class, module_name=None, force=False):
@@ -435,12 +424,10 @@ class Registry:
                 "name must be either of None, an instance of str or a sequence" f"  of str, but got {type(name)}"
             )
 
-        # use it as a normal method: x.register_module(module=SomeClass)
         if module is not None:
             self._register_module(module_class=module, module_name=name, force=force)
             return module
 
-        # use it as a decorator: @x.register_module()
         def _register(cls):
             self._register_module(module_class=cls, module_name=name, force=force)
             return cls
@@ -618,20 +605,11 @@ def get_logger(name, log_file=None, log_level=logging.INFO, file_mode="w"):
     logger = logging.getLogger(name)
     if name in logger_initialized:
         return logger
-    # handle hierarchical names
-    # e.g., logger "a" is initialized, then logger "a.b" will skip the
     # initialization since it is a child of "a".
     for logger_name in logger_initialized:
         if name.startswith(logger_name):
             return logger
 
-    # handle duplicate logs to the console
-    # Starting in 1.8.0, PyTorch DDP attaches a StreamHandler <stderr> (NOTSET)
-    # to the root logger. As logger.propagate is True by default, this root
-    # level handler causes logging messages from rank>0 processes to
-    # unexpectedly show up on the console, creating much unwanted clutter.
-    # To fix this issue, we set the root logger's StreamHandler, if any, to log
-    # at the ERROR level.
     for handler in logger.root.handlers:
         if type(handler) is logging.StreamHandler:
             handler.setLevel(logging.ERROR)
@@ -646,9 +624,6 @@ def get_logger(name, log_file=None, log_level=logging.INFO, file_mode="w"):
 
     # only rank 0 will add a FileHandler
     if rank == 0 and log_file is not None:
-        # Here, the default behaviour of the official logger is 'a'. Thus, we
-        # provide an interface to change the file mode to the default
-        # behaviour.
         file_handler = logging.FileHandler(log_file, file_mode)
         handlers.append(file_handler)
 
@@ -737,11 +712,7 @@ def digit_version(version_str: str, length: int = 4):
 
 
 def load_ext(name, funcs):
-    """Load extension module.
-
-    For CPU-only version, this will try to import from mmcv._ext if available,
-    otherwise return a mock module with stub functions.
-    """
+    """Load extension module."""
     if torch.__version__ != "parrots":
         try:
             # Try to import the actual extension module
@@ -751,8 +722,6 @@ def load_ext(name, funcs):
                     warnings.warn(f"{fun} miss in module mmcv._ext")
             return ext
         except (ImportError, ModuleNotFoundError):
-            # For CPU-only, create a mock module with stub functions
-            # These will raise NotImplementedError if actually called
             mock_ext = ModuleType("_ext")
             for fun in funcs:
 
@@ -810,27 +779,14 @@ def multi_scale_deformable_attn_pytorch(value, value_spatial_shapes, sampling_lo
     _, num_queries, num_heads, num_levels, num_points, _ = sampling_locations.shape
     value_list = value.split([H_ * W_ for H_, W_ in value_spatial_shapes], dim=1)
     sampling_grids = 2 * sampling_locations - 1
-    # ===== END CHECK =====
-
     sampling_value_list = []
     for level, (H_, W_) in enumerate(value_spatial_shapes):
-        # bs, H_*W_, num_heads, embed_dims ->
-        # bs, H_*W_, num_heads*embed_dims ->
-        # bs, num_heads*embed_dims, H_*W_ ->
-        # bs*num_heads, embed_dims, H_, W_
         value_l_ = value_list[level].flatten(2).transpose(1, 2).reshape(bs * num_heads, embed_dims, H_, W_)
-        # bs, num_queries, num_heads, num_points, 2 ->
-        # bs, num_heads, num_queries, num_points, 2 ->
-        # bs*num_heads, num_queries, num_points, 2
         sampling_grid_l_ = sampling_grids[:, :, :, level].transpose(1, 2).flatten(0, 1)
-        # bs*num_heads, embed_dims, num_queries, num_points
         sampling_value_l_ = F.grid_sample(
             value_l_, sampling_grid_l_, mode="bilinear", padding_mode="zeros", align_corners=False
         )
         sampling_value_list.append(sampling_value_l_)
-    # (bs, num_queries, num_heads, num_levels, num_points) ->
-    # (bs, num_heads, num_queries, num_levels, num_points) ->
-    # (bs, num_heads, 1, num_queries, num_levels*num_points)
     attention_weights = attention_weights.transpose(1, 2).reshape(
         bs * num_heads, 1, num_queries, num_levels * num_points
     )
@@ -901,11 +857,6 @@ class ConfigDict(Dict):
         else:
             return value
         raise ex
-
-
-# It depends on yapf, mmcv.utils.misc, mmcv.utils.path
-# For now, we include ConfigDict which is the most critical part
-# The full Config class can be added if needed, but it requires many more dependencies
 
 
 # Full implementation at: https://raw.githubusercontent.com/open-mmlab/mmcv/v1.4.0/mmcv/utils/config.py
@@ -1143,8 +1094,6 @@ class BaseModule(nn.Module, metaclass=ABCMeta):
         # in low levels has a higher priority.
 
         super(BaseModule, self).__init__()
-        # define default value of init_cfg instead of hard code
-        # in init_weights() function
         self._is_init = False
 
         self.init_cfg = copy.deepcopy(init_cfg)
@@ -1159,22 +1108,8 @@ class BaseModule(nn.Module, metaclass=ABCMeta):
         is_top_level_module = False
         # check if it is top-level module
         if not hasattr(self, "_params_init_info"):
-            # The `_params_init_info` is used to record the initialization
-            # information of the parameters
-            # the key should be the obj:`nn.Parameter` of model and the value
-            # should be a dict containing
-            # - init_info (str): The string that describes the initialization.
-            # - tmp_mean_value (FloatTensor): The mean of the parameter,
-            #       which indicates whether the parameter has been modified.
-            # this attribute would be deleted after all parameters
-            # is initialized.
             self._params_init_info = defaultdict(dict)
             is_top_level_module = True
-
-            # Initialize the `_params_init_info`,
-            # When detecting the `tmp_mean_value` of
-            # the corresponding parameter is changed, update related
-            # initialization information
             for name, param in self.named_parameters():
                 self._params_init_info[param]["init_info"] = (
                     f"The value is the same before and "
@@ -1183,30 +1118,18 @@ class BaseModule(nn.Module, metaclass=ABCMeta):
                 )
                 self._params_init_info[param]["tmp_mean_value"] = param.data.mean()
 
-            # pass `params_init_info` to all submodules
-            # All submodules share the same `params_init_info`,
-            # so it will be updated when parameters are
-            # modified at any level of the model.
             for sub_module in self.modules():
                 sub_module._params_init_info = self._params_init_info
 
-        # Get the initialized logger, if not exist,
-        # create a logger named `mmcv`
         logger_names = list(logger_initialized.keys())
         logger_name = logger_names[0] if logger_names else "mmcv"
 
-        # and mmcv.cnn.utils.weight_init.update_init_info
-        # These will need to be added as dependencies
-        # For now, we provide a minimal implementation
         module_name = self.__class__.__name__
         if not self._is_init:
             if self.init_cfg:
                 print_log(f"initialize {module_name} with init_cfg {self.init_cfg}", logger=logger_name)
                 # TODO: Call initialize(self, self.init_cfg) when mmcv.cnn is added
                 if isinstance(self.init_cfg, dict):
-                    # prevent the parameters of
-                    # the pre-trained model
-                    # the `init_weights`
                     if self.init_cfg.get("type") == "Pretrained":
                         return
 
@@ -1365,8 +1288,6 @@ def auto_fp16(apply_to=None, out_fp32=False):
     def auto_fp16_wrapper(old_func):
         @functools.wraps(old_func)
         def new_func(*args, **kwargs):
-            # check if the module has set the attribute `fp16_enabled`, if not,
-            # just fallback to the original method.
             if not isinstance(args[0], torch.nn.Module):
                 raise TypeError("@auto_fp16 can only be used to decorate the " "method of nn.Module")
             if not (hasattr(args[0], "fp16_enabled") and args[0].fp16_enabled):
@@ -1431,13 +1352,10 @@ def force_fp32(apply_to=None, out_fp16=False):
     def force_fp32_wrapper(old_func):
         @functools.wraps(old_func)
         def new_func(*args, **kwargs):
-            # check if the module has set the attribute `fp16_enabled`, if not,
-            # just fallback to the original method.
             if not isinstance(args[0], torch.nn.Module):
                 raise TypeError("@force_fp32 can only be used to decorate the " "method of nn.Module")
             if not (hasattr(args[0], "fp16_enabled") and args[0].fp16_enabled):
                 return old_func(*args, **kwargs)
-            # get the arg spec of the decorated method
             args_info = getfullargspec(old_func)
             # get the argument names to be casted
             args_to_cast = args_info.args if apply_to is None else apply_to
@@ -2058,8 +1976,6 @@ class MultiScaleDeformableAttention(BaseModule):
         self.dropout = nn.Dropout(dropout)
         self.batch_first = batch_first
 
-        # you'd better set dim_per_head to a power of 2
-        # which is more efficient in the CUDA implementation
         def _is_power_of_2(n):
             if (not isinstance(n, int)) or (n < 0):
                 raise ValueError("invalid input for _is_power_of_2: {} (type: {})".format(n, type(n)))
@@ -2416,8 +2332,6 @@ def build_padding_layer(cfg, padding):
 try:
     from torch.nn.modules.instancenorm import _InstanceNorm
 except ImportError:
-    # _InstanceNorm might not be available in all PyTorch versions
-    # Use a fallback that checks for instance norm types
     _InstanceNorm = (nn.InstanceNorm1d, nn.InstanceNorm2d, nn.InstanceNorm3d)
 
 
@@ -2588,13 +2502,6 @@ class ConvModule(nn.Module):
             return None
 
     def init_weights(self):
-        # 1. It is mainly for customized conv layers with their own
-        #    initialization manners by calling their own ``init_weights()``,
-        #    and we do not want ConvModule to override the initialization.
-        # 2. For customized conv layers without their own initialization
-        #    manners (that is, they don't have their own ``init_weights()``)
-        #    and PyTorch's conv layers, they will be initialized by
-        #    this method with default ``kaiming_init``.
         if not hasattr(self.conv, "init_weights"):
             if self.with_activation and self.act_cfg["type"] == "LeakyReLU":
                 nonlinearity = "leaky_relu"
@@ -3338,10 +3245,6 @@ VOXEL_ENCODERS = _MODELS_DET
 MIDDLE_ENCODERS = _MODELS_DET
 FUSION_LAYERS = _MODELS_DET
 
-# Register ResNet with BACKBONES now that BACKBONES is defined
-# ResNet is defined earlier in the file (around line 2334)
-# We'll register it at the end of the file after all classes are defined
-
 
 def build_head(cfg):
     """Build head."""
@@ -3692,10 +3595,6 @@ class DETRHead(AnchorFreeHead):
         self.train_cfg = train_cfg
         self.test_cfg = test_cfg
         self.fp16_enabled = False
-        # self.loss_cls = build_loss(loss_cls) if isinstance(loss_cls, dict) else loss_cls
-        # self.loss_bbox = build_loss(loss_bbox) if isinstance(loss_bbox, dict) else loss_bbox
-        # self.loss_iou = build_loss(loss_iou) if isinstance(loss_iou, dict) else loss_iou
-
         if isinstance(loss_cls, dict):
             use_sigmoid = loss_cls.get("use_sigmoid", True)
         elif loss_cls is not None:
@@ -5292,8 +5191,6 @@ class LoadMultiViewImageFromFiles(object):
         if self.to_float32:
             img = img.astype(np.float32)
         results["filename"] = valid_filenames
-        # unravel to list, see `DefaultFormatBundle` in formating.py
-        # which will transpose each image separately and then stack into array
         results["img"] = [img[..., i] for i in range(img.shape[-1])]
         results["img_shape"] = img.shape
         results["ori_shape"] = img.shape
@@ -6138,8 +6035,6 @@ class FPN(BaseModule):
         # build top-down path
         used_backbone_levels = len(laterals)
         for i in range(used_backbone_levels - 1, 0, -1):
-            # In some cases, fixing `scale factor` (e.g. 2) is preferred, but
-            #  it cannot co-exist with `size` in `F.interpolate`.
             if "scale_factor" in self.upsample_cfg:
                 laterals[i - 1] += F.interpolate(laterals[i], **self.upsample_cfg)
             else:
@@ -6175,7 +6070,6 @@ class FPN(BaseModule):
         return tuple(outs)
 
 
-# Register ResNet with BACKBONES at the end of the file
 BACKBONES.register_module(name="ResNet", module=ResNet)
 
 
@@ -6257,12 +6151,7 @@ def build_model(cfg, train_cfg=None, test_cfg=None):
 
     Should be deprecated in the future.
     """
-    # For inference-only, always use build_detector
-    # build_detector is defined earlier in this file (line ~3851)
     return DETECTORS.build(cfg, default_args=dict(train_cfg=train_cfg, test_cfg=test_cfg))
-
-
-# PIPELINES registry is already defined at line 4494, don't redefine it here
 
 
 @PIPELINES.register_module()
@@ -6390,21 +6279,6 @@ def _concat_dataset(cfg, default_args=None):
 
 
 def build_dataset(cfg, default_args=None):
-    # if isinstance(cfg, (list, tuple)):
-    #     dataset = ConcatDataset([build_dataset(c, default_args) for c in cfg])
-    # elif cfg["type"] == "ConcatDataset":
-    #     dataset = ConcatDataset(
-    #         [build_dataset(c, default_args) for c in cfg["datasets"]], cfg.get("separate_eval", True)
-    #     )
-    # elif cfg["type"] == "RepeatDataset":
-    #     dataset = RepeatDataset(build_dataset(cfg["dataset"], default_args), cfg["times"])
-    # elif cfg["type"] == "ClassBalancedDataset":
-    #     dataset = ClassBalancedDataset(build_dataset(cfg["dataset"], default_args), cfg["oversample_thr"])
-    # # elif cfg["type"] == "CBGSDataset":
-    # #     dataset = CBGSDataset(build_dataset(cfg["dataset"], default_args))
-    # elif isinstance(cfg.get("ann_file"), (list, tuple)):
-    #     dataset = _concat_dataset(cfg, default_args)
-    # else:
     dataset = build_from_cfg(cfg, DATASETS, default_args)
 
     return dataset
@@ -6430,8 +6304,6 @@ def wrap_fp16_model(model):
     if TORCH_VERSION == "parrots" or digit_version(TORCH_VERSION) < digit_version("1.6.0"):
         # convert model to fp16
         model.half()
-        # patch_norm_fp32 removed - not needed for inference-only
-    # set `fp16_enabled` flag
     for m in model.modules():
         if hasattr(m, "fp16_enabled"):
             m.fp16_enabled = True
@@ -6625,7 +6497,6 @@ def load_checkpoint(model, filename, map_location=None, strict=False, logger=Non
     return checkpoint
 
 
-# PyTorch implementation without CUDA dependencies
 def dynamic_voxelize_pytorch(points, voxel_size, coors_range, max_points=-1):
     """Pure PyTorch implementation of dynamic voxelization."""
     voxel_size = torch.tensor(voxel_size, dtype=points.dtype, device=points.device)
@@ -6995,5 +6866,5 @@ def bev_pool(feats, coords, B, D, H, W):
     return x
 
 
-# Import build_dataloader at the end of the file after all dependencies are defined to avoid circular import
+# Import build_dataloader
 from models.experimental.MapTR.reference.datasets import build_dataloader  # noqa: F401
