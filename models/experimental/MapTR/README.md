@@ -91,10 +91,12 @@ MapTR/
 ## Performance
 
 ### Single Device (BS=1, img_size=384x640) (N150):
-- End-to-end perf with 1CQ (no trace) is `~0.11` FPS
+- Device FPS: `~0.11`
 
 ### Multi Device (BS=1, img_size=384x640) (N300):
-- End-to-end perf with 1CQ (no trace) is `~0.24` FPS
+- Device FPS: `~0.24`
+- E2E FPS (Direct TTNN): `~0.04`
+- E2E FPS (1CQ + no trace): `~0.09`
 
 ## PCC (Pearson Correlation Coefficient) Values
 
