@@ -22,9 +22,6 @@ from models.experimental.MapTR.reference.dependency import BaseModule
 from models.experimental.MapTR.reference.dependency import deprecated_api_warning
 
 from models.experimental.MapTR.reference.dependency import ext_loader
-from models.experimental.MapTR.reference.bevformer_deformable_attn import (
-    MultiScaleDeformableAttnFunction_fp32,
-)
 
 ext_module = ext_loader.load_ext("_ext", ["ms_deform_attn_backward", "ms_deform_attn_forward"])
 
@@ -303,17 +300,7 @@ class CustomMSDeformableAttention(BaseModule):
             raise ValueError(
                 f"Last dim of reference_points must be" f" 2 or 4, but get {reference_points.shape[-1]} instead."
             )
-        if torch.cuda.is_available() and value.is_cuda:
-            # using fp16 deformable attention is unstable because it performs many sum operations
-            if value.dtype == torch.float16:
-                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
-            else:
-                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
-            output = MultiScaleDeformableAttnFunction.apply(
-                value, spatial_shapes, level_start_index, sampling_locations, attention_weights, self.im2col_step
-            )
-        else:
-            output = multi_scale_deformable_attn_pytorch(value, spatial_shapes, sampling_locations, attention_weights)
+        output = multi_scale_deformable_attn_pytorch(value, spatial_shapes, sampling_locations, attention_weights)
 
         output = self.output_proj(output)
 

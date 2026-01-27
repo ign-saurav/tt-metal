@@ -46,7 +46,7 @@ class BEVFormerEncoder(TransformerLayerSequence):
         self.fp16_enabled = False
 
     @staticmethod
-    def get_reference_points(H, W, Z=8, num_points_in_pillar=4, dim="3d", bs=1, device="cuda", dtype=torch.float):
+    def get_reference_points(H, W, Z=8, num_points_in_pillar=4, dim="3d", bs=1, device=None, dtype=torch.float):
         """Get the reference points used in SCA and TSA.
         Args:
             H, W: spatial shape of bev.
@@ -58,6 +58,8 @@ class BEVFormerEncoder(TransformerLayerSequence):
             Tensor: reference points used in decoder, has \
                 shape (bs, num_keys, num_levels, 2).
         """
+        if device is None:
+            device = torch.device("cpu")
 
         # reference points in 3D space, used in spatial cross-attention (SCA)
         if dim == "3d":

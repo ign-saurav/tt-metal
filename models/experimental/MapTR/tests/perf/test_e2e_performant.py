@@ -249,8 +249,6 @@ def test_maptr_e2e_performant(
     Performance test that follows exact same structure as test_maptr in test_tt_maptr.py.
     """
     torch.manual_seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(42)
 
     config = create_maptr_config()
 

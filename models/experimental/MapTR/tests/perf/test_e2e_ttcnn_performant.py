@@ -316,8 +316,6 @@ def test_maptr_e2e_performant(
     call to avoid persistent tensor deallocation issues.
     """
     torch.manual_seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(42)
 
     config = create_maptr_config()
 

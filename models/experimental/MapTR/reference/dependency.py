@@ -3370,8 +3370,7 @@ def build_detector(cfg, train_cfg=None, test_cfg=None):
 
 
 def fp16_clamp(x, min=None, max=None):
-    if not x.is_cuda and x.dtype == torch.float16:
-        # clamp for cpu float16, tensor fp16 has no clamp implementation
+    if x.dtype == torch.float16:
         return x.float().clamp(min, max).half()
     return x.clamp(min, max)
 
@@ -5129,94 +5128,6 @@ class BaseInstance3DBoxes(object):
             torch.Tensor: A box of shape (4,).
         """
         yield from self.tensor
-
-    @classmethod
-    def height_overlaps(cls, boxes1, boxes2, mode="iou"):
-        """Calculate height overlaps of two boxes.
-
-        Args:
-            boxes1 (BaseInstance3DBoxes): Boxes 1 contain N boxes.
-            boxes2 (BaseInstance3DBoxes): Boxes 2 contain M boxes.
-            mode (str, optional): Mode of iou calculation. Defaults to 'iou'.
-
-        Returns:
-            torch.Tensor: Calculated iou of boxes.
-        """
-        assert isinstance(boxes1, BaseInstance3DBoxes)
-        assert isinstance(boxes2, BaseInstance3DBoxes)
-        assert type(boxes1) == type(boxes2), (
-            '"boxes1" and "boxes2" should' f"be in the same type, got {type(boxes1)} and {type(boxes2)}."
-        )
-
-        boxes1_top_height = boxes1.top_height.view(-1, 1)
-        boxes1_bottom_height = boxes1.bottom_height.view(-1, 1)
-        boxes2_top_height = boxes2.top_height.view(1, -1)
-        boxes2_bottom_height = boxes2.bottom_height.view(1, -1)
-
-        heighest_of_bottom = torch.max(boxes1_bottom_height, boxes2_bottom_height)
-        lowest_of_top = torch.min(boxes1_top_height, boxes2_top_height)
-        overlaps_h = torch.clamp(lowest_of_top - heighest_of_bottom, min=0)
-        return overlaps_h
-
-    @classmethod
-    def overlaps(cls, boxes1, boxes2, mode="iou"):
-        """Calculate 3D overlaps of two boxes.
-
-        Args:
-            boxes1 (BaseInstance3DBoxes): Boxes 1 contain N boxes.
-            boxes2 (BaseInstance3DBoxes): Boxes 2 contain M boxes.
-            mode (str, optional): Mode of iou calculation. Defaults to 'iou'.
-
-        Returns:
-            torch.Tensor: Calculated iou of boxes' heights.
-        """
-        assert isinstance(boxes1, BaseInstance3DBoxes)
-        assert isinstance(boxes2, BaseInstance3DBoxes)
-        assert type(boxes1) == type(boxes2), (
-            '"boxes1" and "boxes2" should' f"be in the same type, got {type(boxes1)} and {type(boxes2)}."
-        )
-
-        assert mode in ["iou", "iof"]
-
-        rows = len(boxes1)
-        cols = len(boxes2)
-        if rows * cols == 0:
-            return boxes1.tensor.new(rows, cols)
-
-        overlaps_h = cls.height_overlaps(boxes1, boxes2)
-
-        try:
-            from mmdet3d.ops.iou3d import iou3d_cuda
-
-            boxes1_bev = xywhr2xyxyr(boxes1.bev)
-            boxes2_bev = xywhr2xyxyr(boxes2.bev)
-
-            overlaps_bev = boxes1_bev.new_zeros((boxes1_bev.shape[0], boxes2_bev.shape[0])).cuda()
-            iou3d_cuda.boxes_overlap_bev_gpu(
-                boxes1_bev.contiguous().cuda(), boxes2_bev.contiguous().cuda(), overlaps_bev
-            )
-
-            overlaps_3d = overlaps_bev.to(boxes1.device) * overlaps_h
-
-            volume1 = boxes1.volume.view(-1, 1)
-            volume2 = boxes2.volume.view(1, -1)
-
-            if mode == "iou":
-                iou3d = overlaps_3d / torch.clamp(volume1 + volume2 - overlaps_3d, min=1e-8)
-            else:
-                iou3d = overlaps_3d / torch.clamp(volume1, min=1e-8)
-
-            return iou3d
-        except ImportError:
-            overlaps_bev = boxes1.tensor.new_zeros(rows, cols)
-            overlaps_3d = overlaps_bev * overlaps_h
-            volume1 = boxes1.volume.view(-1, 1)
-            volume2 = boxes2.volume.view(1, -1)
-            if mode == "iou":
-                iou3d = overlaps_3d / torch.clamp(volume1 + volume2 - overlaps_3d, min=1e-8)
-            else:
-                iou3d = overlaps_3d / torch.clamp(volume1, min=1e-8)
-            return iou3d
 
     def new_box(self, data):
         """Create a new box object with data.
