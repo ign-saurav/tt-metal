@@ -131,15 +131,15 @@ class GraniteSpeechTTNN:
             self.max_generated_tokens + max_encoded_prompt_len <= self.paged_cache_max_seq_len
         ), f"max_generated_tokens ({self.max_generated_tokens}) needs to be <= than paged_cache_max_seq_len ({self.paged_cache_max_seq_len})"
 
-        logger.info("Starting prefill warmup...")
-        logits = self.generator.prefill_forward_text(
-            input_tokens_prefill_pt,  # Prefill warmup for all users, in case some users have different seqlens than others
-            page_table=self.page_table,
-            kv_cache=self.tt_kv_cache,
-            prompt_lens=decoding_pos,
-            enable_trace=False,
-        )
-        logger.info("Finished prefill warmup")
+        # logger.info("Starting prefill warmup...")
+        # logits = self.generator.prefill_forward_text(
+        #     input_tokens_prefill_pt,  # Prefill warmup for all users, in case some users have different seqlens than others
+        #     page_table=self.page_table,
+        #     kv_cache=self.tt_kv_cache,
+        #     prompt_lens=decoding_pos,
+        #     enable_trace=False,
+        # )
+        # logger.info("Finished prefill warmup")
 
         logger.info(f"Starting prefill...")
         logits = self.generator.prefill_forward_text(

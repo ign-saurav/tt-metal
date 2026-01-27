@@ -33,7 +33,7 @@ class GraniteSpeechTransformer(Transformer):
 
     def transform_and_embed_prefill_inputs_device(self, tokens, tt_page_table, tt_chunk_page_table):
         # tt_tokens = self.embd(tokens)
-        tt_tokens = ttnn.to_layout(tt_tokens, ttnn.TILE_LAYOUT)
+        tt_tokens = ttnn.to_layout(tokens, ttnn.TILE_LAYOUT)
         tt_tokens = ttnn.unsqueeze_to_4D(tt_tokens)
         return tt_tokens, tt_page_table, tt_chunk_page_table
 
