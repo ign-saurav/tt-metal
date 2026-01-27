@@ -42,8 +42,6 @@ _dim_ = 256
 _pos_dim_ = _dim_ // 2
 _ffn_dim_ = _dim_ * 2
 _num_levels_ = 1
-# bev_h_ = 50
-# bev_w_ = 50
 bev_h_ = 200
 bev_w_ = 100
 queue_length = 1  # each sequence contains `queue_length` frames.
@@ -152,12 +150,7 @@ model = dict(
             row_num_embed=bev_h_,
             col_num_embed=bev_w_,
         ),
-        loss_cls=dict(type="FocalLoss", use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=2.0)
-        # loss_bbox=dict(type='L1Loss', loss_weight=0.0),
-        # loss_iou=dict(type='GIoULoss', loss_weight=0.0),
-        # loss_pts=dict(type='PtsL1Loss',
-        #               loss_weight=5.0),
-        # loss_dir=dict(type='PtsDirCosLoss', loss_weight=0.005)
+        loss_cls=dict(type="FocalLoss", use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=2.0),
     ),
 )
 
@@ -182,20 +175,6 @@ model = dict(
 dataset_type = "CustomNuScenesLocalMapDataset"
 data_root = "models/experimental/MapTR/resources/nuScenes/"
 file_client_args = dict(backend="disk")
-
-
-# train_pipeline = [
-#     dict(type='LoadMultiViewImageFromFiles', to_float32=True),
-#     dict(type='PhotoMetricDistortionMultiViewImage'),
-#     dict(type='LoadAnnotations3D', with_bbox_3d=True, with_label_3d=True, with_attr_label=False),
-#     dict(type='ObjectRangeFilter', point_cloud_range=point_cloud_range),
-#     dict(type='ObjectNameFilter', classes=class_names),
-#     dict(type='NormalizeMultiviewImage', **img_norm_cfg),
-#     dict(type='RandomScaleImageMultiViewImage', scales=[0.5]),
-#     dict(type='PadMultiViewImage', size_divisor=32),
-#     dict(type='DefaultFormatBundle3D', class_names=class_names),
-#     dict(type='CustomCollect3D', keys=['gt_bboxes_3d', 'gt_labels_3d', 'img'])
-# ]
 
 test_pipeline = [
     dict(type="LoadMultiViewImageFromFiles", to_float32=True),
@@ -271,29 +250,8 @@ data = dict(
     nonshuffler_sampler=dict(type="DistributedSampler"),
 )
 
-# optimizer = dict(
-#     type='AdamW',
-#     lr=6e-4,
-#     paramwise_cfg=dict(
-#         custom_keys={
-#             'img_backbone': dict(lr_mult=0.1),
-#         }),
-#     weight_decay=0.01)
-
-# optimizer_config = dict(grad_clip=dict(max_norm=35, norm_type=2))
-# # learning policy
-# lr_config = dict(
-#     policy='CosineAnnealing',
-#     warmup='linear',
-#     warmup_iters=500,
-#     warmup_ratio=1.0 / 3,
-#     min_lr_ratio=1e-3)
 total_epochs = 24
-# total_epochs = 50
 evaluation = dict(interval=1, pipeline=test_pipeline)
-# evaluation = dict(interval=2, pipeline=test_pipeline, metric='chamfer')
-
-# runner = dict(type='EpochBasedRunner', max_epochs=total_epochs)
 
 log_config = dict(interval=50, hooks=[dict(type="TextLoggerHook"), dict(type="TensorboardLoggerHook")])
 fp16 = dict(loss_scale=512.0)
