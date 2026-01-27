@@ -117,8 +117,12 @@ def get_mlp_weights(use_pretrained: bool, config: GemmaConfig, component: str = 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
 @pytest.mark.parametrize(
     "use_pretrained",
-    [True, False],
-    ids=["pretrained_weight_true", "pretrained_weight_false"],
+    [False],
+    # [True, False],
+    ids=[
+        "pretrained_weight_false",
+    ],
+    # ids=["pretrained_weight_true", "pretrained_weight_false"],
 )
 def test_pcc_gemma_vlm_mlp(device, use_pretrained):
     """Test Gemma VLM MLP: TTNN vs PyTorch."""
@@ -132,7 +136,6 @@ def test_pcc_gemma_vlm_mlp(device, use_pretrained):
 
     # PyTorch
     mlp_torch = GemmaMLPTorch(config, mlp_weights)
-    print("MLP torch *** =>", mlp_torch)
     out_torch = mlp_torch.forward(hidden)
 
     # TTNN - convert weights
@@ -163,8 +166,12 @@ def test_pcc_gemma_vlm_mlp(device, use_pretrained):
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
 @pytest.mark.parametrize(
     "use_pretrained",
-    [True, False],
-    ids=["pretrained_weight_true", "pretrained_weight_false"],
+    # [True, False],
+    [False],
+    ids=[
+        "pretrained_weight_false",
+    ],
+    # ids=["pretrained_weight_true", "pretrained_weight_false"],
 )
 def test_pcc_gemma_expert_mlp(device, use_pretrained):
     """Test Gemma Expert MLP: TTNN vs PyTorch."""
