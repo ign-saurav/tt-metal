@@ -13,17 +13,14 @@ MapTR is a transformer-based model for detecting map elements (lane dividers, pe
 - **Input Resolution**: 1600x900 pixels (multi-view camera images from 6 cameras)
 
 ## Features
-
-- ✅ **Comprehensive testing**: PCC (Pearson Correlation Coefficient) tests for all components
-- ✅ **Demo visualization**: Full demo script with visualization capabilities
-- ✅ **Modular architecture**: Clean separation of PyTorch reference and TTNN implementations
+- **Comprehensive testing**: PCC (Pearson Correlation Coefficient) tests for all components
+- **Demo visualization**: Full demo script with visualization capabilities
+- **Modular architecture**: Clean separation of PyTorch reference and TTNN implementations
 
 ## Project Structure
 
 ```
 MapTR/
-├── chkpt/                          # Checkpoint directory
-│   └── downloaded_weights.pth      # Auto-downloaded model weights
 ├── demo/                           # Demo scripts
 │   ├── demo.py                     # Main inference demo
 │   └── processing.py                # Data generation utilities
@@ -33,7 +30,7 @@ MapTR/
 ├── reference/                      # Reference implementations and configs
 │   ├── config_maptr_tiny_r50_24e_bevformer.py  # Main config file
 │   ├── maptr.py                    # MapTR detector implementation
-│   ├── dependency.py               # Shared dependencies and utilities
+│   ├── dependency.py               # Shared dependencies and utilities from external libraries
 │   ├── datasets.py                 # Dataset builders and samplers
 │   ├── datasets_nuscenes.py        # NuScenes dataset implementation
 │   ├── datasets_nuscenes_map.py    # NuScenes map dataset implementation
@@ -49,9 +46,6 @@ MapTR/
 │   ├── download_chkpoint.py        # Checkpoint download utility
 │   └── nuScenes/                   # Sample data files
 │       └── samples/                # Sample camera images
-├── ttnn_vis/                       # Visualization outputs (generated during demo)
-│   └── [sample_id]/                # Per-sample visualization directories
-│       └── PRED_MAP_plot.png       # Predicted map visualization
 ├── tests/                          # Test suite
 │   ├── pcc/                        # PCC tests for numerical validation
 │   │   ├── test_backbone.py        # ResNet50 backbone test
@@ -236,17 +230,6 @@ The checkpoint download utility:
 - Downloads from Google Drive
 - Creates necessary directories
 
-## Development
-
-### Adding New Components
-
-When adding new TTNN components:
-
-1. Implement the TTNN version in `tt/` directory
-2. Create a corresponding PCC test in `tests/pcc/`
-3. Ensure the test uses `ensure_checkpoint_downloaded()` for checkpoint loading
-
-
 ## Troubleshooting
 
 ### Checkpoint Download Issues
@@ -282,17 +265,15 @@ SPDX-License-Identifier: Apache-2.0
 
 Copyright © 2026 Tenstorrent AI ULC
 
-## References
-
-- MapTR: [Original MapTR Paper](https://arxiv.org/abs/2208.14437)
-- BEVFormer: [BEVFormer Paper](https://arxiv.org/abs/2203.17270)
-- MMDetection3D: [MMDetection3D Framework](https://github.com/open-mmlab/mmdetection3d)
-
-## Source Implementation
-
-This implementation is adapted from:
+## Source Code Implementation and licenses
 - **MapTR**: https://github.com/hustvl/MapTR (MIT License)
-- **MMDetection3D**: https://github.com/open-mmlab/mmdetection3d (Apache License 2.0)
-- **MMDetection**: https://github.com/open-mmlab/mmdetection (Apache License 2.0)
+-  - MapTR: [Original MapTR Paper](https://arxiv.org/abs/2208.14437)
+-  - BEVFormer: [BEVFormer Paper](https://arxiv.org/abs/2203.17270)
+- **MMCV**: https://github.com/open-mmlab/mmcv/tree/v1.4.0/mmcv (Apache License 2.0)
+- **MMSegmentation**: https://github.com/open-mmlab/mmsegmentation/tree/v0.14.1/mmseg (Apache License 2.0)
+- **MMDetection3D**: https://github.com/open-mmlab/mmdetection3d/tree/v0.17.1/mmdet3d (Apache License 2.0)
+- **MMDetection**: https://github.com/open-mmlab/mmdetection/tree/v2.14.0/mmdet (Apache License 2.0)
+- **MMEngine**: https://github.com/open-mmlab/mmengine/blob/main/mmengine (Apache License 2.0)
+
 
 Original work Copyright (c) OpenMMLab. Licensed under the Apache License, Version 2.0.
