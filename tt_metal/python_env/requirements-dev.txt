@@ -99,8 +99,6 @@ efficientnet-pytorch==0.7.1
 mmcv==2.2.0 # Required for UniAD model
 casadi==3.7.1 # Required for UniAD model
 mmcv-full==1.7.2 #Required for UniAD model
-terminaltables #Required for MapTR model
-pycocotools #Required for MapTR model
 nuscenes-devkit #Required for MapTR model
 gdown #Required for MapTR model
 
