@@ -17,6 +17,7 @@ from loguru import logger
 
 from models.common.utility_functions import comp_pcc, run_for_wormhole_b0
 from models.experimental.MapTR.reference.maptr import MapTR
+from models.experimental.MapTR.resources.download_chkpoint import ensure_checkpoint_downloaded, MAPTR_WEIGHTS_PATH
 from models.experimental.MapTR.tt.ttnn_maptr import TtMapTR
 from models.experimental.MapTR.tt.model_preprocessing import (
     create_maptr_model_parameters,
@@ -24,9 +25,6 @@ from models.experimental.MapTR.tt.model_preprocessing import (
 )
 from models.perf.perf_utils import prep_perf_report
 from models.tt_cnn.tt.pipeline import PipelineConfig, create_pipeline_from_config
-
-
-MAPTR_WEIGHTS_PATH = "models/experimental/MapTR/chkpt/maptr_tiny_r50_24e_bevformer.pth"
 
 
 class ConfigDict(dict):
@@ -339,6 +337,7 @@ def test_maptr_e2e_performant(
         video_test_mode=False,
     )
 
+    ensure_checkpoint_downloaded(MAPTR_WEIGHTS_PATH)
     logger.info(f"Loading weights from {MAPTR_WEIGHTS_PATH}...")
     torch_model = load_maptr_weights(torch_model, MAPTR_WEIGHTS_PATH)
     torch_model.eval()
