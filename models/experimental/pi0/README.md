@@ -321,11 +321,61 @@ python models/experimental/pi0/tests/download_pretrained_weights.py
 | Action Dimension | 32 |
 | Action Horizon | 50 |
 
-## Future Optimizations
+## Performance Optimizations
 
 ### Trace + 2CQ (Two Command Queue)
 
-**Status:** Not yet implemented
+**Status:** ✅ Implemented
+
+Trace+2CQ optimization combines:
+- **Trace**: Pre-records model operations to reduce dispatch overhead
+- **2 Command Queues**: Overlaps input transfers with computation
+  - CQ0: Model operations (trace execution)
+  - CQ1: Input/output transfers
+
+**Usage:**
+
+```python
+from models.experimental.pi0.runner.performant_runner import PI0PerformantRunner
+
+# Create model
+model = PI0ModelTTNN(config, weight_loader, device)
+
+# Create performant runner
+runner = PI0PerformantRunner(model, device)
+
+# Capture trace (one-time setup)
+runner.capture_trace_2cq(
+    images=images,
+    img_masks=img_masks,
+    lang_tokens=lang_tokens,
+    lang_masks=lang_masks,
+    state=state,
+)
+
+# Run inference (repeated calls)
+output = runner.run(
+    images=images,
+    img_masks=img_masks,
+    lang_tokens=lang_tokens,
+    lang_masks=lang_masks,
+    state=state,
+)
+
+# Cleanup
+runner.release()
+```
+
+**Performance Test:**
+
+```bash
+# Run trace+2cq performance test
+pytest models/experimental/pi0/tests/perf/test_perf_ttnn_pi0_model_trace_2cq.py -v
+```
+
+**Device Requirements:**
+- `num_command_queues=2`
+- `trace_region_size=8000000` (or larger)
 
 ## License
 
