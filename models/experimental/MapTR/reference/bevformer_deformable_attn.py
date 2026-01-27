@@ -25,7 +25,7 @@ class MultiScaleDeformableAttnFunction_fp16(Function):
     def forward(
         ctx, value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, im2col_step
     ):
-        """GPU version of multi-scale deformable attention.
+        """Multi-scale deformable attention.
 
         Args:
             value (Tensor): The value has shape
@@ -63,7 +63,7 @@ class MultiScaleDeformableAttnFunction_fp16(Function):
     @once_differentiable
     @custom_bwd(device_type="cpu")
     def backward(ctx, grad_output):
-        """GPU version of backward function.
+        """Backward function.
 
         Args:
             grad_output (Tensor): Gradient
@@ -100,7 +100,7 @@ class MultiScaleDeformableAttnFunction_fp32(Function):
     def forward(
         ctx, value, value_spatial_shapes, value_level_start_index, sampling_locations, attention_weights, im2col_step
     ):
-        """GPU version of multi-scale deformable attention.
+        """Multi-scale deformable attention.
 
         Args:
             value (Tensor): The value has shape
@@ -139,7 +139,7 @@ class MultiScaleDeformableAttnFunction_fp32(Function):
     @once_differentiable
     @custom_bwd(device_type="cpu")
     def backward(ctx, grad_output):
-        """GPU version of backward function.
+        """Backward function.
 
         Args:
             grad_output (Tensor): Gradient

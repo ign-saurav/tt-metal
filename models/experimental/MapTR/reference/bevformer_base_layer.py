@@ -21,25 +21,6 @@ from models.experimental.MapTR.reference.dependency import BaseModule, ModuleLis
 from models.experimental.MapTR.reference.dependency import (
     TRANSFORMER_LAYER,
 )
-
-# Avoid BC-breaking of importing MultiScaleDeformableAttention from this file
-try:
-    from models.experimental.MapTR.reference.dependency import MultiScaleDeformableAttention  # noqa F401
-
-    warnings.warn(
-        ImportWarning(
-            "``MultiScaleDeformableAttention`` has been moved to "
-            "``mmcv.ops.multi_scale_deform_attn``, please change original path "  # noqa E501
-            "``from mmcv.cnn.bricks.transformer import MultiScaleDeformableAttention`` "  # noqa E501
-            "to ``from mmcv.ops.multi_scale_deform_attn import MultiScaleDeformableAttention`` "  # noqa E501
-        )
-    )
-except ImportError:
-    warnings.warn(
-        "Fail to import ``MultiScaleDeformableAttention`` from "
-        "``mmcv.ops.multi_scale_deform_attn``, "
-        "You should install ``mmcv-full`` if you need this module. "
-    )
 from models.experimental.MapTR.reference.dependency import build_feedforward_network, build_attention
 
 
