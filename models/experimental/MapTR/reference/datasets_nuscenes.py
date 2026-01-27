@@ -9,16 +9,15 @@
 ##########################################################################
 
 import copy
+import json
+import random
+from os import path as osp
 
 import numpy as np
-from models.experimental.MapTR.reference.dependency import DATASETS
-from models.experimental.MapTR.reference.dependency import NuScenesDataset
-from os import path as osp
 import torch
 from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
 
-# from .nuscnes_eval import NuScenesEval_custom  # Removed - not needed for demo
-# from reference.mmdet3d_plugin.models.utils.visual import save_tensor  # Removed - not needed for demo
+from models.experimental.MapTR.reference.dependency import DATASETS, DataContainer as DC, NuScenesDataset
 
 
 # Stub for NuScenesEval_custom if needed
@@ -27,15 +26,11 @@ class NuScenesEval_custom:
         pass
 
 
-from models.experimental.MapTR.reference.dependency import DataContainer as DC
-import random
-
-
 @DATASETS.register_module()
 class CustomNuScenesDataset(NuScenesDataset):
     """NuScenes Dataset.
 
-    This datset only add camera intrinsics and extrinsics to the results.
+    This dataset only adds camera intrinsics and extrinsics to the results.
     """
 
     def __init__(self, queue_length=4, bev_size=(200, 200), overlap_test=False, *args, **kwargs):
@@ -58,7 +53,6 @@ class CustomNuScenesDataset(NuScenesDataset):
         prev_indexs_list = list(range(index - self.queue_length, index))
         random.shuffle(prev_indexs_list)
         prev_indexs_list = sorted(prev_indexs_list[1:], reverse=True)
-        ##
 
         input_dict = self.get_data_info(index)
         if input_dict is None:
@@ -247,9 +241,8 @@ class CustomNuScenesDataset(NuScenesDataset):
             data_infos=self.data_infos,
         )
         self.nusc_eval.main(plot_examples=0, render_curves=False)
-        # record metrics
-        import json
 
+        # record metrics
         with open(osp.join(output_dir, "metrics_summary.json"), "r", encoding="utf-8") as f:
             metrics = json.load(f)
         detail = dict()
