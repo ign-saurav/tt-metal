@@ -2,11 +2,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-# ---------------------------------------------
-# Copyright (c) OpenMMLab. All rights reserved.
-# ---------------------------------------------
-#  Modified by Zhiqi Li
-# ---------------------------------------------
+##########################################################################
+# Adapted from BEVFormer (https://github.com/hustvl/MapTR/tree/main/projects/mmdet3d_plugin/bevformer).
+# Original work Copyright (c) OpenMMLab.
+# Modified by Zhiqi Li.
+# Licensed under the Apache License, Version 2.0.
+##########################################################################
 
 from models.experimental.MapTR.reference.bevformer_base_layer import MyCustomBaseTransformerLayer
 import copy
