@@ -137,7 +137,6 @@ model = dict(
         ),
         bbox_coder=dict(
             type="MapTRNMSFreeCoder",
-            # post_center_range=[-61.2, -61.2, -10.0, 61.2, 61.2, 10.0],
             post_center_range=[-15, -30, -15, -30, 15, 30, 15, 30],
             pc_range=point_cloud_range,
             max_num=50,
@@ -150,7 +149,6 @@ model = dict(
             row_num_embed=bev_h_,
             col_num_embed=bev_w_,
         ),
-        loss_cls=dict(type="FocalLoss", use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=2.0),
     ),
 )
 
