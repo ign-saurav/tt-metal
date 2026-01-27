@@ -8,7 +8,7 @@ import pytest
 
 from loguru import logger
 from ttnn.dot_access import make_dot_access_dict
-from ttnn.model_preprocessing import preprocess_model_parameters
+from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_module_args
 from models.common.utility_functions import comp_allclose, comp_pcc
 from models.experimental.detr3d.ttnn.custom_preprocessing import create_custom_mesh_preprocessor
 
@@ -172,6 +172,15 @@ def test_masked_transformer_encoder_inference(
     tt_args = Tt3DetrArgs()
     tt_args.device = device
     tt_args.parameters = make_dot_access_dict({"encoder": parameters})
+    tt_args.parameters.layer_args = {}
+    tt_args.parameters.layer_args = make_dot_access_dict(
+        {
+            "encoder": infer_ttnn_module_args(
+                model=reference_model, run_model=lambda model: reference_model(src=src, xyz=xyz), device=device
+            )
+        }
+    )
+
     tt_encoder = build_ttnn_encoder(tt_args)
 
     tt_src = ttnn.from_torch(

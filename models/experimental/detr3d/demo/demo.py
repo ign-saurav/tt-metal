@@ -10,10 +10,11 @@ import numpy as np
 from loguru import logger
 
 from models.experimental.detr3d.ttnn.model_3detr import build_ttnn_3detr
-from models.experimental.detr3d.reference.model_3detr import build_3detr
+from models.experimental.detr3d.ttnn.utils import box_post_processing as tt_box_post_processing
+from models.experimental.detr3d.reference.model_3detr import build_3detr, box_post_processing
 from models.experimental.detr3d.reference.model_config import Detr3dArgs
 from models.experimental.detr3d.reference.utils.dataset import build_dataset
-from ttnn.model_preprocessing import preprocess_model_parameters
+from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_module_args
 from models.experimental.detr3d.ttnn.custom_preprocessing import create_custom_mesh_preprocessor
 from models.common.utility_functions import comp_pcc
 from models.experimental.detr3d.reference.utils.ap_calculator import APCalculator
@@ -103,14 +104,6 @@ def run_detr3d_inference(
             device=ttnn_device,
         )
 
-        # Build TTNN model
-        logger.info("Building TTNN model...")
-        ttnn_args = Tt3DetrArgs()
-        ttnn_args.parameters = ref_module_parameters
-        ttnn_args.device = ttnn_device
-
-        ttnn_module, _ = build_ttnn_3detr(ttnn_args, dataset_config)
-
         # Initialize APCalculator for TTNN model
         ttnn_ap_calculator = APCalculator(
             dataset_config=dataset_config,
@@ -137,13 +130,72 @@ def run_detr3d_inference(
 
             # Run PyTorch reference inference
             with torch.no_grad():
-                ref_outputs = ref_module(inputs=inputs, encoder_only=encoder_only)
+                (
+                    cls_logits,
+                    center_offset,
+                    size_normalized,
+                    angle_logits,
+                    angle_residual_normalized,
+                    angle_residual,
+                    num_layers,
+                    query_xyz,
+                    point_cloud_dims,
+                ) = ref_module(inputs=inputs, encoder_only=encoder_only)
+                ref_outputs = box_post_processing(
+                    cls_logits,
+                    center_offset,
+                    size_normalized,
+                    angle_logits,
+                    angle_residual_normalized,
+                    angle_residual,
+                    num_layers,
+                    query_xyz,
+                    point_cloud_dims,
+                    dataset_config,
+                )
 
             # Accumulate AP for PyTorch model
             ref_ap_calculator.step_meter(ref_outputs, batch_data_label)
 
+            ref_module_parameters.layer_args = {}
+            ref_module_parameters.layer_args = infer_ttnn_module_args(
+                model=ref_module,
+                run_model=lambda model: ref_module(inputs=inputs, encoder_only=encoder_only),
+                device=ttnn_device,
+            )
+
+            # Build TTNN model
+            logger.info("Building TTNN model...")
+            ttnn_args = Tt3DetrArgs()
+            ttnn_args.parameters = ref_module_parameters
+            ttnn_args.device = ttnn_device
+
+            ttnn_module, _ = build_ttnn_3detr(ttnn_args, dataset_config)
+
             # Run TTNN model inference
-            tt_outputs = ttnn_module(inputs=inputs, encoder_only=encoder_only)
+            (
+                cls_logits,
+                center_offset,
+                size_normalized,
+                angle_logits,
+                angle_residual_normalized,
+                angle_residual,
+                num_layers,
+                torch_query_xyz,
+                torch_point_cloud_dims,
+            ) = ttnn_module(inputs=inputs, encoder_only=encoder_only)
+            tt_outputs = tt_box_post_processing(
+                cls_logits,
+                center_offset,
+                size_normalized,
+                angle_logits,
+                angle_residual_normalized,
+                angle_residual,
+                num_layers,
+                torch_query_xyz,
+                torch_point_cloud_dims,
+                dataset_config,
+            )
 
             # Convert ALL TTNN outputs to float32 for AP calculation
             logger.info("Converting TTNN outputs to float32 for AP calculation...")
@@ -165,7 +217,7 @@ def run_detr3d_inference(
             # Compare outputs (PCC)
             if not encoder_only:
                 logger.info(f"Comparing outputs for batch {batch_idx}...")
-                SKIP_KEYS = ["angle_continuous"]
+                SKIP_KEYS = ["angle_continuousk"]
 
                 for key in ref_outputs["outputs"]:
                     if key in SKIP_KEYS:
@@ -202,13 +254,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--dataset-root-dir",
         type=str,
-        required=True,
+        default="models/experimental/detr3d/resources/sungrgd/",
         help="Path to point cloud file (.npz format, e.g., 000001_pc.npz)",
     )
     parser.add_argument(
         "--test-ckpt",
         type=str,
-        default=None,
+        default="models/experimental/detr3d/resources/sunrgbd_masked_ep720.pth",
         help="Path to test checkpoint (.pth file)",
     )
     parser.add_argument("--seed", default=0, type=int)

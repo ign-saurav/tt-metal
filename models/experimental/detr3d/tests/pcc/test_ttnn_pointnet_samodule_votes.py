@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -13,6 +13,7 @@ from models.experimental.detr3d.common import load_torch_model_state
 from models.experimental.detr3d.reference.model_3detr import PointnetSAModuleVotes
 from models.experimental.detr3d.ttnn.pointnet_samodule_votes import TtnnPointnetSAModuleVotes
 from models.experimental.detr3d.ttnn.custom_preprocessing import create_custom_mesh_preprocessor
+from ttnn.model_preprocessing import infer_ttnn_module_args
 
 
 @pytest.mark.parametrize(
@@ -58,20 +59,25 @@ def test_pointnet_samodule_votes(
         npoint=npoint,
         mlp=mlp[:],
         normalize_xyz=normalize_xyz,
-    )
+    ).to(torch.bfloat16)
     load_torch_model_state(torch_model, weight_key_prefix)
 
-    xyz = torch.randn(xyz_shape)
+    xyz = torch.randn(xyz_shape, dtype=torch.bfloat16)
     if features_shape is not None:
-        features = torch.randn(features_shape)
+        features = torch.randn(features_shape, dtype=torch.bfloat16)
     else:
         features = None
     ref_out = torch_model(xyz=xyz, features=features, inds=None)
 
     parameters = preprocess_model_parameters(
-        initialize_model=lambda: torch_model.mlp_module.to(torch.bfloat16),
+        initialize_model=lambda: torch_model.to(torch.bfloat16),
         custom_preprocessor=create_custom_mesh_preprocessor(),
         device=device,
+    )
+
+    parameters.layer_args = {}
+    parameters.layer_args = infer_ttnn_module_args(
+        model=torch_model, run_model=lambda model: torch_model(xyz=xyz, features=features, inds=None), device=device
     )
 
     ttnn_model = TtnnPointnetSAModuleVotes(
@@ -81,6 +87,7 @@ def test_pointnet_samodule_votes(
         mlp=mlp[:],
         normalize_xyz=normalize_xyz,
         parameters=parameters,
+        layer_params=parameters.layer_args,
         device=device,
     )
 
@@ -91,6 +98,7 @@ def test_pointnet_samodule_votes(
             dtype=ttnn.bfloat16,
             device=device,
         )
+
     tt_output = ttnn_model(xyz=xyz, features=ttnn_features, inds=None)
 
     ttnn_torch_out = []

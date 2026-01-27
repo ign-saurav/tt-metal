@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -8,6 +8,70 @@ from typing import List
 from models.common.lightweightmodule import LightweightModule
 from models.experimental.detr3d.ttnn.shared_mlp import TtnnSharedMLP
 from models.experimental.detr3d.reference import torch_pointnet2_ops as pointnet2_utils
+from models.experimental.detr3d.ttnn.utils import TtnnMaxPool2DSlice
+
+from models.experimental.detr3d.ttnn.constant import ON_DEVICE
+
+
+# class TtnnBallQuery(LightweightModule):
+#     def __init__(
+#         self,
+#         device,
+#         radius,
+#         nsample,
+#     ):
+#         super().__init__()
+#         self.device = device
+#         self.radius = radius
+#         self.nsample = nsample
+
+#     def forward(self, xyz, new_xyz):
+#         # Get shapes
+#         b, m, _ = new_xyz.shape
+#         _, n, _ = xyz.shape
+#         radius2 = self.radius * self.radius
+
+#         # Compute pairwise distances
+#         # new_xyz: (b, m, 3) -> (b, m, 1, 3)
+#         new_xyz_expanded = ttnn.unsqueeze(new_xyz, 2)
+#         # xyz: (b, n, 3) -> (b, 1, n, 3)
+#         xyz_expanded = ttnn.unsqueeze(xyz, 1)
+
+#         # Compute difference: (b, m, n, 3)
+#         diff = ttnn.subtract(new_xyz_expanded, xyz_expanded)
+
+#         # Compute squared distances: (b, m, n)
+#         diff_squared = ttnn.multiply(diff, diff)
+#         dist2 = ttnn.sum(diff_squared, dim=3)
+
+#         # Create mask for points within radius
+#         radius2_tensor = ttnn.full((b, m, n), radius2, dtype=ttnn.float32, device=self.device, layout=ttnn.TILE_LAYOUT)
+#         mask = ttnn.lt(dist2, radius2_tensor)
+
+#         # Create index tensor
+#         arange_n = ttnn.arange(0, n, dtype=ttnn.int32, device=self.device)
+#         arange_n = ttnn.reshape(arange_n, (1, 1, n))
+#         arange_n = ttnn.expand(arange_n, (b, m, n))
+
+#         # Apply mask - set invalid indices to n+1
+#         invalid_value = ttnn.full((b, m, n), n + 1, dtype=ttnn.int32, device=self.device, layout=ttnn.TILE_LAYOUT)
+#         arange_n_masked = ttnn.where(mask, arange_n, invalid_value)
+
+#         # Sort to get closest indices first
+#         sorted_indices = ttnn.sort(arange_n_masked, dim=2)
+#         sorted_indices_tensor = sorted_indices[1]  # Get indices tensor
+
+#         # Convert to supported dtype using typecast (works on device tensors)
+#         sorted_indices_tensor = ttnn.typecast(sorted_indices_tensor, dtype=ttnn.uint32)
+#         first_nsample = sorted_indices_tensor[:, :, : self.nsample]
+
+#         # Handle invalid indices by replacing with first valid index
+#         invalid_mask = ttnn.eq(first_nsample, invalid_value[:, :, : self.nsample])
+#         first_valid = ttnn.unsqueeze(first_nsample[:, :, 0], 2)
+#         first_valid = ttnn.expand(first_valid, first_nsample.shape)
+#         result = ttnn.where(invalid_mask, first_valid, first_nsample)
+
+#         return result
 
 
 class TtnnBallQuery(LightweightModule):
@@ -56,7 +120,11 @@ class TtnnBallQuery(LightweightModule):
 
         # Sort to get closest indices first
         sorted_indices = ttnn.sort(arange_n_masked, dim=2)
-        first_nsample = sorted_indices[:, :, : self.nsample]
+        sorted_indices_tensor = sorted_indices[1]  # Get indices tensor
+
+        # Convert to supported dtype using typecast (works on device tensors)
+        sorted_indices_tensor = ttnn.typecast(sorted_indices_tensor, dtype=ttnn.uint32)
+        first_nsample = sorted_indices_tensor[:, :, : self.nsample]
 
         # Handle invalid indices by replacing with first valid index
         invalid_mask = ttnn.eq(first_nsample, invalid_value[:, :, : self.nsample])
@@ -89,20 +157,69 @@ class TtnnGroupingOperation(LightweightModule):
     def __init__(self):
         super().__init__()
 
+    # def forward(self, points, idx):
+    #     B, C, N = points.shape
+    #     _, npoint, nsample = idx.shape
+
+    #     idx = ttnn.typecast(idx, ttnn.uint32)
+    #     points_flat = ttnn.reshape(points, (B * C, N))
+    #     # idx_flat = ttnn.reshape(idx, (B, npoint * nsample))
+
+    #     idx_expand = ttnn.unsqueeze(idx, dim=1)
+    #     idx_expand = ttnn.expand(idx_expand, (-1, C, -1))
+    #     # idx_expand = ttnn.reshape(idx_expand, (B * C, npoint * nsample))
+
+    #     out_flat = ttnn.gather(points_flat, 1, idx_expand)
+    #     output = ttnn.reshape(out_flat, (B, C, npoint, nsample))
+    #     return output
+
+    # def forward(self, points, idx):
+    #     B, C, N = points.shape
+    #     _, npoint, nsample = idx.shape
+
+    #     idx = ttnn.to_dtype(idx, ttnn.uint32)
+
+    #     # Fix: Don't reshape points, keep original shape for gather
+    #     # Instead, reshape the approach to match PyTorch's gather behavior
+
+    #     # Expand idx to match points dimensions for gather
+    #     idx_expanded = ttnn.unsqueeze(idx, 1)  # (B, 1, npoint, nsample)
+    #     idx_expanded = ttnn.expand(idx_expanded, (B, C, npoint, nsample))  # (B, C, npoint, nsample)
+
+    #     # Expand points to 4D for gather operation
+    #     points_expanded = ttnn.unsqueeze(points, 3)  # (B, C, N, 1)
+    #     points_expanded = ttnn.expand(points_expanded, (B, C, N, nsample))  # (B, C, N, nsample)
+
+    #     # Use gather with dim=2 (the N dimension)
+    #     output = ttnn.gather(points_expanded, 2, idx_expanded)
+
+    #     return output
+
     def forward(self, points, idx):
         B, C, N = points.shape
         _, npoint, nsample = idx.shape
 
-        idx = idx.to(ttnn.int32)
-        points_flat = ttnn.reshape(points, (B * C, N))
-        idx_flat = ttnn.reshape(idx, (B, npoint * nsample))
+        idx = ttnn.to_dtype(idx, ttnn.uint32)
 
-        idx_expand = ttnn.unsqueeze(idx_flat, dim=1)
-        idx_expand = ttnn.expand(idx_expand, (-1, C, -1))
-        idx_expand = ttnn.reshape(idx_expand, (B * C, npoint * nsample))
+        # Expand idx to match points dimensions for gather
+        idx_expanded = ttnn.unsqueeze(idx, 1)  # (B, 1, npoint, nsample)
+        idx_expanded = ttnn.expand(idx_expanded, (B, C, npoint, nsample))  # (B, C, npoint, nsample)
 
-        out_flat = ttnn.gather(points_flat, 1, idx_expand)
-        output = ttnn.reshape(out_flat, (B, C, npoint, nsample))
+        # Expand points to 4D for gather operation
+        points_expanded = ttnn.unsqueeze(points, 3)  # (B, C, N, 1)
+        points_expanded = ttnn.expand(
+            points_expanded, (B, C, N, nsample), memory_config=ttnn.DRAM_MEMORY_CONFIG
+        )  # (B, C, N, nsample)
+
+        # Fix: Ensure both tensors are in TILE_LAYOUT before gather
+        if points_expanded.layout != ttnn.TILE_LAYOUT:
+            points_expanded = ttnn.to_layout(points_expanded, ttnn.TILE_LAYOUT)
+        if idx_expanded.layout != ttnn.TILE_LAYOUT:
+            idx_expanded = ttnn.to_layout(idx_expanded, ttnn.TILE_LAYOUT)
+
+        # Use gather with dim=2 (the N dimension)
+        output = ttnn.gather(points_expanded, 2, idx_expanded)
+
         return output
 
 
@@ -131,10 +248,12 @@ class TtnnQueryAndGroup(LightweightModule):
 
     def forward(self, xyz, new_xyz, features):
         idx = self.ball_query(xyz, new_xyz)
-        xyz_trans = ttnn.permute(xyz, (1, 2))
+        # xyz_trans = ttnn.permute(xyz, (1, 2))
+        xyz_trans = ttnn.permute(xyz, (0, 2, 1))
 
         grouped_xyz = self.grouping_operation(xyz_trans, idx)
-        new_xyz_trans = ttnn.permute(new_xyz, (1, 2))
+        # new_xyz_trans = ttnn.permute(new_xyz, (1, 2))
+        new_xyz_trans = ttnn.permute(new_xyz, (0, 2, 1))
         new_xyz_trans = ttnn.unsqueeze(new_xyz_trans, dim=-1)
         grouped_xyz -= new_xyz_trans
         if self.normalize_xyz:
@@ -216,7 +335,7 @@ class TtnnFurthestPointSampling(LightweightModule):
             # Find farthest point for next iteration
             farthest = ttnn.argmax(distance, dim=1)
 
-        centroids = ttnn.typecast(centroids, ttnn.int32)
+        centroids = ttnn.typecast(centroids, ttnn.uint32)
 
         return centroids
 
@@ -234,9 +353,11 @@ class TtnnPointnetSAModuleVotes(LightweightModule):
         sample_uniformly: bool = False,
         ret_unique_cnt: bool = False,
         parameters=None,
+        layer_params=None,
         device=None,
     ):
         super().__init__()
+
         self.device = device
         self.parameters = parameters
         self.npoint = npoint
@@ -250,42 +371,77 @@ class TtnnPointnetSAModuleVotes(LightweightModule):
         self.sample_uniformly = sample_uniformly
 
         if npoint is not None:
-            self.grouper = pointnet2_utils.QueryAndGroup(
-                radius,
-                nsample,
-                use_xyz=use_xyz,
-                ret_grouped_xyz=True,
-                normalize_xyz=normalize_xyz,
-                sample_uniformly=sample_uniformly,
-                ret_unique_cnt=ret_unique_cnt,
-            )
+            if ON_DEVICE:
+                self.grouper = TtnnQueryAndGroup(
+                    self.device,
+                    radius,
+                    nsample,
+                    use_xyz=use_xyz,
+                    ret_grouped_xyz=True,
+                    normalize_xyz=normalize_xyz,
+                    sample_uniformly=sample_uniformly,
+                    ret_unique_cnt=ret_unique_cnt,
+                )
+            else:
+                self.grouper = pointnet2_utils.QueryAndGroup(
+                    radius,
+                    nsample,
+                    use_xyz=use_xyz,
+                    ret_grouped_xyz=True,
+                    normalize_xyz=normalize_xyz,
+                    sample_uniformly=sample_uniformly,
+                    ret_unique_cnt=ret_unique_cnt,
+                )
         else:
             raise NotImplementedError("Not supported currently")
 
         mlp_spec = mlp
         if use_xyz and len(mlp_spec) > 0:
             mlp_spec[0] += 3
-
-        self.mlp_module = TtnnSharedMLP(parameters, device)
+        self.mlp_module = TtnnSharedMLP(parameters.mlp_module, layer_params.mlp_module, device)
+        self.maxpool = TtnnMaxPool2DSlice(
+            maxpool_args=layer_params.maxpool,
+            num_maxpool_slice=4,
+        )
 
     def forward(self, xyz, features=None, inds=None):
-        if not isinstance(xyz, torch.Tensor):
-            xyz = ttnn.to_torch(xyz, dtype=torch.float32)
-        if not isinstance(features, torch.Tensor) and features is not None:
-            features = ttnn.to_torch(features, dtype=torch.float32)
-        if not isinstance(inds, torch.Tensor) and inds is not None:
-            inds = ttnn.to_torch(inds, dtype=torch.int64)
+        if not ON_DEVICE:
+            if not isinstance(xyz, torch.Tensor):
+                xyz = ttnn.to_torch(xyz, dtype=torch.float32)
+            if not isinstance(features, torch.Tensor) and features is not None:
+                features = ttnn.to_torch(features, dtype=torch.float32)
+            if not isinstance(inds, torch.Tensor) and inds is not None:
+                inds = ttnn.to_torch(inds, dtype=torch.int64)
 
-        xyz_flipped = xyz.transpose(1, 2).contiguous()
+            xyz_flipped = xyz.transpose(1, 2).contiguous()
+        else:
+            if not isinstance(xyz, ttnn.Tensor):
+                xyz = ttnn.from_torch(
+                    xyz,
+                    dtype=ttnn.bfloat16,
+                    device=self.device,
+                )
+            xyz_flipped = ttnn.permute(xyz, (0, 2, 1))
+
         if inds is None:
-            inds = pointnet2_utils.furthest_point_sample(xyz, self.npoint)
+            if ON_DEVICE:
+                inds = TtnnFurthestPointSampling()(xyz, self.npoint, device=self.device)
+            else:
+                inds = pointnet2_utils.furthest_point_sample(xyz, self.npoint)
         else:
             assert inds.shape[1] == self.npoint
-        new_xyz = (
-            pointnet2_utils.gather_operation(xyz_flipped, inds).transpose(1, 2).contiguous()
-            if self.npoint is not None
-            else None
-        )
+        if ON_DEVICE:
+            new_xyz_ttnn_out = TtnnGatherOperation()(
+                xyz_flipped,
+                inds,
+            )
+            new_xyz = ttnn.permute(new_xyz_ttnn_out, (0, 2, 1))
+        else:
+            new_xyz = (
+                pointnet2_utils.gather_operation(xyz_flipped, inds).transpose(1, 2).contiguous()
+                if self.npoint is not None
+                else None
+            )
 
         unique_cnt = None
         if not self.ret_unique_cnt:
@@ -297,63 +453,25 @@ class TtnnPointnetSAModuleVotes(LightweightModule):
 
         if unique_cnt is not None:
             unique_cnt = ttnn.from_torch(unique_cnt, dtype=ttnn.bfloat16, device=self.device)
-        grouped_features = ttnn.from_torch(
-            grouped_features.permute(0, 2, 3, 1),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device,
-            memory_config=ttnn.L1_MEMORY_CONFIG,
-        )
-
+        if not ON_DEVICE:
+            grouped_features = ttnn.from_torch(
+                grouped_features.permute(0, 2, 3, 1),
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+                memory_config=ttnn.L1_MEMORY_CONFIG,
+            )
+        else:
+            grouped_features = ttnn.permute(grouped_features, (0, 2, 3, 1))
+        # Shape([1, 2048, 64, 3])
         new_features = self.mlp_module(grouped_features)  # (B, mlp[-1], npoint, nsample)
+        ttnn.deallocate(grouped_features)
 
         if self.pooling == "max":
-            if (new_features.shape[-2] // 2048) == 64:
-                new_features = ttnn.reshape(
-                    new_features, (new_features.shape[-4], new_features.shape[-2] // 64, 64, new_features.shape[-1])
-                )
-            else:
-                new_features = ttnn.reshape(
-                    new_features, (new_features.shape[-4], new_features.shape[-2] // 32, 32, new_features.shape[-1])
-                )
-
-            partial_maxpool_out = []
-            num_maxpool_slice = 4
-            slice_h = new_features.shape[-3] // num_maxpool_slice
-            B, H, W, C = (new_features.shape[-4], slice_h, new_features.shape[-2], new_features.shape[-1])
-            for slice in range(num_maxpool_slice):
-                slice_input = new_features[:, slice_h * slice : slice_h * (slice + 1), :, :]
-                slice_input = ttnn.reallocate(slice_input)
-                slice_input = ttnn.reshape(slice_input, (1, 1, B * H * W, C))
-                partial_maxpool_out.append(
-                    ttnn.max_pool2d(
-                        input_tensor=slice_input,
-                        batch_size=B,
-                        input_h=slice_h,
-                        input_w=W,
-                        channels=C,
-                        kernel_size=[1, W],
-                        stride=[1, W],
-                        padding=[0, 0],
-                        dilation=[1, 1],
-                        applied_shard_scheme=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
-                        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                    )
-                )
-                ttnn.deallocate(slice_input)
-
-            for i in range(len(partial_maxpool_out)):
-                partial_maxpool_out[i] = ttnn.reshape(partial_maxpool_out[i], (B, H, C))
-
-            new_features = ttnn.concat((partial_maxpool_out), dim=1, memory_config=ttnn.L1_MEMORY_CONFIG)
-            new_features = ttnn.permute(
-                new_features, (0, 2, 1), memory_config=ttnn.L1_MEMORY_CONFIG
-            )  # (B, mlp[-1], npoint)
-            for i in range(len(partial_maxpool_out)):
-                ttnn.deallocate(partial_maxpool_out[i])
+            # if False:
+            new_features = self.maxpool(new_features)
         else:
             raise NotImplementedError("Currently only Maxpool is supported")
-
         if not self.ret_unique_cnt:
             return new_xyz, new_features, inds
         else:

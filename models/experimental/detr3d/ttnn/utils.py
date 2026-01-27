@@ -6,6 +6,86 @@ import ttnn
 import torch
 import numpy as np
 from models.common.lightweightmodule import LightweightModule
+from models.tt_cnn.tt.builder import TtMaxPool2d, MaxPool2dConfiguration
+from models.experimental.detr3d.reference.model_3detr import BoxProcessor
+
+
+def box_post_processing(
+    cls_logits,
+    center_offset,
+    size_normalized,
+    angle_logits,
+    angle_residual_normalized,
+    angle_residual,
+    num_layers,
+    torch_query_xyz,
+    torch_point_cloud_dims,
+    dataset_config,
+):
+    torch_cls_logits = ttnn.to_torch(cls_logits)
+    torch_center_offset = ttnn.to_torch(center_offset)
+    torch_size_normalized = ttnn.to_torch(size_normalized)
+    torch_angle_logits = ttnn.to_torch(angle_logits)
+    torch_angle_residual_normalized = ttnn.to_torch(angle_residual_normalized)
+    torch_angle_residual = ttnn.to_torch(angle_residual)
+    if not isinstance(torch_point_cloud_dims[0], torch.Tensor):
+        for i in range(len(torch_point_cloud_dims)):
+            torch_point_cloud_dims[i] = ttnn.to_torch(torch_point_cloud_dims[i])
+    if not isinstance(torch_query_xyz, torch.Tensor):
+        torch_query_xyz = ttnn.to_torch(torch_query_xyz)
+
+    torch_box_processor = BoxProcessor(dataset_config)
+
+    torch_outputs = []
+    for l in range(num_layers):
+        # box processor converts outputs so we can get a 3D bounding box
+        (
+            torch_center_normalized,
+            torch_center_unnormalized,
+        ) = torch_box_processor.compute_predicted_center(
+            torch_center_offset[l], torch_query_xyz, torch_point_cloud_dims
+        )
+        torch_angle_continuous = torch_box_processor.compute_predicted_angle(
+            torch_angle_logits[l], torch_angle_residual[l]
+        )
+        torch_size_unnormalized = torch_box_processor.compute_predicted_size(
+            torch_size_normalized[l], torch_point_cloud_dims
+        )
+        torch_box_corners = torch_box_processor.box_parametrization_to_corners(
+            torch_center_unnormalized, torch_size_unnormalized, torch_angle_continuous
+        )
+
+        # below are used for matching/mAP eval
+        (
+            torch_semcls_prob,
+            torch_objectness_prob,
+        ) = torch_box_processor.compute_objectness_and_cls_prob(torch_cls_logits[l])
+
+        torch_box_prediction = {
+            "sem_cls_logits": torch_cls_logits[l],
+            "center_normalized": torch_center_normalized,
+            "center_unnormalized": torch_center_unnormalized,
+            "size_normalized": torch_size_normalized[l],
+            "size_unnormalized": torch_size_unnormalized,
+            "angle_logits": torch_angle_logits[l],
+            "angle_residual": torch_angle_residual[l],
+            "angle_residual_normalized": torch_angle_residual_normalized[l],
+            "angle_continuous": torch_angle_continuous,
+            "objectness_prob": torch_objectness_prob,
+            "sem_cls_prob": torch_semcls_prob,
+            "box_corners": torch_box_corners,
+        }
+        torch_outputs.append(torch_box_prediction)
+
+    # intermediate decoder layer outputs are only used during training
+    # we use them to check for any instability in PCC
+    torch_aux_outputs = torch_outputs[:-1]
+    torch_outputs = torch_outputs[-1]
+
+    return {
+        "outputs": torch_outputs,  # output from last layer of decoder
+        "aux_outputs": torch_aux_outputs,  # output from intermediate layers of decoder
+    }
 
 
 class TtnnConv1D(LightweightModule):
@@ -93,6 +173,70 @@ class TtnnConv1D(LightweightModule):
         return tt_output_tensor_on_device
 
 
+class TtnnMaxPool2DSlice(LightweightModule):
+    def __init__(
+        self,
+        maxpool_args,
+        num_maxpool_slice,
+        device=None,
+        math_fidelity=ttnn.MathFidelity.LoFi,
+        math_approx_mode=False,
+    ):
+        super().__init__()
+        self.maxpool_args = maxpool_args
+        self.num_maxpool_slice = num_maxpool_slice
+        self.slice_h = maxpool_args.input_height // num_maxpool_slice
+        self.maxpool = TtMaxPool2d(
+            configuration=MaxPool2dConfiguration(
+                input_height=maxpool_args.input_height // num_maxpool_slice,
+                input_width=maxpool_args.input_width,
+                channels=maxpool_args.input_channels,
+                batch_size=maxpool_args.batch_size,
+                kernel_size=maxpool_args.kernel_size,
+                stride=maxpool_args.stride,
+                padding=(maxpool_args.padding, maxpool_args.padding),
+                dilation=(maxpool_args.dilation, maxpool_args.dilation),
+                deallocate_input=True,
+                output_layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.bfloat16,
+            ),
+            device=device,
+        )
+
+    def forward(self, x):
+        x = ttnn.reshape(
+            x,
+            (
+                self.maxpool_args.batch_size,
+                self.maxpool_args.input_height,
+                self.maxpool_args.input_width,
+                self.maxpool_args.input_channels,
+            ),
+        )
+        B, H, W, C = (x.shape[-4], self.slice_h, x.shape[-2], x.shape[-1])
+
+        partial_maxpool_out = []
+
+        for slice in range(self.num_maxpool_slice):
+            slice_input = x[:, self.slice_h * slice : self.slice_h * (slice + 1), :, :]
+            slice_input = ttnn.reallocate(slice_input)
+            slice_input = ttnn.reshape(slice_input, (1, 1, B * H * W, C))
+            partial_maxpool_out.append(ttnn.sharded_to_interleaved(self.maxpool(slice_input), ttnn.L1_MEMORY_CONFIG))
+
+            ttnn.deallocate(slice_input)
+
+        for i in range(len(partial_maxpool_out)):
+            partial_maxpool_out[i] = ttnn.reshape(partial_maxpool_out[i], (B, H, C))
+        new_features = ttnn.concat((partial_maxpool_out), dim=1, memory_config=ttnn.L1_MEMORY_CONFIG)
+        new_features = ttnn.permute(
+            new_features, (0, 2, 1), memory_config=ttnn.L1_MEMORY_CONFIG
+        )  # (B, mlp[-1], npoint)
+        for i in range(len(partial_maxpool_out)):
+            ttnn.deallocate(partial_maxpool_out[i])
+
+        return new_features
+
+
 def shift_scale_points_ttnn(pred_xyz, src_range, device=None):
     """
     pred_xyz: B x N x 3
@@ -124,8 +268,8 @@ def shift_scale_points_ttnn(pred_xyz, src_range, device=None):
     prop_xyz = ttnn.div(
         prop_xyz,
         src_diff,
-        accurate_mode=True,
-        rounding_mode=None,
+        fast_and_approximate_mode=True,
+        # round_mode=None,
     )
     prop_xyz = prop_xyz + dst_range[0]
 
