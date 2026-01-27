@@ -15,9 +15,13 @@ from os import path as osp
 
 import numpy as np
 import torch
-from nuscenes.eval.common.utils import quaternion_yaw, Quaternion
+from nuscenes.eval.common.utils import Quaternion, quaternion_yaw
 
-from models.experimental.MapTR.reference.dependency import DATASETS, DataContainer as DC, NuScenesDataset
+from models.experimental.MapTR.reference.dependency import (
+    DATASETS,
+    DataContainer as DC,
+    NuScenesDataset,
+)
 
 
 # Stub for NuScenesEval_custom if needed
