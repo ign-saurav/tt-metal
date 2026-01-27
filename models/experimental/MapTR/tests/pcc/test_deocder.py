@@ -186,8 +186,6 @@ def create_maptr_model_parameters_decoder(model: MapTRDecoder, device=None):
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
 def test_maptr_decoder(device, reset_seeds):
     torch.manual_seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(42)
 
     num_layers = 6
     embed_dims = 256
@@ -220,8 +218,6 @@ def test_maptr_decoder(device, reset_seeds):
                 attn.dropout = nn.Identity()
 
     torch.manual_seed(123)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(123)
 
     batch_size = 1
     num_query = 900

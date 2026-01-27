@@ -233,8 +233,6 @@ def test_maptr(
     model_location_generator,
 ):
     torch.manual_seed(42)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(42)
 
     ensure_checkpoint_downloaded(MAPTR_WEIGHTS_PATH)
     config = create_maptr_config()

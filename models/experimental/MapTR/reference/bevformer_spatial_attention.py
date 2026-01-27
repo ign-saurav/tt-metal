@@ -22,9 +22,6 @@ from models.experimental.MapTR.reference.dependency import force_fp32
 from models.experimental.MapTR.reference.dependency import BaseModule
 
 from models.experimental.MapTR.reference.dependency import ext_loader
-from models.experimental.MapTR.reference.bevformer_deformable_attn import (
-    MultiScaleDeformableAttnFunction_fp32,
-)
 
 ext_module = ext_loader.load_ext("_ext", ["ms_deform_attn_backward", "ms_deform_attn_forward"])
 
@@ -380,18 +377,7 @@ class MSDeformableAttention3D(BaseModule):
 
         #  sampling_locations.shape: bs, num_query, num_heads, num_levels, num_all_points, 2
         #  attention_weights.shape: bs, num_query, num_heads, num_levels, num_all_points
-        #
-
-        if torch.cuda.is_available() and value.is_cuda:
-            if value.dtype == torch.float16:
-                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
-            else:
-                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
-            output = MultiScaleDeformableAttnFunction.apply(
-                value, spatial_shapes, level_start_index, sampling_locations, attention_weights, self.im2col_step
-            )
-        else:
-            output = multi_scale_deformable_attn_pytorch(value, spatial_shapes, sampling_locations, attention_weights)
+        output = multi_scale_deformable_attn_pytorch(value, spatial_shapes, sampling_locations, attention_weights)
         if not self.batch_first:
             output = output.permute(1, 0, 2)
 
@@ -601,18 +587,7 @@ class MSIPM3D(BaseModule):
 
         #  sampling_locations.shape: bs, num_query, num_heads, num_levels, num_all_points, 2
         #  attention_weights.shape: bs, num_query, num_heads, num_levels, num_all_points
-        #
-
-        if torch.cuda.is_available() and value.is_cuda:
-            if value.dtype == torch.float16:
-                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
-            else:
-                MultiScaleDeformableAttnFunction = MultiScaleDeformableAttnFunction_fp32
-            output = MultiScaleDeformableAttnFunction.apply(
-                value, spatial_shapes, level_start_index, sampling_locations, attention_weights, self.im2col_step
-            )
-        else:
-            output = multi_scale_deformable_attn_pytorch(value, spatial_shapes, sampling_locations, attention_weights)
+        output = multi_scale_deformable_attn_pytorch(value, spatial_shapes, sampling_locations, attention_weights)
         if not self.batch_first:
             output = output.permute(1, 0, 2)
 
