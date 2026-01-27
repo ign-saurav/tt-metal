@@ -44,3 +44,7 @@ Granite Speech is a state-of-the-art speech-to-text model developed by IBM, capa
 
 ## TODO
 - The Granite Speech language model uses LoRA adapters for accurate results; however, LoRA adapters are not currently supported because the TTNN model is using tt_transformer.
+
+## Issues
+
+- [36541](https://github.com/tenstorrent/tt-metal/issues/36541) - N300 hang issue
