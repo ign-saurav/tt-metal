@@ -32,13 +32,10 @@ import json
 
 
 def add_rotation_noise(extrinsics, std=0.01, mean=0.0):
-    # n = extrinsics.shape[0]
     noise_angle = torch.normal(mean, std=std, size=(3,))
-    # extrinsics[:, 0:3, 0:3] *= (1 + noise)
     sin_noise = torch.sin(noise_angle)
     cos_noise = torch.cos(noise_angle)
     rotation_matrix = torch.eye(4).view(4, 4)
-    #  rotation_matrix[]
     rotation_matrix_x = rotation_matrix.clone()
     rotation_matrix_x[1, 1] = cos_noise[0]
     rotation_matrix_x[1, 2] = sin_noise[0]
@@ -68,7 +65,6 @@ def add_rotation_noise(extrinsics, std=0.01, mean=0.0):
 
 
 def add_translation_noise(extrinsics, std=0.01, mean=0.0):
-    # n = extrinsics.shape[0]
     noise = torch.normal(mean, std=std, size=(3,))
     extrinsics[0:3, -1] += noise.numpy()
     return extrinsics
@@ -131,7 +127,6 @@ class LiDARInstanceLines(object):
         assert len(self.instance_list) != 0
         instance_bbox_list = []
         for instance in self.instance_list:
-            # bounds is bbox: [xmin, ymin, xmax, ymax]
             instance_bbox_list.append(instance.bounds)
         instance_bbox_array = np.array(instance_bbox_list)
         instance_bbox_tensor = to_tensor(instance_bbox_array)
@@ -203,8 +198,6 @@ class LiDARInstanceLines(object):
             )
             sampled_pts = sampled_pts.permute(0, 2, 1).squeeze(0)
             instance_points_list.append(sampled_pts)
-        # instance_points_array = np.array(instance_points_list)
-        # instance_points_tensor = to_tensor(instance_points_array)
         instance_points_tensor = torch.stack(instance_points_list, dim=0)
         instance_points_tensor = instance_points_tensor.to(dtype=torch.float32)
         instance_points_tensor[:, :, 0] = torch.clamp(instance_points_tensor[:, :, 0], min=-self.max_x, max=self.max_x)
@@ -227,7 +220,6 @@ class LiDARInstanceLines(object):
             fixed_num = fixed_num_pts.shape[0]
             shift_pts_list = []
             if is_poly:
-                # import pdb;pdb.set_trace()
                 for shift_right_i in range(fixed_num):
                     shift_pts_list.append(fixed_num_pts.roll(shift_right_i, 0))
             else:
@@ -241,8 +233,6 @@ class LiDARInstanceLines(object):
             if not is_poly:
                 padding = torch.full([fixed_num - shift_pts.shape[0], fixed_num, 2], self.padding_value)
                 shift_pts = torch.cat([shift_pts, padding], dim=0)
-                # padding = np.zeros((self.num_samples - len(sampled_points), 2))
-                # sampled_points = np.concatenate([sampled_points, padding], axis=0)
             instances_list.append(shift_pts)
         instances_tensor = torch.stack(instances_list, dim=0)
         instances_tensor = instances_tensor.to(dtype=torch.float32)
@@ -324,7 +314,6 @@ class LiDARInstanceLines(object):
                         [list(shift_instance.interpolate(distance).coords) for distance in distances]
                     ).reshape(-1, 2)
                     shift_pts_list.append(shift_sampled_points)
-                # import pdb;pdb.set_trace()
             else:
                 sampled_points = np.array(
                     [list(instance.interpolate(distance).coords) for distance in distances]
@@ -349,7 +338,6 @@ class LiDARInstanceLines(object):
             multi_shifts_pts_tensor[:, :, 1] = torch.clamp(
                 multi_shifts_pts_tensor[:, :, 1], min=-self.max_y, max=self.max_y
             )
-            # if not is_poly:
             if multi_shifts_pts_tensor.shape[0] < final_shift_num:
                 padding = torch.full(
                     [final_shift_num - multi_shifts_pts_tensor.shape[0], self.fixed_num, 2], self.padding_value
@@ -897,7 +885,6 @@ class VectorizedLocalMap(object):
         patch = self.map_explorer[location].get_patch_coord(patch_box, patch_angle)
         polygon_list = []
         records = getattr(self.map_explorer[location].map_api, "ped_crossing")
-        # records = getattr(self.nusc_maps[location], 'ped_crossing')
         for record in records:
             polygon = self.map_explorer[location].map_api.extract_polygon(record["polygon_token"])
             if polygon.is_valid:
@@ -1152,7 +1139,7 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
                 - ann_info (dict): Annotation info.
         """
         info = self.data_infos[index]
-        # standard protocal modified from SECOND.Pytorch
+        # standard protocol modified from SECOND.Pytorch
         input_dict = dict(
             sample_idx=info["token"],
             pts_filename=info["lidar_path"],
@@ -1217,7 +1204,6 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
                 cam_intrinsics.append(viewpad)
                 lidar2cam_rts.append(lidar2cam_rt_t)
 
-                # camera to ego transform
                 camera2ego = np.eye(4).astype(np.float32)
                 camera2ego[:3, :3] = Quaternion(cam_info["sensor2ego_rotation"]).rotation_matrix
                 camera2ego[:3, 3] = cam_info["sensor2ego_translation"]
@@ -1322,7 +1308,6 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
                 sample_token = self.data_infos[sample_id]["token"]
                 gt_anno = {}
                 gt_anno["sample_token"] = sample_token
-                # gt_sample_annos = []
                 gt_sample_dict = {}
                 gt_sample_dict = self.vectormap_pipeline(gt_sample_dict, self.data_infos[sample_id])
                 gt_labels = gt_sample_dict["gt_labels_3d"].data.numpy()
@@ -1399,7 +1384,6 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         return res_path
 
     def to_gt_vectors(self, gt_dict):
-        # import pdb;pdb.set_trace()
         gt_labels = gt_dict["gt_labels_3d"].data
         gt_instances = gt_dict["gt_bboxes_3d"].data.instance_list
 
@@ -1412,9 +1396,9 @@ class CustomNuScenesLocalMapDataset(CustomNuScenesDataset):
         for i in range(self.NUM_MAPCLASSES):
             vector_num_list[i] = []
         for vec in gt_vectors:
-            if vector["pts_num"] >= 2:
-                vector_num_list[vector["type"]].append(
-                    (LineString(vector["pts"][: vector["pts_num"]]), vector.get("confidence_level", 1))
+            if vec["pts_num"] >= 2:
+                vector_num_list[vec["type"]].append(
+                    (LineString(vec["pts"][: vec["pts_num"]]), vec.get("confidence_level", 1))
                 )
         return gt_vectors
 
