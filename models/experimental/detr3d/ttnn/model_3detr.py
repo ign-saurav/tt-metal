@@ -20,9 +20,10 @@ from models.experimental.detr3d.ttnn.transformer_decoder import (
     DecoderLayerArgs,
 )
 from models.experimental.detr3d.ttnn.generic_mlp import TtnnGenericMLP
-from models.experimental.detr3d.ttnn.pointnet_samodule_votes import TtnnPointnetSAModuleVotes
+from models.experimental.detr3d.ttnn.pointnet_samodule_votes import TtnnPointnetSAModuleVotes, TtnnFurthestPointSampling
 from models.experimental.detr3d.reference.torch_pointnet2_ops import furthest_point_sample
 from models.experimental.detr3d.ttnn.position_embedding import TtnnPositionEmbeddingCoordsSine
+from models.experimental.detr3d.ttnn.constant import ON_DEVICE
 
 
 class TtnnModel3DETR(LightweightModule):
@@ -107,6 +108,26 @@ class TtnnModel3DETR(LightweightModule):
             ),
         }
 
+    def get_query_embeddings_ttnn(self, torch_encoder_xyz, point_cloud_dims):
+        # torch_query_inds = furthest_point_sample(torch_encoder_xyz, self.num_queries)
+        torch_query_inds = TtnnFurthestPointSampling()(torch_encoder_xyz, self.num_queries, device=self.device)
+        # torch_query_inds = torch_query_inds.long()
+        torch_query_inds = ttnn.typecast(torch_query_inds, dtype=ttnn.uint32)
+        # torch_query_xyz = [torch.gather(torch_encoder_xyz[..., x], 1, torch_query_inds) for x in range(3)]
+        ttnn_query_xyz = []
+        for x in range(3):
+            # Extract the x-th dimension and gather
+            dim_xyz = ttnn.unsqueeze(torch_encoder_xyz[..., x], -1)  # Add last dim for gather
+            gathered = ttnn.gather(dim_xyz, 1, torch_query_inds)
+            ttnn_query_xyz.append(ttnn.squeeze(gathered, -1))  # Remove the extra dim
+        ttnn_query_xyz = ttnn.stack(ttnn_query_xyz, dim=0)
+        ttnn_query_xyz = ttnn.permute(ttnn_query_xyz, (1, 2, 0))
+
+        pos_embed = self.pos_embedding(ttnn_query_xyz, input_range=point_cloud_dims)
+        query_embed = self.query_projection(pos_embed)
+        ttnn.deallocate(pos_embed)
+        return ttnn_query_xyz, query_embed
+
     def get_query_embeddings(self, torch_encoder_xyz, point_cloud_dims):
         torch_query_inds = furthest_point_sample(torch_encoder_xyz, self.num_queries)
         torch_query_inds = torch_query_inds.long()
@@ -123,12 +144,20 @@ class TtnnModel3DETR(LightweightModule):
         # pc may contain color/normals.
 
         torch_xyz = torch_pc[..., 0:3].contiguous()
-        torch_features = torch_pc[..., 3:].transpose(1, 2).contiguous() if torch_pc.size(-1) > 3 else None
-        return torch_xyz, torch_features
+        return torch_xyz
+
+    def _break_up_pc_ttnn(self, torch_pc):
+        # pc may contain color/normals.
+
+        torch_xyz = torch_pc[..., 0:3]
+        return torch_xyz
 
     def run_encoder(self, torch_point_clouds):
-        torch_xyz, torch_features = self._break_up_pc(torch_point_clouds)
-        torch_pre_enc_xyz, pre_enc_features, _ = self.pre_encoder(torch_xyz, torch_features)
+        if ON_DEVICE:
+            torch_xyz = self._break_up_pc_ttnn(torch_point_clouds)
+        else:
+            torch_xyz = self._break_up_pc(torch_point_clouds)
+        torch_pre_enc_xyz, pre_enc_features, _ = self.pre_encoder(torch_xyz)
         # xyz: batch x npoints x 3
         # features: batch x channel x npoints
         # inds: batch x npoints
@@ -178,69 +207,17 @@ class TtnnModel3DETR(LightweightModule):
         angle_residual = angle_residual_normalized * (np.pi / angle_residual_normalized.shape[-1])
 
         # send outputs to torch for box processing
-        torch_cls_logits = ttnn.to_torch(cls_logits)
-        torch_center_offset = ttnn.to_torch(center_offset)
-        torch_size_normalized = ttnn.to_torch(size_normalized)
-        torch_angle_logits = ttnn.to_torch(angle_logits)
-        torch_angle_residual_normalized = ttnn.to_torch(angle_residual_normalized)
-        torch_angle_residual = ttnn.to_torch(angle_residual)
-        ttnn.deallocate(cls_logits)
-        ttnn.deallocate(center_offset)
-        ttnn.deallocate(size_normalized)
-        ttnn.deallocate(angle_logits)
-        ttnn.deallocate(angle_residual_normalized)
-        ttnn.deallocate(angle_residual)
-
-        torch_outputs = []
-        for l in range(num_layers):
-            # box processor converts outputs so we can get a 3D bounding box
-            (
-                torch_center_normalized,
-                torch_center_unnormalized,
-            ) = self.torch_box_processor.compute_predicted_center(
-                torch_center_offset[l], torch_query_xyz, torch_point_cloud_dims
-            )
-            torch_angle_continuous = self.torch_box_processor.compute_predicted_angle(
-                torch_angle_logits[l], torch_angle_residual[l]
-            )
-            torch_size_unnormalized = self.torch_box_processor.compute_predicted_size(
-                torch_size_normalized[l], torch_point_cloud_dims
-            )
-            torch_box_corners = self.torch_box_processor.box_parametrization_to_corners(
-                torch_center_unnormalized, torch_size_unnormalized, torch_angle_continuous
-            )
-
-            # below are used for matching/mAP eval
-            (
-                torch_semcls_prob,
-                torch_objectness_prob,
-            ) = self.torch_box_processor.compute_objectness_and_cls_prob(torch_cls_logits[l])
-
-            torch_box_prediction = {
-                "sem_cls_logits": torch_cls_logits[l],
-                "center_normalized": torch_center_normalized,
-                "center_unnormalized": torch_center_unnormalized,
-                "size_normalized": torch_size_normalized[l],
-                "size_unnormalized": torch_size_unnormalized,
-                "angle_logits": torch_angle_logits[l],
-                "angle_residual": torch_angle_residual[l],
-                "angle_residual_normalized": torch_angle_residual_normalized[l],
-                "angle_continuous": torch_angle_continuous,
-                "objectness_prob": torch_objectness_prob,
-                "sem_cls_prob": torch_semcls_prob,
-                "box_corners": torch_box_corners,
-            }
-            torch_outputs.append(torch_box_prediction)
-
-        # intermediate decoder layer outputs are only used during training
-        # we use them to check for any instability in PCC
-        torch_aux_outputs = torch_outputs[:-1]
-        torch_outputs = torch_outputs[-1]
-
-        return {
-            "outputs": torch_outputs,  # output from last layer of decoder
-            "aux_outputs": torch_aux_outputs,  # output from intermediate layers of decoder
-        }
+        return (
+            cls_logits,
+            center_offset,
+            size_normalized,
+            angle_logits,
+            angle_residual_normalized,
+            angle_residual,
+            num_layers,
+            torch_query_xyz,
+            torch_point_cloud_dims,
+        )
 
     def forward(self, inputs, encoder_only=False):
         torch_point_clouds = inputs["point_clouds"]
@@ -258,14 +235,18 @@ class TtnnModel3DETR(LightweightModule):
             inputs["point_cloud_dims_min"],
             inputs["point_cloud_dims_max"],
         ]
-        point_cloud_dims = [
-            ttnn.from_torch(t, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT)
-            for t in torch_point_cloud_dims
-        ]
+        if ON_DEVICE:
+            torch_query_xyz, query_embed = self.get_query_embeddings_ttnn(torch_enc_xyz, torch_point_cloud_dims)
+            enc_pos = self.pos_embedding(torch_enc_xyz, input_range=torch_point_cloud_dims)
+        else:
+            point_cloud_dims = [
+                ttnn.from_torch(t, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT)
+                for t in torch_point_cloud_dims
+            ]
 
-        torch_query_xyz, query_embed = self.get_query_embeddings(torch_enc_xyz, point_cloud_dims)
-        # query_embed: batch x npoint x channel
-        enc_pos = self.pos_embedding(torch_enc_xyz, input_range=point_cloud_dims)
+            torch_query_xyz, query_embed = self.get_query_embeddings(torch_enc_xyz, point_cloud_dims)
+            # query_embed: batch x npoint x channel
+            enc_pos = self.pos_embedding(torch_enc_xyz, input_range=point_cloud_dims)
 
         # decoder expects: batch x npoints x channel
         tgt = ttnn.zeros_like(query_embed, dtype=ttnn.bfloat16)
@@ -275,8 +256,28 @@ class TtnnModel3DETR(LightweightModule):
         ttnn.deallocate(query_embed)
         ttnn.deallocate(enc_pos)
 
-        torch_box_predictions = self.get_box_predictions(torch_query_xyz, torch_point_cloud_dims, box_features)
-        return torch_box_predictions
+        (
+            cls_logits,
+            center_offset,
+            size_normalized,
+            angle_logits,
+            angle_residual_normalized,
+            angle_residual,
+            num_layers,
+            torch_query_xyz,
+            torch_point_cloud_dims,
+        ) = self.get_box_predictions(torch_query_xyz, torch_point_cloud_dims, box_features)
+        return (
+            cls_logits,
+            center_offset,
+            size_normalized,
+            angle_logits,
+            angle_residual_normalized,
+            angle_residual,
+            num_layers,
+            torch_query_xyz,
+            torch_point_cloud_dims,
+        )
 
 
 def build_ttnn_preencoder(args):
@@ -287,7 +288,8 @@ def build_ttnn_preencoder(args):
         npoint=args.preenc_npoints,
         mlp=mlp_dims,
         normalize_xyz=True,
-        parameters=args.parameters.pre_encoder.mlp_module,
+        parameters=args.parameters.pre_encoder,
+        layer_params=args.parameters.layer_args.pre_encoder,
         device=args.device,
     )
     return preencoder
@@ -302,7 +304,8 @@ def build_ttnn_encoder(args):
             npoint=args.preenc_npoints // 2,
             mlp=[args.enc_dim, 256, 256, args.enc_dim],
             normalize_xyz=True,
-            parameters=args.parameters.encoder.interim_downsampling.mlp_module,
+            parameters=args.parameters.encoder.interim_downsampling,
+            layer_params=args.parameters.layer_args.encoder.interim_downsampling,
             device=args.device,
         )
 

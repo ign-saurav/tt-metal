@@ -41,7 +41,7 @@ def load_torch_model_state(torch_model: torch.nn.Module = None, layer_name: str 
             os.system(
                 "bash models/experimental/detr3d/resources/detr3d_weights_download.sh"
             )  # execute the detr3d_weights_download.sh file
-        weights_path = "models/experimental/detr3d/sunrgbd_masked_ep720.pth"
+        weights_path = "models/experimental/detr3d/resources/sunrgbd_masked_ep720.pth"
     else:
         weights_path = os.path.join(model_path, "sunrgbd_masked_ep720.pth")
 

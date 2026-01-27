@@ -1,11 +1,12 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
 
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
 import torch
-from typing import Optional
+from typing import Optional, Union
 from models.common.lightweightmodule import LightweightModule
+from models.experimental.detr3d.ttnn.constant import ON_DEVICE
 from models.experimental.detr3d.ttnn.multihead_attention import TtnnMultiheadAttention
 from dataclasses import dataclass, asdict
 
@@ -195,7 +196,7 @@ class TtnnMaskedTransformerEncoder(LightweightModule):
         mask_ttnn = ttnn.from_torch(mask_ttnn, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT)
         return mask_ttnn, dist
 
-    def compute_mask_ttnn(self, xyz, radius, dist=None):
+    def compute_mask_ttnn(self, tt_xyz, radius, dist=None):
         """
         Compute attention mask and distance matrix using ttnn operations.
 
@@ -211,15 +212,15 @@ class TtnnMaskedTransformerEncoder(LightweightModule):
         # Compute pairwise distances using ttnn operations
         # Using the formula: ||a - b||^2 = ||a||^2 + ||b||^2 - 2*a·b
 
-        tt_xyz = ttnn.from_torch(
-            xyz,
-            device=self.device,
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
+        # tt_xyz = ttnn.from_torch(
+        #     xyz,
+        #     device=self.device,
+        #     dtype=ttnn.bfloat16,
+        #     layout=ttnn.TILE_LAYOUT,
+        #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        # )
 
-        if dist is None or dist.shape[1] != xyz.shape[1]:
+        if dist is None or dist.shape[1] != tt_xyz.shape[1]:
             # Compute squared norms: ||a||^2 for each point
             # xyz_ttnn shape: (batch_size, seq_len, 3)
             xyz_squared = ttnn.pow(tt_xyz, 2)  # (batch_size, seq_len, 3)
@@ -246,7 +247,7 @@ class TtnnMaskedTransformerEncoder(LightweightModule):
         else:
             dist_ttnn = dist
 
-        ttnn.deallocate(tt_xyz)
+        # ttnn.deallocate(tt_xyz)
 
         # Create mask: distance >= radius
         # Convert radius to ttnn scalar and compare
@@ -263,7 +264,7 @@ class TtnnMaskedTransformerEncoder(LightweightModule):
         src,
         mask: Optional[ttnn.Tensor] = None,
         pos: Optional[ttnn.Tensor] = None,
-        xyz: Optional[torch.Tensor] = None,
+        xyz: Optional[Union[torch.Tensor, ttnn.Tensor]] = None,
         transpose_swap: Optional[bool] = False,
     ):
         if transpose_swap:
@@ -285,8 +286,14 @@ class TtnnMaskedTransformerEncoder(LightweightModule):
         for idx, layer in enumerate(self.layers):
             attn_mask = None
             if self.masking_radius[idx] > 0:
-                attn_mask, xyz_dist = self.compute_mask(xyz, self.masking_radius[idx], xyz_dist)  # Torch based mask gen
-                # attn_mask, xyz_dist = self.compute_mask_ttnn(xyz, self.masking_radius[idx], xyz_dist) # FIXME: Minor pcc drop
+                if ON_DEVICE:
+                    attn_mask, xyz_dist = self.compute_mask_ttnn(
+                        xyz, self.masking_radius[idx], xyz_dist
+                    )  # FIXME: Minor pcc drop
+                else:
+                    attn_mask, xyz_dist = self.compute_mask(
+                        xyz, self.masking_radius[idx], xyz_dist
+                    )  # Torch based mask gen
                 attn_mask = ttnn.unsqueeze(attn_mask, 1)
 
             # encoder layer is implemented in batch first form to make use of ttnn.sdpa
