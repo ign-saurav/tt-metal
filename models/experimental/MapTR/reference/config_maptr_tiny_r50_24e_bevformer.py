@@ -149,26 +149,10 @@ model = dict(
             row_num_embed=bev_h_,
             col_num_embed=bev_w_,
         ),
+        loss_cls=dict(type="FocalLoss", use_sigmoid=True, gamma=2.0, alpha=0.25, loss_weight=2.0),
     ),
 )
 
-# model training and testing settings
-# train_cfg=dict(pts=dict(
-#     grid_size=[512, 512, 1],
-#     voxel_size=voxel_size,
-#     point_cloud_range=point_cloud_range,
-#     out_size_factor=4,
-#     assigner=dict(
-#         type='MapTRAssigner',
-#         cls_cost=dict(type='FocalLossCost', weight=2.0),
-#         reg_cost=dict(type='BBoxL1Cost', weight=0.0, box_format='xywh'),
-#         # reg_cost=dict(type='BBox3DL1Cost', weight=0.25),
-#         # iou_cost=dict(type='IoUCost', weight=1.0), # Fake cost. This is just to make it compatible with DETR head.
-#         iou_cost=dict(type='IoUCost', iou_mode='giou', weight=0.0),
-#         pts_cost=dict(type='OrderedPtsL1Cost',
-#                   weight=5),
-#         pc_range=point_cloud_range)))
-# )
 
 dataset_type = "CustomNuScenesLocalMapDataset"
 data_root = "models/experimental/MapTR/resources/nuScenes/"
@@ -194,25 +178,6 @@ test_pipeline = [
 data = dict(
     samples_per_gpu=4,
     workers_per_gpu=4,
-    # train=dict(
-    #     type=dataset_type,
-    #     data_root=data_root,
-    #     ann_file=data_root + 'nuscenes_infos_temporal_train.pkl',
-    #     pipeline=train_pipeline,
-    #     classes=class_names,
-    #     modality=input_modality,
-    #     test_mode=False,
-    #     use_valid_flag=True,
-    #     bev_size=(bev_h_, bev_w_),
-    #     pc_range=point_cloud_range,
-    #     fixed_ptsnum_per_line=fixed_ptsnum_per_gt_line,
-    #     eval_use_same_gt_sample_num_flag=eval_use_same_gt_sample_num_flag,
-    #     padding_value=-10000,
-    #     map_classes=map_classes,
-    #     queue_length=queue_length,
-    #     # we use box_type_3d='LiDAR' in kitti and nuscenes dataset
-    #     # and box_type_3d='Depth' in sunrgbd and scannet dataset.
-    #     box_type_3d='LiDAR'),
     val=dict(
         type=dataset_type,
         data_root=data_root,
