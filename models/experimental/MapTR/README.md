@@ -286,10 +286,10 @@ Copyright © 2026 Tenstorrent AI ULC
 - BEVFormer: [BEVFormer Paper](https://arxiv.org/abs/2203.17270)
 - MMDetection3D: [MMDetection3D Framework](https://github.com/open-mmlab/mmdetection3d)
 
-## Source Implementation License
+## Source Implementation
 
 This implementation is adapted from:
-- **MapTR**: https://github.com/hustvl/MapTR (Apache License 2.0)
+- **MapTR**: https://github.com/hustvl/MapTR (MIT License)
 - **MMDetection3D**: https://github.com/open-mmlab/mmdetection3d (Apache License 2.0)
 - **MMDetection**: https://github.com/open-mmlab/mmdetection (Apache License 2.0)
 
