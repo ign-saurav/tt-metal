@@ -2,6 +2,12 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+##########################################################################
+# Adapted from MMDetection (https://github.com/hustvl/MapTR/tree/main/projects/mmdet3d_plugin/datasets).
+# Original work Copyright (c) OpenMMLab.
+# Licensed under the Apache License, Version 2.0.
+##########################################################################
+
 import copy
 
 import numpy as np
