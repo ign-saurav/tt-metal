@@ -322,9 +322,6 @@ class GemmaAttentionTTNN:
 
         # Handle KV cache
         if past_key_value is not None:
-            import pdb
-
-            pdb.set_trace()
             past_k, past_v = past_key_value
             k_rope = ttnn.concat([past_k, k_rope], dim=2)
             v = ttnn.concat([past_v, v], dim=2)
