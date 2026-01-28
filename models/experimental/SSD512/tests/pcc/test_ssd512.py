@@ -15,6 +15,7 @@ from models.experimental.SSD512.common import (
 from models.experimental.SSD512.tt.tt_ssd import TtSSD
 from models.common.utility_functions import comp_pcc
 from tests.ttnn.utils_for_testing import assert_with_pcc
+import tracy
 
 
 # End-to-end SSD512 model test
@@ -56,8 +57,9 @@ def test_ssd512(device, pcc, size, reset_seeds):
     ttnn_model = TtSSD(torch_model, torch_input, batch_size=1, device=device)
 
     ttnn.synchronize_device(device)
-
+    tracy.signpost("start")
     tt_loc_preds, tt_conf_preds = ttnn_model(device=device, input=ttnn_input)
+    tracy.signpost("stop")
 
     # Compare predictions for each of the 7 feature map scales
     for source_idx in range(7):

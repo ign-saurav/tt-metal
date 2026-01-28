@@ -72,13 +72,19 @@ pytest models/experimental/SSD512/tests/pcc/test_ssd512.py
 ```
 
 ### Performance
-### Single Device (BS=1):
-- Expected throughput: `66.5` FPS
+### Single Device (BS=1) (n150):
+- E2E Performance (Trace + 2CQ): `66.5` FPS
+- Device Performance : `147.6` FPS
 
-### Run Device Performance Test
+### Run E2E Performance (Trace + 2CQ) Test
 ```bash
 # Test full model performance
 pytest models/experimental/SSD512/tests/perf/test_ssd512_e2e_perf.py
+```
+### Run Device Performance Test
+```bash
+# Test full model performance
+pytest models/experimental/SSD512/tests/perf/test_ssd512_device_perf.py
 ```
 
 ### Run the Demo
