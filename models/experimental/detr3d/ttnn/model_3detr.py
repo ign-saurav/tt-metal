@@ -23,7 +23,7 @@ from models.experimental.detr3d.ttnn.generic_mlp import TtnnGenericMLP
 from models.experimental.detr3d.ttnn.pointnet_samodule_votes import TtnnPointnetSAModuleVotes, TtnnFurthestPointSampling
 from models.experimental.detr3d.reference.torch_pointnet2_ops import furthest_point_sample
 from models.experimental.detr3d.ttnn.position_embedding import TtnnPositionEmbeddingCoordsSine
-from models.experimental.detr3d.ttnn.constant import ON_DEVICE
+from models.experimental.detr3d.ttnn.constant import NO_FALLBACK
 
 
 class TtnnModel3DETR(LightweightModule):
@@ -153,7 +153,7 @@ class TtnnModel3DETR(LightweightModule):
         return torch_xyz
 
     def run_encoder(self, torch_point_clouds):
-        if ON_DEVICE:
+        if NO_FALLBACK:
             torch_xyz = self._break_up_pc_ttnn(torch_point_clouds)
         else:
             torch_xyz = self._break_up_pc(torch_point_clouds)
@@ -235,7 +235,7 @@ class TtnnModel3DETR(LightweightModule):
             inputs["point_cloud_dims_min"],
             inputs["point_cloud_dims_max"],
         ]
-        if ON_DEVICE:
+        if NO_FALLBACK:
             torch_query_xyz, query_embed = self.get_query_embeddings_ttnn(torch_enc_xyz, torch_point_cloud_dims)
             enc_pos = self.pos_embedding(torch_enc_xyz, input_range=torch_point_cloud_dims)
         else:

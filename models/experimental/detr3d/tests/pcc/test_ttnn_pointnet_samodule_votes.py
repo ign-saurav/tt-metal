@@ -13,7 +13,7 @@ from models.experimental.detr3d.common import load_torch_model_state
 from models.experimental.detr3d.reference.model_3detr import PointnetSAModuleVotes
 from models.experimental.detr3d.ttnn.pointnet_samodule_votes import TtnnPointnetSAModuleVotes
 from models.experimental.detr3d.ttnn.custom_preprocessing import create_custom_mesh_preprocessor
-from ttnn.model_preprocessing import infer_ttnn_module_args
+from models.experimental.detr3d.ttnn.utils import infer_ttnn_module_args
 
 
 @pytest.mark.parametrize(
