@@ -29,7 +29,6 @@ class TtnnBallQuery(LightweightModule):
         # Get shapes
         b, m, _ = new_xyz.shape
         _, n, _ = xyz.shape
-        radius2 = self.radius * self.radius
 
         # Compute pairwise distances
         # new_xyz: (b, m, 3) -> (b, m, 1, 3)
@@ -44,6 +43,7 @@ class TtnnBallQuery(LightweightModule):
         diff_squared = ttnn.multiply(diff, diff)
         dist2 = ttnn.sum(diff_squared, dim=3)
 
+        radius2 = self.radius * self.radius
         # Create mask for points within radius
         radius2_tensor = ttnn.full((b, m, n), radius2, dtype=ttnn.float32, device=self.device, layout=ttnn.TILE_LAYOUT)
         mask = ttnn.lt(dist2, radius2_tensor)
