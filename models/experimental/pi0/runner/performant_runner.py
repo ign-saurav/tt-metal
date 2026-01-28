@@ -60,14 +60,6 @@ class PI0PerformantRunner:
         self.op_event = None
         self.write_event = None
 
-        # Input tensors (will be allocated during capture)
-        self.lang_tokens_ttnn = None
-        self.lang_masks_ttnn = None
-        self.state_ttnn = None
-        self.lang_tokens_spec = None
-        self.lang_masks_spec = None
-        self.state_spec = None
-
         # DRAM tensors for persistent storage
         self.lang_tokens_dram = None
         self.lang_masks_dram = None
@@ -144,13 +136,8 @@ class PI0PerformantRunner:
             lang_masks: Language masks
             state: Robot state
         """
-        # Prepare inputs and store specs
+        # Prepare inputs
         lang_tokens_ttnn, lang_masks_ttnn, state_ttnn = self._prepare_inputs_for_trace(lang_tokens, lang_masks, state)
-
-        # Store specs for later allocation
-        self.lang_tokens_spec = lang_tokens_ttnn.spec
-        self.lang_masks_spec = lang_masks_ttnn.spec
-        self.state_spec = state_ttnn.spec
 
         # Warmup run 1: Configure JIT operations
         print("  Warmup run 1: Configuring JIT operations...")
@@ -176,27 +163,24 @@ class PI0PerformantRunner:
 
         # Setup DRAM tensors for persistent storage
         print("  Setting up DRAM tensors...")
-        dram_mem_config = ttnn.DRAM_MEMORY_CONFIG
-        self.lang_tokens_dram = ttnn.to_memory_config(lang_tokens_ttnn, dram_mem_config)
-        self.lang_masks_dram = ttnn.to_memory_config(lang_masks_ttnn, dram_mem_config)
-        self.state_dram = ttnn.to_memory_config(state_ttnn, dram_mem_config)
+        self.lang_tokens_dram = ttnn.to_memory_config(lang_tokens_ttnn, ttnn.DRAM_MEMORY_CONFIG)
+        self.lang_masks_dram = ttnn.to_memory_config(lang_masks_ttnn, ttnn.DRAM_MEMORY_CONFIG)
+        self.state_dram = ttnn.to_memory_config(state_ttnn, ttnn.DRAM_MEMORY_CONFIG)
 
         # Convert DRAM to L1 for operations
         self.lang_tokens_l1 = ttnn.to_memory_config(self.lang_tokens_dram, ttnn.L1_MEMORY_CONFIG)
         self.lang_masks_l1 = ttnn.to_memory_config(self.lang_masks_dram, ttnn.L1_MEMORY_CONFIG)
         self.state_l1 = ttnn.to_memory_config(self.state_dram, ttnn.L1_MEMORY_CONFIG)
 
-        # Capture trace
-        print("  Capturing trace...")
-        # Initialize events (before trace capture)
+        # Initialize events before trace capture
         self.op_event = ttnn.record_event(self.device, self.CQ_OPS)
 
-        # Convert PyTorch tensors to TTNN host tensors (BEFORE trace capture)
+        # Convert PyTorch tensors to TTNN host tensors
         lang_tokens_host = ttnn.from_torch(lang_tokens, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT)
         lang_masks_host = ttnn.from_torch(lang_masks.float(), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
         state_host = ttnn.from_torch(state, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
 
-        # Copy inputs to DRAM on CQ_IO (BEFORE trace capture)
+        # Copy inputs to DRAM on CQ_IO
         ttnn.wait_for_event(self.CQ_IO, self.op_event)
         ttnn.copy_host_to_device_tensor(lang_tokens_host, self.lang_tokens_dram, cq_id=self.CQ_IO)
         ttnn.copy_host_to_device_tensor(lang_masks_host, self.lang_masks_dram, cq_id=self.CQ_IO)
@@ -204,7 +188,7 @@ class PI0PerformantRunner:
         self.write_event = ttnn.record_event(self.device, self.CQ_IO)
         ttnn.wait_for_event(self.CQ_OPS, self.write_event)
 
-        # Convert DRAM to L1 (BEFORE trace capture)
+        # Convert DRAM to L1
         self.lang_tokens_l1 = ttnn.to_memory_config(self.lang_tokens_dram, ttnn.L1_MEMORY_CONFIG)
         self.lang_masks_l1 = ttnn.to_memory_config(self.lang_masks_dram, ttnn.L1_MEMORY_CONFIG)
         self.state_l1 = ttnn.to_memory_config(self.state_dram, ttnn.L1_MEMORY_CONFIG)
@@ -212,16 +196,16 @@ class PI0PerformantRunner:
         # Record event before trace capture
         self.op_event = ttnn.record_event(self.device, self.CQ_OPS)
 
-        # Compute prefix embeddings BEFORE trace capture (involves from_torch for images)
-        print("  Computing prefix embeddings (before trace capture)...")
+        # Compute prefix embeddings (involves from_torch for images, done before trace)
+        print("  Computing prefix embeddings...")
         prefix_embs, _, _ = self.model.embed_prefix(images, img_masks, self.lang_tokens_l1, self.lang_masks_l1)
 
-        # Forward prefix through VLM and cache KV (BEFORE trace capture)
-        print("  Forwarding prefix through VLM (before trace capture)...")
+        # Forward prefix through VLM and cache KV
+        print("  Forwarding prefix through VLM...")
         _, prefix_kv_cache = self.model.backbone.forward_vlm(prefix_embs, use_cache=True)
         self.prefix_kv_cache = prefix_kv_cache
 
-        # Pre-compute timesteps and initial noise (BEFORE trace capture)
+        # Pre-compute timesteps and initial noise
         batch_size = lang_tokens.shape[0]
         num_steps = self.model.denoise_config.num_steps
         self.timesteps = [1.0 - i / num_steps for i in range(num_steps + 1)]
@@ -284,7 +268,7 @@ class PI0PerformantRunner:
         t_tensor = ttnn.reshape(t_tensor, (batch_size,))
         self.t_tensor_persistent = t_tensor
 
-        # Begin trace capture of one denoising step (NO from_torch or tensor creation calls here!)
+        # Begin trace capture of one denoising step
         print("  Beginning trace capture of denoising step...")
         self.trace_id = ttnn.begin_trace_capture(self.device, cq_id=self.CQ_OPS)
 
@@ -298,12 +282,12 @@ class PI0PerformantRunner:
         else:
             self.action_output_tensor = expert_output
 
-        # End trace capture (before project_output, dt multiplication, and Euler step)
-        # These are excluded because project_output creates new tensor and dt changes per step
+        # End trace capture (excludes project_output, dt multiplication, and Euler step
+        # since project_output creates new tensors and dt changes per step)
         ttnn.end_trace_capture(self.device, self.trace_id, cq_id=self.CQ_OPS)
 
         self.trace_captured = True
-        print("  ✅ Trace captured successfully")
+        print("  Trace captured successfully")
 
     def run(
         self,
@@ -362,7 +346,7 @@ class PI0PerformantRunner:
             self.state_l1 = ttnn.to_memory_config(self.state_dram, ttnn.L1_MEMORY_CONFIG, output_tensor=self.state_l1)
 
             # Recompute prefix embeddings (images may change between runs)
-            # This is done BEFORE trace execution to avoid from_torch during trace
+            # Done before trace execution to avoid from_torch during trace
             prefix_embs, _, _ = self.model.embed_prefix(images, img_masks, self.lang_tokens_l1, self.lang_masks_l1)
             _, self.prefix_kv_cache = self.model.backbone.forward_vlm(prefix_embs, use_cache=True)
 
@@ -405,7 +389,6 @@ class PI0PerformantRunner:
             output = ttnn.to_torch(self.x_t_ttnn)
         else:
             # No trace capture - use regular execution with 2CQ I/O overlap
-            # The 2CQ benefit is that we overlapped the I/O transfers with previous execution
             # Convert DRAM to L1 for model execution
             lang_tokens_l1 = ttnn.to_memory_config(self.lang_tokens_dram, ttnn.L1_MEMORY_CONFIG)
             lang_masks_l1 = ttnn.to_memory_config(self.lang_masks_dram, ttnn.L1_MEMORY_CONFIG)
@@ -414,11 +397,11 @@ class PI0PerformantRunner:
             # Record event before model execution
             self.op_event = ttnn.record_event(self.device, self.CQ_OPS)
 
-            # Run model (model will do from_torch internally, but I/O is already done)
+            # Run model (model handles from_torch internally, I/O already done)
             output = self.model.sample_actions(
                 images=images,
                 img_masks=img_masks,
-                lang_tokens=lang_tokens,  # Pass PyTorch tensors as model expects
+                lang_tokens=lang_tokens,
                 lang_masks=lang_masks,
                 state=state,
             )

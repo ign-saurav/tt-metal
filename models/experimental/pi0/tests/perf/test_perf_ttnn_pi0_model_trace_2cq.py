@@ -112,17 +112,17 @@ def run_pi0_inference_trace_2cq(
     inputs = create_test_inputs(config, batch_size)
 
     # Load model
-    print(f"\n📋 Loading PI0 TTNN model (tt/)...")
+    print("\nLoading PI0 TTNN model...")
     weight_loader = PI0WeightLoader(str(checkpoint_path))
     model = PI0ModelTTNN(config, weight_loader, device)
-    print(f"✅ Model loaded")
+    print("Model loaded")
 
     # Create performant runner
-    print(f"\n🚀 Creating performant runner with trace+2cq...")
+    print("\nCreating performant runner with trace+2cq...")
     runner = PI0PerformantRunner(model, device)
 
     # Capture trace
-    print(f"\n📹 Capturing trace...")
+    print("\nCapturing trace...")
     torch.manual_seed(SEED)
     runner.capture_trace_2cq(
         images=inputs["images"],
@@ -133,7 +133,7 @@ def run_pi0_inference_trace_2cq(
     )
 
     # Warmup
-    print(f"\n🔥 Warmup ({warmup_iterations} iterations)...")
+    print(f"\nWarmup ({warmup_iterations} iterations)...")
     for i in range(warmup_iterations):
         torch.manual_seed(SEED + i)
         with torch.no_grad():
@@ -146,7 +146,7 @@ def run_pi0_inference_trace_2cq(
             )
 
     # Measure performance
-    print(f"\n⏱️  Measuring ({inference_iterations} iterations)...")
+    print(f"\nMeasuring ({inference_iterations} iterations)...")
     times: List[float] = []
 
     for i in range(inference_iterations):
@@ -247,16 +247,16 @@ def main():
 
     checkpoint_path = Path(CHECKPOINT_PATH)
     if not checkpoint_path.exists():
-        print(f"\n❌ Checkpoint not found: {checkpoint_path}")
+        print(f"\nCheckpoint not found: {checkpoint_path}")
         return 1
 
-    print(f"\n📁 Checkpoint: {checkpoint_path}")
+    print(f"\nCheckpoint: {checkpoint_path}")
 
     # Open device
-    print("\n🔌 Opening TTNN device...")
+    print("\nOpening TTNN device...")
     device = ttnn.open_device(device_id=0, l1_small_size=24576, num_command_queues=2, trace_region_size=8000000)
     grid = device.compute_with_storage_grid_size()
-    print(f"✅ Device opened (grid: {grid.x}x{grid.y})")
+    print(f"Device opened (grid: {grid.x}x{grid.y})")
 
     try:
         _ = run_pi0_inference_trace_2cq(
@@ -267,15 +267,15 @@ def main():
         )
         return 0
     except Exception as e:
-        print(f"\n❌ Error: {e}")
+        print(f"\nError: {e}")
         import traceback
 
         traceback.print_exc()
         return 1
     finally:
-        print("\n🔌 Closing device...")
+        print("\nClosing device...")
         ttnn.close_device(device)
-        print("✅ Device closed")
+        print("Device closed")
 
 
 if __name__ == "__main__":
