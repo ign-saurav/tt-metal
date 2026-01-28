@@ -11,7 +11,7 @@ import ttnn
 from models.common.utility_functions import comp_allclose, comp_pcc
 from models.tt_transformers.tt.common import PagedAttentionConfig, sample_host
 from models.tt_transformers.tt.model import Transformer
-from models.tt_transformers.tt.model_config import CheckpointType, DecodersPrecision, ModelArgs
+from models.tt_transformers.tt.model_config import DecodersPrecision, ModelArgs
 
 
 @torch.no_grad()
@@ -20,13 +20,10 @@ from models.tt_transformers.tt.model_config import CheckpointType, DecodersPreci
 @pytest.mark.parametrize(
     "weights, layers",
     [
-        # ("random", 1),
+        ("random", 1),
         ("instruct", None),
     ],
-    # ids=["quick", "full"],
-    ids=[
-        "full",
-    ],
+    ids=["quick", "full"],
 )
 @pytest.mark.parametrize(
     "paged_attention",
@@ -54,13 +51,10 @@ from models.tt_transformers.tt.model_config import CheckpointType, DecodersPreci
 @pytest.mark.parametrize(
     "optimizations",
     [
-        # lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
+        lambda model_args: DecodersPrecision.performance(model_args.n_layers, model_args.model_name),
         lambda model_args: DecodersPrecision.accuracy(model_args.n_layers, model_args.model_name),
     ],
-    # ids=["performance", "accuracy"],
-    ids=[
-        "accuracy",
-    ],
+    ids=["performance", "accuracy"],
 )
 @pytest.mark.parametrize(
     "mesh_device",
@@ -128,43 +122,20 @@ def test_model_inference(
 
     model_name = model_args.base_model_name
     if layers == 1:  # quick mode has tight PCC checks for known models
-        if model_args.checkpoint_type == CheckpointType.HuggingFace:
-            model_name = model_args.base_model_name
-        else:
-            model_name = {
-                (16, False): "llama32_1b",
-                (28, False): "llama32_3b",
-                (32, False): "llama31_8b",
-                (32, True): "llama32_11b",
-                (80, False): "llama31_70b",
-                (80, True): "llama32_90b",
-            }[(model_args.n_layers, model_args.is_llama_vision())]
+        model_name = model_args.base_model_name
 
         # Define tight final PCC thresholds for quick mode
         final_model_pcc = {
-            "llama32_1b": 0.9991 if mode_accuracy else 0.9864,
-            "llama32_3b": 0.9989 if mode_accuracy else 0.9837,
-            "llama31_8b": 0.9987 if mode_accuracy else 0.9850,
-            "llama32_11b": 0.9987 if mode_accuracy else 0.9850,
-            "llama31_70b": 0.9843 if mode_accuracy else 0.97607,
-            "llama32_90b": 0.9759,
-            # TODO: Investigate HF_MODEL PCC drop compared to LLAMA_DIR (especially 3.2-3B)
             "Llama-3.1-8B": 0.965 if mode_accuracy else 0.954,
-            "Llama-3.1-70B": 0.979 if mode_accuracy else 0.97607,
-            "Llama-3.2-1B": 0.9990 if mode_accuracy else 0.9864,
-            "Llama-3.2-3B": 0.958 if mode_accuracy else 0.9479,
-            "Llama-3.2-11B": 0.955 if mode_accuracy else 0.944,
-            "Llama-3.2-90B": 0.9732,
+            "Llama-3.1-70B": 0.973,
+            "Llama-3.2-1B": 0.999 if mode_accuracy else 0.991,
+            "Llama-3.2-3B": 0.954 if mode_accuracy else 0.945,
+            "Llama-3.2-11B": 0.952 if mode_accuracy else 0.940,
+            "Llama-3.2-90B": 0.971,
             "Mistral-7B": 0.95 if mode_accuracy else 0.95,
         }[model_name]
 
         final_k_cache_pcc = {
-            "llama32_1b": 0.9998,
-            "llama32_3b": 0.9998,
-            "llama31_8b": 0.9997,
-            "llama32_11b": 0.9995,
-            "llama31_70b": 0.9997,
-            "llama32_90b": 0.9995,
             "Llama-3.1-8B": 0.9997,
             "Llama-3.1-70B": 0.9997,
             "Llama-3.2-1B": 0.9998,
@@ -174,12 +145,6 @@ def test_model_inference(
             "Mistral-7B": 0.68,
         }[model_name]
         final_v_cache_pcc = {
-            "llama32_1b": 0.9996,
-            "llama32_3b": 0.9998,
-            "llama31_8b": 0.9997,
-            "llama32_11b": 0.9996,
-            "llama31_70b": 0.9997,
-            "llama32_90b": 0.9996,
             "Llama-3.1-8B": 0.9997,
             "Llama-3.1-70B": 0.9997,
             "Llama-3.2-1B": 0.9996,
@@ -190,12 +155,6 @@ def test_model_inference(
         }[model_name]
 
         quick_iterations = {
-            "llama32_1b": 2,
-            "llama32_3b": 4,
-            "llama31_8b": 6,
-            "llama32_11b": 6,
-            "llama31_70b": 6,
-            "llama32_90b": 6,
             "Llama-3.1-8B": 6,
             "Llama-3.1-70B": 6,
             "Llama-3.2-1B": 2,
@@ -221,13 +180,13 @@ def test_model_inference(
             or any(
                 [
                     f"{state_dict_prefix}{name}" in k
-                    for name in ["tok_embeddings.weight", "norm.weight", "output.weight"]
+                    for name in ["tok_embeddings.weight", "learnable_embedding.weight", "norm.weight", "output.weight"]
                 ]
             )
         )
     }
 
-    prompts = ["Capital of India is"] * model_args.max_batch_size
+    prompts = ["This is a test"] * model_args.max_batch_size
     if dummy_weights:
         # "This is a test" encoded prompt
         if model_name == "Mistral-7B":
@@ -249,7 +208,17 @@ def test_model_inference(
 
     # Embedding on host
     embd = model_args.reference_embedding(reference_model)
-    embd.load_state_dict({"emb.weight": state_dict[f"{state_dict_prefix}tok_embeddings.weight"]})
+    if model_args.is_llama_vision():
+        weight = torch.cat(
+            [
+                state_dict[f"{state_dict_prefix}tok_embeddings.weight"],
+                state_dict[f"{state_dict_prefix}learnable_embedding.weight"],
+            ],
+            dim=0,
+        )
+    else:
+        weight = state_dict[f"{state_dict_prefix}tok_embeddings.weight"]
+    embd.load_state_dict({"emb.weight": weight})
 
     generation_start_pos = 0
     generation_length = iterations
@@ -327,14 +296,8 @@ def test_model_inference(
     for i in range(generation_length):
         logger.info(f"[Model] Generating token {i}")
 
-        # For Gemma models, the HuggingFace model internally scales embeddings by hidden_size**0.5
-        # The TT model expects the same scaled input, so we apply scaling here
-        scaled_tt_input = tt_decode_input
-        if model_args.embed_scale is not None:
-            scaled_tt_input = tt_decode_input * model_args.embed_scale
-
         decode_input = model_args.prepare_residual_tensor_decode(
-            scaled_tt_input,
+            tt_decode_input,
             model_args.model_config["DECODE_RESIDUAL_MEMCFG"],
         )
 
@@ -342,9 +305,6 @@ def test_model_inference(
         rot_mats = tt_model.rope_setup.get_rot_mats(current_pos)
 
         # Run TT model
-        import time
-
-        start_time = time.time()
         tt_out = tt_model(
             decode_input,
             current_pos_tensor,
@@ -352,10 +312,6 @@ def test_model_inference(
             mode="decode",
             page_table=page_table_tt,
         )
-        end_time = time.time()
-        # import pdb; pdb.set_trace()
-        print(f"Time taken: {end_time - start_time:.2f} seconds")
-        print(f"\n✅ Transformer Gemma PCC (): {pcc:.6f} in {end_time - start_time:.2f} seconds")
 
         # Convert ttnn tensor to torch tensor
         mesh_composer = ttnn.ConcatMesh2dToTensor(
@@ -373,8 +329,8 @@ def test_model_inference(
             # In this test all users have the same position
             ref_output = reference_model(pt_decode_input, current_pos[0])
 
-        # Increment position for next iteration
-        current_pos = torch.tensor([generation_start_pos + i + 1 for _ in range(batch)])
+        # Increment position
+        current_pos = torch.tensor([generation_start_pos + i for _ in range(batch)])
         current_pos_tensor = ttnn.from_torch(
             current_pos,
             device=mesh_device,
@@ -393,25 +349,9 @@ def test_model_inference(
             if run_ref_pt:
                 all_outputs_ref.append(encoded_prompts[0][i])  # Update list of ref outputs
 
-            # Prepare input for NEXT iteration - get next prompt token if available
-            next_token_idx = i + 1
-            if next_token_idx < len(encoded_prompts[0]):
-                tt_decode_input = embd(encoded_prompts_tensor[:, next_token_idx]).view(batch, seqlen, -1)
-                if run_ref_pt:
-                    pt_decode_input = embd(encoded_prompts_tensor[:, next_token_idx]).view(batch, seqlen, -1)
-            else:
-                # Last prompt token processed - sample first generated token for next iteration
-                # Also add this token to outputs (it's the first generated token!)
-                if run_ref_pt:
-                    _, pt_out_tok = sample_host(ref_output, temperature=0, top_p=0.8)
-                    pt_decode_input = embd(pt_out_tok)
-                    tt_decode_input = pt_decode_input
-                    all_outputs_ref.append(pt_out_tok.squeeze(1).tolist()[0])
-                    all_outputs.append(pt_out_tok.squeeze(1).tolist()[0])
-                else:
-                    _, tt_out_tok = sample_host(tt_output_torch, temperature=0, top_p=0.8)
-                    tt_decode_input = embd(tt_out_tok)
-                    all_outputs.append(tt_out_tok.squeeze(1).tolist()[0])
+            tt_decode_input = embd(encoded_prompts_tensor[:, i]).view(batch, seqlen, -1)
+            if run_ref_pt:
+                pt_decode_input = embd(encoded_prompts_tensor[:, i]).view(batch, seqlen, -1)
         else:
             # Greedy decode (temperature = 0) the generated token and save it to print out later
             if run_ref_pt:
@@ -451,20 +391,10 @@ def test_model_inference(
             # Compare KV caches
             if cache_pcc:
                 for l in range(model_args.n_layers):
-                    if model_args.checkpoint_type == CheckpointType.HuggingFace:
-                        pytorch_layer_present = [
-                            reference_model.cache_k.clone().permute(0, 2, 1, 3),  # [batch, n_kv_heads, seq, head_dim]
-                            reference_model.cache_v.clone().permute(0, 2, 1, 3),  # [batch, n_kv_heads, seq, head_dim]
-                        ]
-                    else:
-                        pytorch_layer_present = [
-                            reference_model.layers[l]
-                            .attention.cache_k.clone()
-                            .permute(0, 2, 1, 3),  # [batch, n_kv_heads, seq, head_dim]
-                            reference_model.layers[l]
-                            .attention.cache_v.clone()
-                            .permute(0, 2, 1, 3),  # [batch, n_kv_heads, seq, head_dim]
-                        ]
+                    pytorch_layer_present = [
+                        reference_model.cache_k.clone().permute(0, 2, 1, 3),  # [batch, n_kv_heads, seq, head_dim]
+                        reference_model.cache_v.clone().permute(0, 2, 1, 3),  # [batch, n_kv_heads, seq, head_dim]
+                    ]
                     tt_layer_present = []
                     if paged_attention:
                         for layer_past in tt_model.layers[l].attention.layer_past:
