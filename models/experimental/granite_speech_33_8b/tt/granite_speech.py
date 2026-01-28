@@ -381,7 +381,7 @@ class GraniteSpeechTTNN:
         logger.info(f"Prefill compile time: {round(compile_prefill_time, 2)}s")
         logger.info(f"Decode compile time: {round(compile_decode_time, 2)}s")
         logger.info("")
-        logger.info(f"Audio features time: {round(audio_features_time, 2)}s")
+        logger.info(f"Audio Features Extraction time: {round(audio_features_time * 1000, 2)}ms")
         logger.info(f"Average Time to First Token (TTFT): {round(avg_time_to_first_token * 1000, 2)}ms")
         logger.info(
             f"Average speed: {round(avg_decode_iteration_time * 1000, 2)}ms @ {round(decode_tok_s_user, 2)} tok/s/user ({round(decode_tok_s, 2)} tok/s throughput)"
@@ -389,7 +389,11 @@ class GraniteSpeechTTNN:
 
         # Save benchmark data for CI dashboard
         # Instead of running warmup iterations, the demo profiles the initial compile iteration
-        targets = {}
+        targets = {
+            "audio_features_time": 3500,
+            "prefill_time_to_token": 400,
+            "decode_t/s/u": 27,
+        }
         tt_device_name = determine_device_name(self.mesh_device)  # submesh device should not decide performance target
         model_name = "Granite-speech-3.3-8b"
         bench_n_warmup_iter = {"inference_prefill": 0, "inference_decode": 1}

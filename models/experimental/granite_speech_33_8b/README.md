@@ -45,7 +45,8 @@ Granite Speech is a state-of-the-art speech-to-text model developed by IBM, capa
 
 ## Performance
 Wormhole(N150),
-- TTFS: ~390 ms
+- Audio Features Extraction Time: ~3221 ms
+- TTFT: ~390 ms
 - Speed: ~26 tok/s/user
 
 ## TODO
