@@ -42,6 +42,7 @@ This configuration uses bfp4 MLP and bfp8 attention weights for all models excep
 | Qwen2.5-72B       | T3K         | 99        | 100       | 15.2          | 225       |
 | Qwen2.5-Coder-32B | T3K         | 96        | 99        | 22.4          | 190       |
 | Qwen3-32B         | T3K         | 89        | 97        | 22.9          | 123       |
+| Qwen3-8B          | P150        | 96        | 100       | 5.41          | 405       |
 | Phi3.5-mini       | N150        |           |           | 43.2          | 98        |
 | Phi3.5-mini       | N300        |           |           | 57.8          | 62        |
 | Phi3.5-mini       | T3K         |           |           | 48.8          | 51        |
