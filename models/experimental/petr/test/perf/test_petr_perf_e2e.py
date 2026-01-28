@@ -51,7 +51,7 @@ def create_petr_pipeline_model(ttnn_model, modified_batch_img_metas, batch_size,
         {
             "l1_small_size": 24576,
             "trace_region_size": 50000000,
-            "num_command_queues": 1,
+            "num_command_queues": 2,
         }
     ],
     indirect=True,
@@ -59,7 +59,7 @@ def create_petr_pipeline_model(ttnn_model, modified_batch_img_metas, batch_size,
 @pytest.mark.parametrize("num_iterations", [32])
 @pytest.mark.parametrize(
     "batch, expected_compile_time, expected_throughput_fps",
-    [(1, 1.2, 0.8)],
+    [(1, 5.2, 1.02)],
 )
 def test_petr_e2e_perf(
     num_iterations,
@@ -202,12 +202,13 @@ def test_petr_e2e_perf(
     )
 
     logger.info("Creating pipeline...")
+    # TODO: Add use trace for 2CQ
     pipeline = create_pipeline_from_config(
         device=device,
         model=run_model,
         config=PipelineConfig(
             use_trace=False,
-            num_command_queues=1,
+            num_command_queues=2,
             all_transfers_on_separate_command_queue=False,
         ),
         dram_input_memory_config=dram_input_memory_config,

@@ -68,7 +68,6 @@ models/
         │   ├── demo.py
         └── tests/
           ├── perf/
-          │   ├── test_petr.py
           │   ├── test_petr_perf.py            # Device perf test
           │   └── test_petr_perf_e2e.py        # E2E perf test with CQ=1 and use_trace=False
           └── pcc/
@@ -117,8 +116,8 @@ Note: In the current demo, the calibration needs to be corrected. Since we do no
 ## Performance
 
 ### Single Device (BS=1)
-- Device perf is `2.36` FPS
-- E2E perf without trace and CQ=1 is `0.8` FPS
+- Device perf is `0.98` FPS
+- E2E perf without trace and CQ=2 is `1.02` FPS
 
 ### Run Device Perf Test
 ```

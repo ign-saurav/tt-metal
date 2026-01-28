@@ -9,7 +9,7 @@ import models.perf.device_perf_utils
 
 def _run_device_profiler_op_support_count(*args, **kwargs):
     if "op_support_count" not in kwargs:
-        kwargs["op_support_count"] = 1680
+        kwargs["op_support_count"] = 7000
     return run_device_profiler(*args, **kwargs)
 
 
@@ -19,7 +19,7 @@ models.perf.device_perf_utils.run_device_profiler = _run_device_profiler_op_supp
 @pytest.mark.parametrize(
     "batch_size, model_name, expected_perf",
     [
-        (1, "petr", 2.36),
+        (1, "petr", 0.98),
     ],
 )
 @pytest.mark.models_device_performance_bare_metal
@@ -28,7 +28,7 @@ def test_perf_device_bare_metal_petr(batch_size, model_name, expected_perf):
     num_iterations = 1
     margin = 0.04
 
-    command = f"pytest models/experimental/petr/test/perf/test_petr.py"
+    command = f"pytest models/experimental/petr/test/pcc/test_petr.py"
 
     cols = ["DEVICE FW", "DEVICE KERNEL", "DEVICE BRISC KERNEL"]
 

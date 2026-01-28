@@ -12,6 +12,7 @@ from models.experimental.petr.reference.petr import PETR
 from models.experimental.petr.tt.tt_petr import ttnn_PETR
 from models.experimental.petr.tt.model_preprocessing import get_parameters, generate_petr_inputs
 from tests.ttnn.utils_for_testing import check_with_pcc, assert_with_pcc
+import tracy
 
 
 def prepare_inputs():
@@ -83,5 +84,7 @@ def test_petr(device, reset_seeds):
         query_embedding_input=query_embedding_input,
         device=device,
     )
+    tracy.signpost("start")
     ttnn_output = ttnn_model.predict(ttnn_inputs, ttnn_batch_img_metas, skip_post_processing=True)
+    tracy.signpost("stop")
     verify_output(torch_output, ttnn_output)

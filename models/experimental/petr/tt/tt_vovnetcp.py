@@ -285,12 +285,31 @@ class ttnn_OSA_stage:
         model_config=None,
         conv_args=None,
         device=None,
-        torch_fallback=True,
     ):
-        self.torch_fallback = torch_fallback
+        self.device = device
         self.blocks = []
         if not stage_num == 2:
             self.pooling = True
+            stage_input_dims = {
+                3: (80, 200),
+                4: (40, 100),
+                5: (20, 50),
+            }
+            input_height, input_width = stage_input_dims.get(stage_num, (80, 200))
+            pool_config = MaxPool2dConfiguration(
+                input_height=input_height,
+                input_width=input_width,
+                channels=in_ch,
+                batch_size=1,
+                kernel_size=(3, 3),
+                stride=(2, 2),
+                padding=(0, 0),
+                dilation=(1, 1),
+                ceil_mode=True,
+                dtype=ttnn.bfloat16,
+                output_layout=ttnn.TILE_LAYOUT,
+            )
+            self.maxpool = TtMaxPool2d(pool_config, device)
         else:
             self.pooling = False
 
@@ -342,30 +361,14 @@ class ttnn_OSA_stage:
 
     def __call__(self, device, x):
         if self.pooling is True:
-            if self.torch_fallback:
-                x_torch = ttnn.to_torch(x).to(torch.bfloat16)
-                x_torch = x_torch.permute(0, 3, 1, 2)
-                x_torch = torch.nn.functional.max_pool2d(x_torch, kernel_size=3, stride=2, padding=0, ceil_mode=True)
-                x_torch = x_torch.permute(0, 2, 3, 1)
-                x = ttnn.from_torch(x_torch.to(torch.float32), dtype=ttnn.bfloat16, device=device)
-                x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-            else:
-                batch_size, input_height, input_width, channels = x.shape
-                pool_config = MaxPool2dConfiguration(
-                    input_height=input_height,
-                    input_width=input_width,
-                    channels=channels,
-                    batch_size=batch_size,
-                    kernel_size=(3, 3),
-                    stride=(2, 2),
-                    padding=(0, 0),
-                    dilation=(1, 1),
-                    ceil_mode=True,
-                    dtype=ttnn.bfloat16,
-                    output_layout=ttnn.TILE_LAYOUT,
-                )
-                maxpool = TtMaxPool2d(pool_config, device)
-                x = maxpool(x)
+            batch_size, input_height, input_width, channels = x.shape
+            x = ttnn.reshape(x, (1, 1, batch_size * input_height * input_width, channels))
+
+            x = self.maxpool(x)
+
+            output_height = input_height // 2
+            output_width = input_width // 2
+            x = ttnn.reshape(x, (batch_size, output_height, output_width, channels))
 
         for module_name in self.blocks:
             module = getattr(self, module_name)
