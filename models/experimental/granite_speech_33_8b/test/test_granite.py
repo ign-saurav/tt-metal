@@ -11,11 +11,6 @@ from models.experimental.granite_speech_33_8b.tt.granite_speech import GraniteSp
     [{"l1_small_size": 65535, "trace_region_size": 17000000, "num_command_queues": 1}],
     indirect=True,
 )
-@pytest.mark.parametrize(
-    "mesh_device",
-    [(1, 1)],
-    indirect=True,
-)
 def test_model_output(mesh_device):
     # Initialize models
     torch_model = AutoModelForSpeechSeq2Seq.from_pretrained(
