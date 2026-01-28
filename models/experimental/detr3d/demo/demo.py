@@ -14,7 +14,8 @@ from models.experimental.detr3d.ttnn.utils import box_post_processing as tt_box_
 from models.experimental.detr3d.reference.model_3detr import build_3detr, box_post_processing
 from models.experimental.detr3d.reference.model_config import Detr3dArgs
 from models.experimental.detr3d.reference.utils.dataset import build_dataset
-from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_module_args
+from ttnn.model_preprocessing import preprocess_model_parameters
+from models.experimental.detr3d.ttnn.utils import infer_ttnn_module_args
 from models.experimental.detr3d.ttnn.custom_preprocessing import create_custom_mesh_preprocessor
 from models.common.utility_functions import comp_pcc
 from models.experimental.detr3d.reference.utils.ap_calculator import APCalculator

@@ -7,17 +7,17 @@ import torch
 import pytest
 
 from loguru import logger
-from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_module_args
+from ttnn.model_preprocessing import preprocess_model_parameters
 from models.common.utility_functions import comp_pcc, comp_allclose
 
 from models.experimental.detr3d.common import load_torch_model_state
 from models.experimental.detr3d.ttnn.model_3detr import build_ttnn_3detr
-from models.experimental.detr3d.ttnn.utils import box_post_processing as tt_box_post_processing
+from models.experimental.detr3d.ttnn.utils import box_post_processing as tt_box_post_processing, infer_ttnn_module_args
 from models.experimental.detr3d.reference.model_3detr import build_3detr, box_post_processing
 from models.experimental.detr3d.reference.model_config import Detr3dArgs
 from models.experimental.detr3d.reference.utils.dataset import SunrgbdDatasetConfig
 from models.experimental.detr3d.ttnn.custom_preprocessing import create_custom_mesh_preprocessor
-from models.experimental.detr3d.ttnn.constant import ON_DEVICE
+from models.experimental.detr3d.ttnn.constant import NO_FALLBACK
 
 
 class Tt3DetrArgs(Detr3dArgs):
@@ -97,20 +97,21 @@ def test_3detr_model(encoder_only, input_shape, device):
         run_model=lambda model: ref_module(inputs=input_dict, encoder_only=encoder_only),
         device=device,
     )
-    if ON_DEVICE:
+    if NO_FALLBACK:
         ttnn_dict = {}
         for key, value in input_dict.items():
             if isinstance(value, torch.Tensor):
                 ttnn_dict[key] = ttnn.from_torch(value, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
             else:
                 ttnn_dict[key] = value
+        input_dict = ttnn_dict
 
     ttnn_args = Tt3DetrArgs()
     ttnn_args.parameters = ref_module_parameters
     ttnn_args.device = device
 
     ttnn_module, _ = build_ttnn_3detr(ttnn_args, dataset_config)
-    if ON_DEVICE:
+    if NO_FALLBACK:
         (
             cls_logits,
             center_offset,
@@ -121,7 +122,7 @@ def test_3detr_model(encoder_only, input_shape, device):
             num_layers,
             torch_query_xyz,
             torch_point_cloud_dims,
-        ) = ttnn_module(inputs=ttnn_dict, encoder_only=encoder_only)
+        ) = ttnn_module(inputs=input_dict, encoder_only=encoder_only)
     else:
         (
             cls_logits,
@@ -251,13 +252,14 @@ def test_3detr_model_raw_outputs(encoder_only, input_shape, device):
         device=device,
     )
 
-    if ON_DEVICE:
+    if NO_FALLBACK:
         ttnn_dict = {}
         for key, value in input_dict.items():
             if isinstance(value, torch.Tensor):
                 ttnn_dict[key] = ttnn.from_torch(value, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
             else:
                 ttnn_dict[key] = value
+        input_dict = ttnn_dict
 
     ttnn_args = Tt3DetrArgs()
     ttnn_args.parameters = ref_module_parameters
@@ -266,7 +268,7 @@ def test_3detr_model_raw_outputs(encoder_only, input_shape, device):
     ttnn_module, _ = build_ttnn_3detr(ttnn_args, dataset_config)
 
     # Get raw outputs from TTNN model
-    if ON_DEVICE:
+    if NO_FALLBACK:
         (
             cls_logits,
             center_offset,
@@ -277,7 +279,7 @@ def test_3detr_model_raw_outputs(encoder_only, input_shape, device):
             num_layers,
             ttnn_query_xyz,
             ttnn_point_cloud_dims,
-        ) = ttnn_module(inputs=ttnn_dict, encoder_only=encoder_only)
+        ) = ttnn_module(inputs=input_dict, encoder_only=encoder_only)
     else:
         (
             cls_logits,
@@ -298,9 +300,8 @@ def test_3detr_model_raw_outputs(encoder_only, input_shape, device):
     angle_logits = ttnn.to_torch(angle_logits)
     angle_residual_normalized = ttnn.to_torch(angle_residual_normalized)
     angle_residual = ttnn.to_torch(angle_residual)
-    if ON_DEVICE:
+    if NO_FALLBACK:
         ttnn_query_xyz = ttnn.to_torch(ttnn_query_xyz)
-        # ttnn_point_cloud_dims = ttnn.to_torch(ttnn_point_cloud_dims)
         for i in range(len(ttnn_point_cloud_dims)):
             ttnn_point_cloud_dims[i] = ttnn.to_torch(ttnn_point_cloud_dims[i])
 

@@ -6,7 +6,7 @@ import ttnn
 import torch
 from typing import Optional, Union
 from models.common.lightweightmodule import LightweightModule
-from models.experimental.detr3d.ttnn.constant import ON_DEVICE
+from models.experimental.detr3d.ttnn.constant import NO_FALLBACK
 from models.experimental.detr3d.ttnn.multihead_attention import TtnnMultiheadAttention
 from dataclasses import dataclass, asdict
 
@@ -212,14 +212,6 @@ class TtnnMaskedTransformerEncoder(LightweightModule):
         # Compute pairwise distances using ttnn operations
         # Using the formula: ||a - b||^2 = ||a||^2 + ||b||^2 - 2*a·b
 
-        # tt_xyz = ttnn.from_torch(
-        #     xyz,
-        #     device=self.device,
-        #     dtype=ttnn.bfloat16,
-        #     layout=ttnn.TILE_LAYOUT,
-        #     memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        # )
-
         if dist is None or dist.shape[1] != tt_xyz.shape[1]:
             # Compute squared norms: ||a||^2 for each point
             # xyz_ttnn shape: (batch_size, seq_len, 3)
@@ -286,7 +278,7 @@ class TtnnMaskedTransformerEncoder(LightweightModule):
         for idx, layer in enumerate(self.layers):
             attn_mask = None
             if self.masking_radius[idx] > 0:
-                if ON_DEVICE:
+                if NO_FALLBACK:
                     attn_mask, xyz_dist = self.compute_mask_ttnn(
                         xyz, self.masking_radius[idx], xyz_dist
                     )  # FIXME: Minor pcc drop

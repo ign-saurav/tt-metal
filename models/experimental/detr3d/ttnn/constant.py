@@ -2,4 +2,4 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-ON_DEVICE = True
+NO_FALLBACK = False
