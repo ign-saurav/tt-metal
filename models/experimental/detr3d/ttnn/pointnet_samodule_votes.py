@@ -10,7 +10,7 @@ from models.experimental.detr3d.ttnn.shared_mlp import TtnnSharedMLP
 from models.experimental.detr3d.reference import torch_pointnet2_ops as pointnet2_utils
 from models.experimental.detr3d.ttnn.utils import TtnnMaxPool2DSlice
 
-from models.experimental.detr3d.ttnn.constant import NO_FALLBACK
+from models.experimental.detr3d.ttnn.utils import NO_FALLBACK
 
 
 class TtnnBallQuery(LightweightModule):

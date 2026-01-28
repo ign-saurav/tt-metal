@@ -17,7 +17,7 @@ from models.experimental.detr3d.reference.model_3detr import build_3detr, box_po
 from models.experimental.detr3d.reference.model_config import Detr3dArgs
 from models.experimental.detr3d.reference.utils.dataset import SunrgbdDatasetConfig
 from models.experimental.detr3d.ttnn.custom_preprocessing import create_custom_mesh_preprocessor
-from models.experimental.detr3d.ttnn.constant import NO_FALLBACK
+from models.experimental.detr3d.ttnn.utils import NO_FALLBACK
 
 
 class Tt3DetrArgs(Detr3dArgs):

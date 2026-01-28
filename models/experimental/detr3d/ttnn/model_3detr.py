@@ -23,7 +23,7 @@ from models.experimental.detr3d.ttnn.generic_mlp import TtnnGenericMLP
 from models.experimental.detr3d.ttnn.pointnet_samodule_votes import TtnnPointnetSAModuleVotes, TtnnFurthestPointSampling
 from models.experimental.detr3d.reference.torch_pointnet2_ops import furthest_point_sample
 from models.experimental.detr3d.ttnn.position_embedding import TtnnPositionEmbeddingCoordsSine
-from models.experimental.detr3d.ttnn.constant import NO_FALLBACK
+from models.experimental.detr3d.ttnn.utils import NO_FALLBACK
 
 
 class TtnnModel3DETR(LightweightModule):
