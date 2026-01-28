@@ -28,14 +28,15 @@ done
 
 # Define model directories from environment variables with fallbacks
 HF_MODELS=(
-    "${LLAMA_32_1B_DIR:-meta-llama/Llama-3.2-1B-Instruct}"
-    "${LLAMA_32_3B_DIR:-meta-llama/Llama-3.2-3B-Instruct}"
-    "${LLAMA_31_8B_DIR:-meta-llama/Llama-3.1-8B-Instruct}"
-    "${LLAMA_32_11B_DIR:-meta-llama/Llama-3.2-11B-Vision-Instruct}"
-    "${LLAMA_31_70B_DIR:-meta-llama/Llama-3.1-70B-Instruct}"
-    "${LLAMA_32_90B_DIR:-meta-llama/Llama-3.2-90B-Vision-Instruct}"
-    "${QWEN_25_7B_DIR:-Qwen/Qwen2.5-7B-Instruct}"
-    "${QWEN_25_72B_DIR:-Qwen/Qwen2.5-72B-Instruct}"
+    # "${LLAMA_32_1B_DIR:-meta-llama/Llama-3.2-1B-Instruct}"
+    # "${LLAMA_32_3B_DIR:-meta-llama/Llama-3.2-3B-Instruct}"
+    # "${LLAMA_31_8B_DIR:-meta-llama/Llama-3.1-8B-Instruct}"
+    # "${LLAMA_32_11B_DIR:-meta-llama/Llama-3.2-11B-Vision-Instruct}"
+    # "${LLAMA_31_70B_DIR:-meta-llama/Llama-3.1-70B-Instruct}"
+    # "${LLAMA_32_90B_DIR:-meta-llama/Llama-3.2-90B-Vision-Instruct}"
+    # "${QWEN_25_7B_DIR:-Qwen/Qwen2.5-7B-Instruct}"
+    # "${QWEN_25_72B_DIR:-Qwen/Qwen2.5-72B-Instruct}"
+    "${QWEN3_8B_DIR:-Qwen/Qwen3-8B}"
 )
 
 # Create reference_outputs directory if it doesn't exist
