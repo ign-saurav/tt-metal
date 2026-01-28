@@ -6,7 +6,7 @@ from loguru import logger
 from models.tt_transformers.tt.common import (
     sample_host,
 )
-from models.tt_transformers.tt.model_config import DecodersPrecision
+from models.tt_transformers.tt.model_config import DecodersPrecision, determine_device_name
 from models.experimental.granite_speech_33_8b.tt.generator import (
     Generator,
     prepare_generator_args,
@@ -15,6 +15,8 @@ from typing import List
 from models.experimental.granite_speech_33_8b.tt.ttnn_encoder_block import GraniteSpeechCTCEncoderTTNN
 from models.experimental.granite_speech_33_8b.tt.ttnn_projector_block import GraniteSpeechEncoderProjectorTTNN
 from models.experimental.granite_speech_33_8b.tt.utils import save_language_model_weights
+from models.perf.benchmarking_utils import BenchmarkProfiler
+from models.demos.utils.llm_demo_utils import create_benchmark_data
 
 
 class GraniteSpeechTTNN:
@@ -108,10 +110,16 @@ class GraniteSpeechTTNN:
             )
         else:
             input_features = input_features.to(torch.bfloat16)
+        # Start profiler
+        logger.info(f"Start profiler")
+        profiler = BenchmarkProfiler()
+        profiler.start("run")
 
         """Get the audio features to merged into the multimodal embeddings."""
+        profiler.start("audio_features_time")
         encoder_embeds = self.encoder(input_features)
         audio_features = self.projector(encoder_embeds)
+        profiler.end("audio_features_time")
 
         if not self.use_torch_audio_feat:
             composer = ttnn.concat_mesh_to_tensor_composer(self.mesh_device, dim=-1)
@@ -147,15 +155,29 @@ class GraniteSpeechTTNN:
             self.max_generated_tokens + max_encoded_prompt_len <= self.paged_cache_max_seq_len
         ), f"max_generated_tokens ({self.max_generated_tokens}) needs to be <= than paged_cache_max_seq_len ({self.paged_cache_max_seq_len})"
 
+        logger.info("Starting prefill warmup...")
+        profiler.start(f"compile_prefill", iteration=0)
+        logits = self.generator.prefill_forward_text(
+            input_tokens_prefill_pt,  # Prefill warmup for all users, in case some users have different seqlens than others
+            page_table=self.page_table,
+            kv_cache=self.tt_kv_cache,
+            prompt_lens=decoding_pos,
+            enable_trace=True,
+        )
+        profiler.end(f"compile_prefill", iteration=0)
+        logger.info("Finished prefill warmup")
+
         logger.info(f"Starting prefill...")
+        profiler.start(f"inference_prefill", iteration=0)
         logits = self.generator.prefill_forward_text(
             input_tokens_prefill_pt,
             page_table=self.page_table,
             kv_cache=self.tt_kv_cache,
             prompt_lens=decoding_pos,
-            enable_trace=False,
+            enable_trace=True,
         )
         prefilled_token = torch.argmax(logits, dim=-1)
+        profiler.end(f"inference_prefill", iteration=0)
         logger.info(f"Prefill finished")
 
         # Keep track of generated outputs to print out every iteration
@@ -182,17 +204,23 @@ class GraniteSpeechTTNN:
         # Start decoding
         iteration = 0
         users_decoding = True
+        num_tokens_generated_decode = []
 
         out_tok = prefilled_token
 
         logger.info(f"Starting decode loop...")
+        profiler.start(f"inference_decode", iteration=0)
 
         while users_decoding:
+            if iteration == 0:  # First iteration also accounts for compile time
+                profiler.start(f"compile_decode", iteration=0)
+            else:
+                profiler.start(f"inference_decode_time_{iteration}", iteration=0)
             # Run decode forward
             logits, log_probs = self.generator.decode_forward_text(
                 out_tok,
                 current_pos,
-                enable_trace=False,
+                enable_trace=True,
                 page_table=self.page_table,
                 kv_cache=self.tt_kv_cache,
                 sampling_params=device_sampling_params,
@@ -212,6 +240,18 @@ class GraniteSpeechTTNN:
                     top_p=sampling_params["top_p"],
                     on_host=True,
                 )
+            if iteration == 0:  # First iteration will account the compile time
+                profiler.end(f"compile_decode", iteration=0)
+                decode_iteration_time = profiler.get_duration("compile_decode", iteration=0)
+            else:
+                profiler.end(f"inference_decode_time_{iteration}", iteration=0)
+                decode_iteration_time = profiler.get_duration(f"inference_decode_time_{iteration}", iteration=0)
+
+            # Print perf after every iteration (skip in CI to avoid performance overhead)
+            tokens_per_second_per_user = 1 / decode_iteration_time
+            logger.debug(
+                f"Iteration {iteration}: {1000 * decode_iteration_time:.0f}ms @ {tokens_per_second_per_user:.1f} tok/s/user ({self.global_batch_size * tokens_per_second_per_user:.1f} tok/s throughput)"
+            )
 
             current_pos += 1
 
@@ -245,9 +285,153 @@ class GraniteSpeechTTNN:
             if iteration >= self.max_generated_tokens:
                 users_decoding = False
 
+        num_tokens_generated_decode.append(iteration)  # Save the number of tokens generated for each repeat batch
+
         # Final print
         if not users_decoding:
             logger.info("Finished decoding, printing the final outputs...\n")
             for i, output in enumerate(all_outputs):
                 text = self.tokenizer.decode(output)
                 logger.info(f"\nSTT OUTPUT: {text}\n")
+
+        profiler.end(f"inference_decode", iteration=0)
+
+        # Finish profiling at the end of inference for all repeated batches
+        profiler.end("run")
+
+        # Prepare profile benchmark metrics for the first repeat batch only
+        compile_prefill_time = profiler.get_duration("compile_prefill")
+        compile_decode_time = profiler.get_duration("compile_decode")
+
+        total_inference_prefill_time = profiler.get_duration("inference_prefill")
+        audio_features_time = profiler.get_duration("audio_features_time")
+        total_inference_decode_time = 0
+        for i in range(1, num_tokens_generated_decode[0]):  # Iteration 0 is the compile time
+            total_inference_decode_time += profiler.get_duration(f"inference_decode_time_{i}")
+
+        # Average prefill time for each user
+        avg_time_to_first_token = total_inference_prefill_time / self.global_batch_size
+
+        # Average decode time per batch iteration
+        avg_decode_iteration_time = (
+            total_inference_decode_time / (num_tokens_generated_decode[0] - 1) if iteration > 1 else 0
+        )
+        prefill_lens = [input_tokens_prefill_pt.shape[-2]]
+
+        prefill_tok_s = prefill_lens[0] / total_inference_prefill_time * self.global_batch_size
+        decode_tok_s_user = (
+            (num_tokens_generated_decode[0] - 1) / total_inference_decode_time if iteration > 1 else 0
+        )  # Remove the compile time
+        decode_tok_s = (
+            ((num_tokens_generated_decode[0] - 1) / total_inference_decode_time * self.global_batch_size)
+            if iteration > 1
+            else 0
+        )  # Remove the compile time
+
+        measurements = {
+            # Required measurements
+            "compile_prefill": compile_prefill_time,
+            "compile_decode": compile_decode_time,
+            "inference_prefill": total_inference_prefill_time,
+            "inference_decode": total_inference_decode_time,
+            "audio_features_time": audio_features_time,
+            "prefill_time_to_token": avg_time_to_first_token,
+            "prefill_t/s": prefill_tok_s,  # tokens/s
+            "decode_t/s/u": decode_tok_s_user,  # tokens/s/u
+            "decode_t/s": decode_tok_s,  # tokens/s
+            # Optional measurements
+            "Total compile time": compile_prefill_time + compile_decode_time,
+            "Full demo runtime": profiler.get_duration("run"),
+        }
+
+        # Decode performance for some specific tokens
+        tok_1_perf = (
+            profiler.get_duration(f"inference_decode_time_{1}") if 1 < num_tokens_generated_decode[0] else 0
+        )  # Iteration 0 is compile time
+        tok_128_perf = (
+            profiler.get_duration(f"inference_decode_time_{127}") if 127 < num_tokens_generated_decode[0] else 0
+        )
+        tok_1024_perf = (
+            profiler.get_duration(f"inference_decode_time_{1023}") if 1023 < num_tokens_generated_decode[0] else 0
+        )
+        tok_4096_perf = (
+            profiler.get_duration(f"inference_decode_time_{4095}") if 4095 < num_tokens_generated_decode[0] else 0
+        )
+
+        if not stop_at_eos:
+            logger.info(f"Please note that 'stop_at_eos' is disabled. Output repetition is expected.")
+
+        logger.info("")
+        logger.info(f"=== Performance metrics ===")
+        if tok_1_perf > 0:
+            logger.info(
+                f"1st token decode time: {tok_1_perf * 1000:.2f}ms [{round(1 / tok_1_perf, 2)} t/s/u, {round((1 / tok_1_perf) * self.global_batch_size, 2)} t/s]"
+            )
+        if tok_128_perf > 0:
+            logger.info(
+                f"128th token decode time: {tok_128_perf * 1000:.2f}ms [{round(1 / tok_128_perf, 2)} t/s/u, {round((1 / tok_128_perf) * self.global_batch_size, 2)} t/s]"
+            )
+        if tok_1024_perf > 0:
+            logger.info(
+                f"1024th token decode time: {tok_1024_perf * 1000:.2f}ms [{round(1 / tok_1024_perf, 2)} t/s/u, {round((1 / tok_1024_perf) * self.global_batch_size, 2)} t/s]"
+            )
+
+        # Print some of the perf metrics
+        logger.info("==")
+        logger.info(f"Prefill compile time: {round(compile_prefill_time, 2)}s")
+        logger.info(f"Decode compile time: {round(compile_decode_time, 2)}s")
+        logger.info("")
+        logger.info(f"Audio features time: {round(audio_features_time, 2)}s")
+        logger.info(f"Average Time to First Token (TTFT): {round(avg_time_to_first_token * 1000, 2)}ms")
+        logger.info(
+            f"Average speed: {round(avg_decode_iteration_time * 1000, 2)}ms @ {round(decode_tok_s_user, 2)} tok/s/user ({round(decode_tok_s, 2)} tok/s throughput)"
+        )
+
+        # Save benchmark data for CI dashboard
+        # Instead of running warmup iterations, the demo profiles the initial compile iteration
+        targets = {}
+        tt_device_name = determine_device_name(self.mesh_device)  # submesh device should not decide performance target
+        model_name = "Granite-speech-3.3-8b"
+        bench_n_warmup_iter = {"inference_prefill": 0, "inference_decode": 1}
+        benchmark_data = create_benchmark_data(profiler, measurements, bench_n_warmup_iter, targets)
+
+        # Save the decode performance of every iteration for plotting in superset
+        for i in range(1, num_tokens_generated_decode[0]):
+            benchmark_data.add_measurement(
+                profiler,
+                0,
+                "inference_decode",
+                f"time_to_token_{i}",
+                profiler.get_duration(f"inference_decode_time_{i}") * 1000,
+                step_warm_up_num_iterations=None,
+                target=None,
+            )
+
+        # Also save the avg decode performance for the 128 iterations (excluding the compile time)
+        num_iterations_for_avg = min(128, num_tokens_generated_decode[0])
+        inference_decode_time_first_128 = sum(
+            profiler.get_duration(f"inference_decode_time_{i}") for i in range(1, num_iterations_for_avg)
+        )
+        benchmark_data.add_measurement(
+            profiler,
+            0,
+            "inference_decode",
+            "avg_decode_time_first_128",
+            inference_decode_time_first_128 * 1000 / max(1, num_iterations_for_avg - 1),
+            step_warm_up_num_iterations=None,
+            target=None,
+        )
+        benchmark_data.save_partial_run_json(
+            profiler,
+            run_type=f"{tt_device_name}-demo",
+            ml_model_name=model_name,
+            ml_model_type="speech",
+            num_layers=self.model_args[0].n_layers,
+            batch_size=self.global_batch_size,
+            config_params={
+                "data_parallel": self.data_parallel,
+                "tensor_parallel": self.num_devices // self.data_parallel,
+            },
+            input_sequence_length=max(prefill_lens),
+            output_sequence_length=num_tokens_generated_decode[0],
+        )

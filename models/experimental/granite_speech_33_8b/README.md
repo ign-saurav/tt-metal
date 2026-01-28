@@ -43,6 +43,11 @@ Granite Speech is a state-of-the-art speech-to-text model developed by IBM, capa
 - Used tt_trasformers to run granite speech language model(granite-3.3-8b-instruct)
 - Audio Input: Mono channel, 16kHz sample rate
 
+## Performance
+Wormhole(N150),
+- TTFS: ~390 ms
+- Speed: ~26 tok/s/user
+
 ## TODO
 - The Granite Speech language model uses LoRA adapters for accurate results; however, LoRA adapters are not currently supported because the TTNN model is using tt_transformer.
 
