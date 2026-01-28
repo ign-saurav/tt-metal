@@ -677,6 +677,9 @@ SYSTEM_NAME_TO_MESH_SHAPE: dict[str, tuple[int, int]] = {
     "T3K": (1, 8),
     "N300": (1, 2),
     "N150": (1, 1),
+    "P150": (1, 1),  # Single P150 chip
+    "P150_X4": (2, 2),  # 2x2 mesh of P150 chips
+    "P150_X8": (2, 4),  # 2x4 mesh of P150 chips
 }
 
 

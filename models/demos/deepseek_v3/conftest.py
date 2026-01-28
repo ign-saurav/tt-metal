@@ -34,7 +34,7 @@ def automatically_detect_current_device_type() -> str:
     Automatically detect device type based on cluster type and device count.
 
     Returns:
-        str: One of "N150", "N300", "T3K", "TG", "DUAL", "QUAD"
+        str: One of "N150", "N300", "T3K", "TG", "DUAL", "QUAD", "P150", "P150_X4", "P150_X8"
 
     Raises:
         ValueError: If the device type cannot be determined from the current configuration
@@ -76,6 +76,22 @@ def automatically_detect_current_device_type() -> str:
             return "N300"
         else:
             raise ValueError(f"N300 cluster type detected but unexpected device count: {num_devices} (expected 1 or 2)")
+    # Add P150 support here
+    elif cluster_type == ttnn.cluster.ClusterType.P150:
+        if num_devices == 1:
+            return "P150"
+        else:
+            raise ValueError(f"P150 cluster type detected but unexpected device count: {num_devices} (expected 1)")
+    elif cluster_type == ttnn.cluster.ClusterType.P150_X4:
+        if num_devices == 4:
+            return "P150_X4"
+        else:
+            raise ValueError(f"P150_X4 cluster type detected but unexpected device count: {num_devices} (expected 4)")
+    elif cluster_type == ttnn.cluster.ClusterType.P150_X8:
+        if num_devices == 8:
+            return "P150_X8"
+        else:
+            raise ValueError(f"P150_X8 cluster type detected but unexpected device count: {num_devices} (expected 8)")
 
     raise ValueError(
         f"Unable to determine device type: cluster_type={cluster_type}, "
@@ -105,7 +121,9 @@ def mesh_device(request, device_params):
     # Override mesh shape based on MESH_DEVICE environment variable
     requested_system_name = os.getenv("MESH_DEVICE")
     if requested_system_name is None:
-        raise ValueError("Environment variable $MESH_DEVICE is not set. Please set it to T3K, DUAL, QUAD, or TG.")
+        raise ValueError(
+            "Environment variable $MESH_DEVICE is not set. Please set it to TG, DUAL, QUAD, T3K, N300, N150, P150, P150_X4, P150_X8, or AUTO."
+        )
 
     def get_mesh_shape(system_name: str) -> ttnn.MeshShape:
         if system_name.upper() == "AUTO":
