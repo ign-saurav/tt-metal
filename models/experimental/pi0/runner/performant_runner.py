@@ -78,6 +78,15 @@ class PI0PerformantRunner:
         self.lang_masks_l1 = None
         self.state_l1 = None
 
+        # Trace execution state
+        self.prefix_kv_cache = None
+        self.timesteps = None
+        self.num_steps = None
+        self.timesteps_ttnn = None
+        self.x_t_ttnn = None
+        self.t_tensor_persistent = None
+        self.action_output_tensor = None
+
     def _prepare_inputs_for_trace(
         self,
         lang_tokens: torch.Tensor,
@@ -203,17 +212,95 @@ class PI0PerformantRunner:
         # Record event before trace capture
         self.op_event = ttnn.record_event(self.device, self.CQ_OPS)
 
-        # NOTE: We cannot trace sample_actions because it calls from_torch internally,
-        # which involves reads that aren't supported during trace capture.
-        # For now, we'll skip trace capture and use a simpler approach.
-        # TODO: Refactor model to have a method that takes TTNN tensors directly
-        # without from_torch conversion, so we can trace the core computation.
+        # Compute prefix embeddings BEFORE trace capture (involves from_torch for images)
+        print("  Computing prefix embeddings (before trace capture)...")
+        prefix_embs, _, _ = self.model.embed_prefix(images, img_masks, self.lang_tokens_l1, self.lang_masks_l1)
 
-        # For now, mark trace as not captured - we'll use regular execution
-        self.trace_id = None
-        self.trace_captured = False
-        print("  ⚠️  Trace capture skipped (model.sample_actions uses from_torch which can't be traced)")
-        print("  ✅ Using regular execution mode")
+        # Forward prefix through VLM and cache KV (BEFORE trace capture)
+        print("  Forwarding prefix through VLM (before trace capture)...")
+        _, prefix_kv_cache = self.model.backbone.forward_vlm(prefix_embs, use_cache=True)
+        self.prefix_kv_cache = prefix_kv_cache
+
+        # Pre-compute timesteps and initial noise (BEFORE trace capture)
+        batch_size = lang_tokens.shape[0]
+        num_steps = self.model.denoise_config.num_steps
+        self.timesteps = [1.0 - i / num_steps for i in range(num_steps + 1)]
+        self.num_steps = num_steps
+
+        # Pre-compute timesteps tensor
+        pad_steps = ((num_steps + 31) // 32) * 32
+        timestep_indices = ttnn.arange(0, pad_steps, 1, device=self.device, dtype=ttnn.bfloat16)
+        timestep_indices = ttnn.to_layout(timestep_indices, ttnn.TILE_LAYOUT)
+        timestep_values = ttnn.multiply(timestep_indices, -1.0 / num_steps)
+        self.timesteps_ttnn = ttnn.add(timestep_values, 1.0)
+        self.timesteps_ttnn = ttnn.reshape(self.timesteps_ttnn, (1, pad_steps))
+        ttnn.deallocate(timestep_indices)
+        ttnn.deallocate(timestep_values)
+
+        # Sample initial noise
+        x_t_torch = torch.randn(batch_size, self.model.config.action_horizon, self.model.config.action_dim)
+        self.x_t_ttnn = ttnn.from_torch(
+            x_t_torch,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
+
+        # Warmup one denoising step to compile kernels BEFORE trace capture
+        print("  Warming up denoising step to compile kernels...")
+        i = 0
+        t_tensor = ttnn.slice(self.timesteps_ttnn, [0, i], [batch_size, i + 1])
+        t_tensor = ttnn.reshape(t_tensor, (batch_size,))
+        suffix_embs, _, _, _ = self.model.embed_suffix(self.state_l1, self.x_t_ttnn, t_tensor)
+        expert_output, _ = self.model.backbone.forward_expert(suffix_embs, past_key_values=self.prefix_kv_cache)
+        if not self.model.config.pi05:
+            action_output = ttnn.slice(
+                expert_output, [0, 1, 0], [expert_output.shape[0], expert_output.shape[1], expert_output.shape[2]]
+            )
+        else:
+            action_output = expert_output
+        velocity = self.model.suffix_embedding.project_output(action_output)
+        t = self.timesteps[i]
+        t_next = self.timesteps[i + 1]
+        dt = t_next - t
+        velocity_scaled = ttnn.mul(velocity, dt)
+        self.x_t_ttnn = ttnn.add(self.x_t_ttnn, velocity_scaled, memory_config=ttnn.L1_MEMORY_CONFIG)
+        ttnn.synchronize_device(self.device)
+        ttnn.deallocate(t_tensor)
+
+        # Reset x_t_ttnn for trace capture
+        x_t_torch = torch.randn(batch_size, self.model.config.action_horizon, self.model.config.action_dim)
+        self.x_t_ttnn = ttnn.from_torch(
+            x_t_torch,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+        )
+
+        # Create persistent timestep tensor for trace execution
+        t_tensor = ttnn.slice(self.timesteps_ttnn, [0, i], [batch_size, i + 1])
+        t_tensor = ttnn.reshape(t_tensor, (batch_size,))
+        self.t_tensor_persistent = t_tensor
+
+        # Begin trace capture of one denoising step (NO from_torch or tensor creation calls here!)
+        print("  Beginning trace capture of denoising step...")
+        self.trace_id = ttnn.begin_trace_capture(self.device, cq_id=self.CQ_OPS)
+
+        # Run one denoising step to capture trace (all kernels compiled, tensors cached)
+        suffix_embs, _, _, _ = self.model.embed_suffix(self.state_l1, self.x_t_ttnn, self.t_tensor_persistent)
+        expert_output, _ = self.model.backbone.forward_expert(suffix_embs, past_key_values=self.prefix_kv_cache)
+        if not self.model.config.pi05:
+            self.action_output_tensor = ttnn.slice(
+                expert_output, [0, 1, 0], [expert_output.shape[0], expert_output.shape[1], expert_output.shape[2]]
+            )
+        else:
+            self.action_output_tensor = expert_output
+
+        # End trace capture (before project_output, dt multiplication, and Euler step)
+        # These are excluded because project_output creates new tensor and dt changes per step
+        ttnn.end_trace_capture(self.device, self.trace_id, cq_id=self.CQ_OPS)
 
         self.trace_captured = True
         print("  ✅ Trace captured successfully")
@@ -265,30 +352,57 @@ class PI0PerformantRunner:
         ttnn.wait_for_event(self.CQ_OPS, self.write_event)
 
         if self.trace_captured and self.trace_id is not None:
-            # Convert DRAM to L1 (reshard in place)
-            self.lang_tokens_l1 = ttnn.reshard(self.lang_tokens_dram, ttnn.L1_MEMORY_CONFIG, self.lang_tokens_l1)
-            self.lang_masks_l1 = ttnn.reshard(self.lang_masks_dram, ttnn.L1_MEMORY_CONFIG, self.lang_masks_l1)
-            self.state_l1 = ttnn.reshard(self.state_dram, ttnn.L1_MEMORY_CONFIG, self.state_l1)
+            # Convert DRAM to L1 (reuse tensors)
+            self.lang_tokens_l1 = ttnn.to_memory_config(
+                self.lang_tokens_dram, ttnn.L1_MEMORY_CONFIG, output_tensor=self.lang_tokens_l1
+            )
+            self.lang_masks_l1 = ttnn.to_memory_config(
+                self.lang_masks_dram, ttnn.L1_MEMORY_CONFIG, output_tensor=self.lang_masks_l1
+            )
+            self.state_l1 = ttnn.to_memory_config(self.state_dram, ttnn.L1_MEMORY_CONFIG, output_tensor=self.state_l1)
+
+            # Recompute prefix embeddings (images may change between runs)
+            # This is done BEFORE trace execution to avoid from_torch during trace
+            prefix_embs, _, _ = self.model.embed_prefix(images, img_masks, self.lang_tokens_l1, self.lang_masks_l1)
+            _, self.prefix_kv_cache = self.model.backbone.forward_vlm(prefix_embs, use_cache=True)
+
+            # Sample initial noise
+            batch_size = lang_tokens.shape[0]
+            x_t_torch = torch.randn(batch_size, self.model.config.action_horizon, self.model.config.action_dim)
+            self.x_t_ttnn = ttnn.from_torch(
+                x_t_torch,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+                memory_config=ttnn.L1_MEMORY_CONFIG,
+            )
 
             # Record event before trace execution
             self.op_event = ttnn.record_event(self.device, self.CQ_OPS)
 
-            # Execute trace (non-blocking)
-            ttnn.execute_trace(self.device, self.trace_id, cq_id=self.CQ_OPS, blocking=False)
+            # Execute denoising loop using trace for each step
+            for i in range(self.num_steps):
+                t = self.timesteps[i]
+                t_next = self.timesteps[i + 1]
+                dt = t_next - t
 
-            # Synchronize to ensure trace completes
-            ttnn.synchronize_device(self.device)
+                # Update persistent timestep tensor with current step's value
+                t_tensor_slice = ttnn.slice(self.timesteps_ttnn, [0, i], [batch_size, i + 1])
+                t_tensor_slice = ttnn.reshape(t_tensor_slice, (batch_size,))
+                ttnn.copy(t_tensor_slice, self.t_tensor_persistent)
+                ttnn.deallocate(t_tensor_slice)
 
-            # Note: The trace executes the model operations, but since the model converts
-            # the final output to PyTorch at the end, we need to run the model to get the output.
-            # TODO: Refactor model to return TTNN tensor directly, avoiding this extra call.
-            output = self.model.sample_actions(
-                images=images,
-                img_masks=img_masks,
-                lang_tokens=lang_tokens,  # Pass PyTorch tensors as model expects
-                lang_masks=lang_masks,
-                state=state,
-            )
+                # Execute trace (replays operations up to action_output)
+                ttnn.execute_trace(self.device, self.trace_id, cq_id=self.CQ_OPS, blocking=False)
+                ttnn.synchronize_device(self.device)
+
+                # Run operations not in trace: project_output, dt multiplication, and Euler step
+                velocity = self.model.suffix_embedding.project_output(self.action_output_tensor)
+                velocity_scaled = ttnn.mul(velocity, dt)
+                self.x_t_ttnn = ttnn.add(self.x_t_ttnn, velocity_scaled, memory_config=ttnn.L1_MEMORY_CONFIG)
+
+            # Convert final output to PyTorch
+            output = ttnn.to_torch(self.x_t_ttnn)
         else:
             # No trace capture - use regular execution with 2CQ I/O overlap
             # The 2CQ benefit is that we overlapped the I/O transfers with previous execution

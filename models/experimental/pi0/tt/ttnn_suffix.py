@@ -85,6 +85,24 @@ class SuffixEmbeddingTTNN:
         self._att_mask_pattern = att_mask_ttnn
         self._att_mask_suffix_len = suffix_len
 
+        # OPTIMIZATION: Pre-create padding mask tensor for trace capture
+        # Padding mask is all ones, shape (1, suffix_len) for batch_size=1
+        # This avoids ttnn.ones calls during trace capture (which involve writes)
+        self._cached_pad_mask = ttnn.ones(
+            (1, suffix_len),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+        # OPTIMIZATION: Pre-create indices tensor for timestep embedding (enables trace capture)
+        # The indices tensor is constant (only depends on expert_width), so we can cache it
+        # This avoids ttnn.arange calls during trace capture (which involve writes)
+        half_dim = config.expert_width // 2
+        self._cached_timestep_indices = ttnn.arange(0, half_dim, 1, device=device, dtype=ttnn.float32)
+        self._cached_timestep_indices = ttnn.to_layout(self._cached_timestep_indices, ttnn.TILE_LAYOUT)
+
     def embed_actions(self, noisy_actions: ttnn.Tensor) -> ttnn.Tensor:
         """
         Embed noisy actions using ttnn.linear.
@@ -142,6 +160,7 @@ class SuffixEmbeddingTTNN:
             min_period=4e-3,
             max_period=4.0,
             device=self.device,
+            cached_indices=self._cached_timestep_indices,
         )
 
     def fuse_action_time(
@@ -245,13 +264,19 @@ class SuffixEmbeddingTTNN:
         suffix_len = suffix_embs.shape[1]
 
         # Padding mask: all ones (no padding)
-        suffix_pad_masks = ttnn.ones(
-            (batch_size, suffix_len),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        )
+        # Use cached mask for batch_size=1, otherwise create new one
+        if batch_size == 1 and suffix_len == self._att_mask_suffix_len:
+            # Reuse cached padding mask (avoids ttnn.ones during trace capture)
+            suffix_pad_masks = self._cached_pad_mask
+        else:
+            # Create new mask for different batch_size or suffix_len
+            suffix_pad_masks = ttnn.ones(
+                (batch_size, suffix_len),
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
 
         # OPTIMIZATION: Use pre-computed attention mask pattern (no transfer per step!)
         # Pattern is pre-computed in __init__, just repeat for batch_size

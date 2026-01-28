@@ -42,6 +42,7 @@ def create_sinusoidal_pos_embedding_ttnn(
     min_period: float = 4e-3,
     max_period: float = 4.0,
     device: Optional[ttnn.Device] = None,
+    cached_indices: Optional[ttnn.Tensor] = None,
 ) -> ttnn.Tensor:
     """
     Create sinusoidal positional embeddings for timesteps (pure TTNN version).
@@ -68,8 +69,12 @@ def create_sinusoidal_pos_embedding_ttnn(
 
     # Create fraction [0, 1/(n-1), 2/(n-1), ..., 1] using TTNN
     # ttnn.arange creates [0, 1, 2, ..., n-1], divide by (n-1) to get [0, 1]
-    indices = ttnn.arange(0, half_dim, 1, device=device, dtype=ttnn.float32)
-    indices = ttnn.to_layout(indices, ttnn.TILE_LAYOUT)
+    # Use cached indices if provided (for trace capture optimization)
+    if cached_indices is None:
+        indices = ttnn.arange(0, half_dim, 1, device=device, dtype=ttnn.float32)
+        indices = ttnn.to_layout(indices, ttnn.TILE_LAYOUT)
+    else:
+        indices = cached_indices
     if half_dim > 1:
         fraction = ttnn.multiply(indices, 1.0 / (half_dim - 1))
     else:
@@ -102,8 +107,9 @@ def create_sinusoidal_pos_embedding_ttnn(
     # Concatenate to get [batch, dimension]
     embeddings = ttnn.concat([sin_emb, cos_emb], dim=-1)
 
-    # Clean up
-    ttnn.deallocate(indices)
+    # Clean up (don't deallocate cached_indices)
+    if cached_indices is None:
+        ttnn.deallocate(indices)
     ttnn.deallocate(fraction)
     ttnn.deallocate(exponent)
     ttnn.deallocate(period_ratio)
