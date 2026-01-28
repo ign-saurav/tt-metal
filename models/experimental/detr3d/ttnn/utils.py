@@ -2,6 +2,8 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+import os
+
 import ttnn
 import torch
 import numpy as np
@@ -11,6 +13,16 @@ from models.experimental.detr3d.reference.model_3detr import BoxProcessor
 from ttnn.model_preprocessing import Conv2dArgs, ConvTranspose2dArgs, MaxPool2dArgs, GroupNormArgs, ModuleArgs
 from ttnn.torch_tracer import trace
 from ttnn.dot_access import make_dot_access_dict
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name, None)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+NO_FALLBACK = _env_bool("NO_FALLBACK", default=False)
 
 
 def infer_ttnn_module_args(*, model, run_model, device):

@@ -6,7 +6,7 @@ import ttnn
 import torch
 from typing import Optional, Union
 from models.common.lightweightmodule import LightweightModule
-from models.experimental.detr3d.ttnn.constant import NO_FALLBACK
+from models.experimental.detr3d.ttnn.utils import NO_FALLBACK
 from models.experimental.detr3d.ttnn.multihead_attention import TtnnMultiheadAttention
 from dataclasses import dataclass, asdict
 
