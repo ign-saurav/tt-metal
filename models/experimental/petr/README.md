@@ -29,7 +29,7 @@ This repository provides:
   Follow the official instructions: <https://github.com/tenstorrent/tt-metal/blob/main/INSTALLING.md>
 - (Optional, for profiling) Build with profiler enabled:
   ```bash
-  ./build_metal.sh --enable-profiler
+  ./build_metal.sh
 
 ## Repository Layout
 ```
@@ -66,6 +66,7 @@ models/
         ├── README.md
         ├── demo/
         │   ├── demo.py
+        │   └── visualization.py
         └── tests/
           ├── perf/
           │   ├── test_petr_perf.py            # Device perf test
@@ -78,18 +79,21 @@ models/
               └── test_positional_encoding.py
               └── test_vovnetcp.py
 ```
+
 ## Weights
+
 The default model expects petr_vovnet_gridmask_p4_800x320-e2191752.pth in:
 ```
 models/experimental/petr/resources/petr_vovnet_gridmask_p4_800x320-e2191752.pth
 ```
 If missing, the code will download the same to the path
-```
+
 
 Note: The weights are for nuScenes dataset VoVNet backbone.
 
 ## Quickstart
 ### Run Tests
+
 ```
 models/experimental/petr/tests/pcc/test_petr.py
 ```
@@ -99,15 +103,19 @@ This runs an end-to-end flow that:
   - compares results.
 
 ### Run the Demo
+
 ```
 python3 models/experimental/petr/demo/demo.py
 ```
+
 ### Custom Images
 Sample nuScenes image(s) are placed under:
+
 ```
 models/experimental/petr/resources/sample_input
 ```
 Then re-run either the demo:
+
 ```
 python3 models/experimental/petr/demo/demo.py
 ```
