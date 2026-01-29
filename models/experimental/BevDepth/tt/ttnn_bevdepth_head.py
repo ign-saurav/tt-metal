@@ -403,8 +403,7 @@ class TtBEVDepthHead:
             default_path = os.path.join(
                 file_dir,
                 "resources",
-                "checkpoints",
-                "bev_depth_lss_r50_256x704_128x128_24e_2key.pth",
+                "bevdepth_weights.pth",
             )
 
             # Check if default path exists, otherwise try downloaded weights
@@ -412,7 +411,7 @@ class TtBEVDepthHead:
                 checkpoint_path = default_path
             else:
                 # Fallback to downloaded weights location
-                downloaded_path = "/tmp/bevdepth_weights.pth"
+                downloaded_path = "/resources/bevdepth_weights.pth"
                 if os.path.exists(downloaded_path):
                     checkpoint_path = downloaded_path
                 else:
