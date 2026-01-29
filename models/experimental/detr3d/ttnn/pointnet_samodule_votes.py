@@ -87,8 +87,6 @@ class TtnnGatherOperation(LightweightModule):
     def forward(self, points, idx):
         B, C, N = points.shape
         M = idx.shape[1]
-        # idx = ttnn.to_layout(idx, ttnn.TILE_LAYOUT)
-        # idx = ttnn.typecast(idx, ttnn.uint32)
         idx_expand = ttnn.unsqueeze(idx, 1)
         idx_expand = ttnn.expand(idx_expand, (B, C, M))
         points = ttnn.to_layout(points, ttnn.TILE_LAYOUT)
@@ -106,7 +104,7 @@ class TtnnGroupingOperation(LightweightModule):
         B, C, N = points.shape
         _, npoint, nsample = idx.shape
 
-        idx = ttnn.to_dtype(idx, ttnn.uint32)
+        idx = ttnn.typecast(idx, dtype=ttnn.uint32)
 
         # Expand idx to match points dimensions for gather
         idx_expanded = ttnn.unsqueeze(idx, 1)  # (B, 1, npoint, nsample)
@@ -190,7 +188,7 @@ class TtnnFurthestPointSampling(LightweightModule):
 
         # Initialize output indices
         idx = ttnn.zeros((B, n_samples), dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT, device=device)
-        idx_torch = torch.zeros(B, n_samples, dtype=torch.long)
+        # idx_torch = torch.zeros(B, n_samples, dtype=torch.long)
 
         # Initialize distance array
         # Start with large values
@@ -204,13 +202,13 @@ class TtnnFurthestPointSampling(LightweightModule):
 
         for i in range(n_samples):
             # Use slice_write to assign the values
-            # begins = [0, i]  # Start at row 0, column i
-            # ends = [B, i+1]  # End at row B, column i+1
-            # strides = [1, 1]  # Unit stride
-            # ttnn.slice_write(farthest, idx, begins, ends, strides)
+            begins = [0, i]  # Start at row 0, column i
+            ends = [B, i + 1]  # End at row B, column i+1
+            strides = [1, 1]  # Unit stride
+            ttnn.slice_write(farthest, idx, begins, ends, strides)
 
             # Use torch since slice_write binary gen has issues for larger tensor values
-            idx_torch[:, i] = ttnn.to_torch(farthest).reshape((B))
+            # idx_torch[:, i] = ttnn.to_torch(farthest).reshape((B))
 
             if i < n_samples - 1:
                 # Get coordinates of current centroid
@@ -241,7 +239,6 @@ class TtnnFurthestPointSampling(LightweightModule):
                 farthest = ttnn.argmax(temp_for_argmax, dim=-1)
 
         # Same as above for handling slice_write()
-        idx = ttnn.from_torch(idx_torch)
         return idx
 
 

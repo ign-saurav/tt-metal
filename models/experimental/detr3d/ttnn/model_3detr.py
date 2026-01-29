@@ -108,17 +108,15 @@ class TtnnModel3DETR(LightweightModule):
             ),
         }
 
-    def get_query_embeddings_ttnn(self, torch_encoder_xyz, point_cloud_dims):
-        # torch_query_inds = furthest_point_sample(torch_encoder_xyz, self.num_queries)
-        torch_query_inds = TtnnFurthestPointSampling()(torch_encoder_xyz, self.num_queries, device=self.device)
-        # torch_query_inds = torch_query_inds.long()
-        torch_query_inds = ttnn.typecast(torch_query_inds, dtype=ttnn.uint32)
-        # torch_query_xyz = [torch.gather(torch_encoder_xyz[..., x], 1, torch_query_inds) for x in range(3)]
+    def get_query_embeddings_ttnn(self, encoder_xyz, point_cloud_dims):
+        query_inds = TtnnFurthestPointSampling()(encoder_xyz, self.num_queries, device=self.device)
+        query_inds = ttnn.typecast(query_inds, dtype=ttnn.uint32)
+        query_inds = ttnn.to_layout(query_inds, ttnn.TILE_LAYOUT)
         ttnn_query_xyz = []
         for x in range(3):
             # Extract the x-th dimension and gather
-            dim_xyz = ttnn.unsqueeze(torch_encoder_xyz[..., x], -1)  # Add last dim for gather
-            gathered = ttnn.gather(dim_xyz, 1, torch_query_inds)
+            dim_xyz = ttnn.unsqueeze(encoder_xyz[..., x], -1)  # Add last dim for gather
+            gathered = ttnn.gather(dim_xyz, 1, query_inds)
             ttnn_query_xyz.append(ttnn.squeeze(gathered, -1))  # Remove the extra dim
         ttnn_query_xyz = ttnn.stack(ttnn_query_xyz, dim=0)
         ttnn_query_xyz = ttnn.permute(ttnn_query_xyz, (1, 2, 0))

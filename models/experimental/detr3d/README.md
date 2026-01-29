@@ -42,6 +42,20 @@ models/experimental/detr3d/
     └── pcc/                       # Performance comparison tests
 ```
 
+
+## Fallbacks
+
+Torch Fallback usage in code
+- Below mentioned operations in PointNet:
+  - QueryAndGroup()
+  - GatherOperation()
+  - FurthestPointSampling()
+- compute_mask() in MaskedTransformerEncoder:
+
+Note: Fallbacks can be disabled with export NO_FALLBACK=1, but the full model test gets hang.
+Issue for fallback is raised as [36719](https://github.com/tenstorrent/tt-metal/issues/36719)
+
+
 ### Dependencies
 
 ```bash
