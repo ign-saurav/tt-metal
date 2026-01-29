@@ -157,25 +157,22 @@ python3 models/experimental/BevDepth/demo/demo.py --mode ttnn --output bevdepth_
 The demo uses the pipeline API (1CQ, no trace) and processes sample nuScenes data to visualize 3D object detections in BEV space.
 
 ## Performance
+
 ### Single Device (BS=1)(n150):
 - Device perf is `3.8` FPS
-- E2E perf (with 1CQ, no trace) is `0.17` FPS
+- E2E perf (with 2CQ, no trace) is `0.55` FPS
 
 ### Run Device Performance Test
 ```
 pytest models/experimental/BevDepth/tests/perf/test_bevdepth_perf.py -s
 ```
 
-### Run End-to-End Performance Test
+### Run End-to-End Performance Test ( no Trace + 2CQ)
 ```
 pytest models/experimental/BevDepth/tests/perf/test_e2e_performant.py -s
 ```
 
-The e2e_performant test uses the pipeline API with 1 command queue and trace disabled, providing realistic end-to-end performance measurements.
-
-**Note:** The test is configured with 1CQ (single command queue) without trace due to:
-- 2CQ requires sharded inputs, which conflicts with BevDepth's L1 memory requirements
-- Trace is not supported due to deformable convolution operations
+**Note:** The E2E performance test uses 1 camera (instead of 6) to avoid L1 memory limitations when processing through the pipeline API. The test is configured with 2CQ without trace due to deformable conv2d is not supported in TTNN (see Issue #34509 and PR #34940).
 
 ## Configuration Notes
 - Resolution: (H, W) = (256, 704) is supported end-to-end.
@@ -192,8 +189,6 @@ The e2e_performant test uses the pipeline API with 1 command queue and trace dis
   - arXiv: <https://arxiv.org/pdf/2206.10092>
   - Year: 2022
 
-### Code Repository and licensing
+### Source Code Repository and licensing
 - **Official BEVDepth Implementation**: <https://github.com/Megvii-BaseDetection/BEVDepth>
 - **License**: MIT License
-
-This TT-Metal implementation is adapted from the original BEVDepth repository (MIT License) and is licensed under Apache-2.0 by Tenstorrent AI ULC. The reference implementations in the `reference/` directory retain their original MIT license headers with proper attribution to the source repositories.

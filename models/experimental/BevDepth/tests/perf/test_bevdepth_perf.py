@@ -10,7 +10,7 @@ import models.perf.device_perf_utils
 
 def _run_device_profiler_op_support_count(*args, **kwargs):
     if "op_support_count" not in kwargs:
-        kwargs["op_support_count"] = 10000
+        kwargs["op_support_count"] = 4000
     return run_device_profiler(*args, **kwargs)
 
 
