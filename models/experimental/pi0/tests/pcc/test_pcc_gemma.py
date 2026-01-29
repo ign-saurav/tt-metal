@@ -118,11 +118,9 @@ def get_mlp_weights(use_pretrained: bool, config: GemmaConfig, component: str = 
 @pytest.mark.parametrize(
     "use_pretrained",
     [False],
-    # [True, False],
     ids=[
         "pretrained_weight_false",
     ],
-    # ids=["pretrained_weight_true", "pretrained_weight_false"],
 )
 def test_pcc_gemma_vlm_mlp(device, use_pretrained):
     """Test Gemma VLM MLP: TTNN vs PyTorch."""
@@ -171,7 +169,6 @@ def test_pcc_gemma_vlm_mlp(device, use_pretrained):
     ids=[
         "pretrained_weight_false",
     ],
-    # ids=["pretrained_weight_true", "pretrained_weight_false"],
 )
 def test_pcc_gemma_expert_mlp(device, use_pretrained):
     """Test Gemma Expert MLP: TTNN vs PyTorch."""

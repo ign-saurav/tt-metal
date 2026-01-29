@@ -218,8 +218,6 @@ def get_paligemma_weights(use_pretrained: bool, config: PaliGemmaConfig):
 @pytest.mark.parametrize(
     "use_pretrained",
     [False],
-    # [True, False],
-    # ids=["pretrained_weight_true", "pretrained_weight_false"],
     ids=[
         "pretrained_weight_false",
     ],
@@ -261,7 +259,6 @@ def test_pcc_paligemma_embed_image(device, use_pretrained):
     ids=[
         "pretrained_weight_false",
     ],
-    # ids=["pretrained_weight_true", "pretrained_weight_false"],
 )
 def test_pcc_paligemma_vlm_block(device, use_pretrained):
     """Test single PaliGemma VLM block: TTNN vs PyTorch."""

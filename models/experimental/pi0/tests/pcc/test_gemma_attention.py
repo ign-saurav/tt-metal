@@ -73,7 +73,7 @@ def create_random_attention_weights(config: GemmaConfig) -> dict:
     # Fused QKV weight: [hidden_dim, (num_heads + 2*num_kv_heads) * head_dim]
     qkv_dim = (config.num_heads + 2 * config.num_kv_heads) * config.head_dim
     return {
-        "self_attn.qkv_proj.weight": torch.randn(config.width, qkv_dim).T,  # Transpose here
+        "self_attn.qkv_proj.weight": torch.randn(config.width, qkv_dim).T,
         "self_attn.o_proj.weight": torch.randn(config.width, config.width),
     }
 
@@ -127,7 +127,7 @@ def split_qkv_weights(weights: dict, config: GemmaConfig) -> dict:
         q_dim = config.num_heads * config.head_dim  # 8 * 256 = 2048
         kv_dim = config.num_kv_heads * config.head_dim  # 1 * 256 = 256
 
-        # Slice along COLUMNS (dimension 1) - keep original orientation
+        # Slice along COLUMNS (dimension 1)
         q_proj = wqkv[:, :q_dim]  # (2048, 2048)
         k_proj = wqkv[:, q_dim : q_dim + kv_dim]  # (2048, 256)
         v_proj = wqkv[:, q_dim + kv_dim : q_dim + 2 * kv_dim]  # (2048, 256)
@@ -145,7 +145,6 @@ def split_qkv_weights(weights: dict, config: GemmaConfig) -> dict:
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
 @pytest.mark.parametrize(
     "use_pretrained",
-    # [True, False],
     [False],
     ids=["pretrained_weight_false"],
 )
@@ -168,17 +167,10 @@ def test_pcc_gemma_vlm_attention(device, use_pretrained):
         base=10000.0,
     )
 
-    # Split weights for PyTorch reference (needs separate Q, K, V)
-    # attn_weights_torch = split_qkv_weights(attn_weights, config)
-    # attn_weights_torch = split_hf_keys(attn_weights, config.num_heads, config.num_kv_heads)
-    # attn_weights_torch = split_hf_keys(attn_weights, config.num_heads, config.num_kv_heads)
-    # attn_weights_torch = split_qkv_weights(attn_weights, config)
-
     attn_weights_torch = split_hf_keys(attn_weights.copy(), config.num_heads, config.num_kv_heads)
 
-    # TTNN - keep fused weights and use native RoPE
+    # TTNN
     attn_weights_ttnn = {}
-    # Use the original fused weight key that TTNN expects
     for key in ["self_attn.qkv_proj.weight", "self_attn.o_proj.weight"]:
         if key in attn_weights:
             # Convert qkv_proj.weight to wqkv for TTNN
@@ -190,34 +182,19 @@ def test_pcc_gemma_vlm_attention(device, use_pretrained):
                 device=device,
             )
 
-    # PyTorch reference - create cos/sin in PyTorch format
+    # PyTorch reference
     attn_torch = GemmaAttentionTorch(config, attn_weights_torch, layer_idx=0)
     # Create position IDs and cos/sin for PyTorch
     position_ids = torch.arange(seq_len).unsqueeze(0)  # [1, seq_len]
 
-    # Precompute cos/sin for PyTorch (standard format, not meta format)
+    # Precompute cos/sin for PyTorch
     inv_freq = 1.0 / (config.rope_base ** (torch.arange(0, config.head_dim, 2, dtype=torch.float32) / config.head_dim))
     t = torch.arange(seq_len, dtype=torch.float32)
     freqs = torch.outer(t, inv_freq)
     cos_pt = torch.cos(freqs)  # [seq_len, head_dim//2]
     sin_pt = torch.sin(freqs)  # [seq_len, head_dim//2]
 
-    # Expand to full head_dim by repeating [c0, c1, ..., c_{n/2-1}, c0, c1, ..., c_{n/2-1}]
-    # cos_pt = torch.stack([cos_pt, cos_pt], dim=-1).flatten(-2)  # [seq_len, head_dim]
-    # sin_pt = torch.stack([sin_pt, sin_pt], dim=-1).flatten(-2)  # [seq_len, head_dim]
-
     out_torch = attn_torch.forward(hidden, cos_pt, sin_pt)
-
-    # # TTNN - keep fused weights and use native RoPE
-    # attn_weights_ttnn = {}
-    # for key in ["self_attn.wqkv", "self_attn.o_proj.weight"]:
-    #     if key in attn_weights:
-    #         attn_weights_ttnn[key] = ttnn.from_torch(
-    #             attn_weights[key].T.contiguous(),
-    #             dtype=ttnn.bfloat8_b,
-    #             layout=ttnn.TILE_LAYOUT,
-    #             device=device,
-    #         )
 
     attn_ttnn = GemmaAttentionTTNN(
         config,

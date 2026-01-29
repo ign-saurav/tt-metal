@@ -69,61 +69,6 @@ def rms_norm_ttnn(
 # ============================================================================
 
 
-# def precompute_freqs_cis_meta_format(
-#     head_dim: int,
-#     max_seq_len: int,
-#     device: ttnn.Device,
-#     base: float = 10000.0,
-# ) -> Tuple[ttnn.Tensor, ttnn.Tensor]:
-#     """Optimized pure TTNN version with reduced allocations."""
-#     half_dim = head_dim // 2
-
-#     # Compute frequencies more efficiently
-#     indices = ttnn.arange(0, head_dim, 2, device=device, dtype=ttnn.float32)
-#     # indices = ttnn.to_layout(indices, ttnn.TILE_LAYOUT)
-
-#     # Combine operations to reduce intermediate tensors
-#     freqs = ttnn.reciprocal(
-#         ttnn.pow(base, ttnn.multiply(indices, 1.0 / head_dim))
-#     )
-#     ttnn.deallocate(indices)
-
-#     # Compute position-frequency matrix in one operation
-#     t = ttnn.arange(0, max_seq_len, 1, device=device, dtype=ttnn.float32)
-#     # t = ttnn.to_layout(t, ttnn.TILE_LAYOUT)
-
-#     # Use broadcasting instead of explicit reshape/multiply
-#     freqs_outer = ttnn.multiply(
-#         ttnn.reshape(t, (max_seq_len, 1)),
-#         ttnn.reshape(freqs, (1, half_dim))
-#     )
-#     ttnn.deallocate(t)
-#     ttnn.deallocate(freqs)
-
-#     # Compute cos/sin and duplicate in one step using repeat
-#     cos_half = ttnn.cos(freqs_outer)
-#     sin_half = ttnn.sin(freqs_outer)
-#     ttnn.deallocate(freqs_outer)
-
-#     # More efficient duplication using repeat instead of concat
-#     cos = ttnn.repeat(cos_half, (1, 2))  # [seq, head_dim]
-#     sin = ttnn.repeat(sin_half, (1, 2))  # [seq, head_dim]
-#     ttnn.deallocate(cos_half)
-#     ttnn.deallocate(sin_half)
-
-#     # Final reshape and type conversion
-#     cos = ttnn.typecast(
-#         ttnn.reshape(cos, (1, 1, max_seq_len, head_dim)),
-#         ttnn.bfloat16
-#     )
-#     sin = ttnn.typecast(
-#         ttnn.reshape(sin, (1, 1, max_seq_len, head_dim)),
-#         ttnn.bfloat16
-#     )
-
-#     return cos, sin
-
-
 def precompute_freqs_cis_meta_format(
     head_dim: int,
     max_seq_len: int,
@@ -149,8 +94,8 @@ def precompute_freqs_cis_meta_format(
     cos_half = torch.cos(freqs_outer)
     sin_half = torch.sin(freqs_outer)
 
-    cos = cos_half.repeat(1, 2)  # CORRECT: tensor method
-    sin = sin_half.repeat(1, 2)  # CORRECT: tensor method
+    cos = cos_half.repeat(1, 2)
+    sin = sin_half.repeat(1, 2)
 
     # Final reshape and type conversion
     cos = torch.reshape(cos, (1, 1, max_seq_len, head_dim)).to(torch.bfloat16)
