@@ -51,12 +51,13 @@ def test_ball_query_only(
     new_xyz_shape,
     device,
 ):
+    torch.manual_seed(420)
     # Create torch BallQuery model
     torch_ball_query = BallQuery(radius=radius, nsample=nsample)
 
     # Create test data
-    xyz = torch.randn(xyz_shape, dtype=torch.bfloat16)
-    new_xyz = torch.randn(new_xyz_shape, dtype=torch.bfloat16)
+    xyz = torch.randn(xyz_shape, dtype=torch.float32)
+    new_xyz = torch.randn(new_xyz_shape, dtype=torch.float32)
 
     # Get reference output from torch
     ref_idx = torch_ball_query(xyz=xyz, new_xyz=new_xyz)
@@ -69,8 +70,8 @@ def test_ball_query_only(
     )
 
     # Convert inputs to ttnn format
-    ttnn_xyz = ttnn.from_torch(xyz, dtype=ttnn.bfloat16, device=device)
-    ttnn_new_xyz = ttnn.from_torch(new_xyz, dtype=ttnn.bfloat16, device=device)
+    ttnn_xyz = ttnn.from_torch(xyz, dtype=ttnn.float32, device=device)
+    ttnn_new_xyz = ttnn.from_torch(new_xyz, dtype=ttnn.float32, device=device)
 
     # Get ttnn output
     tt_idx = ttnn_ball_query(xyz=ttnn_xyz, new_xyz=ttnn_new_xyz)

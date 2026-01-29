@@ -55,10 +55,12 @@ class TtnnBallQuery(LightweightModule):
 
         # Apply mask - set invalid indices to n+1
         invalid_value = ttnn.full((b, m, n), n + 1, dtype=ttnn.int32, device=self.device, layout=ttnn.TILE_LAYOUT)
+        arange_n = ttnn.typecast(arange_n, dtype=ttnn.float32)
+        invalid_value = ttnn.typecast(invalid_value, dtype=ttnn.float32)
         arange_n_masked = ttnn.where(mask, arange_n, invalid_value)
 
         # Sort to get closest indices first
-        sorted_indices = ttnn.sort(arange_n_masked, dim=2)
+        sorted_indices = ttnn.sort(ttnn.typecast(arange_n_masked, dtype=ttnn.bfloat16), dim=2)
         sorted_indices_tensor = sorted_indices[1]  # Get indices tensor
 
         # Convert to supported dtype using typecast (works on device tensors)
@@ -69,6 +71,10 @@ class TtnnBallQuery(LightweightModule):
         invalid_mask = ttnn.eq(first_nsample, invalid_value[:, :, : self.nsample])
         first_valid = ttnn.unsqueeze(first_nsample[:, :, 0], 2)
         first_valid = ttnn.expand(first_valid, first_nsample.shape)
+
+        invalid_mask = ttnn.typecast(invalid_mask, dtype=ttnn.float32)
+        first_valid = ttnn.typecast(first_valid, dtype=ttnn.float32)
+        first_nsample = ttnn.typecast(first_nsample, dtype=ttnn.float32)
         result = ttnn.where(invalid_mask, first_valid, first_nsample)
 
         return result
