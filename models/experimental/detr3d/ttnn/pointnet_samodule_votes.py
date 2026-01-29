@@ -182,63 +182,61 @@ class TtnnFurthestPointSampling(LightweightModule):
     def forward(self, points: ttnn.Tensor, n_samples: int, device):
         B, N, _ = points.shape
 
-        # Initialize centroids tensor
-        centroids = ttnn.zeros((B, n_samples), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device)
+        # Initialize output indices
+        idx = ttnn.zeros((B, n_samples), dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT, device=device)
+        idx_torch = torch.zeros(B, n_samples, dtype=torch.long)
 
-        # Initialize distance tensor with large values
-        distance = ttnn.full((B, N), fill_value=1e10, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
+        # Initialize distance array
+        # Start with large values
+        temp = ttnn.full((B, N), fill_value=1e10, dtype=ttnn.float32, layout=ttnn.ROW_MAJOR_LAYOUT, device=device)
 
-        # Initialize farthest indices
-        farthest = ttnn.zeros((B,), dtype=ttnn.int32, layout=ttnn.TILE_LAYOUT, device=device)
+        # Start with first point
+        farthest = ttnn.zeros((B, 1), dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT, device=device)
 
-        # Create batch indices
-        batch_indices = ttnn.arange(0, B, dtype=ttnn.int32, device=device)
-        batch_indices = ttnn.reshape(batch_indices, (B, 1))
+        # Compute magnitude to filter out points
+        mag = ttnn.sum(ttnn.pow(points, 2), dim=-1)  # (B, N)
 
-        centroid_list = []
         for i in range(n_samples):
-            # Create index tensor with proper shape for scatter
-            # The index needs to have shape (B, 1) to match the src tensor shape
-            index_tensor = ttnn.full((B, 1), fill_value=i, dtype=ttnn.int32, layout=ttnn.TILE_LAYOUT, device=device)
+            # Use slice_write to assign the values
+            # begins = [0, i]  # Start at row 0, column i
+            # ends = [B, i+1]  # End at row B, column i+1
+            # strides = [1, 1]  # Unit stride
+            # ttnn.slice_write(farthest, idx, begins, ends, strides)
 
-            # Reshape farthest to match expected src shape for scatter
-            farthest_reshaped = ttnn.reshape(farthest, (B, 1))
-            farthest_reshaped = ttnn.to_layout(farthest_reshaped, ttnn.TILE_LAYOUT)
-            farthest_reshaped = ttnn.typecast(farthest_reshaped, ttnn.bfloat16)
+            # Use torch since slice_write binary gen has issues for larger tensor values
+            idx_torch[:, i] = ttnn.to_torch(farthest).reshape((B))
 
-            # Store current farthest points as centroids
-            centroids = ttnn.scatter(centroids, dim=1, index=index_tensor, src=farthest_reshaped)
+            if i < n_samples - 1:
+                # Get coordinates of current centroid
+                expanded_indices = ttnn.expand(farthest, (B, 1, points.shape[-1]))
+                expanded_indices = ttnn.to_layout(expanded_indices, ttnn.TILE_LAYOUT)
+                centroid = ttnn.gather(ttnn.to_layout(points, ttnn.TILE_LAYOUT), dim=1, index=expanded_indices)
 
-            # Get current centroid coordinates using gather
-            # Create index tensor with shape (B, 1, 3) where each slice along dim=2 has the same index
-            farthest_indices = ttnn.unsqueeze(farthest, -1)
-            # Expand to (B, 1, 3) by repeating the index for each coordinate
-            farthest_indices = ttnn.repeat(farthest_indices, ttnn.Shape((B, 1, 3)))
-            farthest_indices = ttnn.pad(farthest_indices, [(0, 0), (0, 0), (0, 29)], 0)
-            farthest_indices = ttnn.to_layout(farthest_indices, ttnn.TILE_LAYOUT)
-            farthest_indices = ttnn.typecast(farthest_indices, ttnn.uint32)
-            points_padded = ttnn.pad(points, [(0, 0), (0, 0), (0, 29)], 0)
-            points_padded = ttnn.to_layout(points_padded, ttnn.TILE_LAYOUT)
-            centroid = ttnn.gather(points_padded, dim=1, index=farthest_indices)
-            centroid = centroid[:, :, :3]
+                # Compute squared distance from centroid to all points
+                # d = (x2-x1)^2 + (y2-y1)^2 + (z2-z1)^2
+                centroid = ttnn.unsqueeze(centroid, 1)
+                dist = points - centroid
+                dist = ttnn.pow(dist, 2)
+                dist = ttnn.sum(dist, dim=-1)  # (B, N)
 
-            centroid_list.append(farthest)
+                # Filter out points with magnitude <= 1e-3
+                # Set their distances to -infinity so they won't be selected
+                mask = mag <= 1e-3
+                invalid_dist = ttnn.full(
+                    (B, N), fill_value=-1e10, dtype=ttnn.float32, layout=ttnn.TILE_LAYOUT, device=device
+                )
+                dist = ttnn.where(mask, invalid_dist, dist)
 
-            # Calculate squared distances to current centroid
-            diff = points - centroid
-            diff = ttnn.to_layout(diff, ttnn.TILE_LAYOUT)
-            dist = ttnn.sum(ttnn.pow(diff, 2), dim=2)
+                # Update minimum distances: temp[k] = min(d, temp[k])
+                temp = ttnn.minimum(temp, dist)
 
-            # Update minimum distances
-            dist = ttnn.to_layout(dist, ttnn.ROW_MAJOR_LAYOUT)
-            distance = ttnn.minimum(distance, dist)
+                # Select the farthest point (ttnn.argmax only supports reduction on last dim)
+                temp_for_argmax = ttnn.reshape(temp, (B, 1, N))
+                farthest = ttnn.argmax(temp_for_argmax, dim=-1)
 
-            # Find farthest point for next iteration
-            farthest = ttnn.argmax(distance, dim=1)
-
-        centroids = ttnn.typecast(centroids, ttnn.uint32)
-
-        return centroids
+        # Same as above for handling slice_write()
+        idx = ttnn.from_torch(idx_torch)
+        return idx
 
 
 class TtnnPointnetSAModuleVotes(LightweightModule):
