@@ -36,10 +36,12 @@ SEED = 42
 PCC_THRESHOLD = 0.93
 
 
-def create_pi0_pipeline_model(ttnn_model, device, inputs):
+def create_pi0_pipeline_model(ttnn_model, inputs, metadata, structure):
     """Create a wrapper function for the pi0 model to use with pipeline"""
 
-    def run(dummy_input):
+    def run(big_vector):
+        reconstructed_input = reconstruct_inputs(big_vector, metadata, structure)
+
         with torch.no_grad():
             output_dict = ttnn_model.sample_actions(
                 images=inputs["images"],
@@ -148,6 +150,89 @@ def create_test_inputs(config: PI0ModelConfig, device, batch_size: int = 1):
     }
 
 
+def flatten_and_pack_test_inputs(inputs, device):
+    """
+    Flattens all TTNN tensors inside `inputs` into a single 1D torch vector.
+    Returns:
+      - big_vector: torch.Tensor (1D)
+      - metadata: list of tensor reconstruction metadata
+      - structure: structure map to rebuild the dict/list layout
+    """
+
+    flat_tensors = []
+    structure = {}
+
+    # --- deterministic order ---
+    structure["images"] = []
+    for img in inputs["images"]:
+        structure["images"].append(len(flat_tensors))
+        flat_tensors.append(img)
+
+    structure["img_masks"] = []
+    for m in inputs["img_masks"]:
+        structure["img_masks"].append(len(flat_tensors))
+        flat_tensors.append(m)
+
+    for key in ["lang_tokens", "lang_masks", "state"]:
+        structure[key] = len(flat_tensors)
+        flat_tensors.append(inputs[key])
+
+    # --- flatten tensors and collect metadata ---
+    flat_vectors = []
+    metadata = []
+
+    for t in flat_tensors:
+        torch_t = ttnn.to_torch(t)
+
+        flat_vectors.append(torch_t.reshape(-1))
+
+        metadata.append(
+            {
+                "shape": torch_t.shape,
+                "numel": torch_t.numel(),
+                "dtype": t.dtype,
+                "layout": t.layout,
+                "memory_config": ttnn.DRAM_MEMORY_CONFIG,
+                "device": t.device(),
+            }
+        )
+
+    big_vector = torch.cat(flat_vectors)
+
+    packed_vector = ttnn.from_torch(
+        big_vector,
+        dtype=ttnn.bfloat16,  # safe common dtype
+        layout=ttnn.ROW_MAJOR_LAYOUT,  # 1D → row major
+        device=device,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+
+    return packed_vector, metadata, structure
+
+
+def reconstruct_inputs(big_vector, metadata, structure):
+    recovered = []
+    idx = 0
+
+    for meta in metadata:
+        size = meta["numel"]
+        shape = meta["shape"]
+        layout = meta["layout"]
+        dtype = meta["dtype"]
+        memory_config = meta["memory_config"]
+
+        chunk = big_vector[idx : idx + size]
+        chunk = ttnn.reshape(chunk, shape)
+        chunk = ttnn.to_layout(chunk, layout)
+        if chunk.dtype != dtype:
+            chunk = ttnn.typecast(chunk, dtype=dtype)
+        chunk = ttnn.to_memory_config(chunk, memory_config)
+        recovered.append(chunk)
+        idx += size
+
+    return recovered
+
+
 # =============================================================================
 # PYTEST TEST FUNCTION
 # =============================================================================
@@ -175,6 +260,9 @@ def test_perf_pi0_ttnn(device, num_iterations, batch_size, expected_compile_time
     # Create config and inputs
     config = create_config()
     inputs = create_test_inputs(config, device, batch_size=batch_size)
+    big_vector, metadata, structure = flatten_and_pack_test_inputs(inputs, device)
+
+    print(big_vector.shape)
 
     # Load weights
     weight_loader = PI0WeightLoader(str(checkpoint_path))
@@ -182,29 +270,32 @@ def test_perf_pi0_ttnn(device, num_iterations, batch_size, expected_compile_time
     # Initialize models
     model_ttnn = PI0ModelTTNN(config, weight_loader, device)
 
-    run_model = create_pi0_pipeline_model(model_ttnn, device, inputs)
+    run_model = create_pi0_pipeline_model(model_ttnn, inputs, metadata, structure)
+
+    tensor_height = 1
+    tensor_width = 301154
+
+    # Choose core grid - let's use 8 cores for width sharding
+    num_cores = 2
+    core_grid = ttnn.CoreGrid(y=1, x=num_cores)
 
     # Create sharded DRAM memory config
     dram_input_memory_config = get_memory_config_for_persistent_dram_tensor(
-        shape=(1, 1, 1, 32),
+        shape=(tensor_height, tensor_width),  # 2D shape
         shard_strategy=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
         dram_grid_size=device.dram_grid_size(),
     )
 
     # Create sharded L1 memory config
     l1_input_memory_config = ttnn.create_sharded_memory_config(
-        shape=(1, 32),  # Collapsed 2D shape
-        core_grid=ttnn.CoreGrid(y=1, x=1),  # Single core for this small tensor
+        shape=(tensor_height, tensor_width),  # 2D shape
+        core_grid=core_grid,
         strategy=ttnn.ShardStrategy.WIDTH,
         orientation=ttnn.ShardOrientation.ROW_MAJOR,
     )
-    tt_host_tensor = ttnn.from_torch(
-        torch.zeros(1, 1, 1, 32),
-        device=None,
-        dtype=ttnn.bfloat16,
-        layout=ttnn.ROW_MAJOR_LAYOUT,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-    )
+
+    # Create host tensor with the new shape
+    tt_host_tensor = big_vector.cpu()
 
     config = PipelineConfig(use_trace=True, num_command_queues=2, all_transfers_on_separate_command_queue=False)
     pipeline = create_pipeline_from_config(
