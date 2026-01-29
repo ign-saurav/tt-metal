@@ -48,7 +48,15 @@ def test_compute_mask_vs_compute_mask_ttnn(
     ttnn.deallocate(mask_ref_ttnn)
 
     # TTNN implementation
-    mask_ttnn_out, dist_ttnn_out = stub.compute_mask_ttnn(xyz, radius, dist=None)
+
+    tt_xyz = ttnn.from_torch(
+        xyz,
+        device=device,
+        dtype=ttnn.bfloat16,
+        layout=ttnn.TILE_LAYOUT,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+    mask_ttnn_out, dist_ttnn_out = stub.compute_mask_ttnn(tt_xyz, radius, dist=None)
     mask_tt = ttnn.to_torch(mask_ttnn_out)
     ttnn.deallocate(mask_ttnn_out)
     ttnn.deallocate(dist_ttnn_out)
