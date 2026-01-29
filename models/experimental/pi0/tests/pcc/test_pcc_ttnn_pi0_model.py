@@ -162,6 +162,10 @@ def test_pcc_pi0_ttnn(device):
             state=inputs["state"],
         )
 
+    # Convert TTNN output to torch if needed
+    if isinstance(ttnn_actions, ttnn.Tensor):
+        ttnn_actions = ttnn.to_torch(ttnn_actions)
+
     # Compute PCC
     pcc = compute_pcc(torch_actions, ttnn_actions)
 

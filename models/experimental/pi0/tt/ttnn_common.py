@@ -69,11 +69,21 @@ def create_sinusoidal_pos_embedding_ttnn(
 
     # Create fraction [0, 1/(n-1), 2/(n-1), ..., 1] using TTNN
     # ttnn.arange creates [0, 1, 2, ..., n-1], divide by (n-1) to get [0, 1]
-    indices = ttnn.to_layout(indices, ttnn.TILE_LAYOUT)
-    if half_dim > 1:
-        fraction = ttnn.multiply(indices, 1.0 / (half_dim - 1))
+    # Use provided indices if available (for trace capture), otherwise create new ones
+    if indices is not None:
+        indices_to_use = ttnn.to_layout(indices, ttnn.TILE_LAYOUT)
+        indices_allocated_here = False
     else:
-        fraction = indices  # Edge case: half_dim == 1
+        indices_to_use = ttnn.arange(0, half_dim, 1, device=device, dtype=ttnn.float32)
+        indices_to_use = ttnn.to_layout(indices_to_use, ttnn.TILE_LAYOUT)
+        indices_allocated_here = True
+
+    if half_dim > 1:
+        fraction = ttnn.multiply(indices_to_use, 1.0 / (half_dim - 1))
+        fraction_is_indices = False
+    else:
+        fraction = indices_to_use  # Edge case: half_dim == 1
+        fraction_is_indices = True
 
     # Compute period: min_period * (max_period / min_period) ** fraction
     # = min_period * exp(fraction * log(max_period / min_period))
@@ -102,9 +112,12 @@ def create_sinusoidal_pos_embedding_ttnn(
     # Concatenate to get [batch, dimension]
     embeddings = ttnn.concat([sin_emb, cos_emb], dim=-1)
 
-    # Clean up
-    ttnn.deallocate(indices)
-    ttnn.deallocate(fraction)
+    # Clean up (only deallocate indices if we created them, not if they were passed in)
+    if indices_allocated_here:
+        ttnn.deallocate(indices_to_use)
+    # Only deallocate fraction if it's not aliased to indices
+    if not fraction_is_indices:
+        ttnn.deallocate(fraction)
     ttnn.deallocate(exponent)
     ttnn.deallocate(period_ratio)
     ttnn.deallocate(period)

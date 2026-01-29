@@ -171,17 +171,22 @@ class PatchEmbeddingTTNN:
         Minimizes layout conversions by staying in TILE throughout.
 
         Args:
-            pixel_values: PyTorch tensor (batch_size, channels, height, width)
+            pixel_values: PyTorch tensor or TTNN tensor (batch_size, channels, height, width)
 
         Returns:
             TTNN tensor (batch_size, num_patches, hidden_size)
         """
-        # Convert to PyTorch if needed (shouldn't happen in normal flow)
-        # if isinstance(pixel_values, ttnn.Tensor):
-        #     pixel_values = ttnn.to_torch(pixel_values)
-
-        # Step 1: Transfer to device in TILE layout directly (B, C, H, W)
-        x = pixel_values
+        # Step 1: Convert PyTorch tensor to TTNN if needed
+        if isinstance(pixel_values, torch.Tensor):
+            x = ttnn.from_torch(
+                pixel_values,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
+        else:
+            x = pixel_values
 
         # Step 2: Permute to channel-last: (B, C, H, W) -> (B, H, W, C)
         # Note: This uses generic kernel since last 2 dims move, but unavoidable
