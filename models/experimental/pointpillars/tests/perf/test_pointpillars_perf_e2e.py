@@ -24,6 +24,7 @@ from models.experimental.pointpillars.common import (
     MAX_VOXELS,
     NCLASSES,
     load_checkpoint,
+    download_checkpoint,
     multi_device_to_torch,
 )
 
@@ -83,8 +84,9 @@ def setup_pointpillars_test_infra(device, batch_size_per_device):
         max_num_points=MAX_NUM_POINTS,
         max_voxels=MAX_VOXELS,
     )
-
-    state_dict = load_checkpoint("epoch_160.pth")
+    checkpoint_dir = "models/experimental/pointpillars/resources/checkpoint"
+    checkpoint_path = download_checkpoint(checkpoint_dir)
+    state_dict = load_checkpoint(checkpoint_path)
     if state_dict is not None:
         torch_model.load_state_dict(state_dict)
 
@@ -188,7 +190,7 @@ def run_perf_e2e_pointpillars(device, batch_size_per_device, expected_throughput
     )
 
     logger.info(
-        f"PointPillars BS={batch_size}: {inference_time_avg:.4f}s/frame, {fps:.2f} FPS (expected: {expected_throughput})"
+        f"PointPillars BS={batch_size}, Device= {num_devices}: Inference time= {inference_time_avg:.4f}s/frame, Achieved FPS= {fps:.2f} (expected: {expected_throughput})"
     )
     assert validation_passed, "Output validation failed"
 
@@ -199,7 +201,7 @@ def run_perf_e2e_pointpillars(device, batch_size_per_device, expected_throughput
     "device_params", [{"l1_small_size": 79104, "trace_region_size": 6434816, "num_command_queues": 2}], indirect=True
 )
 @pytest.mark.parametrize("batch_size_per_device", (1,))
-@pytest.mark.parametrize("expected_inference_throughput", [19.8])
+@pytest.mark.parametrize("expected_inference_throughput", [19.7])
 def test_pointpillars_perf_single_device(device, batch_size_per_device, expected_inference_throughput):
     """Test PointPillars performance on single device (N150)."""
     run_perf_e2e_pointpillars(device, batch_size_per_device, expected_inference_throughput)

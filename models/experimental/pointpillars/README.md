@@ -70,7 +70,8 @@ models/
         │   │   ├── test_pillar_encoder.py        # Pillar encoder test
         │   │   └── test_conv_transpose_split.py  # Conv transpose test
         │   ├── perf/
-        │   │   └── test_pointpillars_perf_e2e.py # End-to-end performance test
+        │   │   └── test_pointpillars_perf_e2e.py # End-to-end performance
+        │   │   └── test_pointpillars_device_perf.py # Device performance
         │   └── test_stability.py                 # Stability test
         └── common.py
         └── README.md
@@ -116,7 +117,8 @@ models/experimental/pointpillars/resources/
 
 ## Performance
 ### Single Device (BS=1, n150)
-- End-to-end perf (trace enabled, 2CQ): `19.8` FPS
+- End-to-end perf (trace enabled, 2CQ): `19.7` FPS
+- Device perf: `21` FPS
 
 ### Multi-Device (BS=2, n300)
 - End-to-end perf (trace enabled, 2CQ): `40` FPS
@@ -125,6 +127,7 @@ To run performance tests:
 ```
 pytest models/experimental/pointpillars/tests/perf/test_pointpillars_perf_e2e.py::test_pointpillars_perf_single_device -s
 pytest models/experimental/pointpillars/tests/perf/test_pointpillars_perf_e2e.py::test_pointpillars_perf_multi_device -s
+
 ```
 
 ## Configuration Notes

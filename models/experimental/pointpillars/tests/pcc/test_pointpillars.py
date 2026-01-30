@@ -17,7 +17,9 @@ from models.experimental.pointpillars.common import (
     MAX_NUM_POINTS,
     MAX_VOXELS,
     load_checkpoint,
+    download_checkpoint,
 )
+import tracy
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 79104}], indirect=True)
@@ -34,7 +36,9 @@ def test_pointpillars_full_pipeline(device, nclasses, reset_seeds):
         max_voxels=MAX_VOXELS,
     )
 
-    state_dict = load_checkpoint("epoch_160.pth")
+    checkpoint_dir = "models/experimental/pointpillars/resources/checkpoint"
+    checkpoint_path = download_checkpoint(checkpoint_dir)
+    state_dict = load_checkpoint(checkpoint_path)
     if state_dict is not None:
         torch_model.load_state_dict(state_dict)
 
@@ -72,7 +76,9 @@ def test_pointpillars_full_pipeline(device, nclasses, reset_seeds):
         (pillar_features.shape[0], 1, pillar_features.shape[1] * pillar_features.shape[2], pillar_features.shape[3]),
     )
 
+    tracy.signpost("start")
     tt_cls, tt_reg, tt_dir = tt_model.forward(pillar_features)
+    tracy.signpost("stop")
 
     # Compare classification output
     tt_cls_torch = tt2torch_tensor(tt_cls).permute(0, 3, 1, 2)
