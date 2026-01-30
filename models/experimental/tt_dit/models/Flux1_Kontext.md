@@ -38,7 +38,9 @@ Current performance and target performance for two systems are detailed below. P
 export TT_DIT_CACHE_DIR=/your/cache/path
 
 # Run the dev variant on LoudBox (2x4 mesh)
-pytest models/experimental/tt_dit/tests/models/flux1_kontext/test_pipeline_flux1_kontext.py -k "dev and 2x4sp0tp1 and traced and encoder_device"
+pytest models/experimental/tt_dit/tests/models/flux1_kontext/test_pipeline_flux1_kontext.py -k "2x4cfg1sp2tp4 and traced"
+
+pytest models/experimental/tt_dit/tests/models/flux1_kontext/test_pipeline_flux1_kontext.py -k "2x4cfg2sp1tp4 and traced"
 
 ```
 

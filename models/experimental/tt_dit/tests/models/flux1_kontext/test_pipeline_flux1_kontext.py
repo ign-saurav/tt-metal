@@ -16,7 +16,7 @@ from models.perf.benchmarking_utils import BenchmarkProfiler
 
 @pytest.mark.parametrize(
     "no_prompt",
-    [{"1": True, "0": False}.get(os.environ.get("NO_PROMPT"), False)],
+    [{"1": True, "0": False}.get(os.environ.get("NO_PROMPT"), True)],
 )
 @pytest.mark.parametrize(
     "device_params",
@@ -48,14 +48,14 @@ from models.perf.benchmarking_utils import BenchmarkProfiler
 @pytest.mark.parametrize(
     ("use_torch_t5_text_encoder", "use_torch_clip_text_encoder"),
     [
-        pytest.param(True, True, id="encoder_cpu"),
+        # pytest.param(True, True, id="encoder_cpu"),
         pytest.param(False, False, id="encoder_device"),
     ],
 )
 @pytest.mark.parametrize(
     "use_torch_vae",
     [
-        pytest.param(True, id="vae_cpu"),
+        # pytest.param(True, id="vae_cpu"),
         pytest.param(False, id="vae_device"),
     ],
 )

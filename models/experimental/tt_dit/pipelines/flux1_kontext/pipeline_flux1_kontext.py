@@ -1203,10 +1203,6 @@ class Flux1KontextPipeline:
                     submesh_index=submesh_id,
                 )
 
-                if submesh_id == self.vae_submesh_idx:
-                    logger.info("Initializing VAE buffers for safe tracing...")
-                    self._vae_decode(latent_device, self.generation_width, self.generation_height)
-
                 logger.info("Capturing trace...")
                 ttnn.synchronize_device(submesh_device)
                 trace_id = ttnn.begin_trace_capture(submesh_device, cq_id=0)
