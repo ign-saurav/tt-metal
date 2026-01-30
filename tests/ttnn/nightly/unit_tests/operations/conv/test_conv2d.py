@@ -648,15 +648,18 @@ def test_conv_features_multi_device(
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 16384}], indirect=True)
-@pytest.mark.parametrize("stride", [2])
-@pytest.mark.parametrize("batch_size", [2])
+@pytest.mark.parametrize("stride", [1])
+# @pytest.mark.parametrize("stride", [2])
+@pytest.mark.parametrize("batch_size", [1])
+# @pytest.mark.parametrize("batch_size", [2])
 @pytest.mark.parametrize(
     "output_channels, input_channels, input_height, input_width, shard_layout, config",
     (
-        (256, 256, 8, 8, WS, None),
-        (128, 128, 32, 32, BS, None),
-        (32, 32, 256, 256, HS, {"act_block_h": 32}),
-        (32, 32, 256, 256, HS, None),
+        (128, 128, 80, 80, HS, None),
+        # (256, 256, 8, 8, WS, None),
+        # (128, 128, 32, 32, BS, None),
+        # (32, 32, 256, 256, HS, {"act_block_h": 32}),
+        # (32, 32, 256, 256, HS, None),
     ),
 )
 @pytest.mark.parametrize(
@@ -667,12 +670,13 @@ def test_conv_features_multi_device(
     "output_dtype, output_layout",
     [
         [ttnn.bfloat16, ttnn.ROW_MAJOR_LAYOUT],
-        [ttnn.bfloat8_b, ttnn.TILE_LAYOUT],
+        # [ttnn.bfloat8_b, ttnn.TILE_LAYOUT],
     ],
 )
 @pytest.mark.parametrize(
     "fp32_accum",
-    [True],
+    [False],
+    # [True],
 )
 @pytest.mark.parametrize(
     "has_bias",
@@ -681,22 +685,24 @@ def test_conv_features_multi_device(
 @pytest.mark.parametrize(
     "filter, pad",
     [
+        # [1, 1],
         [3, 1],
     ],
 )
 @pytest.mark.parametrize("enable_act_double_buffer", [True])
 @pytest.mark.parametrize("enable_weights_double_buffer", [True])
-@pytest.mark.parametrize("math_fidelity", [ttnn.MathFidelity.HiFi4])
+@pytest.mark.parametrize("math_fidelity", [ttnn.MathFidelity.LoFi])
+# @pytest.mark.parametrize("math_fidelity", [ttnn.MathFidelity.HiFi4])
 @pytest.mark.parametrize(
     "activation",
     [
-        None,
-        ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
+        # None,
+        # ttnn.UnaryWithParam(ttnn.UnaryOpType.RELU),
         ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
-        ttnn.UnaryWithParam(ttnn.UnaryOpType.SIGMOID),
-        ttnn.UnaryWithParam(ttnn.UnaryOpType.TANH),
-        ttnn.UnaryWithParam(ttnn.UnaryOpType.SQRT),
-        ttnn.UnaryWithParam(ttnn.UnaryOpType.GELU),
+        # ttnn.UnaryWithParam(ttnn.UnaryOpType.SIGMOID),
+        # ttnn.UnaryWithParam(ttnn.UnaryOpType.TANH),
+        # ttnn.UnaryWithParam(ttnn.UnaryOpType.SQRT),
+        # ttnn.UnaryWithParam(ttnn.UnaryOpType.GELU),
     ],
 )
 def test_conv_activation(

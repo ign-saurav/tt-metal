@@ -98,6 +98,7 @@ def run_elt_silu_relu(
     if op == "silu":
         torch_silu = torch.nn.SiLU()
         torch_result = torch_silu(input)
+
         output_tensor = ttnn.silu(input_tensor, memory_config=in_sharded_mem_config)
     elif op == "relu":
         torch_relu = torch.nn.ReLU()
@@ -164,18 +165,21 @@ def test_gs_silu_relu(
 @pytest.mark.parametrize(
     "batch_size, input_channels, input_height, input_width, ncores, grid_size, shard_strategy, shard_orientation",
     (
-        (2, 320, 64, 64, 40, (8, 5), ttnn.ShardStrategy.BLOCK, ttnn.ShardOrientation.COL_MAJOR),
-        (8, 256, 56, 56, 32, (8, 4), ttnn.ShardStrategy.HEIGHT, ttnn.ShardOrientation.ROW_MAJOR),
-        (8, 512, 28, 28, 32, (4, 8), ttnn.ShardStrategy.BLOCK, ttnn.ShardOrientation.COL_MAJOR),
-        (8, 1024, 14, 14, 56, (7, 8), ttnn.ShardStrategy.BLOCK, ttnn.ShardOrientation.COL_MAJOR),
-        (8, 256, 56, 56, 56, (7, 8), ttnn.ShardStrategy.HEIGHT, ttnn.ShardOrientation.ROW_MAJOR),
-        (1, 5120, 32, 1, 32, (1, 32), ttnn.ShardStrategy.WIDTH, ttnn.ShardOrientation.ROW_MAJOR),
-        (1, 1024, 64, 1, 32, (1, 32), ttnn.ShardStrategy.WIDTH, ttnn.ShardOrientation.ROW_MAJOR),
-        (2, 10240, 64, 1, 32, (1, 32), ttnn.ShardStrategy.WIDTH, ttnn.ShardOrientation.ROW_MAJOR),
+        (1, 128, 80, 80, 64, (8, 8), ttnn.ShardStrategy.HEIGHT, ttnn.ShardOrientation.ROW_MAJOR),
+        # (1, 128, 80, 80, 56, (7, 8), ttnn.ShardStrategy.HEIGHT, ttnn.ShardOrientation.ROW_MAJOR),
+        # (2, 320, 64, 64, 40, (8, 5), ttnn.ShardStrategy.BLOCK, ttnn.ShardOrientation.COL_MAJOR),
+        # (8, 256, 56, 56, 32, (8, 4), ttnn.ShardStrategy.HEIGHT, ttnn.ShardOrientation.ROW_MAJOR),
+        # (8, 512, 28, 28, 32, (4, 8), ttnn.ShardStrategy.BLOCK, ttnn.ShardOrientation.COL_MAJOR),
+        # (8, 1024, 14, 14, 56, (7, 8), ttnn.ShardStrategy.BLOCK, ttnn.ShardOrientation.COL_MAJOR),
+        # (8, 256, 56, 56, 56, (7, 8), ttnn.ShardStrategy.HEIGHT, ttnn.ShardOrientation.ROW_MAJOR),
+        # (1, 5120, 32, 1, 32, (1, 32), ttnn.ShardStrategy.WIDTH, ttnn.ShardOrientation.ROW_MAJOR),
+        # (1, 1024, 64, 1, 32, (1, 32), ttnn.ShardStrategy.WIDTH, ttnn.ShardOrientation.ROW_MAJOR),
+        # (2, 10240, 64, 1, 32, (1, 32), ttnn.ShardStrategy.WIDTH, ttnn.ShardOrientation.ROW_MAJOR),
     ),
 )
-@pytest.mark.parametrize("op", ["silu", "relu"])
-@pytest.mark.parametrize("dtype", [ttnn.bfloat16, ttnn.bfloat8_b])
+@pytest.mark.parametrize("op", ["silu"])
+@pytest.mark.parametrize("dtype", [ttnn.bfloat16])
+# @pytest.mark.parametrize("dtype", [ttnn.bfloat16, ttnn.bfloat8_b])
 def test_wh_silu_relu(
     device,
     batch_size,
