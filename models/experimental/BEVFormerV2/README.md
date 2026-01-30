@@ -80,7 +80,7 @@ models/
 
 BEVFormerV2 pretrained weights are automatically downloaded when running the model. The weights are from the official BEVFormer repository:
 
-- **Model:** BEVFormerV2 (ResNet-50 backbone, 1 encoder + 1 decoder layers)
+- **Model:** BEVFormerV2 (ResNet-50 backbone, 6 encoder + 6 decoder layers)
 - **Checkpoint Location:** Auto-downloaded via `common.py` on first use
 
 Note: The weights are trained on the nuScenes dataset.
@@ -132,7 +132,7 @@ The demo processes sample nuScenes data and outputs 3D object detections in JSON
 
 ### Single Device (BS=1)(n150):
 
-- Device perf is **0.333** FPS
+- Device perf is **0.105** FPS
 
 ### Run Device Performance Test
 
@@ -145,9 +145,9 @@ pytest models/experimental/BEVFormerV2/tests/perf/test_bevformerv2_perf.py -s
 |--------|-----------|
 | all_cls_scores | 0.99 |
 | all_bbox_preds | 0.99 |
-| bev_embed | 0.955 |
+| bev_embed | 0.99 |
 
-All tests use PCC validation with threshold: 0.97.
+All tests use PCC validation with threshold: 0.99.
 
 ## Configuration Notes
 
@@ -155,8 +155,8 @@ All tests use PCC validation with threshold: 0.97.
 - **Device:** The demo/tests open a Wormhole device (default id typically 0). If you need to change it, adjust the device open call in the demo.
 - **Batch Size:** Tests are written for BS=1. For larger BS you'll need to verify memory layouts and tile alignment.
 - **Number of Cameras:** 6 cameras (CAM_FRONT, CAM_FRONT_LEFT, CAM_FRONT_RIGHT, CAM_BACK, CAM_BACK_LEFT, CAM_BACK_RIGHT).
-- **Transformer Layers:** 1 encoder + 1 decoder layers (configured for memory constraints).
-- **BEV Resolution:** 100×100 (bev_h × bev_w).
+- **Transformer Layers:** 6 encoder + 6 decoder layers.
+- **BEV Resolution:** 100×100 (bev_h × bev_w) (memory constraints).
 - **Weights:** Auto-downloaded via `common.py` on first use.
 
 ## References
