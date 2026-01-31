@@ -50,15 +50,11 @@ The EfficientDet D0 model consists of three main components:
 
 ## Performance(on N150)
 
-### Inference Performance
+### E2E Performance (2CQ + Trace)
+- **Batch Size 1, 512×512**: 36 FPS
 
-##### FPS (Frames Per Second)
-
-- **Batch Size 1, 512×512**: 36
-
-##### Device Time
-
-- **Total Inference Time**: 27160 ms
+### Device Performance
+- **Batch Size 1, 512×512**: 41.8 FPS
 
 **Measurement Configuration:**
 - Input size: 512×512
@@ -89,12 +85,16 @@ models/experimental/efficientdetd0/
 |   ├── efficientdet-d0.pth               # Pre-trained model weights
 │   └── *.jpg                         # Sample test images
 │
-├── tests/                             # Test suite
-│   ├── test_efficient_det.py         # Main integration test
-│   ├── test_bifpn.py                 # BiFPN component test
-│   ├── test_classifier.py            # Classifier component test
-│   ├── test_regressor.py             # Regressor component test
-│   └── evaluate_coco.py              # COCO evaluation script
+├── tests/
+|   └──pcc/                             # Test suite
+│      ├── test_efficient_det.py         # Main integration test
+│      ├── test_bifpn.py                 # BiFPN component test
+│      ├── test_classifier.py            # Classifier component test
+│      ├── test_regressor.py             # Regressor component test
+│      └── evaluate_coco.py              # COCO evaluation script
+|   └──perf/
+|      ├── test_e2e_performant.py         # E2E Performance Test (2CQ + Trace)
+|      └── test_device_perf.py            # Device Performance Test
 │
 └── tt/                                # TTNN implementation
     ├── efficient_det.py              # Main TTNN EfficientDet model

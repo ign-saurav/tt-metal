@@ -18,6 +18,7 @@ from models.experimental.efficientdetd0.tt.custom_preprocessor import (
 )
 from models.experimental.efficientdetd0.tt.efficientdetd0 import TtEfficientDetBackbone
 from models.experimental.efficientdetd0.reference.efficientdet import EfficientDetBackbone
+import tracy
 
 
 torch.manual_seed(0)
@@ -67,7 +68,9 @@ def test_efficient_det(batch, channels, height, width, device):
         device=device,
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
     )
+    tracy.signpost("start")
     ttnn_features, ttnn_regression, ttnn_classification = ttnn_model(ttnn_input_tensor)
+    tracy.signpost("stop")
 
     # Compare features (tuple of P3, P4, P5, P6, P7 after BiFPN)
     logger.info("Comparing BiFPN feature outputs...")
