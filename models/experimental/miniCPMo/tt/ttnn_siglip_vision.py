@@ -31,7 +31,7 @@ except ImportError:
 
 # Import SigLip attention from demos/siglip
 try:
-    from models.demos.siglip.tt.attention import siglip_attention_ttnn
+    from models.demos.multimodal.siglip.tt.attention import siglip_attention_ttnn
 
     logger.info("✅ Imported SigLip TTNN attention")
 except ImportError as e:

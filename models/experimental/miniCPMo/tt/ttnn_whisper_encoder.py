@@ -21,7 +21,7 @@ from loguru import logger
 from typing import Dict, Any, Optional
 
 # Import functions from existing Whisper implementation
-from models.demos.whisper.tt.ttnn_optimized_functional_whisper import (
+from models.demos.audio.whisper.tt.ttnn_optimized_functional_whisper import (
     WHISPER_MEMORY_CONFIG,
 )
 
