@@ -38,18 +38,19 @@ This repository provides:
 models/
 └── experimental/
     └── BEVFormerV2/
-        ├── resources/
-        │   └── nuScenes/
-        │       └── samples/ # Sample camera images (6 cameras)
-        │           ├── CAM_BACK/
-        │           ├── CAM_BACK_LEFT/
-        │           ├── CAM_BACK_RIGHT/
-        │           ├── CAM_FRONT/
-        │           ├── CAM_FRONT_LEFT/
-        │           └── CAM_FRONT_RIGHT/
+        ├── demo/
+        │   ├── demo_data/samples/
+        │   |    ├── CAM_BACK/
+        │   |    ├── CAM_BACK_LEFT/
+        │   |    ├── CAM_BACK_RIGHT/
+        │   |    ├── CAM_FRONT/
+        │   |    ├── CAM_FRONT_LEFT/
+        │   |    ├── CAM_FRONT_RIGHT/
+        │   ├── demo_data_loader.py # Demo data loader
+        │   ├── test.py # Test to generate predictions
         ├── reference/
         │   ├── bevformer_v2.py # Main BEVFormerV2 model
-        │   └── ... # Reference model components
+        │   ├── ... # Reference model components
         ├── tt/
         │   ├── model_preprocessing.py # Model preprocessing utilities
         │   ├── ttnn_bevformer_v2.py # Main TTNN model wrapper (TtBevFormerV2)
@@ -59,10 +60,7 @@ models/
         │   ├── ttnn_bevformer_head.py # Detection head
         │   ├── ttnn_backbone.py # ResNet-50 backbone
         │   ├── ttnn_fpn.py # FPN neck
-        │   └── utils.py # Utility functions
-        ├── demo/
-        │   ├── test.py # Demo script
-        │   └── demo_data_loader.py # Demo data loader
+        │   ├── utils.py # Utility functions
         ├── tests/
         │   ├── pcc/ # Pearson Correlation Coefficient tests
         │   │   ├── test_bevformer_v2.py # End-to-end functional test
@@ -70,21 +68,19 @@ models/
         │   │   ├── test_bevformer_head.py # Head test
         │   │   ├── test_decoder_layer.py # Decoder layer test
         │   │   └── test_ffn.py # FFN test
-        │   └── perf/ # Performance tests
-        │       └── test_bevformerv2_perf.py # Device performance test
+        │   ├── perf/ # Performance tests
+        │       ├── test_device_perf.py # Device performance test
+        |       ├── test_e2e_performant.py # End to end performance test with 1cq+no trace
+        |       ├── test_e2e_performant_2cq_no_trace.py # End to end performance test with 2cq+no trace
         ├── common.py # Common utilities
-        └── README.md
+        ├── README.md
 ```
 
 ## Weights
 
 BEVFormerV2 pretrained weights are automatically downloaded when running the model. The weights are from the official BEVFormer repository:
 
-<<<<<<< HEAD
-- **Model:** BEVFormerV2 (ResNet-50 backbone, 1 encoder + 1 decoder layers)
-=======
 - **Model:** BEVFormerV2 (ResNet-50 backbone, 6 encoder + 6 decoder layers)
->>>>>>> d296420ba338271a8b4669ff06bd8db6b978ba61
 - **Checkpoint Location:** Auto-downloaded via `common.py` on first use
 
 Note: The weights are trained on the nuScenes dataset.
@@ -136,16 +132,18 @@ The demo processes sample nuScenes data and outputs 3D object detections in JSON
 
 ### Single Device (BS=1)(n150):
 
-<<<<<<< HEAD
-- Device perf is **0.333** FPS
-=======
 - Device perf is **0.105** FPS
->>>>>>> d296420ba338271a8b4669ff06bd8db6b978ba61
+- E2E perf with 2 command queue is **0.08** FPS (without trace)
 
 ### Run Device Performance Test
 
 ```bash
-pytest models/experimental/BEVFormerV2/tests/perf/test_bevformerv2_perf.py -s
+pytest models/experimental/BEVFormerV2/tests/perf/test_device_perf.py -s
+```
+### Run End to End Performance Test
+
+```bash
+pytest models/experimental/BEVFormerV2/tests/perf/test_e2e_performant_2cq_no_trace.py -s
 ```
 
 **PCC Scores:**
@@ -153,15 +151,9 @@ pytest models/experimental/BEVFormerV2/tests/perf/test_bevformerv2_perf.py -s
 |--------|-----------|
 | all_cls_scores | 0.99 |
 | all_bbox_preds | 0.99 |
-<<<<<<< HEAD
-| bev_embed | 0.955 |
-
-All tests use PCC validation with threshold: 0.97.
-=======
 | bev_embed | 0.99 |
 
 All tests use PCC validation with threshold: 0.99.
->>>>>>> d296420ba338271a8b4669ff06bd8db6b978ba61
 
 ## Configuration Notes
 
@@ -169,33 +161,18 @@ All tests use PCC validation with threshold: 0.99.
 - **Device:** The demo/tests open a Wormhole device (default id typically 0). If you need to change it, adjust the device open call in the demo.
 - **Batch Size:** Tests are written for BS=1. For larger BS you'll need to verify memory layouts and tile alignment.
 - **Number of Cameras:** 6 cameras (CAM_FRONT, CAM_FRONT_LEFT, CAM_FRONT_RIGHT, CAM_BACK, CAM_BACK_LEFT, CAM_BACK_RIGHT).
-<<<<<<< HEAD
-- **Transformer Layers:** 1 encoder + 1 decoder layers (configured for memory constraints).
-- **BEV Resolution:** 100×100 (bev_h × bev_w).
-=======
 - **Transformer Layers:** 6 encoder + 6 decoder layers.
 - **BEV Resolution:** 100×100 (bev_h × bev_w) (memory constraints).
->>>>>>> d296420ba338271a8b4669ff06bd8db6b978ba61
 - **Weights:** Auto-downloaded via `common.py` on first use.
 
 ## References
 
 ### Paper
-<<<<<<< HEAD
 
-- **BEVFormer: Learning Bird's-Eye-View Representation from Multi-Camera Images with Spatiotemporal Transformers**
-  - Authors: Zhiqi Li, Wenhai Wang, Hongyang Li, et al.
-  - arXiv: [https://arxiv.org/abs/2203.17270](https://arxiv.org/abs/2203.17270)
-  - Year: 2022
-
-=======
->>>>>>> d296420ba338271a8b4669ff06bd8db6b978ba61
 - **BEVFormer v2: Adapting Modern Image Backbones to Bird's-Eye-View Recognition via Perspective Supervision**
   - Authors: Zhiqi Li, Wenhai Chen, Hongyang Li, et al.
   - arXiv: [https://arxiv.org/abs/2211.10439](https://arxiv.org/abs/2211.10439)
   - Year: 2023
-<<<<<<< HEAD
-=======
 
 ### Source Code implementation and licenses
 - ***BEVFormerV2**: https://github.com/fundamentalvision/BEVFormer(Apache License 2.0)
@@ -204,4 +181,3 @@ All tests use PCC validation with threshold: 0.99.
 - **MMDetection3D**: https://github.com/open-mmlab/mmdetection3d/tree/v0.17.1/mmdet3d (Apache License 2.0)
 - **MMDetection**: https://github.com/open-mmlab/mmdetection/tree/v2.14.0/mmdet (Apache License 2.0)
 - **MMEngine**: https://github.com/open-mmlab/mmengine/blob/main/mmengine (Apache License 2.0)
->>>>>>> d296420ba338271a8b4669ff06bd8db6b978ba61
