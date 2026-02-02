@@ -289,7 +289,7 @@ class TtBiFPN:
     @staticmethod
     def _swish(x: ttnn.Tensor) -> ttnn.Tensor:
         """Swish activation: x * sigmoid(x)"""
-        return x * ttnn.sigmoid_accurate(x, True)
+        return x * ttnn.sigmoid(x)
 
     @staticmethod
     def _reshape(x, new_shape):
