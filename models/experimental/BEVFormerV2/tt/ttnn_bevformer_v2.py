@@ -90,6 +90,12 @@ class TtBevFormerV2:
             if isinstance(pts_bbox_head, dict) and pts_bbox_head
             else 256,
             num_reg_fcs=pts_bbox_head.get("num_reg_fcs", 2) if isinstance(pts_bbox_head, dict) and pts_bbox_head else 2,
+            encoder_num_layers=pts_bbox_head.get("encoder_num_layers", 6)
+            if isinstance(pts_bbox_head, dict) and pts_bbox_head
+            else 6,
+            decoder_num_layers=pts_bbox_head.get("decoder_num_layers", 6)
+            if isinstance(pts_bbox_head, dict) and pts_bbox_head
+            else 6,
         )
 
     def extract_img_feat(self, img, img_metas, len_queue=None):

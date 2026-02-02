@@ -21,7 +21,7 @@ models.perf.device_perf_utils.run_device_profiler = _run_device_profiler_op_supp
 @pytest.mark.parametrize(
     "batch_size, model_name, expected_perf",
     [
-        (1, "bevformerv2", 0.33),  # Expected performance: ~0.33 samples/s (measured from device kernel duration)
+        (1, "bevformerv2", 0.105),  # Expected performance: ~0.33 samples/s (measured from device kernel duration)
     ],
 )
 @pytest.mark.models_device_performance_bare_metal

@@ -65,33 +65,28 @@ class TtSpatialCrossAttention:
         bs, num_query, _ = query.shape
 
         D = reference_points_cam.size(3)
+
+        if isinstance(query, ttnn.Tensor):
+            query = ttnn.to_torch(query)
+        if isinstance(reference_points_cam, ttnn.Tensor):
+            reference_points_cam = ttnn.to_torch(reference_points_cam)
+        if isinstance(bev_mask, ttnn.Tensor):
+            bev_mask_torch = ttnn.to_torch(bev_mask)
+        else:
+            bev_mask_torch = bev_mask
+
         indexes = []
-        for i in range(self.num_cams):
-            mask_per_img = bev_mask[i]
-            index_query_per_img = ttnn.sum(mask_per_img[0], -1)
-            index_query_per_img = ttnn.to_layout(index_query_per_img, ttnn.ROW_MAJOR_LAYOUT)
-            for _ in range(3):
-                index_query_per_img = ttnn.unsqueeze(index_query_per_img, 0)
-            output_tensor = ttnn.nonzero(index_query_per_img, queue_id=0, memory_config=ttnn.L1_MEMORY_CONFIG)
-            ttnn.deallocate(index_query_per_img)
-
-            no_of_non_zero_indices = output_tensor[0][..., 0].item()
-            index_query_per_img = output_tensor[1][:, :, :, :no_of_non_zero_indices]
-
-            for _ in range(3):
-                index_query_per_img = ttnn.squeeze(index_query_per_img, 0)
+        for i, mask_per_img in enumerate(bev_mask_torch):
+            index_query_per_img = mask_per_img[0].sum(-1).nonzero().squeeze(-1)
             indexes.append(index_query_per_img)
-            ttnn.deallocate(output_tensor[0])
 
-        max_len = max([each.shape[0] for each in indexes])
-        query = ttnn.to_torch(query)
+        max_len = max([len(each) for each in indexes])
         queries_rebatch = query.new_zeros([bs, self.num_cams, max_len, self.embed_dims])
         reference_points_rebatch = reference_points_cam.new_zeros([bs, self.num_cams, max_len, D, 2])
 
         for j in range(bs):
             for i, reference_points_per_img in enumerate(reference_points_cam):
                 index_query_per_img = indexes[i]
-                index_query_per_img = ttnn.to_torch(index_query_per_img)
                 queries_rebatch[j, i, : len(index_query_per_img)] = query[j, index_query_per_img]
                 reference_points_rebatch[j, i, : len(index_query_per_img)] = reference_points_per_img[
                     j, index_query_per_img
@@ -122,12 +117,7 @@ class TtSpatialCrossAttention:
         queries = ttnn.to_torch(queries)
         for j in range(bs):
             for i, index_query_per_img in enumerate(indexes):
-                index_query_per_img = ttnn.to_torch(index_query_per_img)
-
                 slots[j, index_query_per_img] += queries[j, i, : len(index_query_per_img)]
-        for j in range(bs):
-            for i, index_query_per_img in enumerate(indexes):
-                ttnn.deallocate(index_query_per_img)
 
         count = ttnn.sum(bev_mask, -1) > 0
         count = ttnn.permute(count, (1, 2, 0))
@@ -141,8 +131,6 @@ class TtSpatialCrossAttention:
         ttnn.deallocate(count)
         ttnn.deallocate(key)
         ttnn.deallocate(value)
-        ttnn.deallocate(self.params.output_proj.weight)
-        ttnn.deallocate(self.params.output_proj.bias)
 
         output = slots + inp_residual
         ttnn.deallocate(slots)
@@ -221,8 +209,6 @@ class TtMSDeformableAttention3D:
         value = ttnn.to_layout(value, ttnn.TILE_LAYOUT)
 
         value = ttnn.linear(value, params.value_proj.weight, bias=params.value_proj.bias)
-        ttnn.deallocate(params.value_proj.weight)
-        ttnn.deallocate(params.value_proj.bias)
         if key_padding_mask is not None:
             mask = key_padding_mask[..., None]
             value = ttnn.where(mask, ttnn.zeros_like(value), value)
@@ -230,8 +216,6 @@ class TtMSDeformableAttention3D:
         query = ttnn.to_layout(query, ttnn.TILE_LAYOUT)
 
         sampling_offsets = ttnn.linear(query, params.sampling_offsets.weight, bias=params.sampling_offsets.bias)
-        ttnn.deallocate(params.sampling_offsets.weight)
-        ttnn.deallocate(params.sampling_offsets.bias)
         num_levels_actual = spatial_shapes.shape[0]
         sampling_offsets_features = sampling_offsets.shape[-1]
         expected_features_per_level = self.num_heads * self.num_points * 2
@@ -244,8 +228,6 @@ class TtMSDeformableAttention3D:
                 sampling_offsets, (bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
             )
         attention_weights = ttnn.linear(query, params.attention_weights.weight, bias=params.attention_weights.bias)
-        ttnn.deallocate(params.attention_weights.weight)
-        ttnn.deallocate(params.attention_weights.bias)
         attention_weights_features = attention_weights.shape[-1]
         expected_attention_features = self.num_heads * self.num_points * num_levels_actual
         if attention_weights_features == expected_attention_features:

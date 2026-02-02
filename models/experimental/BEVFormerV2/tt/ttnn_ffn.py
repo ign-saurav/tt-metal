@@ -20,7 +20,8 @@ class TtFFN:
             identity = x
         x = ttnn.linear(x, self.linear1_weight, bias=self.linear1_bias)
         x = ttnn.relu(x)
-        x = ttnn.linear(x, self.linear2_weight, bias=self.linear2_bias)
-        x = ttnn.add(x, identity)
+        out = ttnn.linear(x, self.linear2_weight, bias=self.linear2_bias)
+        x = ttnn.add(out, identity)
+        ttnn.deallocate(out)
         ttnn.deallocate(identity)
         return x

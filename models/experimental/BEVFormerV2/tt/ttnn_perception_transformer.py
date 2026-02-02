@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import ttnn
+import torch
 import numpy as np
 from torchvision.transforms.functional import rotate
 from models.experimental.BEVFormerV2.tt.ttnn_encoder import TtEncoder
@@ -130,7 +131,9 @@ class TtPerceptionTransformer:
         shift_y = shift_y * self.use_shift
         shift_x = shift_x * self.use_shift
 
-        shift = bev_queries.new_tensor([shift_x, shift_y]).permute(1, 0)
+        shift_array = np.array([shift_x, shift_y])
+        shift = torch.from_numpy(shift_array).to(bev_queries.device).to(bev_queries.dtype)
+        shift = shift.permute(1, 0) if shift.dim() > 1 else shift.unsqueeze(0)
         shift = ttnn.from_torch(shift, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
 
         if prev_bev is not None:

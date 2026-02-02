@@ -92,7 +92,6 @@ def extract_transformer_layers_parameters(transformer_module, parent_model=None)
                 num_levels_checkpoint = deform_attn.num_levels
                 num_points = deform_attn.num_points
 
-                # Handle num_feature_levels mismatch if parent_model is provided
                 if parent_model is not None:
                     transformer_module_parent = None
                     for parent_name, parent_module in parent_model.named_modules():
@@ -135,7 +134,6 @@ def extract_transformer_layers_parameters(transformer_module, parent_model=None)
                         attention_weights_weight = deform_attn.attention_weights.weight
                         attention_weights_bias = deform_attn.attention_weights.bias
                 elif num_levels_checkpoint > 1:
-                    # Simple case: just check if num_levels > 1 (for PerceptionTransformerV2 standalone)
                     offsets_per_head = num_levels_checkpoint * num_points * 2
                     offsets_keep = num_points * 2
                     offsets_idx = []
@@ -418,12 +416,14 @@ def extract_sequential_branch(module_list, dtype):
     return branch_params
 
 
-def extract_embeddings_to_ttnn(model, names, dtype):
-    """Extract embedding weights to TTNN format."""
-    return {
-        name: {"weight": ttnn.from_torch(getattr(model, name).weight, dtype=dtype, layout=ttnn.TILE_LAYOUT)}
-        for name in names
-    }
+def extract_embeddings_to_ttnn(model, names, dtype, device=None):
+    result = {}
+    for name in names:
+        weight = ttnn.from_torch(getattr(model, name).weight, dtype=dtype, layout=ttnn.TILE_LAYOUT)
+        if device is not None:
+            weight = ttnn.to_device(weight, device, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        result[name] = {"weight": weight}
+    return result
 
 
 def extract_reg_branches(reg_branches, dtype):
@@ -479,7 +479,6 @@ def _convert_attention_params_dict_to_object(attn_params_dict, device):
     class Parameters:
         pass
 
-    # Check if it's MultiheadAttention or CustomMSDeformableAttention based on keys
     if "in_proj" in attn_params_dict:
         # MultiheadAttention
         attn_params = Parameters()
@@ -546,7 +545,6 @@ def custom_preprocessor(model, name):
     """Main custom preprocessor that handles both full models and standalone modules."""
     parameters = {}
 
-    # Handle standalone modules (for PCC tests)
     if isinstance(model, ResNet):
         parameters.update(extract_resnet_parameters(model))
         return parameters
@@ -579,7 +577,6 @@ def custom_preprocessor(model, name):
         parameters["custom_ms_deformable_attention"] = extract_custom_ms_deformable_attention_parameters(model)
         return parameters
 
-    # Handle standalone PerceptionTransformerV2
     if isinstance(model, PerceptionTransformerV2):
         parameters = {}
 
@@ -609,7 +606,6 @@ def custom_preprocessor(model, name):
 
         return parameters
 
-    # Handle standalone BEVFormerHead
     if isinstance(model, BEVFormerHead):
         parameters = {}
         parameters["head"] = {}
@@ -663,7 +659,7 @@ def custom_preprocessor(model, name):
             )
 
         embedding_layers = ["bev_embedding", "query_embedding"]
-        parameters["head"].update(extract_embeddings_to_ttnn(model, embedding_layers, dtype=ttnn.bfloat16))
+        parameters["head"].update(extract_embeddings_to_ttnn(model, embedding_layers, dtype=ttnn.bfloat16, device=None))
         parameters["head"]["branches"] = {}
 
         parameters["head"]["branches"]["cls_branches"] = extract_sequential_branch(
@@ -677,7 +673,6 @@ def custom_preprocessor(model, name):
 
         return parameters
 
-    # Handle full model hierarchy (BEVFormerV2, etc.)
     if isinstance(model, (BEVFormerV2, DetectionTransformerDecoder)):
         if isinstance(model.pts_bbox_head, BEVFormerHead):
             head = model.pts_bbox_head
@@ -724,7 +719,9 @@ def custom_preprocessor(model, name):
                     )
 
             embedding_layers = ["bev_embedding", "query_embedding"]
-            parameters["head"].update(extract_embeddings_to_ttnn(head, embedding_layers, dtype=ttnn.bfloat16))
+            parameters["head"].update(
+                extract_embeddings_to_ttnn(head, embedding_layers, dtype=ttnn.bfloat16, device=None)
+            )
             parameters["head"]["branches"] = {}
 
             parameters["head"]["branches"]["cls_branches"] = extract_sequential_branch(
@@ -755,7 +752,11 @@ def create_bevformerv2_model_parameters(model: BEVFormerV2, input_tensor: input,
     img = input_tensor[1]
 
     if isinstance(img, list):
-        img = torch.tensor(img[0])
+        img = img[0]
+        if isinstance(img, torch.Tensor):
+            img = img.detach().clone()
+        else:
+            img = torch.tensor(img)
         if img.dim() == 5 and img.size(0) == 1:
             img.squeeze_()
         elif img.dim() == 5 and img.size(0) > 1:
@@ -791,5 +792,25 @@ def create_bevformerv2_model_parameters(model: BEVFormerV2, input_tensor: input,
     if hasattr(parameters, "head"):
         parameters.head.cls_branches_torch = model.pts_bbox_head.cls_branches
         parameters.head.reg_branches_torch = model.pts_bbox_head.reg_branches
+
+        if device is not None:
+            embedding_names = ["bev_embedding", "query_embedding"]
+            for emb_name in embedding_names:
+                if hasattr(parameters.head, emb_name):
+                    emb_obj = getattr(parameters.head, emb_name)
+                    if isinstance(emb_obj, dict) and "weight" in emb_obj:
+                        emb_weight = emb_obj["weight"]
+                        if isinstance(emb_weight, ttnn.Tensor):
+                            emb_obj["weight"] = ttnn.to_device(
+                                emb_weight, device, memory_config=ttnn.DRAM_MEMORY_CONFIG
+                            )
+                    elif hasattr(emb_obj, "weight"):
+                        emb_weight = getattr(emb_obj, "weight")
+                        if isinstance(emb_weight, ttnn.Tensor):
+                            setattr(
+                                emb_obj,
+                                "weight",
+                                ttnn.to_device(emb_weight, device, memory_config=ttnn.DRAM_MEMORY_CONFIG),
+                            )
 
     return parameters

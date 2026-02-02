@@ -15,7 +15,7 @@ class TtTemporalSelfAttention:
         params,
         embed_dims=256,
         num_heads=8,
-        num_levels=1,
+        num_levels=4,
         num_points=4,
         num_bev_queue=2,
         im2col_step=64,
@@ -163,11 +163,12 @@ class TtTemporalSelfAttention:
         ttnn.deallocate(sampling_locations)
         ttnn.deallocate(sampling_offsets)
         ttnn.deallocate(value)
+
         output = ttnn.permute(output, (1, 2, 0))
-        output = ttnn.reshape(output, (num_query, embed_dims, bs_query, self.num_bev_queue))
-        output = ttnn.to_layout(output, ttnn.TILE_LAYOUT)
+        output = ttnn.to_layout(output, ttnn.ROW_MAJOR_LAYOUT)
         output = ttnn.mean(output, dim=-1)
-        output = ttnn.permute(output, (2, 0, 1))
+        output = ttnn.reshape(output, (bs_query, num_query, embed_dims))
+        output = ttnn.to_layout(output, ttnn.TILE_LAYOUT)
         output = ttnn.linear(output, params.output_proj.weight, bias=params.output_proj.bias)
 
         if not self.batch_first:

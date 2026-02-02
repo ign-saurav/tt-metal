@@ -64,10 +64,10 @@ def test_bevformer_head_pcc(
     torch_model.load_state_dict(head_state, strict=False)
 
     torch_model.eval()
-    torch_model.transformer.encoder.layers = torch.nn.ModuleList(list(torch_model.transformer.encoder.layers)[:1])
-    torch_model.transformer.encoder.num_layers = 1
-    torch_model.transformer.decoder.layers = torch.nn.ModuleList(list(torch_model.transformer.decoder.layers)[:1])
-    torch_model.transformer.decoder.num_layers = 1
+    torch_model.transformer.encoder.layers = torch.nn.ModuleList(list(torch_model.transformer.encoder.layers)[:6])
+    torch_model.transformer.encoder.num_layers = 6
+    torch_model.transformer.decoder.layers = torch.nn.ModuleList(list(torch_model.transformer.decoder.layers)[:6])
+    torch_model.transformer.decoder.num_layers = 6
 
     parameter = create_bevformerv2_model_parameters_head(torch_model, device=device)
 
@@ -185,6 +185,6 @@ def test_bevformer_head_pcc(
     else:
         bev_embed_ttnn = bev_embed_ttnn.float() if isinstance(bev_embed_ttnn, torch.Tensor) else bev_embed_ttnn
 
-    assert_with_pcc(model_outputs["bev_embed"], bev_embed_ttnn, 0.98)
+    assert_with_pcc(model_outputs["bev_embed"], bev_embed_ttnn, 0.99)
     assert_with_pcc(model_outputs["all_cls_scores"], ttnn_outputs["all_cls_scores"].float(), 0.99)
     assert_with_pcc(model_outputs["all_bbox_preds"], ttnn_outputs["all_bbox_preds"].float(), 0.99)

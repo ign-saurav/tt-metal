@@ -124,7 +124,7 @@ class TtCustomMSDeformableAttention:
 
         output = multi_scale_deformable_attn(value, spatial_shapes, sampling_locations, attention_weights, self.device)
 
-        output = output = ttnn.linear(output, params.output_proj.weight, bias=params.output_proj.bias)
+        output = ttnn.linear(output, params.output_proj.weight, bias=params.output_proj.bias)
         if not self.batch_first:
             output = ttnn.permute(output, (1, 0, 2))
 

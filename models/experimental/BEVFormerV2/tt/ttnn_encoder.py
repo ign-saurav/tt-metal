@@ -10,6 +10,7 @@ from models.experimental.BEVFormerV2.tt.ttnn_temporal_self_attention import TtTe
 from models.experimental.BEVFormerV2.tt.ttnn_spatial_cross_attention import TtSpatialCrossAttention
 from models.experimental.BEVFormerV2.tt.ttnn_ffn import TtFFN
 
+
 class TtEncoder:
     """TTNN implementation of Encoder"""
 
@@ -465,8 +466,6 @@ class TtEncoderLayer:
                     weight=self.params.norms[f"norm{norm_index}"].weight,
                     bias=self.params.norms[f"norm{norm_index}"].bias,
                 )
-                ttnn.deallocate(self.params.norms[f"norm{norm_index}"].weight)
-                ttnn.deallocate(self.params.norms[f"norm{norm_index}"].bias)
                 norm_index += 1
 
             elif layer == "cross_attn":

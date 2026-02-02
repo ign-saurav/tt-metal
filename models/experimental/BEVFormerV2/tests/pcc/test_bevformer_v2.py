@@ -33,13 +33,13 @@ def test_bevformerv2(
     torch_model = load_torch_model(torch_model=torch_model, model_location_generator=model_location_generator)
 
     torch_model.pts_bbox_head.transformer.encoder.layers = torch.nn.ModuleList(
-        list(torch_model.pts_bbox_head.transformer.encoder.layers)[:1]
+        list(torch_model.pts_bbox_head.transformer.encoder.layers)[:6]
     )
-    torch_model.pts_bbox_head.transformer.encoder.num_layers = 1
+    torch_model.pts_bbox_head.transformer.encoder.num_layers = 6
     torch_model.pts_bbox_head.transformer.decoder.layers = torch.nn.ModuleList(
-        list(torch_model.pts_bbox_head.transformer.decoder.layers)[:1]
+        list(torch_model.pts_bbox_head.transformer.decoder.layers)[:6]
     )
-    torch_model.pts_bbox_head.transformer.decoder.num_layers = 1
+    torch_model.pts_bbox_head.transformer.decoder.num_layers = 6
 
     input_dict = {
         "img_metas": [
@@ -200,4 +200,4 @@ def test_bevformerv2(
     for key in keys_to_check:
         a = torch.load(f"models/experimental/BEVFormerV2/reference/dumps/{key}.pt")
         b = torch.load(f"models/experimental/BEVFormerV2/tt/dumps/{key}.pt")
-        _, msg = assert_with_pcc(a, b, 0.95)
+        _, msg = assert_with_pcc(a, b, 0.99)

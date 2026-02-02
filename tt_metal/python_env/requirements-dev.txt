@@ -57,7 +57,7 @@ xlsxwriter==3.0.8
 tiktoken==0.7.0
 tqdm==4.66.3
 enlighten==1.12.4
-sentencepiece==0.2.0
+sentencepiece==0.2.1
 numba>=0.58.1
 librosa==0.10.0
 timm>=1.0.0
@@ -104,6 +104,9 @@ mmcv==2.2.0 # Required for UniAD model
 casadi==3.7.1 # Required for UniAD model
 mmcv-full==1.7.2 #Required for UniAD model
 
+mmengine==0.10.7            # Required for BEVFormerV2 model
+nuscenes-devkit==1.2.0      # Required for BEVFormerV2 model
+pyquaternion==0.9.9         # Required for BEVFormerV2 model
 # CPU-only torch for x86_64 to avoid installing CUDA dependencies on dev machines
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.7.1 ; platform_machine == 'x86_64'

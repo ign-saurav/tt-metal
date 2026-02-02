@@ -73,6 +73,8 @@ class TtBEVFormerHead:
         num_classes=10,
         embed_dims=256,
         num_reg_fcs=2,
+        encoder_num_layers=6,
+        decoder_num_layers=6,
         model_config=None,
         **kwargs,
     ):
@@ -111,8 +113,8 @@ class TtBEVFormerHead:
             num_cams=6,
             two_stage_num_proposals=300,
             embed_dims=embed_dims,
-            encoder_num_layers=1,
-            decoder_num_layers=1,
+            encoder_num_layers=encoder_num_layers,
+            decoder_num_layers=decoder_num_layers,
             rotate_prev_bev=False,
             use_shift=False,
             use_can_bus=False,
@@ -159,7 +161,6 @@ class TtBEVFormerHead:
                 img_metas=img_metas,
                 prev_bev=prev_bev,
             )
-            ttnn.deallocate(bev_queries)
             ttnn.deallocate(bev_mask)
             ttnn.deallocate(bev_pos)
             if isinstance(bev_embed, ttnn.Tensor):
@@ -184,7 +185,6 @@ class TtBEVFormerHead:
                 prev_bev=prev_bev,
             )
             ttnn.deallocate(dummy_map_query)
-        ttnn.deallocate(bev_queries)
         ttnn.deallocate(bev_mask)
         ttnn.deallocate(bev_pos)
 

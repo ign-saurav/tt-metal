@@ -400,15 +400,14 @@ def main():
             m.eval()
 
     torch_model.pts_bbox_head.transformer.encoder.layers = torch.nn.ModuleList(
-        list(torch_model.pts_bbox_head.transformer.encoder.layers)[:1]
+        list(torch_model.pts_bbox_head.transformer.encoder.layers)[:6]
     )
-    torch_model.pts_bbox_head.transformer.encoder.num_layers = 1
+    torch_model.pts_bbox_head.transformer.encoder.num_layers = 6
     torch_model.pts_bbox_head.transformer.decoder.layers = torch.nn.ModuleList(
-        list(torch_model.pts_bbox_head.transformer.decoder.layers)[:1]
+        list(torch_model.pts_bbox_head.transformer.decoder.layers)[:6]
     )
-    torch_model.pts_bbox_head.transformer.decoder.num_layers = 1
+    torch_model.pts_bbox_head.transformer.decoder.num_layers = 6
 
-    # Load demo data (generated on-the-fly)
     print("Loading demo data (sample 0)")
     infos = load_demo_data(sample_idx=args.sample_idx if args.sample_idx >= 0 else 0)
     print(f"Loaded {len(infos)} samples")
@@ -442,6 +441,8 @@ def main():
             else:
                 imgs_for_preprocessing = imgs
             img_list = [imgs_for_preprocessing]
+            encoder_num_layers = torch_model.pts_bbox_head.transformer.encoder.num_layers
+            decoder_num_layers = torch_model.pts_bbox_head.transformer.decoder.num_layers
             parameters = create_bevformerv2_model_parameters(
                 torch_model,
                 [
@@ -462,7 +463,15 @@ def main():
                 use_grid_mask=False,
                 img_backbone=dict(depth=50, in_channels=3, out_indices=(1, 2, 3), style="caffe"),
                 img_neck=dict(in_channels=[512, 1024, 2048], out_channels=256, num_outs=5),
-                pts_bbox_head=dict(bev_h=100, bev_w=100, num_query=900, num_classes=10, in_channels=256),
+                pts_bbox_head=dict(
+                    bev_h=100,
+                    bev_w=100,
+                    num_query=900,
+                    num_classes=10,
+                    in_channels=256,
+                    encoder_num_layers=encoder_num_layers,
+                    decoder_num_layers=decoder_num_layers,
+                ),
                 video_test_mode=True,
             )
             first_sample = False
@@ -506,6 +515,14 @@ def main():
                 scores = pts_bbox["scores_3d"]
                 if hasattr(scores, "min") and hasattr(scores, "max"):
                     print(f"Score range: [{scores.min():.4f}, {scores.max():.4f}]")
+                    print(f"Score mean: {scores.mean():.4f}, Score std: {scores.std():.4f}")
+                    if len(scores) > 0:
+                        top_scores = (
+                            torch.topk(scores, min(10, len(scores)))[0]
+                            if isinstance(scores, torch.Tensor)
+                            else sorted(scores, reverse=True)[:10]
+                        )
+                        print(f"Top 10 scores: {top_scores}")
 
     if args.out:
         if args.out.endswith(".json"):
