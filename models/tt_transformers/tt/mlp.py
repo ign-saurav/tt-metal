@@ -43,11 +43,8 @@ class MLP(LightweightModule):
         else:
             cache_name = lambda name: weight_cache_path / f"{state_dict_prefix}.{name}{hidden_dim_string}"
 
-        # Store DRAM sharded memory configs for use in decode mode with bfloat4_b
-        self.w1_w3_mem_config = args.create_dram_sharded_mem_config(args.dim, args.hidden_dim // args.num_devices)
-        self.w2_mem_config = args.create_dram_sharded_mem_config(args.hidden_dim // args.num_devices, args.dim)
-        w1_w3_mem_config = self.w1_w3_mem_config
-        w2_mem_config = self.w2_mem_config
+        w1_w3_mem_config = args.create_dram_sharded_mem_config(args.dim, args.hidden_dim // args.num_devices)
+        w2_mem_config = args.create_dram_sharded_mem_config(args.hidden_dim // args.num_devices, args.dim)
 
         # TODO Clean up this code. With sharding, we load the normal weights and then shard them
         as_sharded_tensor = lambda name, type, dims: ttnn.as_tensor(
@@ -124,16 +121,7 @@ class MLP(LightweightModule):
 
         # In decode mode (seqlen <= 32) do DRAM sharded matmuls
         # These use HiFi2; this drops 1 bit of the activations but would be FLOP-bound on 12 cores with HiFi4
-        # Use DRAM sharded instead of L1 for bfloat4_b to avoid L1 memory conflicts
-        ff1_3_dtype = self.model_config["DECODERS_OPTIMIZATIONS"].get_tensor_dtype(
-            decoder_id=self.layer_num, tensor=TensorGroup.FF1_FF3
-        )
-        use_dram_for_decode = ff1_3_dtype == ttnn.bfloat4_b
-        memory_config = (
-            self.w1_w3_mem_config
-            if (mode == "decode" and use_dram_for_decode)
-            else (ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG)
-        )
+        memory_config = ttnn.L1_WIDTH_SHARDED_MEMORY_CONFIG if mode == "decode" else ttnn.DRAM_MEMORY_CONFIG
         w1_out = ttnn.linear(
             x,
             self.w1,
@@ -251,22 +239,18 @@ class MLP(LightweightModule):
             )
 
             if mode == "decode":
-                # Use DRAM sharded for bfloat4_b, otherwise use L1
-                w2_in_mem_cfg = self.w2_mem_config if use_dram_for_decode else ttnn.L1_MEMORY_CONFIG
-                w2_in = ttnn.to_memory_config(w2_in, w2_in_mem_cfg)
+                w2_in = ttnn.to_memory_config(w2_in, ttnn.L1_MEMORY_CONFIG)
 
         li_ff2_compute_kernel_cfg = self.model_config["DECODERS_OPTIMIZATIONS"].get_math_fidelity(
             decoder_id=layer_num, op=OpGroup.LI_FF2, configuration=self.args
         )
-        # Use DRAM sharded for w2 when using bfloat4_b in decode mode
-        w2_memory_config = self.w2_mem_config if (mode == "decode" and use_dram_for_decode) else memory_config
         w2_out = ttnn.linear(
             w2_in,
             self.w2,
             compute_kernel_config=li_ff2_compute_kernel_cfg,
             dtype=self.args.ccl_dtype if TG else activation_dtype or ttnn.bfloat16,
             program_config=pc_2,
-            memory_config=w2_memory_config,
+            memory_config=memory_config,
             core_grid=None,  # FIXME: validate on TG ttnn.CoreGrid(y=8, x=8) if not pc_2 else None,
         )
         ttnn.deallocate(w2_in)
