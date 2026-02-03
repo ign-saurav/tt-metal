@@ -280,6 +280,55 @@ class ModelOptimizations:
             },
         }
 
+    @classmethod
+    def from_dtype(cls, dtype):
+        """Create ModelOptimizations settings based on dtype parameter.
+        Maps dtype to appropriate PrecisionSetting for all tensor groups.
+        """
+        import ttnn
+
+        # Map dtype to PrecisionSetting
+        if dtype == ttnn.bfloat4_b:
+            precision = PrecisionSetting.BFP4
+        elif dtype == ttnn.bfloat8_b:
+            precision = PrecisionSetting.BFP8
+        elif dtype == ttnn.bfloat16:
+            precision = PrecisionSetting.BF16
+        else:
+            # Default to BFP8 if unknown dtype
+            precision = PrecisionSetting.BFP8
+
+        return cls(
+            {
+                "TensorPrecision": {
+                    # MLP
+                    TensorGroup.FF1_FF3: precision,
+                    TensorGroup.FF2: precision,
+                    # Attention
+                    TensorGroup.WQKV: precision,
+                    TensorGroup.WO: precision,
+                    TensorGroup.KV_CACHE: precision,
+                    # ACTIVATION is omitted - will use default None (follows input type)
+                },
+                "OpFidelity": {
+                    # Use appropriate fidelity based on precision
+                    OpGroup.LI_FF1_FF3: MathFidelitySetting.LOFI
+                    if precision == PrecisionSetting.BFP4
+                    else MathFidelitySetting.HIFI2_FP16,
+                    OpGroup.LI_FF2: MathFidelitySetting.LOFI
+                    if precision == PrecisionSetting.BFP4
+                    else MathFidelitySetting.HIFI2_FP16,
+                    OpGroup.LI_QKV_DECODE: MathFidelitySetting.HIFI2,
+                    OpGroup.SDPA_DECODE: MathFidelitySetting.HIFI2,
+                    OpGroup.LI_O_DECODE: MathFidelitySetting.HIFI2,
+                    OpGroup.LI_QKV_PREFILL: MathFidelitySetting.HIFI2,
+                    OpGroup.SDPA_PREFILL: MathFidelitySetting.HIFI4,
+                    OpGroup.LI_O_PREFILL: MathFidelitySetting.HIFI2,
+                    OpGroup.ACCURACY: MathFidelitySetting.HIFI4_FP32,
+                },
+            }
+        )
+
     @property
     def tensor_dtype_settings(self):
         return self._opt_settings["TensorPrecision"]
@@ -1940,11 +1989,11 @@ class ModelArgs:
         if self.instruct:
             return (
                 self.model_cache_path
-                / {ttnn.bfloat16: "tensor_cache_instruct_bf16", ttnn.bfloat8_b: "tensor_cache_instruct_bfp8"}[dtype]
+                / {ttnn.bfloat16: "tensor_cache_instruct_bf16", ttnn.bfloat4_b: "tensor_cache_instruct_bfp4"}[dtype]
             )
         else:
             return (
-                self.model_cache_path / {ttnn.bfloat16: "tensor_cache_bf16", ttnn.bfloat8_b: "tensor_cache_bfp8"}[dtype]
+                self.model_cache_path / {ttnn.bfloat16: "tensor_cache_bf16", ttnn.bfloat4_b: "tensor_cache_bfp4"}[dtype]
             )
 
     def get_model_config(self):

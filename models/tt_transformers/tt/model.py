@@ -44,14 +44,29 @@ class Transformer(LightweightModule):
         self.grid_size = self.args.max_grid_size
         state_dict_prefix = args.get_state_dict_prefix("", None)
 
+        # Override optimization settings based on dtype parameter
+        # This ensures that when dtype=bfloat4_b is passed, all components use bfloat4_b
+        from models.tt_transformers.tt.model_config import ModelOptimizations
+
+        dtype_based_optimizations = ModelOptimizations.from_dtype(dtype)
+        # Update all decoder optimizations to use the dtype-based settings
+        for decoder_id in range(self.n_layers):
+            if decoder_id in args.optimizations.decoder_optimizations:
+                args.optimizations.decoder_optimizations[decoder_id] = dtype_based_optimizations
+            else:
+                args.optimizations.set_decoder_conf(decoder_id, dtype_based_optimizations)
+
         self.tt_ccl = TT_CCL(self.mesh_device)
 
+        # Use dtype parameter for embeddings, but fallback to bfloat16 if dtype is too low precision
+        # (some operations may require bfloat16 minimum)
+        embd_dtype = dtype if dtype in (ttnn.bfloat16, ttnn.bfloat8_b) else ttnn.bfloat16
         embd_kwargs = {
             "mesh_device": mesh_device,
             "args": args,
             "weight_cache_path": args.weight_cache_path(dtype),
             "state_dict": state_dict,
-            "dtype": ttnn.bfloat16,  # Row major layout requires bfloat16
+            "dtype": embd_dtype,
         }
         if self.args.embed_scale is not None:
             embd_cls = ScaledEmbedding

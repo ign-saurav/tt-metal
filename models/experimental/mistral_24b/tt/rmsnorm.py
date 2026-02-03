@@ -89,7 +89,7 @@ class RMSNorm(LightweightModule):
             state_dict[weight_name].unsqueeze(0).view(1, 1, dim),
             device=device,
             dtype=weight_dtype,
-            layout=ttnn.TILE_LAYOUT if weight_dtype == ttnn.bfloat8_b else ttnn.ROW_MAJOR_LAYOUT,
+            layout=ttnn.TILE_LAYOUT if weight_dtype == ttnn.bfloat4_b else ttnn.ROW_MAJOR_LAYOUT,
             memory_config=weight_memory_config,
             cache_file_name=cache_name,
             mesh_mapper=ttnn.ReplicateTensorToMesh(device) if is_mesh_device else None,
