@@ -121,11 +121,11 @@ The model supports various input sizes including 256×256 and 512×512 pixels. F
 
 ## Performance
 ### Single Device (BS=1, img_size=64x64)(n150):
-- end-2-end perf with 1CQ (no trace) is `~2` FPS
+- end-2-end perf with 2CQ+Trace is `~2` FPS
 - Device Performance is `~1.7` FPS
 
 ### Multi Device (BS=1, img_size=64x64)(n300):
-- end-2-end perf with trace disabled and 2CQ is `~4` FPS
+- end-2-end perf with 2CQ+Trace is `~4` FPS
 
 To run perf test:
 ```
@@ -133,9 +133,7 @@ pytest models/experimental/swin2sr/tests/perf/test_perf_e2e.py::test_swin2sr_per
 pytest models/experimental/swin2sr/tests/perf/test_perf_e2e.py::test_swin2sr_perf_multi_device -s
 ```
 
-This test validates Swin2SR on single and multi-device setups using:
-  - **Single Device**: 1 command queue without trace (trace requires sharded tensors not supported on single-device)
-  - **Multi Device**: 2 command queues with trace for optimal performance using `ShardTensorToMesh` for input distribution across devices and `ConcatMeshToTensor` for output composition.
+This test validates Swin2SR on single and multi-device setups using 2 command queues with trace.
 
 
 ## Configuration Notes
@@ -143,7 +141,7 @@ This test validates Swin2SR on single and multi-device setups using:
 - Device: The demo opens a Wormhole device (default id typically 0). If you need to change it, use `--device-id` argument.
 - Batch Size: Demo/tests are written for BS=1. For larger BS you'll need to verify memory layouts and tile alignment.
 - Memory Layouts: The TT-NN path uses ROW_MAJOR layout for resize ops and may pad channels to multiples of 32 to satisfy kernel/tile alignment.
-- Pipeline Configuration: Single device only supports 1 command queue without trace. Trace and 2CQ require sharded tensors which are not supported on single-device setups. Multi-device supports 2 command queues with trace for optimal performance using `ShardTensorToMesh` for input distribution and `ConcatMeshToTensor` for output composition.
+- Pipeline Configuration: Both Single device and Multi-device supports 2 command queues with trace for optimal performance using `ShardTensorToMesh` for input distribution and `ConcatMeshToTensor` for output composition.
 - Tiled Processing: Large images are automatically split into overlapping tiles for processing. Uses weighted averaging at tile boundaries for smooth transitions. Required due to transformer attention's quadratic memory growth and Wormhole L1 memory constraints.
 
 # References

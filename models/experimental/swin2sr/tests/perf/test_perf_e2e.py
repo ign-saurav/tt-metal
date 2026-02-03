@@ -18,11 +18,89 @@ from models.perf.perf_utils import prep_perf_report
 from models.tt_cnn.tt.pipeline import (
     PipelineConfig,
     create_pipeline_from_config,
+    get_memory_config_for_persistent_dram_tensor,
 )
 
 from models.experimental.swin2sr.reference.swin2sr import Swin2SR as TorchSwin2SR
 from models.experimental.swin2sr.tt.tt_swin2sr import TtSwin2SR
 from models.experimental.swin2sr.tests.pcc.test_ttnn_swin2sr import create_swin2sr_preprocessor
+
+
+def _determine_num_cores_for_even_sharding(shard_dim: int, max_cores: int):
+    """Helper function to determine number of cores for even sharding."""
+    number_of_cores = max_cores
+    while shard_dim % number_of_cores != 0:
+        assert number_of_cores > 0, "Unable to find core grid"
+        number_of_cores = number_of_cores - 1
+    return number_of_cores
+
+
+def get_memory_config_for_sharded_l1_tensor(shape, shard_strategy, l1_grid_size):
+    """
+    Creates a sharded L1 memory config with tile-aligned shard dimensions.
+    L1 shards must be tile-aligned (multiples of 32) for proper operation.
+    """
+    TILE_SIZE = 32
+
+    if len(shape) < 2:
+        raise ValueError(f"Shape must be 2D or higher (was {shape})")
+    if l1_grid_size.y != 1:
+        raise ValueError(f"Only 1D L1 grid is supported (was {l1_grid_size})")
+
+    # Force even shards because uneven width-sharding is not supported properly
+    total_number_of_l1_cores = l1_grid_size.x
+    shard_dim = shape[-1] if shard_strategy == ttnn.TensorMemoryLayout.WIDTH_SHARDED else shape[-2]
+
+    # For L1, we need to ensure shard dimensions are tile-aligned (multiples of 32)
+    # Find the maximum number of cores that results in tile-aligned shards
+    l1_cores_for_even_sharding = total_number_of_l1_cores
+    shard_size = shard_dim // l1_cores_for_even_sharding
+
+    # Reduce cores until we get tile-aligned shards
+    while shard_size % TILE_SIZE != 0 and l1_cores_for_even_sharding > 1:
+        l1_cores_for_even_sharding -= 1
+        if shard_dim % l1_cores_for_even_sharding != 0:
+            continue
+        shard_size = shard_dim // l1_cores_for_even_sharding
+
+    if shard_dim % l1_cores_for_even_sharding != 0:
+        raise ValueError(
+            f"Number of L1 cores must evenly divide sharded tensor (was {shard_dim} and {l1_cores_for_even_sharding})"
+        )
+
+    if shard_size % TILE_SIZE != 0:
+        raise ValueError(
+            f"L1 shard size must be tile-aligned (multiple of {TILE_SIZE}), got {shard_size} for shard_dim {shard_dim} with {l1_cores_for_even_sharding} cores"
+        )
+
+    if shard_strategy == ttnn.TensorMemoryLayout.WIDTH_SHARDED:
+        shard_width = shape[-1] // l1_cores_for_even_sharding
+        # Ensure width is tile-aligned
+        if shard_width % TILE_SIZE != 0:
+            raise ValueError(f"L1 shard width must be tile-aligned, got {shard_width}")
+        output_l1_shard_spec = ttnn.ShardSpec(
+            ttnn.CoreRangeSet(
+                {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(l1_cores_for_even_sharding - 1, 0))}
+            ),
+            [shape[-2], shard_width],
+            ttnn.ShardOrientation.ROW_MAJOR,
+        )
+        return ttnn.MemoryConfig(ttnn.TensorMemoryLayout.WIDTH_SHARDED, ttnn.BufferType.L1, output_l1_shard_spec)
+    elif shard_strategy == ttnn.TensorMemoryLayout.HEIGHT_SHARDED:
+        shard_height = shape[-2] // l1_cores_for_even_sharding
+        # Ensure height is tile-aligned
+        if shard_height % TILE_SIZE != 0:
+            raise ValueError(f"L1 shard height must be tile-aligned, got {shard_height}")
+        output_l1_shard_spec = ttnn.ShardSpec(
+            ttnn.CoreRangeSet(
+                {ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(l1_cores_for_even_sharding - 1, 0))}
+            ),
+            [shard_height, shape[-1]],
+            ttnn.ShardOrientation.ROW_MAJOR,
+        )
+        return ttnn.MemoryConfig(ttnn.TensorMemoryLayout.HEIGHT_SHARDED, ttnn.BufferType.L1, output_l1_shard_spec)
+    else:
+        raise ValueError(f"Unsupported shard strategy: {shard_strategy}")
 
 
 def load_test_image(image_path: str, target_size: int, batch_size: int) -> torch.Tensor:
@@ -195,6 +273,50 @@ def run_model_pipeline(device, test_infra, num_measurement_iterations, use_trace
         test_infra.run()
         return test_infra.tt_output
 
+    # DRAM input and L1 input must be sharded to support reshard operation
+    # Get device grid size for sharding
+    if hasattr(device, "get_num_devices") and device.get_num_devices() > 1:
+        # Multi-device: use mesh device grid
+        dram_grid_size = ttnn.CoreCoord(device.get_num_devices(), 1)
+        l1_grid_size = dram_grid_size  # Use same grid size for L1
+    else:
+        # Single device: use device compute grid
+        compute_grid = device.compute_with_storage_grid_size()
+        dram_grid_size = ttnn.CoreCoord(compute_grid.x, 1)
+        l1_grid_size = dram_grid_size  # Use same grid size for L1
+
+    # For image tensors (NCHW), the physical layout flattens N*C*H as height and W as width
+    # Use height sharding to match the physical tensor layout
+    input_shape_list = list(tt_inputs_host.shape)
+    if len(input_shape_list) == 4:
+        # For NCHW format [N, C, H, W], flatten to [N*C*H, W] to match physical layout
+        # Use height sharding which shards along the flattened height dimension
+        flattened_height = input_shape_list[0] * input_shape_list[1] * input_shape_list[2]
+        flattened_width = input_shape_list[3]
+        effective_shape = [flattened_height, flattened_width]
+        dram_input_memory_config = get_memory_config_for_persistent_dram_tensor(
+            shape=effective_shape,
+            shard_strategy=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            dram_grid_size=dram_grid_size,
+        )
+        l1_input_memory_config = get_memory_config_for_sharded_l1_tensor(
+            shape=effective_shape,
+            shard_strategy=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
+            l1_grid_size=l1_grid_size,
+        )
+    else:
+        # For other shapes, use width sharding on last 2 dimensions
+        dram_input_memory_config = get_memory_config_for_persistent_dram_tensor(
+            shape=tt_inputs_host.shape,
+            shard_strategy=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+            dram_grid_size=dram_grid_size,
+        )
+        l1_input_memory_config = get_memory_config_for_sharded_l1_tensor(
+            shape=tt_inputs_host.shape,
+            shard_strategy=ttnn.TensorMemoryLayout.WIDTH_SHARDED,
+            l1_grid_size=l1_grid_size,
+        )
+
     pipeline = create_pipeline_from_config(
         config=PipelineConfig(
             use_trace=use_trace,
@@ -203,8 +325,8 @@ def run_model_pipeline(device, test_infra, num_measurement_iterations, use_trace
         ),
         model=model_wrapper,
         device=device,
-        dram_input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        l1_input_memory_config=ttnn.L1_MEMORY_CONFIG,
+        dram_input_memory_config=dram_input_memory_config,
+        l1_input_memory_config=l1_input_memory_config,
     )
 
     logger.info(f"Running Swin2SR pipeline warmup with input shape {list(tt_inputs_host.shape)}")
@@ -255,8 +377,8 @@ def run_perf_e2e_swin2sr(
     model_location_generator,
     img_size,
     expected_inference_throughput,
-    use_trace=False,
-    num_command_queues=1,
+    use_trace=True,
+    num_command_queues=2,
     upscale=2,
     test_image_path=None,
     use_test_image=True,
@@ -315,7 +437,7 @@ def run_perf_e2e_swin2sr(
 @pytest.mark.models_performance_bare_metal
 @pytest.mark.parametrize(
     "device_params",
-    [{"l1_small_size": 24576, "trace_region_size": 1702912, "num_command_queues": 1}],
+    [{"l1_small_size": 24576, "trace_region_size": 16146432, "num_command_queues": 2}],
     indirect=True,
 )
 @pytest.mark.parametrize("batch_size_per_device", (1,))
@@ -332,6 +454,7 @@ def test_swin2sr_perf_single_device(
     img_size,
     expected_inference_throughput,
 ):
+    print(f"device: {device}")
     run_perf_e2e_swin2sr(
         device,
         batch_size_per_device,
@@ -345,7 +468,7 @@ def test_swin2sr_perf_single_device(
 @pytest.mark.models_performance_bare_metal
 @pytest.mark.parametrize(
     "device_params",
-    [{"l1_small_size": 24576, "trace_region_size": 1702912, "num_command_queues": 1}],
+    [{"l1_small_size": 24576, "trace_region_size": 16146432, "num_command_queues": 2}],
     indirect=True,
 )
 @pytest.mark.parametrize("batch_size_per_device", (1,))
@@ -363,6 +486,7 @@ def test_swin2sr_perf_multi_device(
     expected_inference_throughput,
 ):
     num_devices = mesh_device.get_num_devices()
+    print(f"mesh_device: {mesh_device}")
     if num_devices < 2:
         pytest.skip(f"Multi-device test requires at least 2 devices, but only {num_devices} device(s) available")
 
