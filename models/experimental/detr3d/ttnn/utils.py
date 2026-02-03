@@ -137,16 +137,14 @@ def box_post_processing(
     torch_angle_logits = ttnn.to_torch(angle_logits)
     torch_angle_residual_normalized = ttnn.to_torch(angle_residual_normalized)
     torch_angle_residual = ttnn.to_torch(angle_residual)
-    if not isinstance(torch_point_cloud_dims[0], torch.Tensor):
-        for i in range(len(torch_point_cloud_dims)):
-            torch_point_cloud_dims[i] = ttnn.to_torch(torch_point_cloud_dims[i])
-    if not isinstance(torch_query_xyz, torch.Tensor):
-        torch_query_xyz = ttnn.to_torch(torch_query_xyz)
+    torch_query_xyz = ttnn.to_torch(torch_query_xyz)
+    for i in range(len(torch_point_cloud_dims)):
+        torch_point_cloud_dims[i] = ttnn.to_torch(torch_point_cloud_dims[i])
 
     torch_box_processor = BoxProcessor(dataset_config)
 
     torch_outputs = []
-    for l in range(num_layers):
+    for l in range(num_layers.item()):
         # box processor converts outputs so we can get a 3D bounding box
         (
             torch_center_normalized,

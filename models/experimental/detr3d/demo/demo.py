@@ -10,6 +10,7 @@ import numpy as np
 from loguru import logger
 
 from models.experimental.detr3d.ttnn.model_3detr import build_ttnn_3detr
+from models.experimental.detr3d.ttnn.model_config import Tt3DetrArgs
 from models.experimental.detr3d.ttnn.utils import box_post_processing as tt_box_post_processing
 from models.experimental.detr3d.reference.model_3detr import build_3detr, box_post_processing
 from models.experimental.detr3d.reference.model_config import Detr3dArgs
@@ -19,12 +20,6 @@ from models.experimental.detr3d.ttnn.utils import infer_ttnn_module_args
 from models.experimental.detr3d.ttnn.custom_preprocessing import create_custom_mesh_preprocessor
 from models.common.utility_functions import comp_pcc
 from models.experimental.detr3d.reference.utils.ap_calculator import APCalculator
-
-
-class Tt3DetrArgs(Detr3dArgs):
-    def __init__(self):
-        self.parameters = None
-        self.device = None
 
 
 def load_model_weights(model, weights_path):
@@ -182,8 +177,8 @@ def run_detr3d_inference(
                 angle_residual_normalized,
                 angle_residual,
                 num_layers,
-                torch_query_xyz,
-                torch_point_cloud_dims,
+                query_xyz,
+                point_cloud_dims,
             ) = ttnn_module(inputs=inputs, encoder_only=encoder_only)
             tt_outputs = tt_box_post_processing(
                 cls_logits,
@@ -193,8 +188,8 @@ def run_detr3d_inference(
                 angle_residual_normalized,
                 angle_residual,
                 num_layers,
-                torch_query_xyz,
-                torch_point_cloud_dims,
+                query_xyz,
+                point_cloud_dims,
                 dataset_config,
             )
 

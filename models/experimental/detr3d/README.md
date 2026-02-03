@@ -39,7 +39,8 @@ models/experimental/detr3d/
 ├── ttnn/                          # TTNN-accelerated implementation
 │   └── model_3detr.py            # TTNN DETR3D model
 └── tests/                         # Test files
-    └── pcc/                       # Performance comparison tests
+    ├── pcc/                       # Model correctness tests
+    └── perf/                      # Device and e2e performance tests
 ```
 
 

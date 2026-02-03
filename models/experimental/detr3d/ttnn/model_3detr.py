@@ -169,11 +169,11 @@ class TtnnModel3DETR(LightweightModule):
 
         return torch_enc_xyz, enc_features, _
 
-    def get_box_predictions(self, torch_query_xyz, torch_point_cloud_dims, box_features):
+    def get_box_predictions(self, query_xyz, point_cloud_dims, box_features):
         """
         Parameters:
-            torch_query_xyz: batch x nqueries x 3 tensor of query XYZ coords
-            torch_point_cloud_dims: List of [min, max] dims of point cloud
+            query_xyz: batch x nqueries x 3 tensor of query XYZ coords
+            point_cloud_dims: List of [min, max] dims of point cloud
                               min: batch x 3 tensor of min XYZ coords
                               max: batch x 3 tensor of max XYZ coords
             box_features: num_layers x num_queries x batch x channel
@@ -212,9 +212,9 @@ class TtnnModel3DETR(LightweightModule):
             angle_logits,
             angle_residual_normalized,
             angle_residual,
-            num_layers,
-            torch_query_xyz,
-            torch_point_cloud_dims,
+            ttnn.Tensor([num_layers], [1], ttnn.int32, ttnn.ROW_MAJOR_LAYOUT, device=self.device),
+            query_xyz,
+            point_cloud_dims,
         )
 
     def forward(self, inputs, encoder_only=False):
@@ -233,16 +233,16 @@ class TtnnModel3DETR(LightweightModule):
             inputs["point_cloud_dims_min"],
             inputs["point_cloud_dims_max"],
         ]
+        point_cloud_dims = [
+            ttnn.from_torch(t, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT)
+            for t in torch_point_cloud_dims
+        ]
         if NO_FALLBACK:
-            torch_query_xyz, query_embed = self.get_query_embeddings_ttnn(torch_enc_xyz, torch_point_cloud_dims)
-            enc_pos = self.pos_embedding(torch_enc_xyz, input_range=torch_point_cloud_dims)
+            query_xyz, query_embed = self.get_query_embeddings_ttnn(torch_enc_xyz, point_cloud_dims)
+            enc_pos = self.pos_embedding(torch_enc_xyz, input_range=point_cloud_dims)
         else:
-            point_cloud_dims = [
-                ttnn.from_torch(t, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT)
-                for t in torch_point_cloud_dims
-            ]
-
             torch_query_xyz, query_embed = self.get_query_embeddings(torch_enc_xyz, point_cloud_dims)
+            query_xyz = ttnn.from_torch(torch_query_xyz, device=self.device)
             # query_embed: batch x npoint x channel
             enc_pos = self.pos_embedding(torch_enc_xyz, input_range=point_cloud_dims)
 
@@ -262,9 +262,9 @@ class TtnnModel3DETR(LightweightModule):
             angle_residual_normalized,
             angle_residual,
             num_layers,
-            torch_query_xyz,
-            torch_point_cloud_dims,
-        ) = self.get_box_predictions(torch_query_xyz, torch_point_cloud_dims, box_features)
+            query_xyz,
+            point_cloud_dims,
+        ) = self.get_box_predictions(query_xyz, point_cloud_dims, box_features)
         return (
             cls_logits,
             center_offset,
@@ -273,8 +273,8 @@ class TtnnModel3DETR(LightweightModule):
             angle_residual_normalized,
             angle_residual,
             num_layers,
-            torch_query_xyz,
-            torch_point_cloud_dims,
+            query_xyz,
+            point_cloud_dims,
         )
 
 
