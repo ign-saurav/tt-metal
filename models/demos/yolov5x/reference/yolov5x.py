@@ -2,6 +2,9 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
+import numpy as np
 import torch
 import torch.nn as nn
 
@@ -202,38 +205,72 @@ class DetectionModel(nn.Module):
             ),  # 24
         )
 
-    def forward(self, x):
+    def _save_if(self, save_dir, name, *tensors):
+        if save_dir is None:
+            return
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for i, t in enumerate(tensors):
+            if t is None:
+                continue
+            path = save_dir / f"{name}.npy" if len(tensors) == 1 else save_dir / f"{name}_{i}.npy"
+            np.save(path, t.detach().cpu().numpy())
+
+    def forward(self, x, save_dir=None):
+        self._save_if(save_dir, "pt_00_conv_in", x)
         x = self.model[0](x)  # 0
+        self._save_if(save_dir, "pt_01_conv_in", x)
         x = self.model[1](x)  # 1
+        self._save_if(save_dir, "pt_02_c3_in", x)
         x = self.model[2](x)  # 2
+        self._save_if(save_dir, "pt_03_conv_in", x)
         x = self.model[3](x)  # 3
+        self._save_if(save_dir, "pt_04_c3_in", x)
         x = self.model[4](x)  # 4
         x4 = x
+        self._save_if(save_dir, "pt_05_conv_in", x)
         x = self.model[5](x)  # 5
+        self._save_if(save_dir, "pt_06_c3_in", x)
         x = self.model[6](x)  # 6
         x6 = x
+        self._save_if(save_dir, "pt_07_conv_in", x)
         x = self.model[7](x)  # 7
+        self._save_if(save_dir, "pt_08_c3_in", x)
         x = self.model[8](x)  # 8
+        self._save_if(save_dir, "pt_09_sppf_in", x)
         x = self.model[9](x)  # 9
+        self._save_if(save_dir, "pt_10_conv_in", x)
         x = self.model[10](x)  # 10
         x10 = x
         x = self.model[11](x)  # 11
+        self._save_if(save_dir, "pt_12_concat_in", x, x6)
         x = self.model[12](x, x6)  # 12
+        self._save_if(save_dir, "pt_13_c3_in", x)
         x = self.model[13](x)  # 13
+        self._save_if(save_dir, "pt_14_conv_in", x)
         x = self.model[14](x)  # 14
         x14 = x
         x = self.model[15](x)  # 15
+        self._save_if(save_dir, "pt_16_concat_in", x, x4)
         x = self.model[16](x, x4)  # 16
+        self._save_if(save_dir, "pt_17_c3_in", x)
         x = self.model[17](x)  # 17
         x17 = x
+        self._save_if(save_dir, "pt_18_conv_in", x)
         x = self.model[18](x)  # 18
+        self._save_if(save_dir, "pt_19_concat_in", x, x14)
         x = self.model[19](x, x14)  # 19
+        self._save_if(save_dir, "pt_20_c3_in", x)
         x = self.model[20](x)  # 20
         x20 = x
+        self._save_if(save_dir, "pt_21_conv_in", x)
         x = self.model[21](x)  # 21
+        self._save_if(save_dir, "pt_22_concat_in", x, x10)
         x = self.model[22](x, x10)  # 22
+        self._save_if(save_dir, "pt_23_c3_in", x)
         x = self.model[23](x)  # 23
         x23 = x
+        self._save_if(save_dir, "pt_24_detect_in", x17, x20, x23)
         x = self.model[24]([x17, x20, x23])  # 24
         return x
 
@@ -245,5 +282,5 @@ class YOLOv5(nn.Module):
         if weights_path:
             self.load_state_dict(torch.load(weights_path), strict=False)
 
-    def forward(self, x):
-        return self.model(x)
+    def forward(self, x, save_dir=None):
+        return self.model(x, save_dir=save_dir)

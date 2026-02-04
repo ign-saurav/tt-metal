@@ -2,6 +2,9 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+from pathlib import Path
+
+import numpy as np
 
 import ttnn
 from models.demos.yolov5x.tt.c3 import TtnnC3
@@ -124,7 +127,19 @@ class Yolov5x:
         )
         self.detect = TtnnDetect(device, parameters.model_args.model[24], conv_pt.model[24])
 
-    def __call__(self, x):
+    def _save_if(self, save_dir, name, *tensors):
+        if save_dir is None:
+            return
+        save_dir = Path(save_dir)
+        save_dir.mkdir(parents=True, exist_ok=True)
+        for i, t in enumerate(tensors):
+            if t is None:
+                continue
+            arr = ttnn.to_torch(t).float().numpy()
+            path = save_dir / f"{name}.npy" if len(tensors) == 1 else save_dir / f"{name}_{i}.npy"
+            np.save(path, arr)
+
+    def __call__(self, x, save_dir=None):
         N, C, H, W = x.shape
         min_channels = 16
         if C < min_channels:
@@ -138,20 +153,31 @@ class Yolov5x:
         nhwc = ttnn.reallocate(nhwc)
         x = ttnn.reshape(nhwc, [1, 1, nhwc.shape[0] * nhwc.shape[1] * nhwc.shape[2], nhwc.shape[-1]])
 
+        self._save_if(save_dir, "ttnn_00_conv_in", x)
         x = self.conv1(x)
+        self._save_if(save_dir, "ttnn_01_conv_in", x)
         x = self.conv2(x)
+        self._save_if(save_dir, "ttnn_02_c3_in", x)
         x = self.c3_1(x)
+        self._save_if(save_dir, "ttnn_03_conv_in", x)
         x = self.conv3(x)
+        self._save_if(save_dir, "ttnn_04_c3_in", x)
         x = self.c3_2(x)
         x4 = x
 
+        self._save_if(save_dir, "ttnn_05_conv_in", x)
         x = self.conv4(x)
+        self._save_if(save_dir, "ttnn_06_c3_in", x)
         x = self.c3_3(x)
         x6 = x
 
+        self._save_if(save_dir, "ttnn_07_conv_in", x)
         x = self.conv5(x)
+        self._save_if(save_dir, "ttnn_08_c3_in", x)
         x = self.c3_4(x)
+        self._save_if(save_dir, "ttnn_09_sppf_in", x)
         x = self.sppf(x)
+        self._save_if(save_dir, "ttnn_10_conv_in", x)
         x = self.conv6(x)
         x10 = x
 
@@ -160,10 +186,13 @@ class Yolov5x:
 
         x = ttnn.reshape(x, (1, 1, x.shape[0] * x.shape[1] * x.shape[2], x.shape[3]))
 
+        self._save_if(save_dir, "ttnn_12_concat_in", x, x6)
         x = concat(-1, True, x, x6)
         ttnn.deallocate(x6)
 
+        self._save_if(save_dir, "ttnn_13_c3_in", x)
         x = self.c3_5(x)
+        self._save_if(save_dir, "ttnn_14_conv_in", x)
         x = self.conv7(x)
         x14 = x
 
@@ -172,26 +201,35 @@ class Yolov5x:
 
         x = ttnn.reshape(x, (1, 1, x.shape[0] * x.shape[1] * x.shape[2], x.shape[3]))
 
+        self._save_if(save_dir, "ttnn_16_concat_in", x, x4)
         x = concat(-1, True, x, x4)
         ttnn.deallocate(x4)
 
+        self._save_if(save_dir, "ttnn_17_c3_in", x)
         x = self.c3_6(x)
         x17 = x
+        self._save_if(save_dir, "ttnn_18_conv_in", x)
         x = self.conv8(x)
 
+        self._save_if(save_dir, "ttnn_19_concat_in", x, x14)
         x = concat(-1, True, x, x14)
         ttnn.deallocate(x14)
 
+        self._save_if(save_dir, "ttnn_20_c3_in", x)
         x = self.c3_7(x)
         x20 = x
+        self._save_if(save_dir, "ttnn_21_conv_in", x)
         x = self.conv9(x)
 
         x = ttnn.sharded_to_interleaved(x, memory_config=ttnn.L1_MEMORY_CONFIG)
+        self._save_if(save_dir, "ttnn_22_concat_in", x, x10)
         x = concat(-1, True, x, x10)
         ttnn.deallocate(x10)
         x = ttnn.sharded_to_interleaved(x, memory_config=ttnn.L1_MEMORY_CONFIG)
+        self._save_if(save_dir, "ttnn_23_c3_in", x)
         x = self.c3_8(x)
         x23 = x
+        self._save_if(save_dir, "ttnn_24_detect_in", x17, x20, x23)
         x = self.detect(x17, x20, x23)
 
         ttnn.deallocate(x17)
