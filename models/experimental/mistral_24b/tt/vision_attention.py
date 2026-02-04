@@ -161,11 +161,37 @@ class TtMistralImageAttention(LightweightModule):
         self.scale = self.head_dim**-0.5
 
     def forward(self, x_11SH, position_embeddings=None):
-        seq_len = x_11SH.shape[-2]
+        original_seq_len = x_11SH.shape[-2]
+        seq_len = original_seq_len
 
         MAX_MM_SEQ_LEN = self.configuration.VISION_MAX_MM_SEQ
 
+        # Pad seq_len to be divisible by MAX_MM_SEQ_LEN to ensure reshape works correctly
+        # This maintains shape consistency throughout the pipeline (no slicing that breaks residual connections)
+        padded_seq_len = None
         if seq_len > MAX_MM_SEQ_LEN:
+            if seq_len % MAX_MM_SEQ_LEN != 0:
+                # Pad to next multiple of MAX_MM_SEQ_LEN
+                padded_seq_len = ((seq_len + MAX_MM_SEQ_LEN - 1) // MAX_MM_SEQ_LEN) * MAX_MM_SEQ_LEN
+                pad_amount = padded_seq_len - seq_len
+                # Pad input with zeros: [batch, 1, seq_len, hidden_dim] -> [batch, 1, padded_seq_len, hidden_dim]
+                x_11SH = ttnn.pad(x_11SH, [(0, 0), (0, 0), (0, pad_amount), (0, 0)], value=0.0)
+                seq_len = padded_seq_len
+                # Pad position_embeddings to match
+                if position_embeddings is not None:
+                    cos, sin = position_embeddings
+                    # cos and sin have shape [1, original_seq_len, head_dim] or [1, 1, original_seq_len, head_dim]
+                    if len(cos.shape) == 3:
+                        # Shape: [1, seq_len, head_dim]
+                        cos = ttnn.pad(cos, [(0, 0), (0, pad_amount), (0, 0)], value=1.0)  # pad cos with 1.0 (identity)
+                        sin = ttnn.pad(
+                            sin, [(0, 0), (0, pad_amount), (0, 0)], value=0.0
+                        )  # pad sin with 0.0 (no rotation)
+                    elif len(cos.shape) == 4:
+                        # Shape: [1, 1, seq_len, head_dim]
+                        cos = ttnn.pad(cos, [(0, 0), (0, 0), (0, pad_amount), (0, 0)], value=1.0)
+                        sin = ttnn.pad(sin, [(0, 0), (0, 0), (0, pad_amount), (0, 0)], value=0.0)
+                    position_embeddings = (cos, sin)
             x_11SH = ttnn.reshape(x_11SH, [1, seq_len // MAX_MM_SEQ_LEN, MAX_MM_SEQ_LEN, -1])
 
         xqkv_fused = ttnn.linear(
@@ -238,6 +264,14 @@ class TtMistralImageAttention(LightweightModule):
         if seq_len > MAX_MM_SEQ_LEN:
             output_11SH = ttnn.reshape(output_11SH, [1, 1, seq_len, -1])
         ttnn.deallocate(attn_output_11SH)
+
+        # Slice output back to original sequence length if we padded
+        if padded_seq_len is not None and padded_seq_len > original_seq_len:
+            output_11SH = ttnn.slice(
+                output_11SH,
+                (0, 0, 0, 0),
+                (output_11SH.shape[0], output_11SH.shape[1], original_seq_len, output_11SH.shape[-1]),
+            )
 
         # All reduce
         if self.num_devices > 1:  # replace with reduce_scatter and all_gather

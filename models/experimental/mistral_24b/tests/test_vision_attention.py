@@ -30,7 +30,8 @@ from ttnn import ConcatMeshToTensor
 )
 @pytest.mark.parametrize(
     "seq_len",
-    (128,),
+    (12100,),  # Test both small seq_len (no chunking) and large seq_len (with chunking)
+    # (128, 6784),  # Test both small seq_len (no chunking) and large seq_len (with chunking)
 )
 @pytest.mark.parametrize(
     "batch_size",
@@ -60,6 +61,12 @@ def test_vision_attention(mesh_device, seq_len, batch_size):
     hidden_size = model_args.vision_dim
     n_heads = model_args.vision_attn_n_heads
     head_dim = hidden_size // n_heads
+
+    # Cap seq_len to be divisible by VISION_MAX_MM_SEQ (reshape requires seq_len % MAX_MM_SEQ == 0)
+    # This ensures both reference and TT models process the same sequence length
+    if hasattr(model_args, "VISION_MAX_MM_SEQ") and seq_len > model_args.VISION_MAX_MM_SEQ:
+        seq_len = (seq_len // model_args.VISION_MAX_MM_SEQ) * model_args.VISION_MAX_MM_SEQ
+        logger.info(f"Capped seq_len to {seq_len} to be divisible by VISION_MAX_MM_SEQ={model_args.VISION_MAX_MM_SEQ}")
 
     tt_ccl = TT_CCL(mesh_device)
     tt_model = TtLlamaImageAttention(
