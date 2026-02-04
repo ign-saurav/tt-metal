@@ -9,7 +9,16 @@ from models.experimental.yolo_common.yolo_utils import concat
 
 
 class TtnnC3:
-    def __init__(self, shortcut=True, n=4, device=None, parameters=None, conv_pt=None, use_block_shard=False):
+    def __init__(
+        self,
+        shortcut=True,
+        n=4,
+        device=None,
+        parameters=None,
+        conv_pt=None,
+        use_block_shard=False,
+        math_fidelity=ttnn.MathFidelity.HiFi2,
+    ):
         self.shortcut = shortcut
         self.device = device
         self.parameters = parameters
@@ -18,7 +27,7 @@ class TtnnC3:
         if use_block_shard:
             shard_layout = ttnn.TensorMemoryLayout.BLOCK_SHARDED
         else:
-            shard_layout = None
+            shard_layout = ttnn.TensorMemoryLayout.HEIGHT_SHARDED
 
         self.cv1 = TtYOLOv5xConv2D(
             device,
@@ -26,6 +35,9 @@ class TtnnC3:
             self.conv_pt.cv1.conv,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
             shard_layout=shard_layout,
+            math_fidelity=math_fidelity,
+            packer_l1_acc=True,
+            fp32_dest_acc_en=True,
         )
 
         self.cv2 = TtYOLOv5xConv2D(
@@ -34,6 +46,9 @@ class TtnnC3:
             self.conv_pt.cv2.conv,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
             shard_layout=shard_layout,
+            math_fidelity=math_fidelity,
+            packer_l1_acc=True,
+            fp32_dest_acc_en=True,
         )
 
         self.cv3 = TtYOLOv5xConv2D(
@@ -42,6 +57,9 @@ class TtnnC3:
             self.conv_pt.cv3.conv,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
             auto_shard=True if use_block_shard else False,
+            math_fidelity=math_fidelity,
+            packer_l1_acc=True,
+            fp32_dest_acc_en=True,
         )
 
         self.m = [

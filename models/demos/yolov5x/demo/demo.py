@@ -79,14 +79,16 @@ def run_inference_and_save(
         preds = model(im_tensor)[0]
         print(f"torch model output shape: {preds.shape}")
         print(f"torch model output: {preds[0, :, :].flatten()[:10]}")
-        print(f"torch model output: {preds[1, :, :].flatten()[:10]}")
+        if preds.shape[0] > 1:
+            print(f"torch model output: {preds[1, :, :].flatten()[:10]}")
     else:
         preds = runner.run(im_tensor)
         print(f"preds: {preds}")
         preds = ttnn.to_torch(preds, dtype=torch.float32, mesh_composer=outputs_mesh_composer)
         print(f"tt model output shape: {preds.shape}")
         print(f"tt model output: {preds[0, :, :].flatten()[:10]}")
-        print(f"tt model output: {preds[1, :, :].flatten()[:10]}")
+        if preds.shape[0] > 1:
+            print(f"tt model output: {preds[1, :, :].flatten()[:10]}")
 
     # Save preds as npy for further analysis (shape: [batch, 84, 8400])
     preds_npy_dir = os.path.join(save_dir, "preds_npy")

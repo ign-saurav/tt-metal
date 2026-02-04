@@ -42,6 +42,8 @@ class Yolov5x:
             conv_pt.model[3].conv,
             deallocate_activation=False,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
+            math_fidelity=ttnn.MathFidelity.HiFi2,
+            packer_l1_acc=True,
         )
         self.c3_2 = TtnnC3(
             shortcut=True, n=8, device=self.device, parameters=parameters.conv_args[4], conv_pt=conv_pt.model[4]
@@ -52,6 +54,8 @@ class Yolov5x:
             conv_pt.model[5].conv,
             deallocate_activation=False,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
+            math_fidelity=ttnn.MathFidelity.HiFi2,
+            packer_l1_acc=True,
         )
         self.c3_3 = TtnnC3(
             shortcut=True, n=12, device=self.device, parameters=parameters.conv_args[6], conv_pt=conv_pt.model[6]
@@ -64,6 +68,9 @@ class Yolov5x:
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
             use_1d_systolic_array=True,
             shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            math_fidelity=ttnn.MathFidelity.HiFi2,
+            packer_l1_acc=True,
+            fp32_dest_acc_en=True,
         )
         self.c3_4 = TtnnC3(
             shortcut=True,
@@ -72,6 +79,7 @@ class Yolov5x:
             parameters=parameters.conv_args[8],
             conv_pt=conv_pt.model[8],
             use_block_shard=True,
+            math_fidelity=ttnn.MathFidelity.HiFi4,
         )
         self.sppf = TtnnSPPF(device, parameters.conv_args[9], conv_pt.model[9])
         self.conv6 = TtYOLOv5xConv2D(
@@ -80,6 +88,9 @@ class Yolov5x:
             conv_pt.model[10].conv,
             deallocate_activation=False,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
+            math_fidelity=ttnn.MathFidelity.HiFi4,
+            packer_l1_acc=True,
+            fp32_dest_acc_en=True,
         )
 
         self.c3_5 = TtnnC3(
@@ -91,6 +102,8 @@ class Yolov5x:
             conv_pt.model[14].conv,
             deallocate_activation=False,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
+            math_fidelity=ttnn.MathFidelity.HiFi2,
+            packer_l1_acc=True,
         )
 
         self.c3_6 = TtnnC3(
@@ -102,6 +115,8 @@ class Yolov5x:
             conv_pt.model[18].conv,
             deallocate_activation=False,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
+            math_fidelity=ttnn.MathFidelity.HiFi2,
+            packer_l1_acc=True,
         )
 
         self.c3_7 = TtnnC3(
@@ -115,6 +130,8 @@ class Yolov5x:
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
             use_1d_systolic_array=True,
             shard_layout=ttnn.TensorMemoryLayout.BLOCK_SHARDED,
+            math_fidelity=ttnn.MathFidelity.HiFi2,
+            packer_l1_acc=True,
         )
 
         self.c3_8 = TtnnC3(

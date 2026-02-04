@@ -14,7 +14,7 @@ from models.demos.yolov5x.tt.model_preprocessing import create_yolov5x_model_par
 from models.demos.yolov5x.tt.yolov5x import Yolov5x
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
-IM_TENSOR_PATH = Path(__file__).parent / "im_tensor.npy"
+IM_TENSOR_PATH = "im_tensor.npy"
 INTERMEDIATES_DIR = Path(__file__).parent / "intermediates"
 
 

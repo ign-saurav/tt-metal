@@ -45,6 +45,9 @@ class TtYOLOv5xConv2D:
         reshard_if_not_optimal=False,
         enable_act_double_buffer=True,
         enable_weights_double_buffer=False,
+        math_fidelity=ttnn.MathFidelity.LoFi,
+        packer_l1_acc=False,
+        fp32_dest_acc_en=False,
     ):
         self.is_detect = is_detect
         self.is_dfl = is_dfl
@@ -62,11 +65,14 @@ class TtYOLOv5xConv2D:
         self.reshard_if_not_optimal = reshard_if_not_optimal
         self.auto_shard = auto_shard
         self.enable_weights_double_buffer = enable_weights_double_buffer
+        self.math_fidelity = math_fidelity
+        self.packer_l1_acc = packer_l1_acc
+        self.fp32_dest_acc_en = fp32_dest_acc_en
         self.compute_config = ttnn.init_device_compute_kernel_config(
             device.arch(),
-            math_fidelity=ttnn.MathFidelity.LoFi,
-            fp32_dest_acc_en=False,
-            packer_l1_acc=False,
+            math_fidelity=self.math_fidelity,
+            fp32_dest_acc_en=self.fp32_dest_acc_en,
+            packer_l1_acc=self.packer_l1_acc,
             math_approx_mode=False,
         )
 
@@ -153,7 +159,7 @@ class TtnnBottleneck:
         if use_block_shard:
             shard_layout = ttnn.TensorMemoryLayout.BLOCK_SHARDED
         else:
-            shard_layout = None
+            shard_layout = ttnn.TensorMemoryLayout.HEIGHT_SHARDED
 
         self.cv1 = TtYOLOv5xConv2D(
             device,
@@ -161,6 +167,9 @@ class TtnnBottleneck:
             self.conv_pt.cv1.conv,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
             shard_layout=shard_layout,
+            math_fidelity=ttnn.MathFidelity.HiFi2,
+            packer_l1_acc=True,
+            fp32_dest_acc_en=True,
         )
 
         self.cv2 = TtYOLOv5xConv2D(
@@ -169,6 +178,9 @@ class TtnnBottleneck:
             self.conv_pt.cv2.conv,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
             shard_layout=shard_layout,
+            math_fidelity=ttnn.MathFidelity.HiFi2,
+            packer_l1_acc=True,
+            fp32_dest_acc_en=True,
         )
 
     def __call__(self, input_tensor):
