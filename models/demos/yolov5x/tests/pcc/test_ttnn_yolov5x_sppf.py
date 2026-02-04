@@ -2,6 +2,7 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
+import numpy as np
 import pytest
 
 import ttnn
@@ -10,7 +11,33 @@ from models.demos.yolov5x.tt.model_preprocessing import create_yolov5x_input_ten
 from models.demos.yolov5x.tt.sppf import TtnnSPPF
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
-from .plot_utils import plot_abs_diff
+# from .plot_utils import plot_abs_diff
+
+
+def _analyze_outputs(torch_out, ttnn_out):
+    """Print max absolute error and other stats for torch vs ttnn outputs."""
+    t = torch_out.detach().cpu().numpy().astype(np.float64)
+    tt = (
+        ttnn_out.detach().cpu().numpy().astype(np.float64)
+        if hasattr(ttnn_out, "detach")
+        else np.asarray(ttnn_out, dtype=np.float64)
+    )
+    abs_diff = np.abs(t - tt)
+    max_ae = float(np.max(abs_diff))
+    mean_ae = float(np.mean(abs_diff))
+    std_ae = float(np.std(abs_diff))
+    median_ae = float(np.median(abs_diff))
+    flat_idx = np.argmax(abs_diff)
+    max_idx = np.unravel_index(flat_idx, abs_diff.shape)
+    torch_at_max = float(t[max_idx])
+    tt_at_max = float(tt[max_idx])
+    print("SPPF output analysis (Torch vs TTNN):")
+    print(f"  Shape: {t.shape}  Total elements: {abs_diff.size}")
+    print(f"  Max absolute error:    {max_ae:.6g}")
+    print(f"  Mean absolute error:  {mean_ae:.6g}")
+    print(f"  Std absolute error:   {std_ae:.6g}")
+    print(f"  Median absolute error: {median_ae:.6g}")
+    print(f"  Max error at index {max_idx}: torch={torch_at_max:.6g}, ttnn={tt_at_max:.6g}")
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": YOLOV5X_L1_SMALL_SIZE}], indirect=True)
@@ -47,4 +74,5 @@ def test_yolov5x_SPPF(device, reset_seeds, model_location_generator, request):
 
     pcc_passed, pcc_value = assert_with_pcc(torch_model_output, ttnn_output, 0.99)
     print(f"PCC value: {pcc_value}")
-    plot_abs_diff(torch_model_output, ttnn_output, request.node.name)
+    _analyze_outputs(torch_model_output, ttnn_output)
+    # plot_abs_diff(torch_model_output, ttnn_output, request.node.name)
