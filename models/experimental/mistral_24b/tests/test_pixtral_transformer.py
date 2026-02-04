@@ -12,10 +12,15 @@ from models.tt_transformers.tt.ccl import TT_CCL
 from models.tt_transformers.tt.model_config import ModelArgs
 
 from models.experimental.mistral_24b.tt.vision_pixtral_transformer import TtPixtralTransformer
-from models.common.utility_functions import comp_allclose, comp_pcc, run_for_wormhole_b0
+from models.common.utility_functions import (
+    comp_allclose,
+    comp_pcc,
+    enable_memory_reports,
+    is_blackhole,
+)
 
 
-@run_for_wormhole_b0()
+# @run_for_wormhole_b0()
 @pytest.mark.parametrize(
     "batch, num_chunks",
     ((1, 1),),
@@ -49,7 +54,12 @@ def test_image_transformer_inference(batch, num_chunks, mesh_device):
 
     dim = model_args.vision_dim
     heads = model_args.vision_attn_n_heads
-    seq_len = model_args.vision_chunk_ntok - 1
+    # Use full sequence; model handles subblocking via dynamic VISION_MAX_MM_SEQ
+    # Cap to multiple of VISION_MAX_MM_SEQ (reshape requires seq_len % MAX_MM_SEQ == 0)
+    full_seq_len = model_args.vision_chunk_ntok - 1
+    seq_len = (full_seq_len // model_args.VISION_MAX_MM_SEQ) * model_args.VISION_MAX_MM_SEQ
+    if is_blackhole():
+        enable_memory_reports()  # Reports written to .reports/tt_metal for L1 verification
     head_dim = dim // heads
 
     reference_model = model_args.reference_vision_encoder()

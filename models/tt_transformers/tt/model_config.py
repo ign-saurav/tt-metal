@@ -1314,6 +1314,19 @@ class ModelArgs:
 
             if self.is_multimodal:
                 self.VISION_MAX_MM_SEQ = nearest_32(self.vision_chunk_ntok)
+                # On Blackhole, dynamically size based on available L1 (circular buffers overflow otherwise)
+                if is_blackhole():
+                    # Reserve space for kernel, CBs, and alignment
+                    L1_RESERVE = 256 * 1024  # 256KB
+                    BLACKHOLE_L1_SIZE = 1572864  # 1.5MB from blackhole_implementation.hpp
+                    available_l1 = BLACKHOLE_L1_SIZE - L1_RESERVE
+                    # QKV matmul CBs: per_core_M * (3*heads*head_dim) elements * 2 bytes (bfloat16)
+                    # For 8x8 grid, per_core_M = seq/64. Use conservative estimate.
+                    bytes_per_row = 3 * self.vision_attn_n_heads * self.vision_head_dim * 2
+                    max_per_core_m = available_l1 // (bytes_per_row * 2)  # *2 for input+output buffers
+                    # 32 tiles per block in M dimension
+                    max_seq_from_l1 = max(max_per_core_m * 32, 512)  # floor at 512 (known working cap)
+                    self.VISION_MAX_MM_SEQ = min(self.VISION_MAX_MM_SEQ, max_seq_from_l1)
 
             # RMS NORM
             self.model_config["SHARDED_NORM_ATTN_PRGM_CFG"] = self.create_sharded_norm_config(attn_input_grid)

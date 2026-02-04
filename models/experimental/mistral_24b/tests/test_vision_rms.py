@@ -11,13 +11,13 @@ import os
 import ttnn
 from models.experimental.mistral_24b.tt.rmsnorm import RMSNorm
 
-from models.common.utility_functions import comp_allclose, comp_pcc, run_for_wormhole_b0
+from models.common.utility_functions import comp_allclose, comp_pcc
 
 from models.tt_transformers.tt.model_config import ModelArgs
 
 
 @torch.no_grad()
-@run_for_wormhole_b0()
+# @run_for_wormhole_b0()
 @pytest.mark.parametrize(
     "device",
     [

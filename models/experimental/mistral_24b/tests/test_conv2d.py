@@ -13,11 +13,11 @@ from loguru import logger
 import ttnn
 from models.tt_transformers.tt.model_config import ModelArgs
 from models.experimental.mistral_24b.tt.vision_conv2d import TtMistralConv2dPatch
-from models.common.utility_functions import comp_allclose, comp_pcc, run_for_wormhole_b0
+from models.common.utility_functions import comp_allclose, comp_pcc
 from ttnn import ConcatMeshToTensor
 
 
-@run_for_wormhole_b0()
+# @run_for_wormhole_b02()
 @pytest.mark.parametrize(
     "mesh_device",
     [
@@ -84,16 +84,21 @@ def test_conv2d_inference(
 
     ##### Check the outputs #####
     out = ttnn.from_device(tt_output)
-    tt_output_torch = ttnn.to_torch(out, mesh_composer=ConcatMeshToTensor(mesh_device, dim=2))
+    tt_output_torch = ttnn.to_torch(out, mesh_composer=ConcatMeshToTensor(mesh_device, dim=3))
 
     # Only select output from one device
     tt_output_torch = tt_output_torch[0, ..., :out_channels]
 
-    # 1. Restore batch dim
-    tt_output_torch = tt_output_torch.unsqueeze(0)
-    # 1 1024 4096
-    # 2. Permute to match Conv2D output: (N, C_out, H_out, W_out)
-    tt_output_torch = tt_output_torch.permute(0, 2, 1).reshape(1, 1024, 64, 64)
+    logger.info(f"Reference output shape: {reference_output.shape}")
+    logger.info(f"TT output shape (before reshape): {tt_output_torch.shape}")
+
+    # TT output: [B, HW, C] - use dynamic spatial dims like Gemma3 test
+    if tt_output_torch.dim() == 2:
+        tt_output_torch = tt_output_torch.unsqueeze(0)
+    B, HW, C = tt_output_torch.shape
+    H = W = int(HW**0.5)
+    assert H * W == HW, f"HW={HW} is not a perfect square — cannot reshape to Conv2D format"
+    tt_output_torch = tt_output_torch.permute(0, 2, 1).reshape(B, C, H, W)
 
     passing, pcc_message = comp_pcc(reference_output, tt_output_torch)
 
