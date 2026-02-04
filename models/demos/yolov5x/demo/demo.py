@@ -71,14 +71,20 @@ def process_images(dataset, res, batch_size):
     return torch_input_tensor, orig_images, paths_images
 
 
+import numpy as np
+
+
 def run_inference_and_save(
     model, runner, model_type, outputs_mesh_composer, im_tensor, orig_images, paths_images, save_dir, names
 ):
     if model_type == "torch_model":
-        preds = model(im_tensor)
+        preds = model(im_tensor)[0]
+
+        np.save("preds_torch.npy", preds.detach().numpy())
     else:
         preds = runner.run(im_tensor)
         preds = ttnn.to_torch(preds, dtype=torch.float32, mesh_composer=outputs_mesh_composer)
+        np.save("preds_ttnn.npy", preds.detach().numpy())
 
     results = postprocess(preds, im_tensor, orig_images, paths_images, names)
 
@@ -93,6 +99,9 @@ def run_yolov5x_demo(model_location_generator, device, model_type, input_loc, ba
 
     dataset = LoadImages(path=os.path.abspath(input_loc), batch=batch_size)
     im_tensor, orig_images, paths_images = process_images(dataset, (640, 640), batch_size)
+    import numpy as np
+
+    np.save("im_tensor.npy", im_tensor.detach().numpy())
     names = load_coco_class_names()
     save_dir = "models/demos/yolov5x/demo/runs"
 

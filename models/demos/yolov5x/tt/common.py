@@ -45,6 +45,9 @@ class TtYOLOv5xConv2D:
         reshard_if_not_optimal=False,
         enable_act_double_buffer=True,
         enable_weights_double_buffer=False,
+        math_fidelity=ttnn.MathFidelity.LoFi,
+        packer_l1_acc=False,
+        fp32_dest_acc_en=False,
     ):
         self.is_detect = is_detect
         self.is_dfl = is_dfl
@@ -64,9 +67,9 @@ class TtYOLOv5xConv2D:
         self.enable_weights_double_buffer = enable_weights_double_buffer
         self.compute_config = ttnn.init_device_compute_kernel_config(
             device.arch(),
-            math_fidelity=ttnn.MathFidelity.LoFi,
-            fp32_dest_acc_en=False,
-            packer_l1_acc=False,
+            math_fidelity=math_fidelity,
+            fp32_dest_acc_en=fp32_dest_acc_en,
+            packer_l1_acc=packer_l1_acc,
             math_approx_mode=False,
         )
 
@@ -143,7 +146,16 @@ class TtYOLOv5xConv2D:
 
 
 class TtnnBottleneck:
-    def __init__(self, shortcut=True, device=None, parameters=None, conv_pt=None, label=None, use_block_shard=False):
+    def __init__(
+        self,
+        shortcut=True,
+        device=None,
+        parameters=None,
+        conv_pt=None,
+        label=None,
+        use_block_shard=False,
+        use_higher_precision=False,
+    ):
         self.shortcut = shortcut
         self.device = device
         self.parameters = parameters
@@ -153,7 +165,11 @@ class TtnnBottleneck:
         if use_block_shard:
             shard_layout = ttnn.TensorMemoryLayout.BLOCK_SHARDED
         else:
-            shard_layout = None
+            shard_layout = ttnn.TensorMemoryLayout.HEIGHT_SHARDED
+
+        # Use higher precision for bottleneck layers to reduce error accumulation
+        math_fidelity = ttnn.MathFidelity.HiFi2 if use_higher_precision else ttnn.MathFidelity.LoFi
+        packer_l1_acc = use_higher_precision
 
         self.cv1 = TtYOLOv5xConv2D(
             device,
@@ -161,6 +177,8 @@ class TtnnBottleneck:
             self.conv_pt.cv1.conv,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
             shard_layout=shard_layout,
+            math_fidelity=math_fidelity,
+            packer_l1_acc=packer_l1_acc,
         )
 
         self.cv2 = TtYOLOv5xConv2D(
@@ -169,6 +187,8 @@ class TtnnBottleneck:
             self.conv_pt.cv2.conv,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
             shard_layout=shard_layout,
+            math_fidelity=math_fidelity,
+            packer_l1_acc=packer_l1_acc,
         )
 
     def __call__(self, input_tensor):

@@ -26,6 +26,8 @@ class TtnnC3:
             self.conv_pt.cv1.conv,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
             shard_layout=shard_layout,
+            math_fidelity=ttnn.MathFidelity.HiFi2,
+            packer_l1_acc=True,
         )
 
         self.cv2 = TtYOLOv5xConv2D(
@@ -34,6 +36,8 @@ class TtnnC3:
             self.conv_pt.cv2.conv,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
             shard_layout=shard_layout,
+            math_fidelity=ttnn.MathFidelity.HiFi2,
+            packer_l1_acc=True,
         )
 
         self.cv3 = TtYOLOv5xConv2D(
@@ -42,6 +46,8 @@ class TtnnC3:
             self.conv_pt.cv3.conv,
             activation=ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
             auto_shard=True if use_block_shard else False,
+            math_fidelity=ttnn.MathFidelity.HiFi2,
+            packer_l1_acc=True,
         )
 
         self.m = [
@@ -52,6 +58,7 @@ class TtnnC3:
                 conv_pt=self.conv_pt.m[i],
                 label=(i == 0),
                 use_block_shard=use_block_shard,
+                use_higher_precision=True,
             )
             for i in range(n)
         ]

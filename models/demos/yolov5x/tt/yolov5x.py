@@ -197,5 +197,9 @@ class Yolov5x:
         ttnn.deallocate(x17)
         ttnn.deallocate(x20)
         ttnn.deallocate(x23)
-
+        # yolov5x_preds = x
+        # import numpy as np
+        # import torch
+        # yolov5x_preds = ttnn.to_torch(yolov5x_preds, dtype=torch.float32)
+        # np.save("modelyolov5xpreds_ttnn.npy", yolov5x_preds.detach().numpy())
         return x

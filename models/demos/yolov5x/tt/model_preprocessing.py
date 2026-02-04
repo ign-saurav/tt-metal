@@ -113,10 +113,15 @@ def create_yolov5x_model_parameters_detect(
     return parameters
 
 
+import numpy as np
+
+
 def create_yolov5x_input_tensors(
     device, batch_size=1, input_channels=3, input_height=640, input_width=640, input_dtype=ttnn.bfloat8_b
 ):
-    torch_input_tensor = torch.randn(batch_size, input_channels, input_height, input_width)
+    # torch_input_tensor = torch.randn(batch_size, input_channels, input_height, input_width)
+    torch_input_tensor = torch.from_numpy(np.load("im_tensor.npy"))
+    print("torch_input_tensor.shape", torch_input_tensor.shape)
     ttnn_input_tensor = torch.permute(torch_input_tensor, (0, 2, 3, 1))
     ttnn_input_tensor = ttnn_input_tensor.reshape(
         1,
@@ -124,6 +129,8 @@ def create_yolov5x_input_tensors(
         ttnn_input_tensor.shape[0] * ttnn_input_tensor.shape[1] * ttnn_input_tensor.shape[2],
         ttnn_input_tensor.shape[3],
     )
+    print("torch_input_tensor.shape", torch_input_tensor.shape)
+    print("ttnn_input_tensor.shape", ttnn_input_tensor.shape)
     ttnn_input_tensor = ttnn.from_torch(
         ttnn_input_tensor,
         dtype=input_dtype,
