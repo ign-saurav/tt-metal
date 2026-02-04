@@ -13,6 +13,8 @@ from models.demos.yolov5x.tt.model_preprocessing import (
 )
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
+from .plot_utils import plot_abs_diff
+
 
 @pytest.mark.parametrize(
     "fwd_input_shape",
@@ -68,4 +70,6 @@ def test_yolov5x_Detect(
     ttnn_output = ttnn_module(ttnn_input_1, ttnn_input_2, ttnn_input_3)
     ttnn_output = ttnn.to_torch(ttnn_output)
 
-    assert_with_pcc(torch_model_output, ttnn_output, 0.99)
+    pcc_passed, pcc_value = assert_with_pcc(torch_model_output, ttnn_output, 0.99)
+    print(f"PCC value: {pcc_value}")
+    plot_abs_diff(torch_model_output, ttnn_output, request.node.name)

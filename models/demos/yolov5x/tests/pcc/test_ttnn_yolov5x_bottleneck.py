@@ -10,6 +10,8 @@ from models.demos.yolov5x.tt.common import TtnnBottleneck
 from models.demos.yolov5x.tt.model_preprocessing import create_yolov5x_input_tensors, create_yolov5x_model_parameters
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
+from .plot_utils import plot_abs_diff
+
 
 @pytest.mark.parametrize(
     "index, fwd_input_shape , shortcut",
@@ -64,4 +66,6 @@ def test_yolov5x_Bottleneck(
     ttnn_output = ttnn_output.permute(0, 3, 1, 2)
     ttnn_output = ttnn_output.reshape(torch_model_output.shape)
 
-    assert_with_pcc(torch_model_output, ttnn_output, 0.99)
+    pcc_passed, pcc_value = assert_with_pcc(torch_model_output, ttnn_output, 0.99)
+    print(f"PCC value: {pcc_value}")
+    plot_abs_diff(torch_model_output, ttnn_output, request.node.name)

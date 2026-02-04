@@ -10,9 +10,11 @@ from models.demos.yolov5x.tt.model_preprocessing import create_yolov5x_input_ten
 from models.demos.yolov5x.tt.sppf import TtnnSPPF
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
+from .plot_utils import plot_abs_diff
+
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": YOLOV5X_L1_SMALL_SIZE}], indirect=True)
-def test_yolov5x_SPPF(device, reset_seeds, model_location_generator):
+def test_yolov5x_SPPF(device, reset_seeds, model_location_generator, request):
     fwd_input_shape = [1, 1280, 20, 20]
     torch_input, ttnn_input = create_yolov5x_input_tensors(
         device,
@@ -43,4 +45,6 @@ def test_yolov5x_SPPF(device, reset_seeds, model_location_generator):
     ttnn_output = ttnn_output.permute(0, 3, 1, 2)
     ttnn_output = ttnn_output.reshape(torch_model_output.shape)
 
-    assert_with_pcc(torch_model_output, ttnn_output, 0.99)
+    pcc_passed, pcc_value = assert_with_pcc(torch_model_output, ttnn_output, 0.99)
+    print(f"PCC value: {pcc_value}")
+    plot_abs_diff(torch_model_output, ttnn_output, request.node.name)

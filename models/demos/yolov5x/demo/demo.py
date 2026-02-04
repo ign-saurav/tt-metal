@@ -6,6 +6,7 @@ import json
 import os
 
 import fiftyone
+import numpy as np
 import pytest
 import torch
 from loguru import logger
@@ -75,10 +76,24 @@ def run_inference_and_save(
     model, runner, model_type, outputs_mesh_composer, im_tensor, orig_images, paths_images, save_dir, names
 ):
     if model_type == "torch_model":
-        preds = model(im_tensor)
+        preds = model(im_tensor)[0]
+        print(f"torch model output shape: {preds.shape}")
+        print(f"torch model output: {preds[0, :, :].flatten()[:10]}")
+        print(f"torch model output: {preds[1, :, :].flatten()[:10]}")
     else:
         preds = runner.run(im_tensor)
+        print(f"preds: {preds}")
         preds = ttnn.to_torch(preds, dtype=torch.float32, mesh_composer=outputs_mesh_composer)
+        print(f"tt model output shape: {preds.shape}")
+        print(f"tt model output: {preds[0, :, :].flatten()[:10]}")
+        print(f"tt model output: {preds[1, :, :].flatten()[:10]}")
+
+    # Save preds as npy for further analysis (shape: [batch, 84, 8400])
+    preds_npy_dir = os.path.join(save_dir, "preds_npy")
+    os.makedirs(preds_npy_dir, exist_ok=True)
+    preds_path = os.path.join(preds_npy_dir, f"preds_{model_type}.npy")
+    np.save(preds_path, preds.detach().cpu().numpy())
+    logger.info(f"Predictions saved to {preds_path} for analysis")
 
     results = postprocess(preds, im_tensor, orig_images, paths_images, names)
 
@@ -179,7 +194,7 @@ def test_demo(model_location_generator, device, batch_size_per_device, input_loc
     "model_type",
     [
         "tt_model",
-        # "torch_model", # Uncomment to run the demo with torch model.
+        "torch_model",  # Uncomment to run the demo with torch model.
     ],
 )
 def test_demo_dp(model_location_generator, mesh_device, batch_size_per_device, input_loc, model_type):

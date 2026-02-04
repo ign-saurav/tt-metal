@@ -10,9 +10,11 @@ from models.demos.yolov5x.tt.model_preprocessing import create_yolov5x_input_ten
 from models.demos.yolov5x.tt.yolov5x import Yolov5x
 from tests.ttnn.utils_for_testing import assert_with_pcc
 
+from .plot_utils import plot_abs_diff
+
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": YOLOV5X_L1_SMALL_SIZE}], indirect=True)
-def test_yolov5x(device, reset_seeds, model_location_generator):
+def test_yolov5x(device, reset_seeds, model_location_generator, request):
     torch_input, ttnn_input = create_yolov5x_input_tensors(device)
     n, c, h, w = torch_input.shape
     padded_c = 16 if c < 16 else c  # If the channels < 16, pad the channels to 16 to run the Conv layer
@@ -39,5 +41,10 @@ def test_yolov5x(device, reset_seeds, model_location_generator):
     ttnn_output = ttnn_module(ttnn_input)
     ttnn_output = ttnn.to_torch(ttnn_output)
 
-    pcc_passed, pcc_message = assert_with_pcc(torch_model_output, ttnn_output, 0.99)
-    print(pcc_message)
+    print(f"torch_model_output: {torch_model_output.shape}")
+    print(f"torch_model_output: {torch_model_output.flatten()[:20]}")
+    print(f"ttnn_output: {ttnn_output.shape}")
+    print(f"ttnn_output: {ttnn_output.flatten()[:20]}")
+    pcc_passed, pcc_value = assert_with_pcc(torch_model_output, ttnn_output, 0.99)
+    print(f"PCC value: {pcc_value}")
+    plot_abs_diff(torch_model_output, ttnn_output, request.node.name)
