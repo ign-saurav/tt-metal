@@ -222,6 +222,26 @@ class TtMistralImageAttention(LightweightModule):
             cos, sin = position_embeddings
             q_heads_1QSD, k_heads_1KSD = apply_rotary_pos_emb_vision_tt(q_heads_1QSD, k_heads_1KSD, cos, sin)
         ttnn.deallocate(xqkv_fused)
+
+        # Create padding mask when we padded input: prevent real tokens from attending to padded positions
+        attn_mask = None
+        if padded_seq_len is not None and padded_seq_len > original_seq_len:
+            # Mask shape [1, 1, seq_len, seq_len]: -inf at key positions >= original_seq_len
+            pad_mask = torch.zeros(
+                (1, 1, padded_seq_len, padded_seq_len),
+                dtype=torch.bfloat16,
+                device="cpu",
+            )
+            pad_mask[:, :, :, original_seq_len:] = torch.finfo(torch.bfloat16).min
+            attn_mask = ttnn.from_torch(
+                pad_mask,
+                device=self.mesh_device,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                mesh_mapper=ttnn.ReplicateTensorToMesh(self.mesh_device),
+            )
+
         # TODO: get this from model_config
         sdpa_cfg = ttnn.SDPAProgramConfig(
             compute_with_storage_grid_size=(8, 8), q_chunk_size=128, k_chunk_size=128, exp_approx_mode=False
@@ -230,11 +250,14 @@ class TtMistralImageAttention(LightweightModule):
             q_heads_1QSD,
             k_heads_1KSD,
             v_heads_1VSD,
+            attn_mask=attn_mask,
             is_causal=False,
             scale=self.scale,
             program_config=sdpa_cfg,
             compute_kernel_config=self.compute_kernel_config_sdpa,
         )
+        if attn_mask is not None:
+            ttnn.deallocate(attn_mask)
         # deallocate keys and values
         ttnn.deallocate(q_heads_1QSD)
         ttnn.deallocate(k_heads_1KSD)
