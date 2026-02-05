@@ -162,8 +162,6 @@ class TtSpatialCrossAttention:
         slots = ttnn.linear(slots, self.params.output_proj.weight, bias=self.params.output_proj.bias)
         ttnn.deallocate(key)
         ttnn.deallocate(value)
-        ttnn.deallocate(self.params.output_proj.weight)
-        ttnn.deallocate(self.params.output_proj.bias)
 
         output = slots + inp_residual
         ttnn.deallocate(slots)
@@ -255,8 +253,7 @@ class TtMSDeformableAttention3D:
         value = ttnn.to_layout(value, ttnn.TILE_LAYOUT)
 
         value = ttnn.linear(value, params.value_proj.weight, bias=params.value_proj.bias)
-        ttnn.deallocate(params.value_proj.weight)
-        ttnn.deallocate(params.value_proj.bias)
+
         if key_padding_mask is not None:
             mask = key_padding_mask[..., None]
             value = ttnn.where(mask, ttnn.zeros_like(value), value)
@@ -264,14 +261,12 @@ class TtMSDeformableAttention3D:
         query = ttnn.to_layout(query, ttnn.TILE_LAYOUT)
 
         sampling_offsets = ttnn.linear(query, params.sampling_offsets.weight, bias=params.sampling_offsets.bias)
-        ttnn.deallocate(params.sampling_offsets.weight)
-        ttnn.deallocate(params.sampling_offsets.bias)
+
         sampling_offsets = ttnn.reshape(
             sampling_offsets, (bs, num_query, self.num_heads, self.num_levels, self.num_points, 2)
         )
         attention_weights = ttnn.linear(query, params.attention_weights.weight, bias=params.attention_weights.bias)
-        ttnn.deallocate(params.attention_weights.weight)
-        ttnn.deallocate(params.attention_weights.bias)
+
         attention_weights = ttnn.reshape(
             attention_weights, (bs, num_query, self.num_heads, self.num_levels * self.num_points)
         )

@@ -131,8 +131,7 @@ class TtCustomMSDeformableAttention:
 
         value = ttnn.linear(value, params.value_proj.weight, bias=params.value_proj.bias)
         # Deallocate value_proj parameters after use
-        ttnn.deallocate(params.value_proj.weight)
-        ttnn.deallocate(params.value_proj.bias)
+
         if key_padding_mask is not None:
             mask = key_padding_mask[..., None]
             value = ttnn.where(mask, ttnn.zeros_like(value), value)
@@ -143,10 +142,7 @@ class TtCustomMSDeformableAttention:
         sampling_offsets = ttnn.linear(query, params.sampling_offsets.weight, bias=params.sampling_offsets.bias)
         attention_weights = ttnn.linear(query, params.attention_weights.weight, bias=params.attention_weights.bias)
         # Now safe to deallocate query and weight parameters
-        ttnn.deallocate(params.sampling_offsets.weight)
-        ttnn.deallocate(params.sampling_offsets.bias)
-        ttnn.deallocate(params.attention_weights.weight)
-        ttnn.deallocate(params.attention_weights.bias)
+
         ttnn.deallocate(query)
         # Reshape after deallocation
         sampling_offsets = ttnn.reshape(
@@ -198,8 +194,7 @@ class TtCustomMSDeformableAttention:
         output = multi_scale_deformable_attn(value, spatial_shapes, sampling_locations, attention_weights, self.device)
 
         output = ttnn.linear(output, params.output_proj.weight, bias=params.output_proj.bias)
-        ttnn.deallocate(params.output_proj.weight)
-        ttnn.deallocate(params.output_proj.bias)
+
         if not self.batch_first:
             output = ttnn.permute(output, (1, 0, 2))
 

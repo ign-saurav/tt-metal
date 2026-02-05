@@ -235,47 +235,12 @@ def create_input_dict(num_cams=6, img_h=384, img_w=640):
     return input_dict
 
 
-def create_stateless_maptr_pipeline_model(tt_model_class, torch_model, tensor, device, config, input_dict):
+def create_stateless_maptr_pipeline_model(tt_model, tensor, input_dict):
     def run(input_tensor: ttnn.Tensor) -> tuple:
-        fresh_parameters = create_maptr_model_parameters(
-            torch_model,
-            tensor,
-            device,
-        )
+        ttnn.deallocate(input_tensor)
 
-        fresh_model = tt_model_class(
-            device=device,
-            params=fresh_parameters,
-            use_grid_mask=False,
-            pts_voxel_layer=None,
-            pts_voxel_encoder=None,
-            pts_middle_encoder=None,
-            pts_fusion_layer=None,
-            img_backbone=True,
-            pts_backbone=None,
-            img_neck=True,
-            pts_neck=None,
-            pts_bbox_head=True,
-            img_roi_head=None,
-            img_rpn_head=None,
-            train_cfg=None,
-            test_cfg=None,
-            pretrained=None,
-            video_test_mode=False,
-            bev_h=config.bev_h,
-            bev_w=config.bev_w,
-            pc_range=config.pc_range,
-            num_vec=config.num_vec,
-            num_pts_per_vec=config.num_pts_per_vec,
-            num_classes=config.num_classes,
-            embed_dims=config.embed_dims,
-        )
-
-        if input_tensor.memory_config().buffer_type == ttnn.BufferType.L1:
-            input_tensor = ttnn.to_memory_config(input_tensor, ttnn.DRAM_MEMORY_CONFIG)
-
-        ttnn_img_feats = fresh_model.extract_feat(input_tensor, input_dict["img_metas"])
-        ttnn_head_outs = fresh_model.pts_bbox_head(
+        ttnn_img_feats = tt_model.extract_feat(tensor, input_dict["img_metas"])
+        ttnn_head_outs = tt_model.pts_bbox_head(
             ttnn_img_feats,
             lidar_feat=None,
             img_metas=input_dict["img_metas"][0],
@@ -300,7 +265,9 @@ def create_stateless_maptr_pipeline_model(tt_model_class, torch_model, tensor, d
 
 
 @run_for_wormhole_b0()
-@pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
+@pytest.mark.parametrize(
+    "device_params", [{"l1_small_size": 24576, "trace_region_size": 1000000, "num_command_queues": 2}], indirect=True
+)
 @pytest.mark.models_performance_bare_metal
 def test_maptr_e2e_performant(
     device,
@@ -403,7 +370,44 @@ def test_maptr_e2e_performant(
         )
 
     logger.info("Creating stateless pipeline model...")
-    pipeline_model = create_stateless_maptr_pipeline_model(TtMapTR, torch_model, tensor, device, config, input_dict)
+    tensor_ttnn = ttnn.from_torch(
+        tensor, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG
+    )
+    pipeline_model = create_stateless_maptr_pipeline_model(tt_model, tensor_ttnn, input_dict)
+
+    # Calculate physical 2D dimensions for HEIGHT_SHARDED layout
+    image_shape = tensor.shape
+    dram_grid_size = device.dram_grid_size()
+    width = image_shape[-1]
+    volume = image_shape[0] * image_shape[1] * image_shape[2] * image_shape[3] * image_shape[4]
+    physical_height = volume // width
+    max_cores = 8
+
+    # Find optimal cores for height sharding (distribute height across cores)
+    dram_cores = 1
+    for cores in range(max_cores, 0, -1):
+        if physical_height % cores == 0 and (physical_height // cores) % 32 == 0:
+            dram_cores = cores
+            break
+
+    shard_height = physical_height // dram_cores
+
+    dram_shard_spec = ttnn.ShardSpec(
+        ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(dram_cores - 1, 0))}),
+        [shard_height, width],
+        ttnn.ShardOrientation.ROW_MAJOR,
+    )
+    dram_input_memory_config = ttnn.MemoryConfig(
+        ttnn.TensorMemoryLayout.HEIGHT_SHARDED, ttnn.BufferType.DRAM, dram_shard_spec
+    )
+
+    l1_input_memory_config = ttnn.create_sharded_memory_config(
+        shape=(shard_height, width),
+        core_grid=ttnn.CoreGrid(y=dram_cores, x=1),
+        strategy=ttnn.ShardStrategy.HEIGHT,
+        orientation=ttnn.ShardOrientation.ROW_MAJOR,
+        use_height_and_width_as_shard_shape=True,
+    )
 
     logger.info("Preparing input tensor for pipeline...")
     # Use the same tensor as PyTorch reference for correct comparison
@@ -418,13 +422,13 @@ def test_maptr_e2e_performant(
     pipeline = create_pipeline_from_config(
         config=PipelineConfig(
             use_trace=False,
-            num_command_queues=1,
+            num_command_queues=2,
             all_transfers_on_separate_command_queue=False,
         ),
         model=pipeline_model,
         device=device,
-        dram_input_memory_config=ttnn.DRAM_MEMORY_CONFIG,
-        l1_input_memory_config=ttnn.L1_MEMORY_CONFIG,
+        dram_input_memory_config=dram_input_memory_config,
+        l1_input_memory_config=l1_input_memory_config,
     )
 
     logger.info("Compiling pipeline (warmup)...")
@@ -435,7 +439,7 @@ def test_maptr_e2e_performant(
     compile_time = end - start
     logger.info(f"Compilation time: {compile_time:.2f}s")
 
-    num_iterations = 1
+    num_iterations = 50
     batch_size = 1
     input_tensors = [pipeline_input] * num_iterations
 
