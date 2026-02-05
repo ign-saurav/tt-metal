@@ -197,19 +197,11 @@ class TtMapTR:
             if isinstance(img_feats, dict):
                 img_feats = list(img_feats.values())
 
-            for i, feat in enumerate(img_feats):
-                feat_torch = ttnn.to_torch(feat)
-                logger.info(
-                    f"[TT] backbone[{i}] shape: {feat_torch.shape}, sample: {feat_torch.flatten()[:3].tolist()}"
-                )
         else:
             return None
 
         if self.with_img_neck:
             img_feats = self.img_neck(img_feats)
-            for i, feat in enumerate(img_feats):
-                feat_torch = ttnn.to_torch(feat)
-                logger.info(f"[TT] fpn[{i}] shape: {feat_torch.shape}, sample: {feat_torch.flatten()[:3].tolist()}")
 
         img_feats_reshaped = []
         for img_feat in img_feats:

@@ -90,7 +90,7 @@ class TtMapTRDecoder:
                         tmp = ttnn.relu(tmp)
 
                 assert reference_points.shape[-1] == 2
-
+                # TODO move to init
                 new_reference_points = ttnn.zeros_like(reference_points, memory_config=ttnn.L1_MEMORY_CONFIG)
 
                 updated_xy = tmp[..., :2] + inverse_sigmoid(reference_points[..., :2])

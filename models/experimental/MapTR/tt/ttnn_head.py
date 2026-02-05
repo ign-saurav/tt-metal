@@ -30,10 +30,13 @@ class TtLearnedPositionalEncoding:
         self.row_num_embed = row_num_embed
         self.col_num_embed = col_num_embed
 
+        self.x = ttnn.arange(100, device=self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
+        self.y = ttnn.arange(200, device=self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
+
     def __call__(self, mask: ttnn.Tensor) -> ttnn.Tensor:
         _, h, w = mask.shape
-        x = ttnn.arange(w, device=self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
-        y = ttnn.arange(h, device=self.device, memory_config=ttnn.L1_MEMORY_CONFIG)
+        x = self.x
+        y = self.y
 
         x_embed = self.col_embed(
             x,
@@ -107,6 +110,8 @@ class TtMapTRHead:
         self.bev_encoder_type = bev_encoder_type
         self.with_box_refine = with_box_refine
         self.as_two_stage = as_two_stage
+
+        self.bev_mask = ttnn.zeros((1, self.bev_h, self.bev_w), device=self.device, dtype=ttnn.bfloat16)
 
         if positional_encoding is None and hasattr(self.params, "positional_encoding"):
             self.positional_encoding = TtLearnedPositionalEncoding(
@@ -312,7 +317,7 @@ class TtMapTRHead:
 
         if self.bev_embedding is not None:
             bev_queries = self.bev_embedding.weight
-            bev_mask = ttnn.zeros((bs, self.bev_h, self.bev_w), device=self.device, dtype=ttnn.bfloat16)
+            bev_mask = self.bev_mask
             if self.positional_encoding is not None:
                 bev_pos = self.positional_encoding(bev_mask)
                 bev_pos = ttnn.to_layout(bev_pos, layout=ttnn.ROW_MAJOR_LAYOUT)

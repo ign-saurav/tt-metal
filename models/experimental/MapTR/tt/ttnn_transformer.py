@@ -66,6 +66,10 @@ class TtMapTRPerceptionTransformer:
         use_cams_embeds: bool = True,
         rotate_center: List[int] = None,
         fuser: Optional[TtConvFuser] = None,
+        img_metas: Optional[List] = None,
+        grid_length: Optional[List] = None,
+        bev_h: Optional[int] = None,
+        bev_w: Optional[int] = None,
     ):
         if rotate_center is None:
             rotate_center = [100, 100]
@@ -87,6 +91,37 @@ class TtMapTRPerceptionTransformer:
 
         # Check if using attention-based BEV encoder
         self.use_attn_bev = hasattr(encoder, "layers")
+
+        if grid_length is None:
+            grid_length = [0.512, 0.512]
+
+        # Obtain rotation angle and shift with ego motion
+        delta_x = np.array([each.get("can_bus", np.zeros(18))[0] for each in img_metas])
+        delta_y = np.array([each.get("can_bus", np.zeros(18))[1] for each in img_metas])
+        ego_angle = np.array([each.get("can_bus", np.zeros(18))[-2] / np.pi * 180 for each in img_metas])
+
+        grid_length_y = grid_length[0]
+        grid_length_x = grid_length[1]
+        translation_length = np.sqrt(delta_x**2 + delta_y**2)
+        translation_angle = np.arctan2(delta_y, delta_x) / np.pi * 180
+        bev_angle = ego_angle - translation_angle
+        shift_y = translation_length * np.cos(bev_angle / 180 * np.pi) / grid_length_y / bev_h
+        shift_x = translation_length * np.sin(bev_angle / 180 * np.pi) / grid_length_x / bev_w
+        shift_y = shift_y * self.use_shift
+        shift_x = shift_x * self.use_shift
+
+        shift = torch.tensor(
+            [shift_x, shift_y],
+            dtype=torch.bfloat16,
+        ).permute(1, 0)
+        self.shift = ttnn.from_torch(shift, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
+
+        # Add CAN bus signals (vadv2 pattern: direct linear layers)
+        can_bus = torch.as_tensor(
+            [each.get("can_bus", np.zeros(18)) for each in img_metas],
+            dtype=torch.bfloat16,
+        )
+        self.can_bus = ttnn.from_torch(can_bus, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
 
     def attn_bev_encode(
         self,
@@ -113,30 +148,8 @@ class TtMapTRPerceptionTransformer:
         bev_pos = ttnn.reshape(bev_pos, [bev_pos.shape[0], bev_pos.shape[1], bev_pos.shape[2] * bev_pos.shape[3]])
         bev_pos = ttnn.permute(bev_pos, (2, 0, 1))
 
-        # Convert to torch for tensor creation (following vadv2 pattern)
-        bev_queries_torch = ttnn.to_torch(bev_queries)
-
-        # Obtain rotation angle and shift with ego motion
-        img_metas = kwargs.get("img_metas", [{}])
-        delta_x = np.array([each.get("can_bus", np.zeros(18))[0] for each in img_metas])
-        delta_y = np.array([each.get("can_bus", np.zeros(18))[1] for each in img_metas])
-        ego_angle = np.array([each.get("can_bus", np.zeros(18))[-2] / np.pi * 180 for each in img_metas])
-
-        grid_length_y = grid_length[0]
-        grid_length_x = grid_length[1]
-        translation_length = np.sqrt(delta_x**2 + delta_y**2)
-        translation_angle = np.arctan2(delta_y, delta_x) / np.pi * 180
-        bev_angle = ego_angle - translation_angle
-        shift_y = translation_length * np.cos(bev_angle / 180 * np.pi) / grid_length_y / bev_h
-        shift_x = translation_length * np.sin(bev_angle / 180 * np.pi) / grid_length_x / bev_w
-        shift_y = shift_y * self.use_shift
-        shift_x = shift_x * self.use_shift
-
-        # Create shift tensor (vadv2 pattern: use new_tensor then permute)
-        shift = bev_queries_torch.new_tensor([shift_x, shift_y]).permute(1, 0)  # [bs, 2]
-        shift = ttnn.from_torch(shift, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
-
         # Handle previous BEV features with rotation
+        # TODO convert to ttnn
         if prev_bev is not None:
             if prev_bev.shape[1] == bev_h * bev_w:
                 prev_bev = ttnn.permute(prev_bev, (1, 0, 2))
@@ -156,15 +169,8 @@ class TtMapTRPerceptionTransformer:
                     prev_bev_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
                 )
 
-        # Add CAN bus signals (vadv2 pattern: direct linear layers)
-        can_bus = bev_queries_torch.new_tensor([each.get("can_bus", np.zeros(18)) for each in img_metas])
-        can_bus = ttnn.from_torch(can_bus, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
-        bev_queries = ttnn.from_torch(
-            bev_queries_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
-        )
-
         # CAN bus MLP: Linear -> ReLU -> Linear -> ReLU -> LayerNorm
-        can_bus = ttnn.linear(can_bus, self.params.can_bus_mlp["0"].weight, bias=self.params.can_bus_mlp["0"].bias)
+        can_bus = ttnn.linear(self.can_bus, self.params.can_bus_mlp["0"].weight, bias=self.params.can_bus_mlp["0"].bias)
         can_bus = ttnn.relu(can_bus)
         can_bus = ttnn.linear(can_bus, self.params.can_bus_mlp["2"].weight, bias=self.params.can_bus_mlp["2"].bias)
         can_bus = ttnn.relu(can_bus)
@@ -232,7 +238,7 @@ class TtMapTRPerceptionTransformer:
             spatial_shapes=spatial_shapes_ttnn,
             level_start_index=level_start_index,
             prev_bev=prev_bev,
-            shift=shift,
+            shift=self.shift,
             **kwargs,
         )
 
@@ -349,10 +355,6 @@ class TtMapTRPerceptionTransformer:
         import logging
 
         logger = logging.getLogger(__name__)
-        bev_embed_torch = ttnn.to_torch(bev_embed)
-        logger.info(
-            f"[TT Transformer] BEV embed shape: {bev_embed_torch.shape}, sample: {bev_embed_torch.flatten()[:5].tolist()}"
-        )
 
         # Split object query embeddings into position and content
         object_query_embed = ttnn.to_layout(object_query_embed, layout=ttnn.ROW_MAJOR_LAYOUT)
@@ -398,16 +400,6 @@ class TtMapTRPerceptionTransformer:
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
             **kwargs,
-        )
-
-        # Log decoder outputs for debugging
-        inter_states_torch = ttnn.to_torch(inter_states)
-        inter_refs_torch = ttnn.to_torch(inter_references)
-        logger.info(
-            f"[TT Transformer] Decoder inter_states shape: {inter_states_torch.shape}, sample: {inter_states_torch.flatten()[:5].tolist()}"
-        )
-        logger.info(
-            f"[TT Transformer] Decoder inter_refs shape: {inter_refs_torch.shape}, sample: {inter_refs_torch.flatten()[:5].tolist()}"
         )
 
         inter_references_out = inter_references
