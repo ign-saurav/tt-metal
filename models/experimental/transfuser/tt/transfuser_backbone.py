@@ -194,6 +194,21 @@ class TtTransfuserBackbone:
             bev_upsample_factor=config.bev_upsample_factor,
         )
 
+        # ---------- Pre-create normalization tensors for trace support ----------
+        # These must be created before trace capture to avoid "Writes are not supported during trace capture" error
+        self.normalize_mean = ttnn.from_torch(
+            torch.tensor([0.485, 0.456, 0.406]).reshape(1, 1, 1, 3),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device,
+        )
+        self.normalize_std_inv = ttnn.from_torch(
+            torch.tensor([1.0 / 0.229, 1.0 / 0.224, 1.0 / 0.225]).reshape(1, 1, 1, 3),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device,
+        )
+
     def _create_conv_config(
         self,
         parameters,
@@ -268,24 +283,10 @@ class TtTransfuserBackbone:
         # Convert from [0,255] to [0,1]
         x = ttnn.multiply(x, 1.0 / 255.0)
 
-        # Create normalization constants as tensors
-        # Mean: [0.485, 0.456, 0.406], Std: [0.229, 0.224, 0.225]
-        mean = ttnn.from_torch(
-            torch.tensor([0.485, 0.456, 0.406]).reshape(1, 1, 1, 3),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device,
-        )
-        std_inv = ttnn.from_torch(
-            torch.tensor([1.0 / 0.229, 1.0 / 0.224, 1.0 / 0.225]).reshape(1, 1, 1, 3),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device,
-        )
-
+        # Use pre-created normalization tensors (created in __init__ to support trace capture)
         # Normalize all channels at once (no slice/concat needed)
-        x = ttnn.subtract(x, mean)
-        x = ttnn.multiply(x, std_inv)
+        x = ttnn.subtract(x, self.normalize_mean)
+        x = ttnn.multiply(x, self.normalize_std_inv)
 
         return x
 
