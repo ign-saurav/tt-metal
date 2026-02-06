@@ -55,7 +55,7 @@ class Yolov11Conv2D:
             deallocate_activation=self.deallocate_activation,
             enable_act_double_buffer=True,
             reshard_if_not_optimal=True if self.reshard else False,
-            activation=self.activation,
+            activation=None,
             enable_weights_double_buffer=True,
             output_layout=ttnn.TILE_LAYOUT,
         )
@@ -116,6 +116,12 @@ class Yolov11Conv2D:
             if x.shape[2] != hw and output_rm_needed:
                 x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
                 x = x[:, :, :hw, :]
+        if (
+            self.activation is not None
+            and isinstance(self.activation, ttnn.UnaryWithParam)
+            and self.activation.op_type == ttnn.UnaryOpType.SILU
+        ):
+            x = ttnn.silu(x)
         return x
 
 

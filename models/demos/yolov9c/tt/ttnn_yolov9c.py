@@ -75,6 +75,7 @@ class TtYOLOv9cConv2D:
         self.activation_dtype = activation_dtype
         self.core_count = core_count
         self.override_sharding_config = override_sharding_config
+        self.activation = activation
 
         self.compute_config = ttnn.init_device_compute_kernel_config(
             device.arch(),
@@ -90,7 +91,7 @@ class TtYOLOv9cConv2D:
             enable_act_double_buffer=True,
             enable_weights_double_buffer=True if shard_layout == ttnn.TensorMemoryLayout.BLOCK_SHARDED else False,
             reshard_if_not_optimal=True if self.use_1d_systolic_array else False,
-            activation=activation,
+            activation=None,
         )
         if self.core_count is not None:
             shard_grid = get_shard_grid_from_num_cores(self.core_count, device)
@@ -153,6 +154,12 @@ class TtYOLOv9cConv2D:
             if x.shape[2] != hw:
                 x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
                 x = x[:, :, :hw, :]
+            if (
+                self.activation is not None
+                and isinstance(self.activation, ttnn.UnaryWithParam)
+                and self.activation.op_type == ttnn.UnaryOpType.SILU
+            ):
+                x = ttnn.silu(x)
         else:
             self.enable_autopad = False
             padding = autopad(self.kernel_size, pad=None, dilation=1) if self.enable_autopad else self.padding
@@ -179,6 +186,12 @@ class TtYOLOv9cConv2D:
                 mirror_kernel=True,
                 dtype=self.activation_dtype,
             )
+            if (
+                self.activation is not None
+                and isinstance(self.activation, ttnn.UnaryWithParam)
+                and self.activation.op_type == ttnn.UnaryOpType.SILU
+            ):
+                x = ttnn.silu(x)
 
         return x
 

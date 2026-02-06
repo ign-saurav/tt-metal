@@ -91,8 +91,7 @@ class TtConv:
         if self.change_shard:
             conv_config.shard_layout = None
 
-        if self.is_act_false != True:
-            conv_config.activation = ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU)
+        self.need_silu = self.is_act_false != True
 
         if self.act_block_h:
             conv_config.act_block_h_override = self.act_blocks
@@ -152,6 +151,8 @@ class TtConv:
             dtype=ttnn.bfloat16,
             slice_config=ttnn.Conv2dL1FullSliceConfig,
         )
+        if self.need_silu:
+            x = ttnn.silu(x)
 
         if self.is_act_false:
             x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)

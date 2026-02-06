@@ -45,6 +45,7 @@ class TtYOLOv12xConv2D:
         self.deallocate_activation = False
         self.activation_dtype = activation_dtype
         self.core_count = core_count
+        self.activation = activation
 
         if hasattr(self.padding, "__len__"):
             if len(self.padding) == 2:
@@ -69,7 +70,7 @@ class TtYOLOv12xConv2D:
             deallocate_activation=self.deallocate_activation,
             enable_act_double_buffer=enable_act_double_buffer,
             reshard_if_not_optimal=True if self.use_1d_systolic_array else False,
-            activation=activation,
+            activation=None,
             enable_weights_double_buffer=enable_weights_double_buffer,
         )
         if config_override is None and conv.in_channels == 3:
@@ -125,6 +126,12 @@ class TtYOLOv12xConv2D:
             if x.is_sharded():
                 x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)
             x = x[:, :, :hw, :]
+        if (
+            self.activation is not None
+            and isinstance(self.activation, ttnn.UnaryWithParam)
+            and self.activation.op_type == ttnn.UnaryOpType.SILU
+        ):
+            x = ttnn.silu(x)
         return x
 
 

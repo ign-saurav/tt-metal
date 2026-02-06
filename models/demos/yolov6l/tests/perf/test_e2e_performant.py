@@ -9,7 +9,7 @@ import torch
 from loguru import logger
 
 import ttnn
-from models.common.utility_functions import disable_persistent_kernel_cache, run_for_wormhole_b0
+from models.common.utility_functions import run_for_wormhole_b0
 from models.demos.yolov6l.common import YOLOV6L_L1_SMALL_SIZE
 from models.demos.yolov6l.runner.performant_runner import YOLOv6lPerformantRunner
 from models.demos.yolov6l.tt.common import get_mesh_mappers
@@ -36,7 +36,7 @@ def run_yolov6_inference(
     resolution,
     model_location_generator,
 ):
-    disable_persistent_kernel_cache()
+    # disable_persistent_kernel_cache()
 
     num_devices = device.get_num_devices()
     batch_size = batch_size_per_device * num_devices

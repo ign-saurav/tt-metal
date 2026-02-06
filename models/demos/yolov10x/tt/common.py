@@ -56,6 +56,7 @@ class TtYolov10Conv2D:
         self.use_1d_systolic_array = use_1d_systolic_array
         self.deallocate_activation = deallocate_activation
         self.auto_shard = auto_shard
+        self.activation = activation
         self.compute_config = ttnn.init_device_compute_kernel_config(
             device.arch(),
             math_fidelity=ttnn.MathFidelity.LoFi,
@@ -76,7 +77,7 @@ class TtYolov10Conv2D:
             shard_layout=shard_layout,
             deallocate_activation=self.deallocate_activation,
             reshard_if_not_optimal=True if self.use_1d_systolic_array else False,
-            activation=activation,
+            activation=None,
             output_layout=ttnn.TILE_LAYOUT,
             act_block_h_override=act_block_h_override,
             enable_act_double_buffer=True
@@ -136,6 +137,12 @@ class TtYolov10Conv2D:
             dtype=self.conv_output_dtype,
             slice_config=ttnn.Conv2dL1FullSliceConfig,
         )
+        if (
+            self.activation is not None
+            and isinstance(self.activation, ttnn.UnaryWithParam)
+            and self.activation.op_type == ttnn.UnaryOpType.SILU
+        ):
+            x = ttnn.silu(x)
         return x
 
 

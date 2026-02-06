@@ -58,7 +58,7 @@ class TtYOLOv7Conv2D:
     def __call__(self, device, input_tensor):
         conv_config = ttnn.Conv2dConfig(
             weights_dtype=self.weights_dtype,
-            activation=self.activation,
+            activation=None,
             shard_layout=self.shard_layout,
             reshard_if_not_optimal=True if self.use_1d_systolic_array else False,
             enable_act_double_buffer=True,
@@ -102,6 +102,12 @@ class TtYOLOv7Conv2D:
             return_output_dim=True,
             dtype=self.dtype,
         )
+        if (
+            self.activation is not None
+            and isinstance(self.activation, ttnn.UnaryWithParam)
+            and self.activation.op_type == ttnn.UnaryOpType.SILU
+        ):
+            output_tensor = ttnn.silu(output_tensor)
         if self.is_reshape:
             output_tensor = ttnn.sharded_to_interleaved(output_tensor, ttnn.L1_MEMORY_CONFIG)
             output_tensor = ttnn.to_layout(output_tensor, ttnn.ROW_MAJOR_LAYOUT)

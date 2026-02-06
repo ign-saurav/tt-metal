@@ -237,8 +237,8 @@ class TtnnConv:
         config_override=None,
     ):
         self.enable_act = enable_act
-        if self.enable_act:
-            activation = "silu"
+        self.device = device
+        activation = ""
         self.conv = Yolov11Conv2D(
             parameter.conv,
             conv_pt.conv,
@@ -256,6 +256,8 @@ class TtnnConv:
 
     def __call__(self, device, x):
         x = self.conv(x)
+        if self.enable_act:
+            x = ttnn.silu(x)
         return x
 
 

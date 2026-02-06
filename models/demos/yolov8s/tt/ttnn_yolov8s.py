@@ -136,9 +136,10 @@ class TtConv:
 
     def _initialize_conv_config(self):
         self.output_dtype = ttnn.bfloat16
+        self.need_silu = not self.is_detect_cv2
         conv_config = ttnn.Conv2dConfig(
             weights_dtype=ttnn.bfloat16,
-            activation=None if self.is_detect_cv2 else ttnn.UnaryWithParam(ttnn.UnaryOpType.SILU),
+            activation=None,
             shard_layout=ttnn.TensorMemoryLayout.HEIGHT_SHARDED,
             act_block_w_div=1,
             transpose_shards=False,
@@ -215,6 +216,8 @@ class TtConv:
             dtype=self.output_dtype,
             slice_config=ttnn.Conv2dL1FullSliceConfig,
         )
+        if self.need_silu:
+            x = ttnn.silu(x)
 
         if self.is_detect_cv2:
             x = ttnn.sharded_to_interleaved(x, ttnn.L1_MEMORY_CONFIG)

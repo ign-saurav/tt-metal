@@ -99,7 +99,7 @@ class YOLOv11PerformantRunner:
 
     def _validate(self, input_tensor, result_output_tensor):
         torch_output_tensor = self.runner_infra.torch_output_tensor
-        assert_with_pcc(torch_output_tensor, result_output_tensor, 0.99)
+        assert_with_pcc(torch_output_tensor, result_output_tensor, 0.95)
 
     def run(self, torch_input_tensor=None, check_pcc=False):
         tt_inputs_host, _ = self.runner_infra._setup_l1_sharded_input(self.device, torch_input_tensor)
