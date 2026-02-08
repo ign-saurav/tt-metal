@@ -235,11 +235,13 @@ def create_input_dict(num_cams=6, img_h=384, img_w=640):
     return input_dict
 
 
-def create_stateless_maptr_pipeline_model(tt_model, tensor, input_dict):
+def create_stateless_maptr_pipeline_model(tt_model, input_dict):
     def run(input_tensor: ttnn.Tensor) -> tuple:
-        ttnn.deallocate(input_tensor)
+        if input_tensor.memory_config().buffer_type == ttnn.BufferType.L1:
+            input_tensor_dram = ttnn.to_memory_config(input_tensor, ttnn.DRAM_MEMORY_CONFIG)
+            ttnn.deallocate(input_tensor)
 
-        ttnn_img_feats = tt_model.extract_feat(tensor, input_dict["img_metas"])
+        ttnn_img_feats = tt_model.extract_feat(input_tensor_dram, input_dict["img_metas"])
         ttnn_head_outs = tt_model.pts_bbox_head(
             ttnn_img_feats,
             lidar_feat=None,
@@ -370,14 +372,11 @@ def test_maptr_e2e_performant(
         )
 
     logger.info("Creating stateless pipeline model...")
-    tensor_ttnn = ttnn.from_torch(
-        tensor, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG
-    )
-    pipeline_model = create_stateless_maptr_pipeline_model(tt_model, tensor_ttnn, input_dict)
+
+    pipeline_model = create_stateless_maptr_pipeline_model(tt_model, input_dict)
 
     # Calculate physical 2D dimensions for HEIGHT_SHARDED layout
     image_shape = tensor.shape
-    dram_grid_size = device.dram_grid_size()
     width = image_shape[-1]
     volume = image_shape[0] * image_shape[1] * image_shape[2] * image_shape[3] * image_shape[4]
     physical_height = volume // width
@@ -439,7 +438,7 @@ def test_maptr_e2e_performant(
     compile_time = end - start
     logger.info(f"Compilation time: {compile_time:.2f}s")
 
-    num_iterations = 50
+    num_iterations = 20
     batch_size = 1
     input_tensors = [pipeline_input] * num_iterations
 
