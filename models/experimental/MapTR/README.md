@@ -60,7 +60,6 @@ MapTR/
 │   │   ├── test_spatial_cross_attention.py      # Spatial cross attention test
 │   │   └── test_temporal_self_attention.py      # Temporal self attention test
 │   └── perf/                       # Performance tests
-│       ├── test_e2e_performant.py  # End-to-end performance test
 │       ├── test_e2e_ttcnn_performant.py  # TT-CNN pipeline performance test
 │       └── test_perf.py            # Device performance test
 └── tt/                             # TTNN implementations
@@ -90,7 +89,7 @@ MapTR/
 ### Multi Device (BS=1, img_size=384x640) (N300):
 - Device FPS: `~0.24`
 - E2E FPS (Direct TTNN): `~0.04`
-- E2E FPS (1CQ + no trace): `~0.09`
+- E2E FPS (2CQ + no trace): `~0.20`
 
 ## PCC (Pearson Correlation Coefficient) Values
 
@@ -126,18 +125,18 @@ The demo script automatically downloads the checkpoint if it's missing:
 
 ```bash
 # Using default checkpoint (auto-downloads if missing)
-python_env/bin/python \
+python \
     models/experimental/MapTR/demo/demo.py \
     models/experimental/MapTR/reference/config_maptr_tiny_r50_24e_bevformer.py
 
 # Using custom checkpoint
-python_env/bin/python \
+python \
     models/experimental/MapTR/demo/demo.py \
     models/experimental/MapTR/reference/config_maptr_tiny_r50_24e_bevformer.py \
     path/to/your/checkpoint.pth
 
 # With custom options
-python_env/bin/python \
+python \
     models/experimental/MapTR/demo/demo.py \
     models/experimental/MapTR/reference/config_maptr_tiny_r50_24e_bevformer.py \
     --score-thresh 0.5 \
