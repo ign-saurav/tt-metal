@@ -25,6 +25,11 @@ from models.experimental.MapTR.tt.model_preprocessing import (
 )
 from models.perf.perf_utils import prep_perf_report
 from models.tt_cnn.tt.pipeline import PipelineConfig, create_pipeline_from_config
+import glob
+import os
+import cv2
+import numpy as np
+from torchvision import transforms
 
 
 class ConfigDict(dict):
@@ -312,7 +317,38 @@ def test_maptr_e2e_performant(
     torch_model.eval()
 
     input_dict = create_input_dict()
-    tensor = torch.randn(1, 6, 3, 384, 640)
+
+    image_extensions = ("*.jpg", "*.png", "*.jpeg", "*.JPG", "*.PNG", "*.JPEG")
+    samples_root = "models/experimental/MapTR/resources/nuScenes/samples"
+    img_files = []
+    for ext in image_extensions:
+        img_files.extend(glob.glob(os.path.join(samples_root, "**", ext), recursive=True))
+    img_files = sorted(img_files)
+
+    if len(img_files) < 6:
+        raise RuntimeError(
+            f"Found {len(img_files)} images (searched recursively in subfolders of {samples_root}), need at least 6."
+        )
+
+    target_h, target_w = 384, 640
+    processed_imgs = []
+    preprocess = transforms.Compose(
+        [
+            transforms.ToTensor(),
+            transforms.Resize((target_h, target_w)),
+        ]
+    )
+
+    for img_path in img_files[:6]:
+        img = cv2.imread(img_path)
+        if img is None:
+            raise RuntimeError(f"Failed to read {img_path}")
+        img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        img_pil = transforms.functional.to_pil_image(img)
+        img_tensor = preprocess(img_pil)
+        processed_imgs.append(img_tensor)
+
+    tensor = torch.stack(processed_imgs, dim=0).unsqueeze(0)
 
     logger.info("Creating TTNN model parameters...")
     parameters = create_maptr_model_parameters(
