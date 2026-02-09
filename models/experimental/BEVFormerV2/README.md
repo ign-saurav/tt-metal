@@ -184,6 +184,7 @@ All tests use PCC validation with threshold: 0.99.
 
 ### Paper
 
+
 - **BEVFormer v2: Adapting Modern Image Backbones to Bird's-Eye-View Recognition via Perspective Supervision**
   - Authors: Zhiqi Li, Wenhai Chen, Hongyang Li, et al.
   - arXiv: [https://arxiv.org/abs/2211.10439](https://arxiv.org/abs/2211.10439)
