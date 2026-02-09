@@ -1,0 +1,9 @@
+torch==2.6.0
+transformers==4.46.3
+tokenizers==0.20.3
+einops
+addict
+easydict
+
+# Optional: for best OCR performance with DeepSeek-OCR (CUDA only; install with --no-build-isolation after torch).
+# flash-attn==2.7.3
