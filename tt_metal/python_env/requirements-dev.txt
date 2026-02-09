@@ -35,7 +35,8 @@ git+https://github.com/tenstorrent/llama-models.git@tt_metal_tag
 protobuf==3.20.2
 
 # For TT-Transformers Qwen3 support
-transformers == 4.53.0
+transformers == 4.46.3
+# transformers == 4.53.0
 huggingface-hub >= 0.30.0
 
 # testing
@@ -43,6 +44,7 @@ pytest==8.4.2
 pytest-cov==7.0.0
 pytest-timeout==2.4.0
 pytest-split==0.10.0
+pytest-xdist==3.8.0
 pytest-benchmark==5.1.0
 jsbeautifier==1.14.7
 datasets==2.9.0
@@ -107,3 +109,7 @@ mmcv-full==1.7.2 #Required for UniAD model
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.7.1 ; platform_machine == 'x86_64'
 torchvision==0.22.1 ; platform_machine == 'x86_64'
+
+addict
+easydict
+tokenizers==0.20.3
