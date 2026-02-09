@@ -71,7 +71,6 @@ models/
         │   │   └── test_ffn.py                    # FFN test
         │   └── perf/                  # Performance tests
         │       ├── test_device_perf.py            # Device performance test
-        │       ├── test_e2e_performant.py         # E2E perf (1cq, no trace)
         │       └── test_e2e_performant_2cq_no_trace.py  # E2E perf (2cq, no trace)
         ├── common.py                  # Common utilities
         └── README.md
@@ -111,9 +110,6 @@ pytest models/experimental/BEVFormerV2/tests/pcc/test_fpn.py
 
 # Test Head
 pytest models/experimental/BEVFormerV2/tests/pcc/test_bevformer_head.py
-
-# Test Full Network
-pytest models/experimental/BEVFormerV2/tests/pcc/test_bevformer_v2.py
 ```
 
 ### Run the Demo
@@ -126,12 +122,12 @@ python3 models/experimental/BEVFormerV2/demo/demo.py
 python3 models/experimental/BEVFormerV2/demo/demo.py --sample-idx 0
 
 # With custom score threshold for visualization
-python3 models/experimental/BEVFormerV2/demo/demo.py --score-thresh 0.5
+python3 models/experimental/BEVFormerV2/demo/demo.py --score-thresh 0.35
 ```
 
 **Demo Options:**
 - `--data-root`: Path to demo data directory (default: `models/experimental/BEVFormerV2/demo/demo_data/nuscenes`)
-- `--sample-idx`: Sample index to process (default: 0, use -1 for all samples)
+- `--sample-idx`: Sample index to process (default: 0)
 - `--out`: Output JSON file path (default: `models/experimental/BEVFormerV2/demo/outputs/results.json`)
 - `--score-thresh`: Score threshold for visualization (default: 0.35)
 - `--device-params`: Device parameters as JSON string (default: `'{"l1_small_size": 32768}'`)
