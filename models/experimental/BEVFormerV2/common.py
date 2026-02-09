@@ -17,6 +17,7 @@ def download_bevformerv2_weights():
     weights_path = "models/experimental/BEVFormerV2/chkpt/bevformer_v2_weights.pth"
 
     if not os.path.exists(weights_path):
+        os.makedirs(os.path.dirname(weights_path), exist_ok=True)
         try:
             print("Downloading weights from Google Drive...")
             url = f"https://drive.google.com/uc?id={file_id}"
