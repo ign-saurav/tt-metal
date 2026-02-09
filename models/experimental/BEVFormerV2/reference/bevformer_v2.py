@@ -168,16 +168,6 @@ class BEVFormerV2(nn.Module):
         img_feats = self.extract_feat(img, img_metas)
         outs = self.pts_bbox_head(img_feats, img_metas, prev_bev=None)
 
-        import os
-
-        save_path = "models/experimental/BEVFormerV2/reference/dumps"
-        os.makedirs(save_path, exist_ok=True)
-        keys_to_save = ["bev_embed", "all_cls_scores", "all_bbox_preds"]
-        for key in keys_to_save:
-            if key in outs:
-                tensor = outs[key]
-                torch.save(tensor, os.path.join(save_path, f"{key}.pt"))
-
         bbox_list = self.pts_bbox_head.bbox_coder.decode(outs)
         bbox_results = [
             dict(

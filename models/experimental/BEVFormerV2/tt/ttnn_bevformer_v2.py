@@ -80,8 +80,8 @@ class TtBevFormerV2:
             code_weights=pts_bbox_head.get("code_weights")
             if isinstance(pts_bbox_head, dict) and pts_bbox_head
             else None,
-            bev_h=pts_bbox_head.get("bev_h", 100) if isinstance(pts_bbox_head, dict) and pts_bbox_head else 100,
-            bev_w=pts_bbox_head.get("bev_w", 100) if isinstance(pts_bbox_head, dict) and pts_bbox_head else 100,
+            bev_h=pts_bbox_head.get("bev_h", 200) if isinstance(pts_bbox_head, dict) and pts_bbox_head else 200,
+            bev_w=pts_bbox_head.get("bev_w", 200) if isinstance(pts_bbox_head, dict) and pts_bbox_head else 200,
             num_query=pts_bbox_head.get("num_query", 900) if isinstance(pts_bbox_head, dict) and pts_bbox_head else 900,
             num_classes=pts_bbox_head.get("num_classes", 10)
             if isinstance(pts_bbox_head, dict) and pts_bbox_head
@@ -99,6 +99,10 @@ class TtBevFormerV2:
         )
 
     def extract_img_feat(self, img, img_metas, len_queue=None):
+        # Handle list input (matching Simplified pattern)
+        if isinstance(img, list) and len(img) > 0:
+            img = img[0]
+
         if img is not None:
             if len(img.shape) == 5:
                 B, N, C, H, W = img.shape
@@ -153,18 +157,26 @@ class TtBevFormerV2:
         return img_feats
 
     def __call__(self, return_loss=True, **kwargs):
-        return self.forward_test(**kwargs)
+        if return_loss:
+            return self.forward_train(**kwargs)
+        else:
+            return self.forward_test(**kwargs)
 
-    def forward_test(
-        self,
-        img_metas,
-        img=None,
-        prev_bev=None,
-        **kwargs,
-    ):
+    def forward_train(self, img_metas=None, gt_bboxes_3d=None, gt_labels_3d=None, **kwargs):
+        img = kwargs.get("img")
+        if isinstance(img, list) and len(img) > 0:
+            img = img[0]
+        img_feats = self.extract_feat(img=img, img_metas=img_metas)
+        outs = self.pts_bbox_head(img_feats, img_metas)
+        return outs
+
+    def forward_test(self, img_metas=None, **kwargs):
+        img = kwargs.get("img")
+
         for var, name in [(img_metas, "img_metas")]:
             if not isinstance(var, list):
                 raise TypeError("{} must be a list, but got {}".format(name, type(var)))
+
         img = [img] if img is None else img
 
         while isinstance(img_metas, list) and len(img_metas) > 0 and isinstance(img_metas[0], list):
@@ -176,67 +188,27 @@ class TtBevFormerV2:
         if "can_bus" not in img_metas[0]:
             img_metas[0]["can_bus"] = [0.0] * 18
 
-        new_prev_bev, bbox_results = self.simple_test(
-            img_metas=img_metas,
-            img=img,
-            prev_bev=None,
-            **kwargs,
-        )
-
-        return bbox_results
-
-    def simple_test(
-        self,
-        img_metas,
-        img=None,
-        prev_bev=None,
-        points=None,
-        rescale=False,
-        **kwargs,
-    ):
         img_feats = self.extract_feat(img=img, img_metas=img_metas)
-        bbox_list = [dict() for i in range(len(img_metas))]
-        new_prev_bev, bbox_list = self.simple_test_pts(
-            img_feats,
-            img_metas,
-            prev_bev,
-            rescale=rescale,
-        )
+        img_feats[0] = ttnn.to_layout(img_feats[0], layout=ttnn.TILE_LAYOUT)
+        outs = self.pts_bbox_head(img_feats, img_metas, prev_bev=None)
 
-        return new_prev_bev, bbox_list
+        if "bev_embed" in outs:
+            bev_embed = outs["bev_embed"]
+            if isinstance(bev_embed, ttnn.Tensor):
+                bev_embed = ttnn.to_torch(bev_embed).float()
+            else:
+                bev_embed = bev_embed.float()
+            outs["bev_embed"] = bev_embed
 
-    def simple_test_pts(
-        self,
-        x,
-        img_metas,
-        prev_bev=None,
-        rescale=False,
-    ):
-        x[0] = ttnn.to_layout(x[0], layout=ttnn.TILE_LAYOUT)
-        outs = self.pts_bbox_head(x, img_metas, prev_bev=prev_bev)
-
-        bev_embed = outs["bev_embed"]
-        if isinstance(bev_embed, ttnn.Tensor):
-            bev_embed = ttnn.to_torch(bev_embed).float()
-        else:
-            bev_embed = bev_embed.float()
-        outs["bev_embed"] = bev_embed
-
-        outs["all_cls_scores"] = outs["all_cls_scores"].float()
-        outs["all_bbox_preds"] = outs["all_bbox_preds"].float()
-
-        import os
-
-        save_path = "models/experimental/BEVFormerV2/tt/dumps"
-        os.makedirs(save_path, exist_ok=True)
-        keys_to_save = ["bev_embed", "all_cls_scores", "all_bbox_preds"]
-        for key in keys_to_save:
-            if key in outs:
-                tensor = outs[key]
-                torch.save(tensor, os.path.join(save_path, f"{key}.pt"))
+        if "all_cls_scores" in outs and outs["all_cls_scores"] is not None:
+            if isinstance(outs["all_cls_scores"], torch.Tensor):
+                outs["all_cls_scores"] = outs["all_cls_scores"].float()
+        if "all_bbox_preds" in outs and outs["all_bbox_preds"] is not None:
+            if isinstance(outs["all_bbox_preds"], torch.Tensor):
+                outs["all_bbox_preds"] = outs["all_bbox_preds"].float()
 
         decoded_bbox_list = self.pts_bbox_head.bbox_coder.decode(outs)
-        bbox_list = [
+        bbox_results = [
             dict(
                 pts_bbox=dict(
                     boxes_3d=decoded_bbox_list[i]["bboxes"],
@@ -247,4 +219,4 @@ class TtBevFormerV2:
             for i in range(len(decoded_bbox_list))
         ]
 
-        return outs["bev_embed"], bbox_list
+        return bbox_results

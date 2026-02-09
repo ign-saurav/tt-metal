@@ -119,16 +119,15 @@ class TtSpatialCrossAttention:
             for i, index_query_per_img in enumerate(indexes):
                 slots[j, index_query_per_img] += queries[j, i, : len(index_query_per_img)]
 
-        count = ttnn.sum(bev_mask, -1) > 0
-        count = ttnn.permute(count, (1, 2, 0))
+        count = bev_mask_torch.sum(-1) > 0
+        count = count.permute(1, 2, 0)
+        count = count.sum(-1)
+        count = count.clamp(min=1.0)
+        count = count.unsqueeze(-1)
 
-        count = ttnn.sum(count, -1)
-        count = ttnn.clamp(count, min=1.0)
-        count = ttnn.unsqueeze(count, -1)
+        slots = slots / count
         slots = ttnn.from_torch(slots, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
-        slots = ttnn.div(slots, count)
         slots = ttnn.linear(slots, self.params.output_proj.weight, bias=self.params.output_proj.bias)
-        ttnn.deallocate(count)
         ttnn.deallocate(key)
         ttnn.deallocate(value)
 
@@ -260,74 +259,62 @@ class TtMSDeformableAttention3D:
                 offset_normalizer, (1, 1, 1, offset_normalizer.shape[0], 1, offset_normalizer.shape[1])
             )
 
-            sampling_offsets = ttnn.to_layout(sampling_offsets, ttnn.TILE_LAYOUT)
-            offset_normalizer_xy = ttnn.to_layout(offset_normalizer_xy, ttnn.TILE_LAYOUT)
+            sampling_offsets_torch = ttnn.to_torch(sampling_offsets)
+            offset_normalizer_torch = ttnn.to_torch(offset_normalizer_xy)
+            reference_xy_torch = ttnn.to_torch(reference_xy)
 
-            bs_s, num_query_s, num_heads_s, num_levels_s, num_points_s, xy_s = sampling_offsets.shape
-            sampling_offsets_reshaped = ttnn.reshape(
-                sampling_offsets, [bs_s, num_query_s * num_heads_s, num_levels_s, num_points_s, xy_s]
+            bs_s, num_query_s, num_heads_s, num_levels_s, num_points_s, xy_s = sampling_offsets_torch.shape
+            sampling_offsets_reshaped_torch = sampling_offsets_torch.view(
+                bs_s, num_query_s * num_heads_s, num_levels_s, num_points_s, xy_s
             )
-            offset_normalizer_xy_reshaped = ttnn.reshape(
-                offset_normalizer_xy,
-                [
-                    offset_normalizer_xy.shape[0],
-                    offset_normalizer_xy.shape[1],
-                    offset_normalizer_xy.shape[3],
-                    offset_normalizer_xy.shape[4],
-                    offset_normalizer_xy.shape[5],
-                ],
+            offset_normalizer_xy_reshaped_torch = offset_normalizer_torch.view(
+                offset_normalizer_torch.shape[0],
+                offset_normalizer_torch.shape[1],
+                offset_normalizer_torch.shape[3],
+                offset_normalizer_torch.shape[4],
+                offset_normalizer_torch.shape[5],
             )
 
-            sampling_locations = ttnn.div(sampling_offsets_reshaped, offset_normalizer_xy_reshaped)
-            ttnn.deallocate(sampling_offsets_reshaped)
-            ttnn.deallocate(offset_normalizer_xy_reshaped)
-            ttnn.deallocate(offset_normalizer_xy)
-
-            sampling_locations = ttnn.reshape(
-                sampling_locations, [bs_s, num_query_s, num_heads_s, num_levels_s, num_points_s, xy_s]
+            sampling_locations_torch = sampling_offsets_reshaped_torch / offset_normalizer_xy_reshaped_torch
+            sampling_locations_torch = sampling_locations_torch.view(
+                bs_s, num_query_s, num_heads_s, num_levels_s, num_points_s, xy_s
             )
 
-            bs, num_query, num_heads, num_levels, num_all_points, xy = sampling_locations.shape
-            sampling_locations = ttnn.reshape(
-                sampling_locations,
-                [bs, num_query, num_heads, num_levels, num_all_points // num_Z_anchors, num_Z_anchors, xy],
-            )
-            reference_xy_reshaped = ttnn.reshape(
-                reference_xy,
-                (
-                    reference_xy.shape[0],
-                    reference_xy.shape[1],
-                    -1,
-                    reference_xy.shape[4],
-                    reference_xy.shape[5],
-                    reference_xy.shape[6],
-                ),
-            )
-            sampling_locations_reshaped = ttnn.reshape(
-                sampling_locations,
-                (
-                    sampling_locations.shape[0],
-                    sampling_locations.shape[1],
-                    -1,
-                    sampling_locations.shape[4],
-                    sampling_locations.shape[5],
-                    sampling_locations.shape[6],
-                ),
+            bs, num_query, num_heads, num_levels, num_all_points, xy = sampling_locations_torch.shape
+            sampling_locations_torch = sampling_locations_torch.view(
+                bs, num_query, num_heads, num_levels, num_all_points // num_Z_anchors, num_Z_anchors, xy
             )
 
-            sampling_locations_add = reference_xy_reshaped + sampling_locations_reshaped
+            reference_xy_reshaped_torch = reference_xy_torch.view(
+                reference_xy_torch.shape[0],
+                reference_xy_torch.shape[1],
+                -1,
+                reference_xy_torch.shape[4],
+                reference_xy_torch.shape[5],
+                reference_xy_torch.shape[6],
+            )
+            sampling_locations_reshaped_torch = sampling_locations_torch.view(
+                sampling_locations_torch.shape[0],
+                sampling_locations_torch.shape[1],
+                -1,
+                sampling_locations_torch.shape[4],
+                sampling_locations_torch.shape[5],
+                sampling_locations_torch.shape[6],
+            )
 
-            sampling_locations = ttnn.reshape(sampling_locations_add, sampling_locations.shape)
+            sampling_locations_add_torch = reference_xy_reshaped_torch + sampling_locations_reshaped_torch
+            sampling_locations_torch = sampling_locations_add_torch.view(sampling_locations_torch.shape)
 
-            ttnn.deallocate(reference_xy_reshaped)
-            ttnn.deallocate(sampling_locations_reshaped)
-            ttnn.deallocate(sampling_locations_add)
-
-            bs, num_query, num_heads, num_levels, num_points, num_Z_anchors, xy = sampling_locations.shape
+            bs, num_query, num_heads, num_levels, num_points, num_Z_anchors, xy = sampling_locations_torch.shape
             assert num_all_points == num_points * num_Z_anchors
-            sampling_locations = ttnn.reshape(
-                sampling_locations, (bs, num_query, num_heads, num_levels, num_all_points, xy)
+            sampling_locations_torch = sampling_locations_torch.view(
+                bs, num_query, num_heads, num_levels, num_all_points, xy
             )
+
+            sampling_locations = ttnn.from_torch(
+                sampling_locations_torch, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.ROW_MAJOR_LAYOUT
+            )
+            ttnn.deallocate(offset_normalizer_xy)
 
         elif reference_points.shape[-1] == 4:
             assert False
