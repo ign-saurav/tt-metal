@@ -19,6 +19,12 @@ from models.common.lightweightmodule import LightweightModule
 # Same attention building blocks as tt_transformers (we call these ttnn APIs directly)
 # Reference: models.tt_transformers.tt.multimodal.llama_image_attention.TtLlamaImageAttention.forward
 # Uses: ttnn.linear, nlp_create_qkv_heads, scaled_dot_product_attention, nlp_concat_heads
+#
+# Layout requirements (cross-checked with ttnn APIs):
+# - ttnn.conv2d: weight_tensor and bias_tensor must be ROW_MAJOR_LAYOUT (host conv).
+# - ttnn.linear: weight and bias in TILE_LAYOUT; input in TILE_LAYOUT.
+# - ttnn.layer_norm: weight and bias in TILE_LAYOUT.
+# - run_tt_sam input: from_torch(..., TILE_LAYOUT) so first conv receives TILE; conv output stays device layout.
 
 
 # --------------- Attention (same pattern as tt_transformers TtLlamaImageAttention) ---------------
@@ -48,12 +54,10 @@ class TtSamAttention(LightweightModule):
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
 
-        # SAM uses fused qkv: (dim, dim*3) in torch; ttnn.linear expects weight (out, in) -> we pass transposed for matmul
-        # ttnn.linear(act, weight_T): act (B, 1, S, K), weight (K, N) -> (B, 1, S, N). So weight on device as (dim*3, dim).
-        wqkv = qkv_weight.detach().float()  # (dim, dim*3)
-        wqkv_t = wqkv.T.contiguous()  # (dim*3, dim)
+        # SAM qkv_weight (dim*3, dim). .T -> (dim, dim*3); store (1, 1, 768, 2304) for matmul act (1,1,S,768) @ (768,2304)
+        wqkv = qkv_weight.detach().float().T.unsqueeze(0).unsqueeze(0)  # (1, 1, 768, 2304)
         self.wqkv = ttnn.from_torch(
-            wqkv_t.unsqueeze(0).unsqueeze(0),
+            wqkv,
             dtype=dtype,
             device=device,
             layout=ttnn.TILE_LAYOUT,
@@ -71,10 +75,10 @@ class TtSamAttention(LightweightModule):
         else:
             self.wqkv_bias = None
 
-        wproj = proj_weight.detach().float()  # (dim, dim)
-        wproj_t = wproj.T.contiguous()  # (dim, dim)
+        # proj (dim, dim); store (1, 1, dim, dim) as (1,1,768,768); matmul with transpose_b=True
+        wproj = proj_weight.detach().float().T.unsqueeze(0).unsqueeze(0)  # (1, 1, 768, 768)
         self.wo = ttnn.from_torch(
-            wproj_t.unsqueeze(0).unsqueeze(0),
+            wproj,
             dtype=dtype,
             device=device,
             layout=ttnn.TILE_LAYOUT,
@@ -109,14 +113,16 @@ class TtSamAttention(LightweightModule):
         """x_11SH: (1, 1, seq_len, dim). Returns (1, 1, seq_len, dim)."""
         seq_len = x_11SH.shape[-2]
 
-        xqkv_fused = ttnn.linear(
+        # input (1,1,S,768) @ weight (1,1,768,2304) -> (1,1,S,2304)
+        xqkv_fused = ttnn.matmul(
             x_11SH,
             self.wqkv,
-            bias=self.wqkv_bias,
-            dtype=ttnn.bfloat16,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            dtype=ttnn.bfloat16,
             compute_kernel_config=self.compute_kernel_config,
         )
+        if self.wqkv_bias is not None:
+            xqkv_fused = ttnn.add(xqkv_fused, self.wqkv_bias)
 
         q_heads, k_heads, v_heads = ttnn.experimental.nlp_create_qkv_heads(
             xqkv_fused,
@@ -147,14 +153,16 @@ class TtSamAttention(LightweightModule):
         )
         ttnn.deallocate(attn_out)
 
-        output = ttnn.linear(
+        # attn_concat (1,1,S,768) @ wo (1,1,768,768) -> (1,1,S,768)
+        output = ttnn.matmul(
             attn_concat,
             self.wo,
-            bias=self.bo,
-            compute_kernel_config=self.compute_kernel_config,
-            dtype=ttnn.bfloat16,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            dtype=ttnn.bfloat16,
+            compute_kernel_config=self.compute_kernel_config,
         )
+        if self.bo is not None:
+            output = ttnn.add(output, self.bo)
         ttnn.deallocate(attn_concat)
         return output
 
@@ -220,7 +228,7 @@ class TtSamMLP(LightweightModule):
             fp32_dest_acc_en=False,
             packer_l1_acc=False,
         )
-        # (out, in) for ttnn.linear with weight transposed
+        # (in, out) for ttnn.linear: act (..., dim) @ weight (dim, mlp_dim); torch lin1 is (mlp_dim, dim) so use .T
         self.w1 = ttnn.from_torch(
             lin1_weight.T.unsqueeze(0).unsqueeze(0),
             dtype=dtype,
@@ -337,20 +345,17 @@ class TtPatchEmbed(LightweightModule):
         self.batch_size = batch_size
         self.input_height = input_height
         self.input_width = input_width
+        # ttnn.conv2d requires host conv weights/bias in ROW_MAJOR; do not pass device so tensors stay on host
         self.weight = ttnn.from_torch(
             weight.detach().float(),
             dtype=dtype,
-            device=device,
-            layout=ttnn.TILE_LAYOUT,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
         )
         self.bias = (
             ttnn.from_torch(
                 bias.detach().float().unsqueeze(0).unsqueeze(0).unsqueeze(0),
                 dtype=dtype,
-                device=device,
-                layout=ttnn.TILE_LAYOUT,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                layout=ttnn.ROW_MAJOR_LAYOUT,
             )
             if bias is not None
             else None
@@ -427,20 +432,17 @@ class TtConv2d(LightweightModule):
         self.kernel_size = kernel_size
         self.stride = stride
         self.padding = padding
+        # ttnn.conv2d requires host conv weights/bias in ROW_MAJOR; do not pass device so tensors stay on host
         self.weight = ttnn.from_torch(
             weight.detach().float(),
             dtype=dtype,
-            device=device,
-            layout=ttnn.TILE_LAYOUT,
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
         )
         self.bias = (
             ttnn.from_torch(
                 bias.detach().float().unsqueeze(0).unsqueeze(0).unsqueeze(0),
                 dtype=dtype,
-                device=device,
-                layout=ttnn.TILE_LAYOUT,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                layout=ttnn.ROW_MAJOR_LAYOUT,
             )
             if bias is not None
             else None
@@ -460,10 +462,11 @@ class TtConv2d(LightweightModule):
         )
 
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        # ttnn.conv2d expects input [N, H, W, C] (NHWC)
         if len(x.shape) == 4:
-            batch, in_ch, in_h, in_w = x.shape
+            batch, in_h, in_w, in_ch = x.shape[0], x.shape[1], x.shape[2], x.shape[3]
         else:
-            batch, in_h, in_w, in_ch = x.shape
+            batch, in_h, in_w, in_ch = x.shape[0], x.shape[1], x.shape[2], x.shape[3]
         out, _, _ = ttnn.conv2d(
             input_tensor=x,
             weight_tensor=self.weight,
@@ -621,14 +624,10 @@ class TtImageEncoderViT(LightweightModule):
             )
             self.blocks.append(TtSamBlock(device, embed_dim, num_heads, mlp_ratio, attn, norm1, norm2, mlp))
 
-        # Neck and head convs (TtConv2d with dynamic input size in forward)
-        neck = sam_torch_module.neck
-        self.neck_conv1 = self._conv_from_module(device, neck[0], dtype)
-        self.neck_ln1 = TtLayerNorm2d(device, out_chans, neck[1].weight, neck[1].bias, eps=neck[1].eps, dtype=dtype)
-        self.neck_conv2 = self._conv_from_module(device, neck[2], dtype)
-        self.neck_ln2 = TtLayerNorm2d(device, out_chans, neck[3].weight, neck[3].bias, eps=neck[3].eps, dtype=dtype)
-        self.net_2 = self._conv_from_module(device, sam_torch_module.net_2, dtype)
-        self.net_3 = self._conv_from_module(device, sam_torch_module.net_3, dtype)
+        # Neck and head convs: run on PyTorch (CPU) to avoid device L1 OOM after 12 blocks
+        self.neck_torch = sam_torch_module.neck
+        self.net_2_torch = sam_torch_module.net_2
+        self.net_3_torch = sam_torch_module.net_3
 
     @staticmethod
     def _conv_from_module(device: ttnn.Device, conv: torch.nn.Conv2d, dtype) -> TtConv2d:
@@ -661,28 +660,49 @@ class TtImageEncoderViT(LightweightModule):
         x = self.patch_embed(x)
         # Add pos_embed if present (x is B,H,W,C; pos_embed is 1,H,W,C)
         if self.pos_embed is not None:
-            pos = ttnn.from_torch(
-                self.pos_embed.to(x.dtype if hasattr(x, "dtype") else torch.bfloat16),
+            # Add on host to avoid device "Invalid subtile broadcast type" (tile layout mismatch)
+            b, h, w, c = x.shape[0], x.shape[1], x.shape[2], x.shape[3]
+            x_torch = ttnn.to_torch(x)
+            pos_torch = self.pos_embed.detach().to(torch.bfloat16)  # (1, pos_h, pos_w, C), e.g. (1,64,64,768)
+            grid = self.grid_size  # patch grid for current image_size (e.g. 40 for 640)
+            if pos_torch.shape[1] != grid or pos_torch.shape[2] != grid:
+                pos_torch = torch.nn.functional.interpolate(
+                    pos_torch.permute(0, 3, 1, 2), size=(grid, grid), mode="bilinear", align_corners=False
+                ).permute(0, 2, 3, 1)
+            # Reshape pos to match x (x may be (B,H,W,C) or (B,1,H*W,C) depending on conv2d output)
+            if (pos_torch.shape[1], pos_torch.shape[2]) != (h, w):
+                pos_torch = pos_torch.reshape(1, 1, grid * grid, c).expand(b, 1, grid * grid, c).clone()
+            else:
+                pos_torch = pos_torch.expand(b, h, w, c).clone()
+            x_torch = x_torch + pos_torch
+            # Use ROW_MAJOR then TILE so layout matches conv2d output and matmul sees (S, C)
+            x = ttnn.from_torch(
+                x_torch,
                 device=self.device,
                 dtype=ttnn.bfloat16,
-                layout=ttnn.TILE_LAYOUT,
+                layout=ttnn.ROW_MAJOR_LAYOUT,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
-            x = ttnn.add(x, pos)
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         # (B, H, W, C) -> (1, 1, S, C)
         b, h, w, c = x.shape
         x = ttnn.reshape(x, (1, 1, b * h * w, c))
         for blk in self.blocks:
             x = blk(x)
-        # (1, 1, S, C) -> (B, H, W, C) -> (B, C, H, W)
-        x = ttnn.reshape(x, (b, h, w, c))
-        x = ttnn.permute(x, (0, 3, 1, 2))
-        x = self.neck_conv1(x)
-        x = self.neck_ln1(x)
-        x = self.neck_conv2(x)
-        x = self.neck_ln2(x)
-        x = self.net_2(x)
-        x = self.net_3(x)
+        # (1, 1, S, C) -> (B, C, H, W); run neck + net_2 + net_3 in PyTorch to avoid device L1 OOM
+        x_t = ttnn.to_torch(x)
+        ttnn.deallocate(x)
+        # (1, 1, S, C) -> (B, H, W, C) -> (B, C, H, W); use grid_size so h,w are correct after blocks
+        grid = self.grid_size
+        x_t = x_t.reshape(1, grid, grid, c).permute(0, 3, 1, 2)
+        with torch.no_grad():
+            for layer in self.neck_torch:
+                x_t = layer(x_t)
+            x_t = self.net_2_torch(x_t)
+            x_t = self.net_3_torch(x_t)
+        # x_t: (1, 1024, 10, 10) for image_size 640; keep on host so to_torch preserves shape
+        x_t = x_t.contiguous().to(torch.bfloat16)
+        x = ttnn.from_torch(x_t, dtype=ttnn.bfloat16)
         return x
 
 
