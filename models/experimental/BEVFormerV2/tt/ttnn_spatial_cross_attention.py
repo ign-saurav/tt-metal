@@ -58,7 +58,7 @@ class TtSpatialCrossAttention:
         if residual is None:
             inp_residual = query
             slots = ttnn.zeros_like(query)
-            slots = ttnn.to_torch(slots)
+            # Keep slots as ttnn.Tensor for ttnn operations
         if query_pos is not None:
             query = query + query_pos
 
@@ -70,9 +70,14 @@ class TtSpatialCrossAttention:
             query = ttnn.to_torch(query)
         if isinstance(reference_points_cam, ttnn.Tensor):
             reference_points_cam = ttnn.to_torch(reference_points_cam)
+        # Preserve bev_mask as ttnn.Tensor for later ttnn operations, but also create torch version
+        ######################################################################
         if isinstance(bev_mask, ttnn.Tensor):
+            bev_mask_ttnn = bev_mask  # Keep original for ttnn operations
             bev_mask_torch = ttnn.to_torch(bev_mask)
         else:
+            # Convert torch tensor to ttnn for later operations
+            bev_mask_ttnn = ttnn.from_torch(bev_mask, dtype=ttnn.bfloat16, device=self.device)
             bev_mask_torch = bev_mask
 
         indexes = []
@@ -91,7 +96,7 @@ class TtSpatialCrossAttention:
                 reference_points_rebatch[j, i, : len(index_query_per_img)] = reference_points_per_img[
                     j, index_query_per_img
                 ]
-
+        ######################################################################
         queries_rebatch = ttnn.from_torch(queries_rebatch, dtype=ttnn.bfloat16, device=self.device)
         reference_points_rebatch = ttnn.from_torch(reference_points_rebatch, dtype=ttnn.bfloat16, device=self.device)
         num_cams, l, bs, embed_dims = key.shape
@@ -114,19 +119,67 @@ class TtSpatialCrossAttention:
 
         queries = ttnn.reshape(queries, (bs, self.num_cams, max_len, self.embed_dims))
 
-        queries = ttnn.to_torch(queries)
+        # ttnn equivalent: indexed addition using scatter_add
+        # import torch
         for j in range(bs):
+            # Extract batch j from slots: [num_query, embed_dims]
+            # slots shape is [bs, num_query, embed_dims] (3D)
+            slots_j = ttnn.slice(slots, [j, 0, 0], [j + 1, slots.shape[1], slots.shape[2]])
+            slots_j = ttnn.squeeze(slots_j, 0)  # [num_query, embed_dims]
+
             for i, index_query_per_img in enumerate(indexes):
-                slots[j, index_query_per_img] += queries[j, i, : len(index_query_per_img)]
+                if len(index_query_per_img) == 0:
+                    continue
 
-        count = bev_mask_torch.sum(-1) > 0
-        count = count.permute(1, 2, 0)
-        count = count.sum(-1)
-        count = count.clamp(min=1.0)
-        count = count.unsqueeze(-1)
+                # Extract source: queries[j, i, :len(index_query_per_img)]
+                # queries shape is [bs, num_cams, max_len, embed_dims] (4D)
+                source = ttnn.slice(queries, [j, i, 0, 0], [j + 1, i + 1, len(index_query_per_img), queries.shape[3]])
+                source = ttnn.squeeze(source, 0)  # [1, len, embed_dims]
+                source = ttnn.squeeze(source, 0)  # [len, embed_dims]
 
-        slots = slots / count
-        slots = ttnn.from_torch(slots, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
+                # Create index tensor: [len, embed_dims] where each row has the same index
+                index_expanded = index_query_per_img.unsqueeze(-1).expand(len(index_query_per_img), slots.shape[2])
+                index_tensor = ttnn.from_torch(
+                    index_expanded, dtype=ttnn.int32, device=self.device, layout=ttnn.ROW_MAJOR_LAYOUT
+                )
+
+                # Use scatter_add: slots_j[index_query_per_img] += source
+                slots_j = ttnn.scatter_add(slots_j, dim=0, index=index_tensor, src=source)
+
+                ttnn.deallocate(source)
+                ttnn.deallocate(index_tensor)
+
+            # Update slots with modified batch
+            slots_j = ttnn.unsqueeze(slots_j, 0)  # [1, num_query, embed_dims]
+            # Reconstruct slots - concatenate batches
+            if j == 0:
+                slots_new = slots_j
+            else:
+                slots_new = ttnn.concat([slots_new, slots_j], dim=0)
+
+        # Replace slots
+        ttnn.deallocate(slots)
+        slots = slots_new
+        ############################################################
+        # count = bev_mask_torch.sum(-1) > 0
+        # count = count.permute(1, 2, 0)
+        # count = count.sum(-1)
+        # count = count.clamp(min=1.0)
+        # count = count.unsqueeze(-1)
+        # ttnn equivalent: bev_mask.sum(-1) > 0
+        count = ttnn.sum(bev_mask_ttnn, dim=-1)
+        count = ttnn.gt(count, 0.0)
+        # ttnn equivalent: permute(1, 2, 0)
+        count = ttnn.permute(count, (1, 2, 0))
+        # ttnn equivalent: sum(-1)
+        count = ttnn.sum(count, dim=-1)
+        # ttnn equivalent: clamp(min=1.0)
+        count = ttnn.clamp(count, min=1.0)
+        # ttnn equivalent: unsqueeze(-1)
+        count = ttnn.unsqueeze(count, -1)
+        # Use count directly for division (already a ttnn.Tensor)
+        slots = ttnn.divide(slots, count)
+        ttnn.deallocate(count)
         slots = ttnn.linear(slots, self.params.output_proj.weight, bias=self.params.output_proj.bias)
         ttnn.deallocate(key)
         ttnn.deallocate(value)
