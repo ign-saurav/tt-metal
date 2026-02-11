@@ -86,19 +86,106 @@ class TtSpatialCrossAttention:
             indexes.append(index_query_per_img)
 
         max_len = max([len(each) for each in indexes])
-        queries_rebatch = query.new_zeros([bs, self.num_cams, max_len, self.embed_dims])
-        reference_points_rebatch = reference_points_cam.new_zeros([bs, self.num_cams, max_len, D, 2])
+        if 1:
+            #####################################################################
+            queries_rebatch = query.new_zeros([bs, self.num_cams, max_len, self.embed_dims])
+            for j in range(bs):
+                for i, reference_points_per_img in enumerate(reference_points_cam):
+                    index_query_per_img = indexes[i]
+                    queries_rebatch[j, i, : len(index_query_per_img)] = query[j, index_query_per_img]
+                    # reference_points_rebatch[j, i, : len(index_query_per_img)] = reference_points_per_img[
+                    #     j, index_query_per_img
+                    # ]
 
-        for j in range(bs):
-            for i, reference_points_per_img in enumerate(reference_points_cam):
-                index_query_per_img = indexes[i]
-                queries_rebatch[j, i, : len(index_query_per_img)] = query[j, index_query_per_img]
-                reference_points_rebatch[j, i, : len(index_query_per_img)] = reference_points_per_img[
-                    j, index_query_per_img
-                ]
+            queries_rebatch = ttnn.from_torch(queries_rebatch, dtype=ttnn.bfloat16, device=self.device)
+
+        ######################################################################################
+        else:
+            # Initialize output tensors
+            # query_ttnn = ttnn.from_torch(query, dtype=ttnn.bfloat8_b, device=self.device, layout=ttnn.TILE_LAYOUT)
+            query_ttnn = ttnn.from_torch(query, dtype=ttnn.bfloat16, device=self.device, layout=ttnn.TILE_LAYOUT)
+            queries_rebatch = query.new_zeros([bs, self.num_cams, max_len, self.embed_dims])
+
+            for j in range(bs):
+                for i in range(self.num_cams):
+                    index_query_per_img = indexes[i]
+                    len_idx = len(index_query_per_img)
+                    if len_idx == 0:
+                        continue
+
+                    #         # Gather from query[j] using ttnn
+                    query_batch_j = ttnn.slice(query_ttnn, [j, 0, 0], [j + 1, query_ttnn.shape[1], query_ttnn.shape[2]])
+                    query_batch_j = ttnn.squeeze(query_batch_j, 0)  # [num_query, embed_dims]
+
+                    indices_q = index_query_per_img.unsqueeze(-1).expand(len_idx, self.embed_dims)
+                    indices_q_ttnn = ttnn.from_torch(
+                        indices_q, dtype=ttnn.uint32, device=self.device, layout=ttnn.TILE_LAYOUT
+                    )
+                    gathered_query = ttnn.gather(query_batch_j, dim=0, index=indices_q_ttnn)  # [len_idx, embed_dims]
+                    queries_rebatch[j, i, :len_idx] = ttnn.to_torch(gathered_query)
+                    ttnn.deallocate(gathered_query)
+                    # ttnn.deallocate(query_batch_j)
+                    # ttnn.deallocate(indices_q_ttnn)
+
+            ttnn.deallocate(query_ttnn)
+            queries_rebatch = ttnn.from_torch(queries_rebatch, dtype=ttnn.bfloat16, device=self.device)
+
+        ######################################################################################
         ######################################################################
-        queries_rebatch = ttnn.from_torch(queries_rebatch, dtype=ttnn.bfloat16, device=self.device)
-        reference_points_rebatch = ttnn.from_torch(reference_points_rebatch, dtype=ttnn.bfloat16, device=self.device)
+        if 1:
+            reference_points_rebatch = reference_points_cam.new_zeros([bs, self.num_cams, max_len, D, 2])
+            for j in range(bs):
+                for i, reference_points_per_img in enumerate(reference_points_cam):
+                    index_query_per_img = indexes[i]
+                    # queries_rebatch[j, i, : len(index_query_per_img)] = query[j, index_query_per_img]
+                    reference_points_rebatch[j, i, : len(index_query_per_img)] = reference_points_per_img[
+                        j, index_query_per_img
+                    ]
+            reference_points_rebatch = ttnn.from_torch(
+                reference_points_rebatch, dtype=ttnn.bfloat16, device=self.device
+            )
+        else:
+            ######################################################################################
+            reference_points_cam_ttnn = ttnn.from_torch(
+                reference_points_cam, dtype=ttnn.bfloat8_b, device=self.device, layout=ttnn.TILE_LAYOUT
+            )
+
+            reference_points_rebatch = reference_points_cam.new_zeros([bs, self.num_cams, max_len, D, 2])
+            for j in range(bs):
+                for i in range(self.num_cams):
+                    index_query_per_img = indexes[i]
+                    len_idx = len(index_query_per_img)
+                    if len_idx == 0:
+                        continue
+
+                    #         # Gather from reference_points_cam[i, j] using ttnn
+                    ref_cam_i_batch_j = ttnn.slice(
+                        reference_points_cam_ttnn,
+                        [i, j, 0, 0, 0],
+                        [i + 1, j + 1, reference_points_cam_ttnn.shape[2], D, 2],
+                    )
+                    ref_cam_i_batch_j = ttnn.squeeze(ttnn.squeeze(ref_cam_i_batch_j, 0), 0)  # [num_query, D, 2]
+
+                    indices_r = index_query_per_img.unsqueeze(-1).unsqueeze(-1).expand(len_idx, D, 2)
+                    indices_r_ttnn = ttnn.from_torch(
+                        indices_r, dtype=ttnn.uint32, device=self.device, layout=ttnn.TILE_LAYOUT
+                    )
+                    gathered_ref = ttnn.gather(ref_cam_i_batch_j, dim=0, index=indices_r_ttnn)  # [len_idx, D, 2]
+                    #         # Convert to torch for variable-length assignment (ttnn doesn't support this directly)
+                    reference_points_rebatch[j, i, :len_idx] = ttnn.to_torch(gathered_ref)
+
+                    #         # Cleanup intermediate tensors
+                    ttnn.deallocate(gathered_ref)
+                    # ttnn.deallocate(ref_cam_i_batch_j)
+                    # ttnn.deallocate(indices_r_ttnn)
+
+            ttnn.deallocate(reference_points_cam_ttnn)
+
+            reference_points_rebatch = ttnn.from_torch(
+                reference_points_rebatch, dtype=ttnn.bfloat16, device=self.device
+            )
+        ######################################################################################
+        ######################################################################
         num_cams, l, bs, embed_dims = key.shape
 
         key = ttnn.permute(key, (2, 0, 1, 3))
