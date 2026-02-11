@@ -10,11 +10,75 @@ Uses the same ttnn ops as tt_transformers multimodal image attention (no edits t
 
 from __future__ import annotations
 
+import importlib
 from typing import Optional, Tuple
 
 import torch
+import torch.nn.functional as F
 import ttnn
 from models.common.lightweightmodule import LightweightModule
+
+
+# --------------- Relative position bias (mirrors deepencoder.get_rel_pos / add_decomposed_rel_pos) ---------------
+
+
+def _get_rel_pos(q_size: int, k_size: int, rel_pos: torch.Tensor) -> torch.Tensor:
+    """Relative position table indexed by (q_coord - k_coord). Returns (q_size, k_size, head_dim)."""
+    max_rel_dist = int(2 * max(q_size, k_size) - 1)
+    if rel_pos.shape[0] != max_rel_dist:
+        rel_pos = rel_pos.float()
+        rel_pos_resized = F.interpolate(
+            rel_pos.reshape(1, rel_pos.shape[0], -1).permute(0, 2, 1),
+            size=max_rel_dist,
+            mode="linear",
+        ).to(rel_pos.dtype)
+        rel_pos_resized = rel_pos_resized.reshape(-1, max_rel_dist).permute(1, 0)
+    else:
+        rel_pos_resized = rel_pos
+    q_coords = torch.arange(q_size, device=rel_pos.device)[:, None] * max(k_size / q_size, 1.0)
+    k_coords = torch.arange(k_size, device=rel_pos.device)[None, :] * max(q_size / k_size, 1.0)
+    relative_coords = (q_coords - k_coords) + (k_size - 1) * max(q_size / k_size, 1.0)
+    return rel_pos_resized[relative_coords.long()]
+
+
+def _add_decomposed_rel_pos(
+    q: torch.Tensor,
+    rel_pos_h: torch.Tensor,
+    rel_pos_w: torch.Tensor,
+    q_size: Tuple[int, int],
+    k_size: Tuple[int, int],
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """q: (B, n_heads, q_h*q_w, head_dim). Returns rel_h, rel_w for building attn_bias."""
+    q_h, q_w = q_size
+    k_h, k_w = k_size
+    Rh = _get_rel_pos(q_h, k_h, rel_pos_h)
+    Rw = _get_rel_pos(q_w, k_w, rel_pos_w)
+    B, n_heads, S, dim = q.shape
+    r_q = q.reshape(B, n_heads, q_h, q_w, dim)
+    rel_h = torch.einsum("bnhwc,hkc->bnhwk", r_q, Rh)
+    rel_w = torch.einsum("bnhwc,wkc->bnhwk", r_q, Rw)
+    rel_h = rel_h.reshape(B, n_heads, q_h * q_w, k_h, 1)
+    rel_w = rel_w.reshape(B, n_heads, q_h * q_w, 1, k_w)
+    return rel_h, rel_w
+
+
+def compute_sam_attn_bias(
+    q: torch.Tensor,
+    rel_pos_h: torch.Tensor,
+    rel_pos_w: torch.Tensor,
+    spatial_size: Tuple[int, int],
+) -> torch.Tensor:
+    """q: (1, n_heads, S, head_dim). Returns attn_bias (1, n_heads, S, S) for SDPA."""
+    H, W = spatial_size
+    S = H * W
+    dtype = q.dtype
+    q = q.float()
+    rel_pos_h = rel_pos_h.float()
+    rel_pos_w = rel_pos_w.float()
+    rel_h, rel_w = _add_decomposed_rel_pos(q, rel_pos_h, rel_pos_w, (H, W), (H, W))
+    attn_bias = (rel_h + rel_w).reshape(1, q.shape[1], S, S).to(dtype)
+    return attn_bias
+
 
 # Same attention building blocks as tt_transformers (we call these ttnn APIs directly)
 # Reference: models.tt_transformers.tt.multimodal.llama_image_attention.TtLlamaImageAttention.forward
@@ -34,6 +98,7 @@ class TtSamAttention(LightweightModule):
     """
     SAM self-attention using the same TT path as tt_transformers image attention:
     fused QKV linear -> nlp_create_qkv_heads -> scaled_dot_product_attention -> nlp_concat_heads -> output linear.
+    Optional relative position bias: computed on host from q and rel_pos_h/w, then passed as attn_mask to SDPA.
     """
 
     def __init__(
@@ -45,6 +110,9 @@ class TtSamAttention(LightweightModule):
         qkv_bias: Optional[torch.Tensor],
         proj_weight: torch.Tensor,
         proj_bias: Optional[torch.Tensor],
+        rel_pos_h: Optional[torch.Tensor] = None,
+        rel_pos_w: Optional[torch.Tensor] = None,
+        spatial_size: Optional[Tuple[int, int]] = None,
         dtype=ttnn.bfloat16,
     ):
         super().__init__()
@@ -53,6 +121,13 @@ class TtSamAttention(LightweightModule):
         self.n_heads = num_heads
         self.head_dim = dim // num_heads
         self.scale = self.head_dim**-0.5
+        self.use_rel_pos = rel_pos_h is not None and rel_pos_w is not None and spatial_size is not None
+        self._rel_pos_h = rel_pos_h
+        self._rel_pos_w = rel_pos_w
+        self._spatial_size = spatial_size
+        if self.use_rel_pos:
+            self._qkv_weight_torch = qkv_weight.detach().float()
+            self._qkv_bias_torch = qkv_bias.detach().float() if qkv_bias is not None else None
 
         # SAM qkv_weight (dim*3, dim). .T -> (dim, dim*3); store (1, 1, 768, 2304) for matmul act (1,1,S,768) @ (768,2304)
         wqkv = qkv_weight.detach().float().T.unsqueeze(0).unsqueeze(0)  # (1, 1, 768, 2304)
@@ -109,9 +184,33 @@ class TtSamAttention(LightweightModule):
             exp_approx_mode=False,
         )
 
+    def _get_attn_bias(self, x_11SH: ttnn.Tensor) -> Optional[ttnn.Tensor]:
+        """Compute rel_pos attn_bias on host and return as ttnn tensor (1, n_heads, S, S), or None."""
+        if not self.use_rel_pos:
+            return None
+        x_t = ttnn.to_torch(x_11SH)
+        if x_t.device.type != "cpu":
+            x_t = x_t.cpu()
+        x_t = x_t.float()
+        # (1, 1, S, dim) @ (dim, dim*3) -> (1, 1, S, dim*3)
+        qkv = F.linear(x_t, self._qkv_weight_torch, self._qkv_bias_torch)
+        S = qkv.shape[2]
+        qkv = qkv.reshape(1, S, 3, self.n_heads, self.head_dim).permute(0, 2, 3, 1, 4)
+        q = qkv[:, 0]
+        attn_bias = compute_sam_attn_bias(q, self._rel_pos_h, self._rel_pos_w, self._spatial_size)
+        attn_bias = attn_bias.to(torch.bfloat16)
+        return ttnn.from_torch(
+            attn_bias,
+            dtype=ttnn.bfloat16,
+            device=self.device,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
     def forward(self, x_11SH: ttnn.Tensor) -> ttnn.Tensor:
         """x_11SH: (1, 1, seq_len, dim). Returns (1, 1, seq_len, dim)."""
         seq_len = x_11SH.shape[-2]
+        attn_mask_tt = self._get_attn_bias(x_11SH) if self.use_rel_pos else None
 
         # input (1,1,S,768) @ weight (1,1,768,2304) -> (1,1,S,2304)
         xqkv_fused = ttnn.matmul(
@@ -139,10 +238,12 @@ class TtSamAttention(LightweightModule):
             v_heads,
             is_causal=False,
             scale=self.scale,
-            attn_mask=None,
+            attn_mask=attn_mask_tt,
             program_config=self.sdpa_config,
             compute_kernel_config=self.compute_kernel_config,
         )
+        if attn_mask_tt is not None:
+            ttnn.deallocate(attn_mask_tt)
         ttnn.deallocate(q_heads)
         ttnn.deallocate(k_heads)
         ttnn.deallocate(v_heads)
@@ -286,6 +387,36 @@ class TtSamMLP(LightweightModule):
         )
 
 
+# --------------- Window partition / unpartition (mirrors deepencoder, torch for host) ---------------
+
+
+def _window_partition_torch(x_bhwc: torch.Tensor, window_size: int) -> Tuple[torch.Tensor, Tuple[int, int]]:
+    """x_bhwc: (B, H, W, C). Returns windows (B*num_windows, window_size, window_size, C), (Hp, Wp)."""
+    B, H, W, C = x_bhwc.shape
+    pad_h = (window_size - H % window_size) % window_size
+    pad_w = (window_size - W % window_size) % window_size
+    if pad_h > 0 or pad_w > 0:
+        x_bhwc = F.pad(x_bhwc, (0, 0, 0, pad_w, 0, pad_h))
+    Hp, Wp = H + pad_h, W + pad_w
+    x = x_bhwc.view(B, Hp // window_size, window_size, Wp // window_size, window_size, C)
+    windows = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(-1, window_size, window_size, C)
+    return windows, (Hp, Wp)
+
+
+def _window_unpartition_torch(
+    windows: torch.Tensor, window_size: int, pad_hw: Tuple[int, int], hw: Tuple[int, int]
+) -> torch.Tensor:
+    """windows: (B*num_windows, window_size, window_size, C). Returns (B, H, W, C)."""
+    Hp, Wp = pad_hw
+    H, W = hw
+    B = windows.shape[0] // (Hp * Wp // window_size // window_size)
+    x = windows.view(B, Hp // window_size, Wp // window_size, window_size, window_size, -1)
+    x = x.permute(0, 1, 3, 2, 4, 5).contiguous().view(B, Hp, Wp, -1)
+    if Hp > H or Wp > W:
+        x = x[:, :H, :W, :].contiguous()
+    return x
+
+
 # --------------- Block (norm -> attention -> add -> norm -> mlp -> add) ---------------
 
 
@@ -300,22 +431,97 @@ class TtSamBlock(LightweightModule):
         norm1: TtSamLayerNorm,
         norm2: TtSamLayerNorm,
         mlp: TtSamMLP,
+        window_size: int = 0,
+        grid_size: int = 40,
     ):
         super().__init__()
+        self.device = device
         self.norm1 = norm1
         self.attn = attn_module
         self.norm2 = norm2
         self.mlp = mlp
+        self.window_size = window_size
+        self.grid_size = grid_size
 
-    def forward(self, x_11SH: ttnn.Tensor) -> ttnn.Tensor:
-        attn_out = self.attn(self.norm1(x_11SH))
+    def _to_torch_hwc(self, t: ttnn.Tensor) -> torch.Tensor:
+        """Convert (1, 1, S, C) to torch (1, grid_size, grid_size, C)."""
+        out = ttnn.to_torch(t)
+        if out.device.type != "cpu":
+            out = out.cpu()
+        g = self.grid_size
+        if out.shape[-2] == g * g:
+            out = out.reshape(1, g, g, out.shape[-1])
+        return out.float()
+
+    def forward(self, x_11SH: ttnn.Tensor, collect_sub_stages: Optional[dict] = None) -> ttnn.Tensor:
+        normed = self.norm1(x_11SH)
+        if collect_sub_stages is not None:
+            collect_sub_stages["norm1_out"] = self._to_torch_hwc(normed)
+        if self.window_size > 0:
+            attn_out = self._forward_window_attention(normed)
+        else:
+            attn_out = self.attn(normed)
+        ttnn.deallocate(normed)
         res = ttnn.add(x_11SH, attn_out)
+        if collect_sub_stages is not None:
+            collect_sub_stages["attn_out"] = self._to_torch_hwc(attn_out)
         ttnn.deallocate(attn_out)
-        mlp_out = self.mlp(self.norm2(res))
+        after_add = res
+        if collect_sub_stages is not None:
+            collect_sub_stages["after_attn_add"] = self._to_torch_hwc(after_add)
+        norm2_out = self.norm2(res)
+        if collect_sub_stages is not None:
+            collect_sub_stages["norm2_out"] = self._to_torch_hwc(norm2_out)
+        mlp_out = self.mlp(norm2_out)
+        if collect_sub_stages is not None:
+            collect_sub_stages["mlp_out"] = self._to_torch_hwc(mlp_out)
         out = ttnn.add(res, mlp_out)
         ttnn.deallocate(mlp_out)
         ttnn.deallocate(res)
+        if collect_sub_stages is not None:
+            collect_sub_stages["out"] = self._to_torch_hwc(out)
         return out
+
+    def _forward_window_attention(self, x_11SH: ttnn.Tensor) -> ttnn.Tensor:
+        """Partition x into windows, run TT attention per window, unpartition. x: (1, 1, S, C)."""
+        H = W = self.grid_size
+        window_size = self.window_size
+        C = x_11SH.shape[-1]
+        x_t = ttnn.to_torch(x_11SH)
+        if x_t.device.type != "cpu":
+            x_t = x_t.cpu()
+        x_t = x_t.reshape(1, H, W, C)
+        windows, pad_hw = _window_partition_torch(x_t, window_size)
+        num_windows = windows.shape[0]
+        out_windows = []
+        for i in range(num_windows):
+            win = windows[i : i + 1]
+            win_flat = win.reshape(1, window_size * window_size, C)
+            win_tt = ttnn.from_torch(
+                win_flat.unsqueeze(1).to(torch.bfloat16),
+                dtype=ttnn.bfloat16,
+                device=self.device,
+                layout=ttnn.TILE_LAYOUT,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
+            out_tt = self.attn(win_tt)
+            out_t = ttnn.to_torch(out_tt)
+            ttnn.deallocate(out_tt)
+            ttnn.deallocate(win_tt)
+            if out_t.device.type != "cpu":
+                out_t = out_t.cpu()
+            out_windows.append(out_t.reshape(1, window_size, window_size, C))
+        out_stack = torch.cat(out_windows, dim=0)
+        out_unpart = _window_unpartition_torch(out_stack, window_size, pad_hw, (H, W))
+        out_flat = out_unpart.reshape(1, H * W, C)
+        out_tt = ttnn.from_torch(
+            out_flat.unsqueeze(1).to(torch.bfloat16),
+            dtype=ttnn.bfloat16,
+            device=self.device,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        return out_tt
 
 
 # --------------- PatchEmbed (ttnn.conv2d) ---------------
@@ -592,14 +798,24 @@ class TtImageEncoderViT(LightweightModule):
         # Pos embed (optional add; keep on host and add after patch_embed to TT tensor when needed)
         if getattr(sam_torch_module, "pos_embed", None) is not None:
             self.pos_embed = sam_torch_module.pos_embed.detach()
+            # Use same get_abs_pos_sam as reference (deepencoder) for identical interpolation
+            deepencoder = importlib.import_module(type(sam_torch_module).__module__)
+            self._get_abs_pos_sam = getattr(deepencoder, "get_abs_pos_sam", None)
         else:
             self.pos_embed = None
+            self._get_abs_pos_sam = None
 
-        # Blocks
+        # Blocks (SAM ViT-B: window_size=14 for most blocks, 0 for global-attn blocks 2,5,8,11)
+        grid_size = self.grid_size
         mlp_dim = int(embed_dim * mlp_ratio)
         self.blocks = []
+        self._blocks_torch = None
         for i in range(depth):
             blk = sam_torch_module.blocks[i]
+            win_sz = getattr(blk, "window_size", 0)
+            spatial_size = (win_sz, win_sz) if win_sz else (grid_size, grid_size)
+            rel_pos_h = getattr(blk.attn, "rel_pos_h", None)
+            rel_pos_w = getattr(blk.attn, "rel_pos_w", None)
             attn = TtSamAttention(
                 device=device,
                 dim=embed_dim,
@@ -608,6 +824,9 @@ class TtImageEncoderViT(LightweightModule):
                 qkv_bias=blk.attn.qkv.bias,
                 proj_weight=blk.attn.proj.weight,
                 proj_bias=blk.attn.proj.bias,
+                rel_pos_h=rel_pos_h,
+                rel_pos_w=rel_pos_w,
+                spatial_size=spatial_size if (rel_pos_h is not None and rel_pos_w is not None) else None,
                 dtype=dtype,
             )
             norm1 = TtSamLayerNorm(device, embed_dim, blk.norm1.weight, blk.norm1.bias, eps=blk.norm1.eps, dtype=dtype)
@@ -622,7 +841,20 @@ class TtImageEncoderViT(LightweightModule):
                 lin2_bias=blk.mlp.lin2.bias,
                 dtype=dtype,
             )
-            self.blocks.append(TtSamBlock(device, embed_dim, num_heads, mlp_ratio, attn, norm1, norm2, mlp))
+            self.blocks.append(
+                TtSamBlock(
+                    device,
+                    embed_dim,
+                    num_heads,
+                    mlp_ratio,
+                    attn,
+                    norm1,
+                    norm2,
+                    mlp,
+                    window_size=win_sz,
+                    grid_size=grid_size,
+                )
+            )
 
         # Neck and head convs: run on PyTorch (CPU) to avoid device L1 OOM after 12 blocks
         self.neck_torch = sam_torch_module.neck
@@ -649,31 +881,71 @@ class TtImageEncoderViT(LightweightModule):
             dtype=dtype,
         )
 
-    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+    def _stage_to_torch(self, x: ttnn.Tensor, stage: str, h: int, w: int, c: int) -> torch.Tensor:
+        """Convert current x to torch (B, H, W, C) for a given stage."""
+        out = ttnn.to_torch(x)
+        if out.device.type != "cpu":
+            out = out.cpu()
+        if len(out.shape) == 4 and out.shape[2] == self.grid_size * self.grid_size:
+            out = out.reshape(out.shape[0], self.grid_size, self.grid_size, out.shape[-1])
+        elif stage.startswith("block_") and out.shape[-2] == self.grid_size * self.grid_size:
+            out = out.reshape(1, self.grid_size, self.grid_size, c)
+        return out.float()
+
+    def forward(
+        self,
+        x: ttnn.Tensor,
+        stop_at_stage: Optional[str] = None,
+        collect_stages: Optional[dict] = None,
+        collect_block_sub_stages: Optional[dict] = None,
+    ) -> ttnn.Tensor | torch.Tensor:
         """
         x: (B, C, H, W) in TT layout. Returns final feature map from net_3.
+        If stop_at_stage is set ("patch_embed", "pos_embed", "block_0".."block_11"),
+        returns the intermediate tensor as torch (B, H, W, C) for PCC comparison.
+        If collect_stages is a dict, run full forward once and fill collect_stages[stage]
+        with torch (B, H, W, C) at each stage (one TT run, no device reuse).
         """
         # Input (B, C, H, W) -> (B, H, W, C) for patch_embed conv
         if len(x.shape) == 4 and x.shape[1] == 3:
             x = ttnn.permute(x, (0, 2, 3, 1))
         # Patch embed -> (B, grid, grid, embed_dim)
         x = self.patch_embed(x)
+        if collect_stages is not None:
+            collect_stages["patch_embed"] = self._stage_to_torch(
+                x, "patch_embed", self.grid_size, self.grid_size, x.shape[-1]
+            )
+        elif stop_at_stage == "patch_embed":
+            out = self._stage_to_torch(x, "patch_embed", self.grid_size, self.grid_size, x.shape[-1])
+            return out
         # Add pos_embed if present (x is B,H,W,C; pos_embed is 1,H,W,C)
         if self.pos_embed is not None:
-            # Add on host to avoid device "Invalid subtile broadcast type" (tile layout mismatch)
+            # Add on host to avoid device "Invalid subtile broadcast type" (tile layout mismatch).
+            # Use reference get_abs_pos_sam when available so pos interpolation matches exactly.
+            # Work in (B, H, W, C) so spatial order matches torch; TT conv2d may return (B, 1, H*W, C).
             b, h, w, c = x.shape[0], x.shape[1], x.shape[2], x.shape[3]
-            x_torch = ttnn.to_torch(x)
-            pos_torch = self.pos_embed.detach().to(torch.bfloat16)  # (1, pos_h, pos_w, C), e.g. (1,64,64,768)
             grid = self.grid_size  # patch grid for current image_size (e.g. 40 for 640)
-            if pos_torch.shape[1] != grid or pos_torch.shape[2] != grid:
-                pos_torch = torch.nn.functional.interpolate(
-                    pos_torch.permute(0, 3, 1, 2), size=(grid, grid), mode="bilinear", align_corners=False
-                ).permute(0, 2, 3, 1)
-            # Reshape pos to match x (x may be (B,H,W,C) or (B,1,H*W,C) depending on conv2d output)
-            if (pos_torch.shape[1], pos_torch.shape[2]) != (h, w):
-                pos_torch = pos_torch.reshape(1, 1, grid * grid, c).expand(b, 1, grid * grid, c).clone()
+            x_torch = ttnn.to_torch(x)
+            if (h, w) != (grid, grid) and h * w == grid * grid:
+                x_torch = x_torch.reshape(b, grid, grid, c)
+            if self._get_abs_pos_sam is not None:
+                pos_torch = self._get_abs_pos_sam(self.pos_embed, grid)  # (1, grid, grid, C)
             else:
-                pos_torch = pos_torch.expand(b, h, w, c).clone()
+                pos_torch = self.pos_embed.detach()
+                if pos_torch.shape[1] != grid or pos_torch.shape[2] != grid:
+                    pos_torch = pos_torch.permute(0, 3, 1, 2).to(torch.float32)
+                    pos_torch = (
+                        torch.nn.functional.interpolate(
+                            pos_torch,
+                            size=(grid, grid),
+                            mode="bicubic",
+                            antialias=True,
+                            align_corners=False,
+                        )
+                        .to(x_torch.dtype)
+                        .permute(0, 2, 3, 1)
+                    )
+            pos_torch = pos_torch.expand(b, grid, grid, c).clone()
             x_torch = x_torch + pos_torch
             # Use ROW_MAJOR then TILE so layout matches conv2d output and matmul sees (S, C)
             x = ttnn.from_torch(
@@ -684,15 +956,25 @@ class TtImageEncoderViT(LightweightModule):
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        # (B, H, W, C) -> (1, 1, S, C)
+        if collect_stages is not None:
+            collect_stages["pos_embed"] = self._stage_to_torch(
+                x, "pos_embed", self.grid_size, self.grid_size, x.shape[-1]
+            )
+        elif stop_at_stage == "pos_embed":
+            return self._stage_to_torch(x, "pos_embed", self.grid_size, self.grid_size, x.shape[-1])
         b, h, w, c = x.shape
         x = ttnn.reshape(x, (1, 1, b * h * w, c))
-        for blk in self.blocks:
-            x = blk(x)
+        collect_block_sub = collect_block_sub_stages if collect_block_sub_stages is not None else {}
+        for i, blk in enumerate(self.blocks):
+            sub_stages = collect_block_sub.get(i)
+            x = blk(x, collect_sub_stages=sub_stages)
+            if collect_stages is not None:
+                collect_stages[f"block_{i}"] = self._stage_to_torch(x, f"block_{i}", h, w, c)
+            elif stop_at_stage == f"block_{i}":
+                return self._stage_to_torch(x, f"block_{i}", h, w, c)
         # (1, 1, S, C) -> (B, C, H, W); run neck + net_2 + net_3 in PyTorch to avoid device L1 OOM
         x_t = ttnn.to_torch(x)
         ttnn.deallocate(x)
-        # (1, 1, S, C) -> (B, H, W, C) -> (B, C, H, W); use grid_size so h,w are correct after blocks
         grid = self.grid_size
         x_t = x_t.reshape(1, grid, grid, c).permute(0, 3, 1, 2)
         with torch.no_grad():
@@ -722,6 +1004,53 @@ def run_tt_sam(
     input_tensor: (B, 3, H, W) torch tensor, e.g. bfloat16. Will be transferred to device.
     Returns TT tensor output from TtImageEncoderViT (same shape as torch SAM forward).
     """
+    return run_tt_sam_until_stage(
+        device=device,
+        sam_torch_module=sam_torch_module,
+        input_tensor=input_tensor,
+        batch_size=batch_size,
+        image_size=image_size,
+        dtype=dtype,
+        stage=None,
+    )
+
+
+def run_tt_pos_embed(
+    device: ttnn.Device,
+    sam_torch_module: torch.nn.Module,
+    input_tensor: torch.Tensor,
+    batch_size: int = 1,
+    image_size: int = 1024,
+    dtype=ttnn.bfloat16,
+) -> torch.Tensor:
+    """
+    Run TT SAM patch_embed + pos_embed only; returns output as torch (B, H, W, C).
+    Uses the exact same input_tensor as the reference. For unit testing pos_embed PCC.
+    """
+    return run_tt_sam_until_stage(
+        device=device,
+        sam_torch_module=sam_torch_module,
+        input_tensor=input_tensor,
+        stage="pos_embed",
+        batch_size=batch_size,
+        image_size=image_size,
+        dtype=dtype,
+    )
+
+
+def run_tt_sam_forward_collect_stages(
+    device: ttnn.Device,
+    sam_torch_module: torch.nn.Module,
+    input_tensor: torch.Tensor,
+    batch_size: int = 1,
+    image_size: int = 1024,
+    dtype=ttnn.bfloat16,
+) -> dict:
+    """
+    Run TT SAM forward once and collect intermediate outputs at each stage.
+    Returns dict stage_name -> torch.Tensor (B, H, W, C). One TT run, no device reuse.
+    """
+    collect_stages = {}
     tt_model = TtImageEncoderViT(
         device=device,
         sam_torch_module=sam_torch_module,
@@ -736,4 +1065,77 @@ def run_tt_sam(
         layout=ttnn.TILE_LAYOUT,
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
     )
-    return tt_model(tt_input)
+    tt_model(tt_input, collect_stages=collect_stages)
+    return collect_stages
+
+
+def run_tt_sam_forward_collect_stages_with_block_sub(
+    device: ttnn.Device,
+    sam_torch_module: torch.nn.Module,
+    input_tensor: torch.Tensor,
+    block_index: int,
+    batch_size: int = 1,
+    image_size: int = 1024,
+    dtype=ttnn.bfloat16,
+) -> Tuple[dict, dict]:
+    """
+    Run TT SAM forward and collect stage outputs plus sub-stages for one block.
+    Returns (collect_stages, block_sub_stages) where block_sub_stages has keys
+    norm1_out, attn_out, after_attn_add, norm2_out, mlp_out, out.
+    """
+    collect_stages = {}
+    collect_block_sub_stages = {block_index: {}}
+    tt_model = TtImageEncoderViT(
+        device=device,
+        sam_torch_module=sam_torch_module,
+        batch_size=batch_size,
+        image_size=image_size,
+        dtype=dtype,
+    )
+    tt_input = ttnn.from_torch(
+        input_tensor.detach().to(torch.bfloat16),
+        dtype=dtype,
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+    tt_model(
+        tt_input,
+        collect_stages=collect_stages,
+        collect_block_sub_stages=collect_block_sub_stages,
+    )
+    return collect_stages, collect_block_sub_stages[block_index]
+
+
+def run_tt_sam_until_stage(
+    device: ttnn.Device,
+    sam_torch_module: torch.nn.Module,
+    input_tensor: torch.Tensor,
+    stage: Optional[str],
+    batch_size: int = 1,
+    image_size: int = 1024,
+    dtype=ttnn.bfloat16,
+) -> ttnn.Tensor | torch.Tensor:
+    """
+    Run TT SAM forward until the given stage and return the intermediate tensor as torch.
+    stage: None (full forward, returns ttnn), "patch_embed", "pos_embed", "block_0".."block_11".
+    When stage is not None, returns torch tensor (B, H, W, C) for PCC comparison.
+    """
+    tt_model = TtImageEncoderViT(
+        device=device,
+        sam_torch_module=sam_torch_module,
+        batch_size=batch_size,
+        image_size=image_size,
+        dtype=dtype,
+    )
+    tt_input = ttnn.from_torch(
+        input_tensor.detach().to(torch.bfloat16),
+        dtype=dtype,
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+    out = tt_model(tt_input, stop_at_stage=stage)
+    if stage is not None:
+        return out
+    return out
