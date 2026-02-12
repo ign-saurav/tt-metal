@@ -28,7 +28,7 @@ from models.tt_transformers.tt.model_config import DecodersPrecision
 
 class Qwen3ForEmbedding:
     """
-    vLLM-compatible wrapper for Qwen3-Embedding-8B embedding model.
+    vLLM-compatible wrapper for Qwen3-Embedding models (8B, 4B, 0.6B).
 
     This class implements the interface required by vLLM for embedding models,
     enabling OpenAI Embedding API compatibility.
@@ -81,7 +81,7 @@ class Qwen3ForEmbedding:
         if vllm_config is not None:
             self.vllm_config = vllm_config
 
-        # Load config
+        # Load config (model_name supports Qwen3-Embedding-8B, 4B, 0.6B variants)
         self.config = transformers.AutoConfig.from_pretrained(model_name)
 
         # Initialize model and generator (will be set up during first forward pass)
@@ -128,10 +128,16 @@ class Qwen3ForEmbedding:
             Initialized Qwen3ForEmbedding instance
         """
         if max_seq_len is None:
-            max_seq_len = 8192  # Default for Qwen3-Embedding-8B
+            max_seq_len = 8192  # Default for Qwen3-Embedding (8B, 4B, 0.6B)
+
+        # Get model name from vllm_config for correct model loading (supports 8B, 4B, 0.6B variants)
+        model_name = "Qwen/Qwen3-Embedding-8B"  # default
+        if vllm_config is not None and hasattr(vllm_config.model_config, "model"):
+            model_name = vllm_config.model_config.model
 
         logger.info(
-            f"Initializing Qwen3-Embedding-8B for vLLM: " f"max_batch_size={max_batch_size}, max_seq_len={max_seq_len}"
+            f"Initializing Qwen3-Embedding for vLLM: model={model_name}, "
+            f"max_batch_size={max_batch_size}, max_seq_len={max_seq_len}"
         )
 
         # When vLLM wraps the class, it requires vllm_config to be passed
@@ -150,6 +156,7 @@ class Qwen3ForEmbedding:
                 model_location_generator=model_location_generator,
                 max_batch_size=max_batch_size,
                 max_seq_len=max_seq_len,
+                model_name=model_name,
                 vllm_config=vllm_config,
             )
         else:
@@ -422,7 +429,7 @@ def register_model():
             "TTQwen3Model",
             Qwen3ForEmbedding,
         )
-        logger.info("Successfully registered TTQwen3Model (Qwen3-Embedding-8B) with vLLM ModelRegistry")
+        logger.info("Successfully registered TTQwen3Model (Qwen3-Embedding 8B/4B/0.6B) with vLLM ModelRegistry")
     except ImportError:
         logger.warning(
             "vLLM ModelRegistry not available. "
