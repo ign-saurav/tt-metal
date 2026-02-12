@@ -11,6 +11,7 @@ Uses the same ttnn ops as tt_transformers multimodal image attention (no edits t
 from __future__ import annotations
 
 import importlib
+import math
 from typing import Optional, Tuple
 
 import torch
@@ -177,6 +178,15 @@ class TtSamAttention(LightweightModule):
             fp32_dest_acc_en=False,
             packer_l1_acc=False,
         )
+        # Match tt_transformers llama_image_attention SDPA: separate config with fp32_dest_acc_en=True
+        # for better numerics in attention scores and weighted sum (model_config.py compute_kernel_config_sdpa)
+        self.compute_kernel_config_sdpa = ttnn.WormholeComputeKernelConfig(
+            math_fidelity=ttnn.MathFidelity.HiFi4,
+            math_approx_mode=False,
+            fp32_dest_acc_en=True,
+            packer_l1_acc=False,
+        )
+        # Same SDPAProgramConfig as tt_transformers (q_chunk_size=32*max(1,num_chunks); we use 32 for window 196)
         self.sdpa_config = ttnn.SDPAProgramConfig(
             compute_with_storage_grid_size=(8, 8),
             q_chunk_size=32,
@@ -184,14 +194,24 @@ class TtSamAttention(LightweightModule):
             exp_approx_mode=False,
         )
 
-    def _get_attn_bias(self, x_11SH: ttnn.Tensor) -> Optional[ttnn.Tensor]:
-        """Compute rel_pos attn_bias on host and return as ttnn tensor (1, n_heads, S, S), or None."""
+    def _get_attn_bias(
+        self,
+        x_11SH: ttnn.Tensor,
+        seq_len_orig: Optional[int] = None,
+        seq_len_padded: Optional[int] = None,
+    ) -> Optional[ttnn.Tensor]:
+        """Compute rel_pos attn_bias on host and return as ttnn tensor (1, n_heads, S, S), or None.
+        When seq_len_orig and seq_len_padded are set with seq_len_padded > seq_len_orig, bias is
+        computed for seq_len_orig then extended to (seq_len_padded, seq_len_padded) with -inf for padding."""
         if not self.use_rel_pos:
             return None
         x_t = ttnn.to_torch(x_11SH)
         if x_t.device.type != "cpu":
             x_t = x_t.cpu()
         x_t = x_t.float()
+        # Use only first seq_len_orig rows when padding so rel_pos is correct
+        if seq_len_orig is not None:
+            x_t = x_t[:, :, :seq_len_orig, :]
         # (1, 1, S, dim) @ (dim, dim*3) -> (1, 1, S, dim*3)
         qkv = F.linear(x_t, self._qkv_weight_torch, self._qkv_bias_torch)
         S = qkv.shape[2]
@@ -199,6 +219,15 @@ class TtSamAttention(LightweightModule):
         q = qkv[:, 0]
         attn_bias = compute_sam_attn_bias(q, self._rel_pos_h, self._rel_pos_w, self._spatial_size)
         attn_bias = attn_bias.to(torch.bfloat16)
+        if seq_len_padded is not None and seq_len_padded > S:
+            full_bias = torch.full(
+                (1, self.n_heads, seq_len_padded, seq_len_padded),
+                float("-inf"),
+                dtype=torch.bfloat16,
+                device=attn_bias.device,
+            )
+            full_bias[:, :, :S, :S] = attn_bias
+            attn_bias = full_bias
         return ttnn.from_torch(
             attn_bias,
             dtype=ttnn.bfloat16,
@@ -207,21 +236,68 @@ class TtSamAttention(LightweightModule):
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
-    def forward(self, x_11SH: ttnn.Tensor) -> ttnn.Tensor:
-        """x_11SH: (1, 1, seq_len, dim). Returns (1, 1, seq_len, dim)."""
+    def _attn_stage_to_torch_hwc(self, t: ttnn.Tensor) -> torch.Tensor:
+        """Convert (1, 1, S, C) to torch (1, grid, grid, C) for PCC comparison."""
+        out = ttnn.to_torch(t)
+        if out.device.type != "cpu":
+            out = out.cpu()
+        S, C = out.shape[-2], out.shape[-1]
+        grid = math.isqrt(S)
+        if grid * grid == S:
+            out = out.reshape(1, grid, grid, C)
+        return out.float()
+
+    def forward(self, x_11SH: ttnn.Tensor, collect_attn_sub_stages: Optional[dict] = None) -> ttnn.Tensor:
+        """x_11SH: (1, 1, seq_len, dim). Returns (1, 1, seq_len, dim).
+        When seq_len is not divisible by 32, input is padded to a multiple of 32 for SDPA, then output is sliced back.
+        """
         seq_len = x_11SH.shape[-2]
-        attn_mask_tt = self._get_attn_bias(x_11SH) if self.use_rel_pos else None
+        pad_seq = ((seq_len + 31) // 32) * 32
+        need_pad = pad_seq > seq_len
+
+        if need_pad:
+            x_t = ttnn.to_torch(x_11SH)
+            if x_t.device.type != "cpu":
+                x_t = x_t.cpu()
+            x_t = F.pad(x_t, (0, 0, 0, pad_seq - seq_len), value=0.0)
+            x_work = ttnn.from_torch(
+                x_t,
+                dtype=ttnn.bfloat16,
+                device=self.device,
+                layout=ttnn.TILE_LAYOUT,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+                pad_value=0.0,
+            )
+        else:
+            x_work = x_11SH
+
+        attn_mask_tt = None
+        if self.use_rel_pos:
+            attn_mask_tt = self._get_attn_bias(
+                x_work, seq_len_orig=seq_len if need_pad else None, seq_len_padded=pad_seq if need_pad else None
+            )
 
         # input (1,1,S,768) @ weight (1,1,768,2304) -> (1,1,S,2304)
         xqkv_fused = ttnn.matmul(
-            x_11SH,
+            x_work,
             self.wqkv,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
             dtype=ttnn.bfloat16,
             compute_kernel_config=self.compute_kernel_config,
         )
+        if need_pad:
+            ttnn.deallocate(x_work)
         if self.wqkv_bias is not None:
             xqkv_fused = ttnn.add(xqkv_fused, self.wqkv_bias)
+        if collect_attn_sub_stages is not None:
+            qkv_for_stage = (
+                xqkv_fused[(slice(0, 1), slice(0, 1), slice(0, seq_len), slice(0, xqkv_fused.shape[-1]))]
+                if need_pad
+                else xqkv_fused
+            )
+            collect_attn_sub_stages["attn_qkv_out"] = self._attn_stage_to_torch_hwc(qkv_for_stage)
+            if need_pad:
+                ttnn.deallocate(qkv_for_stage)
 
         q_heads, k_heads, v_heads = ttnn.experimental.nlp_create_qkv_heads(
             xqkv_fused,
@@ -232,20 +308,33 @@ class TtSamAttention(LightweightModule):
         )
         ttnn.deallocate(xqkv_fused)
 
-        attn_out = ttnn.transformer.scaled_dot_product_attention(
+        # Manual SDPA: Q@K^T -> scale -> +mask -> softmax -> @V (scale_mask_softmax requires mask height 1 or 32, so we do add+softmax separately)
+        qk = ttnn.matmul(
             q_heads,
             k_heads,
-            v_heads,
-            is_causal=False,
-            scale=self.scale,
-            attn_mask=attn_mask_tt,
-            program_config=self.sdpa_config,
-            compute_kernel_config=self.compute_kernel_config,
+            transpose_b=True,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            dtype=ttnn.bfloat16,
+            compute_kernel_config=self.compute_kernel_config_sdpa,
         )
-        if attn_mask_tt is not None:
-            ttnn.deallocate(attn_mask_tt)
         ttnn.deallocate(q_heads)
         ttnn.deallocate(k_heads)
+        qk = ttnn.multiply(qk, self.scale, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        if attn_mask_tt is not None:
+            qk = ttnn.add(qk, attn_mask_tt, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            ttnn.deallocate(attn_mask_tt)
+        attn_weights = ttnn.softmax(
+            qk, dim=-1, compute_kernel_config=self.compute_kernel_config_sdpa, numeric_stable=True
+        )
+        ttnn.deallocate(qk)
+        attn_out = ttnn.matmul(
+            attn_weights,
+            v_heads,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            dtype=ttnn.bfloat16,
+            compute_kernel_config=self.compute_kernel_config_sdpa,
+        )
+        ttnn.deallocate(attn_weights)
         ttnn.deallocate(v_heads)
 
         attn_concat = ttnn.experimental.nlp_concat_heads(
@@ -253,8 +342,17 @@ class TtSamAttention(LightweightModule):
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
         ttnn.deallocate(attn_out)
+        if collect_attn_sub_stages is not None:
+            sdpa_for_stage = (
+                attn_concat[(slice(0, 1), slice(0, 1), slice(0, seq_len), slice(0, attn_concat.shape[-1]))]
+                if need_pad
+                else attn_concat
+            )
+            collect_attn_sub_stages["attn_sdpa_out"] = self._attn_stage_to_torch_hwc(sdpa_for_stage)
+            if need_pad:
+                ttnn.deallocate(sdpa_for_stage)
 
-        # attn_concat (1,1,S,768) @ wo (1,1,768,768) -> (1,1,S,768)
+        # attn_concat (1,1,S,768) @ wo (1,1,768,768) -> (1,1,S,768); do slice after proj when padded
         output = ttnn.matmul(
             attn_concat,
             self.wo,
@@ -264,7 +362,12 @@ class TtSamAttention(LightweightModule):
         )
         if self.bo is not None:
             output = ttnn.add(output, self.bo)
+        if need_pad:
+            output = output[(slice(0, 1), slice(0, 1), slice(0, seq_len), slice(0, output.shape[-1]))]
         ttnn.deallocate(attn_concat)
+        if collect_attn_sub_stages is not None:
+            proj_for_stage = output  # already sliced to seq_len when need_pad
+            collect_attn_sub_stages["attn_proj_out"] = self._attn_stage_to_torch_hwc(proj_for_stage)
         return output
 
 
@@ -458,9 +561,9 @@ class TtSamBlock(LightweightModule):
         if collect_sub_stages is not None:
             collect_sub_stages["norm1_out"] = self._to_torch_hwc(normed)
         if self.window_size > 0:
-            attn_out = self._forward_window_attention(normed)
+            attn_out = self._forward_window_attention(normed, collect_sub_stages)
         else:
-            attn_out = self.attn(normed)
+            attn_out = self.attn(normed, collect_attn_sub_stages=collect_sub_stages)
         ttnn.deallocate(normed)
         res = ttnn.add(x_11SH, attn_out)
         if collect_sub_stages is not None:
@@ -482,7 +585,7 @@ class TtSamBlock(LightweightModule):
             collect_sub_stages["out"] = self._to_torch_hwc(out)
         return out
 
-    def _forward_window_attention(self, x_11SH: ttnn.Tensor) -> ttnn.Tensor:
+    def _forward_window_attention(self, x_11SH: ttnn.Tensor, collect_sub_stages: Optional[dict] = None) -> ttnn.Tensor:
         """Partition x into windows, run TT attention per window, unpartition. x: (1, 1, S, C)."""
         H = W = self.grid_size
         window_size = self.window_size
@@ -494,6 +597,9 @@ class TtSamBlock(LightweightModule):
         windows, pad_hw = _window_partition_torch(x_t, window_size)
         num_windows = windows.shape[0]
         out_windows = []
+        list_qkv = [] if collect_sub_stages is not None else None
+        list_sdpa = [] if collect_sub_stages is not None else None
+        list_proj = [] if collect_sub_stages is not None else None
         for i in range(num_windows):
             win = windows[i : i + 1]
             win_flat = win.reshape(1, window_size * window_size, C)
@@ -504,13 +610,27 @@ class TtSamBlock(LightweightModule):
                 layout=ttnn.TILE_LAYOUT,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
-            out_tt = self.attn(win_tt)
+            per_win_collect = {} if collect_sub_stages is not None else None
+            out_tt = self.attn(win_tt, collect_attn_sub_stages=per_win_collect)
+            if per_win_collect is not None:
+                list_qkv.append(per_win_collect["attn_qkv_out"].reshape(1, window_size, window_size, -1))
+                list_sdpa.append(per_win_collect["attn_sdpa_out"].reshape(1, window_size, window_size, -1))
+                list_proj.append(per_win_collect["attn_proj_out"].reshape(1, window_size, window_size, -1))
             out_t = ttnn.to_torch(out_tt)
             ttnn.deallocate(out_tt)
             ttnn.deallocate(win_tt)
             if out_t.device.type != "cpu":
                 out_t = out_t.cpu()
             out_windows.append(out_t.reshape(1, window_size, window_size, C))
+        if collect_sub_stages is not None:
+            for key, lst in [
+                ("attn_qkv_out", list_qkv),
+                ("attn_sdpa_out", list_sdpa),
+                ("attn_proj_out", list_proj),
+            ]:
+                stack = torch.cat(lst, dim=0)
+                unpart = _window_unpartition_torch(stack, window_size, pad_hw, (H, W))
+                collect_sub_stages[key] = unpart.float()
         out_stack = torch.cat(out_windows, dim=0)
         out_unpart = _window_unpartition_torch(out_stack, window_size, pad_hw, (H, W))
         out_flat = out_unpart.reshape(1, H * W, C)
@@ -1105,6 +1225,46 @@ def run_tt_sam_forward_collect_stages_with_block_sub(
         collect_block_sub_stages=collect_block_sub_stages,
     )
     return collect_stages, collect_block_sub_stages[block_index]
+
+
+def run_tt_sam_attention_single_window(
+    device: ttnn.Device,
+    sam_torch_module: torch.nn.Module,
+    block_index: int,
+    window_norm1_tensor: torch.Tensor,
+    image_size: int = 640,
+    dtype=ttnn.bfloat16,
+) -> torch.Tensor:
+    """
+    Run TT attention for one window only (e.g. window 0). window_norm1_tensor: (1, 196, 768) or (1, 14, 14, 768).
+    Returns torch (1, 196, 768). Used to debug per-window PCC vs ref.
+    """
+    if window_norm1_tensor.dim() == 4:
+        window_norm1_tensor = window_norm1_tensor.reshape(1, -1, window_norm1_tensor.shape[-1])
+    tt_model = TtImageEncoderViT(
+        device=device,
+        sam_torch_module=sam_torch_module,
+        batch_size=1,
+        image_size=image_size,
+        dtype=dtype,
+    )
+    blk = tt_model.blocks[block_index]
+    # (1, 196, 768) -> (1, 1, 196, 768)
+    x = window_norm1_tensor.detach().to(torch.bfloat16)
+    tt_in = ttnn.from_torch(
+        x.unsqueeze(1),
+        dtype=dtype,
+        device=device,
+        layout=ttnn.TILE_LAYOUT,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+    )
+    tt_out = blk.attn(tt_in)
+    out = ttnn.to_torch(tt_out)
+    ttnn.deallocate(tt_out)
+    ttnn.deallocate(tt_in)
+    if out.device.type != "cpu":
+        out = out.cpu()
+    return out.squeeze(1).float()
 
 
 def run_tt_sam_until_stage(
