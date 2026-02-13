@@ -11,7 +11,6 @@ Uses the same ttnn ops as tt_transformers multimodal image attention (no edits t
 from __future__ import annotations
 
 import importlib
-import math
 from typing import Optional, Tuple
 
 import torch
@@ -28,6 +27,7 @@ def _get_rel_pos(q_size: int, k_size: int, rel_pos: torch.Tensor) -> torch.Tenso
     max_rel_dist = int(2 * max(q_size, k_size) - 1)
     if rel_pos.shape[0] != max_rel_dist:
         rel_pos = rel_pos.float()
+        # fallback: linear interpolate on host (no ttnn equivalent)
         rel_pos_resized = F.interpolate(
             rel_pos.reshape(1, rel_pos.shape[0], -1).permute(0, 2, 1),
             size=max_rel_dist,
@@ -205,6 +205,7 @@ class TtSamAttention(LightweightModule):
         computed for seq_len_orig then extended to (seq_len_padded, seq_len_padded) with -inf for padding."""
         if not self.use_rel_pos:
             return None
+        # fallback: compute bias on host (F.linear + compute_sam_attn_bias), then from_torch
         x_t = ttnn.to_torch(x_11SH)
         if x_t.device.type != "cpu":
             x_t = x_t.cpu()
@@ -236,18 +237,7 @@ class TtSamAttention(LightweightModule):
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
-    def _attn_stage_to_torch_hwc(self, t: ttnn.Tensor) -> torch.Tensor:
-        """Convert (1, 1, S, C) to torch (1, grid, grid, C) for PCC comparison."""
-        out = ttnn.to_torch(t)
-        if out.device.type != "cpu":
-            out = out.cpu()
-        S, C = out.shape[-2], out.shape[-1]
-        grid = math.isqrt(S)
-        if grid * grid == S:
-            out = out.reshape(1, grid, grid, C)
-        return out.float()
-
-    def forward(self, x_11SH: ttnn.Tensor, collect_attn_sub_stages: Optional[dict] = None) -> ttnn.Tensor:
+    def forward(self, x_11SH: ttnn.Tensor) -> ttnn.Tensor:
         """x_11SH: (1, 1, seq_len, dim). Returns (1, 1, seq_len, dim).
         When seq_len is not divisible by 32, input is padded to a multiple of 32 for SDPA, then output is sliced back.
         """
@@ -256,6 +246,7 @@ class TtSamAttention(LightweightModule):
         need_pad = pad_seq > seq_len
 
         if need_pad:
+            # fallback: pad on host (to_torch, F.pad, from_torch) so SDPA sees seq divisible by 32
             x_t = ttnn.to_torch(x_11SH)
             if x_t.device.type != "cpu":
                 x_t = x_t.cpu()
@@ -289,15 +280,6 @@ class TtSamAttention(LightweightModule):
             ttnn.deallocate(x_work)
         if self.wqkv_bias is not None:
             xqkv_fused = ttnn.add(xqkv_fused, self.wqkv_bias)
-        if collect_attn_sub_stages is not None:
-            qkv_for_stage = (
-                xqkv_fused[(slice(0, 1), slice(0, 1), slice(0, seq_len), slice(0, xqkv_fused.shape[-1]))]
-                if need_pad
-                else xqkv_fused
-            )
-            collect_attn_sub_stages["attn_qkv_out"] = self._attn_stage_to_torch_hwc(qkv_for_stage)
-            if need_pad:
-                ttnn.deallocate(qkv_for_stage)
 
         q_heads, k_heads, v_heads = ttnn.experimental.nlp_create_qkv_heads(
             xqkv_fused,
@@ -342,15 +324,6 @@ class TtSamAttention(LightweightModule):
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
         ttnn.deallocate(attn_out)
-        if collect_attn_sub_stages is not None:
-            sdpa_for_stage = (
-                attn_concat[(slice(0, 1), slice(0, 1), slice(0, seq_len), slice(0, attn_concat.shape[-1]))]
-                if need_pad
-                else attn_concat
-            )
-            collect_attn_sub_stages["attn_sdpa_out"] = self._attn_stage_to_torch_hwc(sdpa_for_stage)
-            if need_pad:
-                ttnn.deallocate(sdpa_for_stage)
 
         # attn_concat (1,1,S,768) @ wo (1,1,768,768) -> (1,1,S,768); do slice after proj when padded
         output = ttnn.matmul(
@@ -365,9 +338,6 @@ class TtSamAttention(LightweightModule):
         if need_pad:
             output = output[(slice(0, 1), slice(0, 1), slice(0, seq_len), slice(0, output.shape[-1]))]
         ttnn.deallocate(attn_concat)
-        if collect_attn_sub_stages is not None:
-            proj_for_stage = output  # already sliced to seq_len when need_pad
-            collect_attn_sub_stages["attn_proj_out"] = self._attn_stage_to_torch_hwc(proj_for_stage)
         return output
 
 
@@ -546,50 +516,28 @@ class TtSamBlock(LightweightModule):
         self.window_size = window_size
         self.grid_size = grid_size
 
-    def _to_torch_hwc(self, t: ttnn.Tensor) -> torch.Tensor:
-        """Convert (1, 1, S, C) to torch (1, grid_size, grid_size, C)."""
-        out = ttnn.to_torch(t)
-        if out.device.type != "cpu":
-            out = out.cpu()
-        g = self.grid_size
-        if out.shape[-2] == g * g:
-            out = out.reshape(1, g, g, out.shape[-1])
-        return out.float()
-
-    def forward(self, x_11SH: ttnn.Tensor, collect_sub_stages: Optional[dict] = None) -> ttnn.Tensor:
+    def forward(self, x_11SH: ttnn.Tensor) -> ttnn.Tensor:
         normed = self.norm1(x_11SH)
-        if collect_sub_stages is not None:
-            collect_sub_stages["norm1_out"] = self._to_torch_hwc(normed)
         if self.window_size > 0:
-            attn_out = self._forward_window_attention(normed, collect_sub_stages)
+            attn_out = self._forward_window_attention(normed)
         else:
-            attn_out = self.attn(normed, collect_attn_sub_stages=collect_sub_stages)
+            attn_out = self.attn(normed)
         ttnn.deallocate(normed)
         res = ttnn.add(x_11SH, attn_out)
-        if collect_sub_stages is not None:
-            collect_sub_stages["attn_out"] = self._to_torch_hwc(attn_out)
         ttnn.deallocate(attn_out)
-        after_add = res
-        if collect_sub_stages is not None:
-            collect_sub_stages["after_attn_add"] = self._to_torch_hwc(after_add)
         norm2_out = self.norm2(res)
-        if collect_sub_stages is not None:
-            collect_sub_stages["norm2_out"] = self._to_torch_hwc(norm2_out)
         mlp_out = self.mlp(norm2_out)
-        if collect_sub_stages is not None:
-            collect_sub_stages["mlp_out"] = self._to_torch_hwc(mlp_out)
         out = ttnn.add(res, mlp_out)
         ttnn.deallocate(mlp_out)
         ttnn.deallocate(res)
-        if collect_sub_stages is not None:
-            collect_sub_stages["out"] = self._to_torch_hwc(out)
         return out
 
-    def _forward_window_attention(self, x_11SH: ttnn.Tensor, collect_sub_stages: Optional[dict] = None) -> ttnn.Tensor:
+    def _forward_window_attention(self, x_11SH: ttnn.Tensor) -> ttnn.Tensor:
         """Partition x into windows, run TT attention per window, unpartition. x: (1, 1, S, C)."""
         H = W = self.grid_size
         window_size = self.window_size
         C = x_11SH.shape[-1]
+        # fallback: window partition on host (to_torch, _window_partition_torch), then from_torch per window
         x_t = ttnn.to_torch(x_11SH)
         if x_t.device.type != "cpu":
             x_t = x_t.cpu()
@@ -597,9 +545,6 @@ class TtSamBlock(LightweightModule):
         windows, pad_hw = _window_partition_torch(x_t, window_size)
         num_windows = windows.shape[0]
         out_windows = []
-        list_qkv = [] if collect_sub_stages is not None else None
-        list_sdpa = [] if collect_sub_stages is not None else None
-        list_proj = [] if collect_sub_stages is not None else None
         for i in range(num_windows):
             win = windows[i : i + 1]
             win_flat = win.reshape(1, window_size * window_size, C)
@@ -610,30 +555,17 @@ class TtSamBlock(LightweightModule):
                 layout=ttnn.TILE_LAYOUT,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
-            per_win_collect = {} if collect_sub_stages is not None else None
-            out_tt = self.attn(win_tt, collect_attn_sub_stages=per_win_collect)
-            if per_win_collect is not None:
-                list_qkv.append(per_win_collect["attn_qkv_out"].reshape(1, window_size, window_size, -1))
-                list_sdpa.append(per_win_collect["attn_sdpa_out"].reshape(1, window_size, window_size, -1))
-                list_proj.append(per_win_collect["attn_proj_out"].reshape(1, window_size, window_size, -1))
+            out_tt = self.attn(win_tt)
             out_t = ttnn.to_torch(out_tt)
             ttnn.deallocate(out_tt)
             ttnn.deallocate(win_tt)
             if out_t.device.type != "cpu":
                 out_t = out_t.cpu()
             out_windows.append(out_t.reshape(1, window_size, window_size, C))
-        if collect_sub_stages is not None:
-            for key, lst in [
-                ("attn_qkv_out", list_qkv),
-                ("attn_sdpa_out", list_sdpa),
-                ("attn_proj_out", list_proj),
-            ]:
-                stack = torch.cat(lst, dim=0)
-                unpart = _window_unpartition_torch(stack, window_size, pad_hw, (H, W))
-                collect_sub_stages[key] = unpart.float()
         out_stack = torch.cat(out_windows, dim=0)
         out_unpart = _window_unpartition_torch(out_stack, window_size, pad_hw, (H, W))
         out_flat = out_unpart.reshape(1, H * W, C)
+        # fallback: unpartition on host, then from_torch back to device
         out_tt = ttnn.from_torch(
             out_flat.unsqueeze(1).to(torch.bfloat16),
             dtype=ttnn.bfloat16,
@@ -1001,55 +933,20 @@ class TtImageEncoderViT(LightweightModule):
             dtype=dtype,
         )
 
-    def _stage_to_torch(self, x: ttnn.Tensor, stage: str, h: int, w: int, c: int) -> torch.Tensor:
-        """Convert current x to torch (B, H, W, C) for a given stage."""
-        out = ttnn.to_torch(x)
-        if out.device.type != "cpu":
-            out = out.cpu()
-        if len(out.shape) == 4 and out.shape[2] == self.grid_size * self.grid_size:
-            out = out.reshape(out.shape[0], self.grid_size, self.grid_size, out.shape[-1])
-        elif stage.startswith("block_") and out.shape[-2] == self.grid_size * self.grid_size:
-            out = out.reshape(1, self.grid_size, self.grid_size, c)
-        return out.float()
-
-    def forward(
-        self,
-        x: ttnn.Tensor,
-        stop_at_stage: Optional[str] = None,
-        collect_stages: Optional[dict] = None,
-        collect_block_sub_stages: Optional[dict] = None,
-    ) -> ttnn.Tensor | torch.Tensor:
-        """
-        x: (B, C, H, W) in TT layout. Returns final feature map from net_3.
-        If stop_at_stage is set ("patch_embed", "pos_embed", "block_0".."block_11"),
-        returns the intermediate tensor as torch (B, H, W, C) for PCC comparison.
-        If collect_stages is a dict, run full forward once and fill collect_stages[stage]
-        with torch (B, H, W, C) at each stage (one TT run, no device reuse).
-        """
-        # Input (B, C, H, W) -> (B, H, W, C) for patch_embed conv
+    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        """x: (B, C, H, W) in TT layout. Returns final feature map from net_3."""
         if len(x.shape) == 4 and x.shape[1] == 3:
             x = ttnn.permute(x, (0, 2, 3, 1))
-        # Patch embed -> (B, grid, grid, embed_dim)
         x = self.patch_embed(x)
-        if collect_stages is not None:
-            collect_stages["patch_embed"] = self._stage_to_torch(
-                x, "patch_embed", self.grid_size, self.grid_size, x.shape[-1]
-            )
-        elif stop_at_stage == "patch_embed":
-            out = self._stage_to_torch(x, "patch_embed", self.grid_size, self.grid_size, x.shape[-1])
-            return out
-        # Add pos_embed if present (x is B,H,W,C; pos_embed is 1,H,W,C)
         if self.pos_embed is not None:
-            # Add on host to avoid device "Invalid subtile broadcast type" (tile layout mismatch).
-            # Use reference get_abs_pos_sam when available so pos interpolation matches exactly.
-            # Work in (B, H, W, C) so spatial order matches torch; TT conv2d may return (B, 1, H*W, C).
+            # fallback: pos_embed add on host (to_torch, get_abs_pos_sam or bicubic interpolate, add, from_torch)
             b, h, w, c = x.shape[0], x.shape[1], x.shape[2], x.shape[3]
-            grid = self.grid_size  # patch grid for current image_size (e.g. 40 for 640)
+            grid = self.grid_size
             x_torch = ttnn.to_torch(x)
             if (h, w) != (grid, grid) and h * w == grid * grid:
                 x_torch = x_torch.reshape(b, grid, grid, c)
             if self._get_abs_pos_sam is not None:
-                pos_torch = self._get_abs_pos_sam(self.pos_embed, grid)  # (1, grid, grid, C)
+                pos_torch = self._get_abs_pos_sam(self.pos_embed, grid)
             else:
                 pos_torch = self.pos_embed.detach()
                 if pos_torch.shape[1] != grid or pos_torch.shape[2] != grid:
@@ -1067,7 +964,6 @@ class TtImageEncoderViT(LightweightModule):
                     )
             pos_torch = pos_torch.expand(b, grid, grid, c).clone()
             x_torch = x_torch + pos_torch
-            # Use ROW_MAJOR then TILE so layout matches conv2d output and matmul sees (S, C)
             x = ttnn.from_torch(
                 x_torch,
                 device=self.device,
@@ -1076,23 +972,11 @@ class TtImageEncoderViT(LightweightModule):
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        if collect_stages is not None:
-            collect_stages["pos_embed"] = self._stage_to_torch(
-                x, "pos_embed", self.grid_size, self.grid_size, x.shape[-1]
-            )
-        elif stop_at_stage == "pos_embed":
-            return self._stage_to_torch(x, "pos_embed", self.grid_size, self.grid_size, x.shape[-1])
         b, h, w, c = x.shape
         x = ttnn.reshape(x, (1, 1, b * h * w, c))
-        collect_block_sub = collect_block_sub_stages if collect_block_sub_stages is not None else {}
-        for i, blk in enumerate(self.blocks):
-            sub_stages = collect_block_sub.get(i)
-            x = blk(x, collect_sub_stages=sub_stages)
-            if collect_stages is not None:
-                collect_stages[f"block_{i}"] = self._stage_to_torch(x, f"block_{i}", h, w, c)
-            elif stop_at_stage == f"block_{i}":
-                return self._stage_to_torch(x, f"block_{i}", h, w, c)
-        # (1, 1, S, C) -> (B, C, H, W); run neck + net_2 + net_3 in PyTorch to avoid device L1 OOM
+        for blk in self.blocks:
+            x = blk(x)
+        # fallback: neck + net_2 + net_3 in PyTorch to avoid device L1 OOM
         x_t = ttnn.to_torch(x)
         ttnn.deallocate(x)
         grid = self.grid_size
@@ -1102,7 +986,6 @@ class TtImageEncoderViT(LightweightModule):
                 x_t = layer(x_t)
             x_t = self.net_2_torch(x_t)
             x_t = self.net_3_torch(x_t)
-        # x_t: (1, 1024, 10, 10) for image_size 640; keep on host so to_torch preserves shape
         x_t = x_t.contiguous().to(torch.bfloat16)
         x = ttnn.from_torch(x_t, dtype=ttnn.bfloat16)
         return x
@@ -1119,58 +1002,7 @@ def run_tt_sam(
     image_size: int = 1024,
     dtype=ttnn.bfloat16,
 ) -> ttnn.Tensor:
-    """
-    Run TT SAM image encoder forward.
-    input_tensor: (B, 3, H, W) torch tensor, e.g. bfloat16. Will be transferred to device.
-    Returns TT tensor output from TtImageEncoderViT (same shape as torch SAM forward).
-    """
-    return run_tt_sam_until_stage(
-        device=device,
-        sam_torch_module=sam_torch_module,
-        input_tensor=input_tensor,
-        batch_size=batch_size,
-        image_size=image_size,
-        dtype=dtype,
-        stage=None,
-    )
-
-
-def run_tt_pos_embed(
-    device: ttnn.Device,
-    sam_torch_module: torch.nn.Module,
-    input_tensor: torch.Tensor,
-    batch_size: int = 1,
-    image_size: int = 1024,
-    dtype=ttnn.bfloat16,
-) -> torch.Tensor:
-    """
-    Run TT SAM patch_embed + pos_embed only; returns output as torch (B, H, W, C).
-    Uses the exact same input_tensor as the reference. For unit testing pos_embed PCC.
-    """
-    return run_tt_sam_until_stage(
-        device=device,
-        sam_torch_module=sam_torch_module,
-        input_tensor=input_tensor,
-        stage="pos_embed",
-        batch_size=batch_size,
-        image_size=image_size,
-        dtype=dtype,
-    )
-
-
-def run_tt_sam_forward_collect_stages(
-    device: ttnn.Device,
-    sam_torch_module: torch.nn.Module,
-    input_tensor: torch.Tensor,
-    batch_size: int = 1,
-    image_size: int = 1024,
-    dtype=ttnn.bfloat16,
-) -> dict:
-    """
-    Run TT SAM forward once and collect intermediate outputs at each stage.
-    Returns dict stage_name -> torch.Tensor (B, H, W, C). One TT run, no device reuse.
-    """
-    collect_stages = {}
+    """Run TT SAM image encoder. input_tensor: (B, 3, H, W). Returns TT tensor (same shape as torch SAM)."""
     tt_model = TtImageEncoderViT(
         device=device,
         sam_torch_module=sam_torch_module,
@@ -1185,117 +1017,4 @@ def run_tt_sam_forward_collect_stages(
         layout=ttnn.TILE_LAYOUT,
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
     )
-    tt_model(tt_input, collect_stages=collect_stages)
-    return collect_stages
-
-
-def run_tt_sam_forward_collect_stages_with_block_sub(
-    device: ttnn.Device,
-    sam_torch_module: torch.nn.Module,
-    input_tensor: torch.Tensor,
-    block_index: int,
-    batch_size: int = 1,
-    image_size: int = 1024,
-    dtype=ttnn.bfloat16,
-) -> Tuple[dict, dict]:
-    """
-    Run TT SAM forward and collect stage outputs plus sub-stages for one block.
-    Returns (collect_stages, block_sub_stages) where block_sub_stages has keys
-    norm1_out, attn_out, after_attn_add, norm2_out, mlp_out, out.
-    """
-    collect_stages = {}
-    collect_block_sub_stages = {block_index: {}}
-    tt_model = TtImageEncoderViT(
-        device=device,
-        sam_torch_module=sam_torch_module,
-        batch_size=batch_size,
-        image_size=image_size,
-        dtype=dtype,
-    )
-    tt_input = ttnn.from_torch(
-        input_tensor.detach().to(torch.bfloat16),
-        dtype=dtype,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-    )
-    tt_model(
-        tt_input,
-        collect_stages=collect_stages,
-        collect_block_sub_stages=collect_block_sub_stages,
-    )
-    return collect_stages, collect_block_sub_stages[block_index]
-
-
-def run_tt_sam_attention_single_window(
-    device: ttnn.Device,
-    sam_torch_module: torch.nn.Module,
-    block_index: int,
-    window_norm1_tensor: torch.Tensor,
-    image_size: int = 640,
-    dtype=ttnn.bfloat16,
-) -> torch.Tensor:
-    """
-    Run TT attention for one window only (e.g. window 0). window_norm1_tensor: (1, 196, 768) or (1, 14, 14, 768).
-    Returns torch (1, 196, 768). Used to debug per-window PCC vs ref.
-    """
-    if window_norm1_tensor.dim() == 4:
-        window_norm1_tensor = window_norm1_tensor.reshape(1, -1, window_norm1_tensor.shape[-1])
-    tt_model = TtImageEncoderViT(
-        device=device,
-        sam_torch_module=sam_torch_module,
-        batch_size=1,
-        image_size=image_size,
-        dtype=dtype,
-    )
-    blk = tt_model.blocks[block_index]
-    # (1, 196, 768) -> (1, 1, 196, 768)
-    x = window_norm1_tensor.detach().to(torch.bfloat16)
-    tt_in = ttnn.from_torch(
-        x.unsqueeze(1),
-        dtype=dtype,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-    )
-    tt_out = blk.attn(tt_in)
-    out = ttnn.to_torch(tt_out)
-    ttnn.deallocate(tt_out)
-    ttnn.deallocate(tt_in)
-    if out.device.type != "cpu":
-        out = out.cpu()
-    return out.squeeze(1).float()
-
-
-def run_tt_sam_until_stage(
-    device: ttnn.Device,
-    sam_torch_module: torch.nn.Module,
-    input_tensor: torch.Tensor,
-    stage: Optional[str],
-    batch_size: int = 1,
-    image_size: int = 1024,
-    dtype=ttnn.bfloat16,
-) -> ttnn.Tensor | torch.Tensor:
-    """
-    Run TT SAM forward until the given stage and return the intermediate tensor as torch.
-    stage: None (full forward, returns ttnn), "patch_embed", "pos_embed", "block_0".."block_11".
-    When stage is not None, returns torch tensor (B, H, W, C) for PCC comparison.
-    """
-    tt_model = TtImageEncoderViT(
-        device=device,
-        sam_torch_module=sam_torch_module,
-        batch_size=batch_size,
-        image_size=image_size,
-        dtype=dtype,
-    )
-    tt_input = ttnn.from_torch(
-        input_tensor.detach().to(torch.bfloat16),
-        dtype=dtype,
-        device=device,
-        layout=ttnn.TILE_LAYOUT,
-        memory_config=ttnn.DRAM_MEMORY_CONFIG,
-    )
-    out = tt_model(tt_input, stop_at_stage=stage)
-    if stage is not None:
-        return out
-    return out
+    return tt_model(tt_input)
