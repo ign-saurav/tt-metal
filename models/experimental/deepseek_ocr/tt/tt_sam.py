@@ -22,12 +22,13 @@ from models.common.lightweightmodule import LightweightModule
 # --------------- Relative position bias (mirrors deepencoder.get_rel_pos / add_decomposed_rel_pos) ---------------
 
 
-def _get_rel_pos(q_size: int, k_size: int, rel_pos: torch.Tensor) -> torch.Tensor:
+def _get_rel_pos(q_size: int, k_size: int, rel_pos: torch.Tensor, device: Optional[ttnn.Device] = None) -> torch.Tensor:
     """Relative position table indexed by (q_coord - k_coord). Returns (q_size, k_size, head_dim)."""
     max_rel_dist = int(2 * max(q_size, k_size) - 1)
     if rel_pos.shape[0] != max_rel_dist:
+        # Interpolation only runs when grid != pretrained size (e.g. 640 gives grid 40 → max_rel_dist 79; rel_pos is 127 so we downsample). For 1024 (grid 64) rel_pos already has 127 entries so we skip interpolate.
+        # Keep linear interpolation on host for PCC match (ttnn.upsample has nearest/bilinear only; nearest changes values)
         rel_pos = rel_pos.float()
-        # fallback: linear interpolate on host (no ttnn equivalent)
         rel_pos_resized = F.interpolate(
             rel_pos.reshape(1, rel_pos.shape[0], -1).permute(0, 2, 1),
             size=max_rel_dist,
@@ -48,12 +49,13 @@ def _add_decomposed_rel_pos(
     rel_pos_w: torch.Tensor,
     q_size: Tuple[int, int],
     k_size: Tuple[int, int],
+    device: Optional[ttnn.Device] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """q: (B, n_heads, q_h*q_w, head_dim). Returns rel_h, rel_w for building attn_bias."""
     q_h, q_w = q_size
     k_h, k_w = k_size
-    Rh = _get_rel_pos(q_h, k_h, rel_pos_h)
-    Rw = _get_rel_pos(q_w, k_w, rel_pos_w)
+    Rh = _get_rel_pos(q_h, k_h, rel_pos_h, device=device)
+    Rw = _get_rel_pos(q_w, k_w, rel_pos_w, device=device)
     B, n_heads, S, dim = q.shape
     r_q = q.reshape(B, n_heads, q_h, q_w, dim)
     rel_h = torch.einsum("bnhwc,hkc->bnhwk", r_q, Rh)
@@ -68,6 +70,7 @@ def compute_sam_attn_bias(
     rel_pos_h: torch.Tensor,
     rel_pos_w: torch.Tensor,
     spatial_size: Tuple[int, int],
+    device: Optional[ttnn.Device] = None,
 ) -> torch.Tensor:
     """q: (1, n_heads, S, head_dim). Returns attn_bias (1, n_heads, S, S) for SDPA."""
     H, W = spatial_size
@@ -76,7 +79,7 @@ def compute_sam_attn_bias(
     q = q.float()
     rel_pos_h = rel_pos_h.float()
     rel_pos_w = rel_pos_w.float()
-    rel_h, rel_w = _add_decomposed_rel_pos(q, rel_pos_h, rel_pos_w, (H, W), (H, W))
+    rel_h, rel_w = _add_decomposed_rel_pos(q, rel_pos_h, rel_pos_w, (H, W), (H, W), device=device)
     attn_bias = (rel_h + rel_w).reshape(1, q.shape[1], S, S).to(dtype)
     return attn_bias
 
@@ -200,25 +203,43 @@ class TtSamAttention(LightweightModule):
         seq_len_orig: Optional[int] = None,
         seq_len_padded: Optional[int] = None,
     ) -> Optional[ttnn.Tensor]:
-        """Compute rel_pos attn_bias on host and return as ttnn tensor (1, n_heads, S, S), or None.
-        When seq_len_orig and seq_len_padded are set with seq_len_padded > seq_len_orig, bias is
-        computed for seq_len_orig then extended to (seq_len_padded, seq_len_padded) with -inf for padding."""
+        """Compute rel_pos attn_bias; use TT slice + matmul + create_qkv_heads for q, then host for bias formula."""
         if not self.use_rel_pos:
             return None
-        # fallback: compute bias on host (F.linear + compute_sam_attn_bias), then from_torch
-        x_t = ttnn.to_torch(x_11SH)
-        if x_t.device.type != "cpu":
-            x_t = x_t.cpu()
-        x_t = x_t.float()
-        # Use only first seq_len_orig rows when padding so rel_pos is correct
+        dim = x_11SH.shape[-1]
         if seq_len_orig is not None:
-            x_t = x_t[:, :, :seq_len_orig, :]
-        # (1, 1, S, dim) @ (dim, dim*3) -> (1, 1, S, dim*3)
-        qkv = F.linear(x_t, self._qkv_weight_torch, self._qkv_bias_torch)
-        S = qkv.shape[2]
-        qkv = qkv.reshape(1, S, 3, self.n_heads, self.head_dim).permute(0, 2, 3, 1, 4)
-        q = qkv[:, 0]
-        attn_bias = compute_sam_attn_bias(q, self._rel_pos_h, self._rel_pos_w, self._spatial_size)
+            x_for_bias = x_11SH[(slice(0, 1), slice(0, 1), slice(0, seq_len_orig), slice(0, dim))]
+        else:
+            x_for_bias = x_11SH
+        qkv_tt = ttnn.matmul(
+            x_for_bias,
+            self.wqkv,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            dtype=ttnn.bfloat16,
+            compute_kernel_config=self.compute_kernel_config,
+        )
+        if seq_len_orig is not None:
+            ttnn.deallocate(x_for_bias)
+        if self.wqkv_bias is not None:
+            qkv_tt = ttnn.add(qkv_tt, self.wqkv_bias)
+        q_heads, k_heads, v_heads = ttnn.experimental.nlp_create_qkv_heads(
+            qkv_tt,
+            num_heads=self.n_heads,
+            num_kv_heads=self.n_heads,
+            transpose_k_heads=False,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        ttnn.deallocate(qkv_tt)
+        ttnn.deallocate(k_heads)
+        ttnn.deallocate(v_heads)
+        q_t = ttnn.to_torch(q_heads)
+        ttnn.deallocate(q_heads)
+        if q_t.device.type != "cpu":
+            q_t = q_t.cpu()
+        S = q_t.shape[2]
+        attn_bias = compute_sam_attn_bias(
+            q_t.float(), self._rel_pos_h, self._rel_pos_w, self._spatial_size, device=self.device
+        )
         attn_bias = attn_bias.to(torch.bfloat16)
         if seq_len_padded is not None and seq_len_padded > S:
             full_bias = torch.full(
@@ -246,18 +267,13 @@ class TtSamAttention(LightweightModule):
         need_pad = pad_seq > seq_len
 
         if need_pad:
-            # fallback: pad on host (to_torch, F.pad, from_torch) so SDPA sees seq divisible by 32
-            x_t = ttnn.to_torch(x_11SH)
-            if x_t.device.type != "cpu":
-                x_t = x_t.cpu()
-            x_t = F.pad(x_t, (0, 0, 0, pad_seq - seq_len), value=0.0)
-            x_work = ttnn.from_torch(
-                x_t,
-                dtype=ttnn.bfloat16,
-                device=self.device,
-                layout=ttnn.TILE_LAYOUT,
+            # Pad sequence dim to multiple of 32 for SDPA (ttnn.pad: padding (before, after) per dim; value=0)
+            padding = ((0, 0), (0, 0), (0, pad_seq - seq_len), (0, 0))
+            x_work = ttnn.pad(
+                x_11SH,
+                padding=padding,
+                value=0.0,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                pad_value=0.0,
             )
         else:
             x_work = x_11SH
@@ -490,6 +506,88 @@ def _window_unpartition_torch(
     return x
 
 
+def _window_partition_unpartition_tt(
+    x_11SH: ttnn.Tensor,
+    device: ttnn.Device,
+    H: int,
+    W: int,
+    window_size: int,
+    C: int,
+    run_attn_per_window,
+    memory_config=ttnn.DRAM_MEMORY_CONFIG,
+) -> ttnn.Tensor:
+    """Partition (1,1,S,C) into windows on TT, run run_attn_per_window(win_11SW) per window, unpartition. Uses ROW_MAJOR for reshape/permute (non-32 dims)."""
+    pad_h = (window_size - H % window_size) % window_size
+    pad_w = (window_size - W % window_size) % window_size
+    Hp, Wp = H + pad_h, W + pad_w
+    S_padded = Hp * Wp
+
+    if pad_h > 0 or pad_w > 0:
+        x_t = ttnn.to_torch(x_11SH)
+        if x_t.device.type != "cpu":
+            x_t = x_t.cpu()
+        x_t = x_t.reshape(1, H, W, C)
+        x_t = F.pad(x_t, (0, 0, 0, pad_w, 0, pad_h))
+        x_t = x_t.reshape(1, S_padded, C)
+        x_11SH = ttnn.from_torch(
+            x_t.unsqueeze(1).to(torch.bfloat16),
+            dtype=ttnn.bfloat16,
+            device=device,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=memory_config,
+        )
+
+    # ROW_MAJOR so we can reshape to (1, Hp, Wp, C) with Hp, Wp not multiples of 32
+    x_rm = ttnn.to_layout(x_11SH, ttnn.ROW_MAJOR_LAYOUT, memory_config=memory_config)
+    ttnn.deallocate(x_11SH)
+    x_rm = ttnn.reshape(x_rm, (1, Hp, Wp, C))
+
+    nH, nW = Hp // window_size, Wp // window_size
+    ws = window_size
+    # (1, Hp, Wp, C) -> (1, nH, ws, nW, ws, C)
+    x_rm = ttnn.reshape(x_rm, (1, nH, ws, nW, ws, C))
+    # (1, nH, nW, ws, ws, C)
+    x_rm = ttnn.permute(x_rm, (0, 1, 3, 2, 4, 5))
+    # (1, num_windows, ws*ws, C)
+    num_windows = nH * nW
+    x_rm = ttnn.reshape(x_rm, (1, num_windows, ws * ws, C))
+
+    out_list = []
+    for i in range(num_windows):
+        win = ttnn.slice(
+            x_rm,
+            (0, i, 0, 0),
+            (1, i + 1, ws * ws, C),
+            memory_config=memory_config,
+        )
+        win = ttnn.reshape(win, (1, 1, ws * ws, C))
+        win = ttnn.to_layout(win, ttnn.TILE_LAYOUT, memory_config=memory_config)
+        out_i = run_attn_per_window(win)
+        ttnn.deallocate(win)
+        out_i = ttnn.to_layout(out_i, ttnn.ROW_MAJOR_LAYOUT, memory_config=memory_config)
+        out_list.append(out_i)
+    ttnn.deallocate(x_rm)
+
+    out_cat = ttnn.concat(out_list, dim=1, memory_config=memory_config)
+    for t in out_list:
+        ttnn.deallocate(t)
+    # (1, nH, nW, ws, ws, C)
+    out_cat = ttnn.reshape(out_cat, (1, nH, nW, ws, ws, C))
+    out_cat = ttnn.permute(out_cat, (0, 1, 3, 2, 4, 5))
+    out_cat = ttnn.reshape(out_cat, (1, Hp, Wp, C))
+    if Hp > H or Wp > W:
+        out_cat = ttnn.slice(
+            out_cat,
+            (0, 0, 0, 0),
+            (1, H, W, C),
+            memory_config=memory_config,
+        )
+    out_cat = ttnn.reshape(out_cat, (1, 1, H * W, C))
+    out_tt = ttnn.to_layout(out_cat, ttnn.TILE_LAYOUT, memory_config=memory_config)
+    ttnn.deallocate(out_cat)
+    return out_tt
+
+
 # --------------- Block (norm -> attention -> add -> norm -> mlp -> add) ---------------
 
 
@@ -533,47 +631,20 @@ class TtSamBlock(LightweightModule):
         return out
 
     def _forward_window_attention(self, x_11SH: ttnn.Tensor) -> ttnn.Tensor:
-        """Partition x into windows, run TT attention per window, unpartition. x: (1, 1, S, C)."""
+        """Partition x into windows on TT, run TT attention per window, unpartition on TT. x: (1, 1, S, C)."""
         H = W = self.grid_size
         window_size = self.window_size
         C = x_11SH.shape[-1]
-        # fallback: window partition on host (to_torch, _window_partition_torch), then from_torch per window
-        x_t = ttnn.to_torch(x_11SH)
-        if x_t.device.type != "cpu":
-            x_t = x_t.cpu()
-        x_t = x_t.reshape(1, H, W, C)
-        windows, pad_hw = _window_partition_torch(x_t, window_size)
-        num_windows = windows.shape[0]
-        out_windows = []
-        for i in range(num_windows):
-            win = windows[i : i + 1]
-            win_flat = win.reshape(1, window_size * window_size, C)
-            win_tt = ttnn.from_torch(
-                win_flat.unsqueeze(1).to(torch.bfloat16),
-                dtype=ttnn.bfloat16,
-                device=self.device,
-                layout=ttnn.TILE_LAYOUT,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-            )
-            out_tt = self.attn(win_tt)
-            out_t = ttnn.to_torch(out_tt)
-            ttnn.deallocate(out_tt)
-            ttnn.deallocate(win_tt)
-            if out_t.device.type != "cpu":
-                out_t = out_t.cpu()
-            out_windows.append(out_t.reshape(1, window_size, window_size, C))
-        out_stack = torch.cat(out_windows, dim=0)
-        out_unpart = _window_unpartition_torch(out_stack, window_size, pad_hw, (H, W))
-        out_flat = out_unpart.reshape(1, H * W, C)
-        # fallback: unpartition on host, then from_torch back to device
-        out_tt = ttnn.from_torch(
-            out_flat.unsqueeze(1).to(torch.bfloat16),
-            dtype=ttnn.bfloat16,
+        return _window_partition_unpartition_tt(
+            x_11SH,
             device=self.device,
-            layout=ttnn.TILE_LAYOUT,
+            H=H,
+            W=W,
+            window_size=window_size,
+            C=C,
+            run_attn_per_window=self.attn,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
-        return out_tt
 
 
 # --------------- PatchEmbed (ttnn.conv2d) ---------------
@@ -939,12 +1010,9 @@ class TtImageEncoderViT(LightweightModule):
             x = ttnn.permute(x, (0, 2, 3, 1))
         x = self.patch_embed(x)
         if self.pos_embed is not None:
-            # fallback: pos_embed add on host (to_torch, get_abs_pos_sam or bicubic interpolate, add, from_torch)
-            b, h, w, c = x.shape[0], x.shape[1], x.shape[2], x.shape[3]
+            # Pos: only interpolate on host (bicubic); add + reshape on TT.
             grid = self.grid_size
-            x_torch = ttnn.to_torch(x)
-            if (h, w) != (grid, grid) and h * w == grid * grid:
-                x_torch = x_torch.reshape(b, grid, grid, c)
+            b, h, w, c = x.shape[0], x.shape[1], x.shape[2], x.shape[3]
             if self._get_abs_pos_sam is not None:
                 pos_torch = self._get_abs_pos_sam(self.pos_embed, grid)
             else:
@@ -959,21 +1027,30 @@ class TtImageEncoderViT(LightweightModule):
                             antialias=True,
                             align_corners=False,
                         )
-                        .to(x_torch.dtype)
+                        .to(torch.bfloat16)
                         .permute(0, 2, 3, 1)
                     )
-            pos_torch = pos_torch.expand(b, grid, grid, c).clone()
-            x_torch = x_torch + pos_torch
-            x = ttnn.from_torch(
-                x_torch,
+            pos_torch = pos_torch.expand(b, grid, grid, c).clone().to(torch.bfloat16)
+            pos_tt = ttnn.from_torch(
+                pos_torch,
                 device=self.device,
                 dtype=ttnn.bfloat16,
                 layout=ttnn.ROW_MAJOR_LAYOUT,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
+            # x on device: ensure (1, grid, grid, c) for add (use ROW_MAJOR for non-32 dims)
+            x_rm = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+            ttnn.deallocate(x)
+            if (h, w) != (grid, grid) and h * w == grid * grid:
+                x_rm = ttnn.reshape(x_rm, (1, grid, grid, c))
+            x = ttnn.add(x_rm, pos_tt)
+            ttnn.deallocate(x_rm)
+            ttnn.deallocate(pos_tt)
+            x = ttnn.reshape(x, (1, 1, grid * grid, c))
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        b, h, w, c = x.shape
-        x = ttnn.reshape(x, (1, 1, b * h * w, c))
+        else:
+            b, h, w, c = x.shape[0], x.shape[1], x.shape[2], x.shape[3]
+            x = ttnn.reshape(x, (1, 1, b * h * w, c))
         for blk in self.blocks:
             x = blk(x)
         # fallback: neck + net_2 + net_3 in PyTorch to avoid device L1 OOM

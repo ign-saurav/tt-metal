@@ -11,7 +11,7 @@ from loguru import logger
 from tests.ttnn.utils_for_testing import check_with_pcc
 from models.experimental.deepseek_ocr.tt.tt_sam import run_tt_sam
 
-PCC_THRESHOLD = 0.90
+PCC_THRESHOLD = 0.99
 MODEL_NAME = "deepseek-ai/DeepSeek-OCR"
 
 
