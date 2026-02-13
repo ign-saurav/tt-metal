@@ -208,3 +208,8 @@ class Qwen3OmniVisionModelArgs:
 
         block = Qwen3OmniMoeVisionBlock(config=self.hf_config.vision_config)
         return block.mlp
+
+    def reference_vision_model(self):
+        from reference.torch_modeling_qwen3_omni_moe import Qwen3OmniMoeVisionEncoder
+
+        return Qwen3OmniMoeVisionEncoder(config=self.hf_config.vision_config)

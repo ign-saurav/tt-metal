@@ -1101,9 +1101,6 @@ class Qwen3OmniMoeVisionEncoder(Qwen3OmniMoePreTrainedModel):
     }
 
     def __init__(self, config, *inputs, **kwargs) -> None:
-        import pdb
-
-        pdb.set_trace()
         super().__init__(config, *inputs, **kwargs)
         self.merger_list = nn.ModuleList(
             [
