@@ -70,7 +70,8 @@ class GraniteSpeechTransformer(Transformer):
             tokens_embd = ttnn.unsqueeze_to_4D(tokens)
 
         # Slice the rot mats to the prefill seqlen
-        mat_len = self.rope_setup.cos_matrix.shape[2]
+        # Use cos_matrix_prefill/sin_matrix_prefill which are TILE_LAYOUT (required by rotary_embedding_llama)
+        mat_len = self.rope_setup.cos_matrix_prefill.shape[2]
         # Use last_token_idx if provided, otherwise fall back to S (padded sequence length)
         seq_len = last_token_idx + 1 if last_token_idx is not None else S
         assert mat_len >= seq_len, f"Seqence length {seq_len} exceeds max seq len {mat_len}"
@@ -85,8 +86,8 @@ class GraniteSpeechTransformer(Transformer):
         # We set slice_end to max_seq_len so that we don't create a new tensor for the whole cos_matrix and sin_matrix ; in case of trace, we will use the whole matrix for all seq_lens supported by trace
         slice_start = 0 if trace_enabled else start_pos
         slice_end = self.args.max_seq_len if trace_enabled else min(mat_len, required_end)
-        cos_slice = self.rope_setup.cos_matrix[:, :, slice_start:slice_end, :]
-        sin_slice = self.rope_setup.sin_matrix[:, :, slice_start:slice_end, :]
+        cos_slice = self.rope_setup.cos_matrix_prefill[:, :, slice_start:slice_end, :]
+        sin_slice = self.rope_setup.sin_matrix_prefill[:, :, slice_start:slice_end, :]
         if pad_len > 0:
             # padding: [(before, after), ...] for each dim; pad at end of 3rd dim (dim=2) by pad_len
             padding = [(0, 0)] * 4
@@ -99,7 +100,8 @@ class GraniteSpeechTransformer(Transformer):
         ]
 
         if hasattr(self, "rope_local_setup"):
-            local_mat_len = self.rope_local_setup.cos_matrix.shape[2]
+            # Use cos_matrix_prefill/sin_matrix_prefill which are TILE_LAYOUT (required by rotary_embedding_llama)
+            local_mat_len = self.rope_local_setup.cos_matrix_prefill.shape[2]
             local_required_end = start_pos + S
             if local_required_end > local_mat_len:
                 local_pad_len = local_required_end - local_mat_len
@@ -107,8 +109,8 @@ class GraniteSpeechTransformer(Transformer):
                 local_pad_len = 0
 
             local_slice_end = self.args.max_seq_len if trace_enabled else min(local_mat_len, local_required_end)
-            local_cos_slice = self.rope_local_setup.cos_matrix[:, :, slice_start:local_slice_end, :]
-            local_sin_slice = self.rope_local_setup.sin_matrix[:, :, slice_start:local_slice_end, :]
+            local_cos_slice = self.rope_local_setup.cos_matrix_prefill[:, :, slice_start:local_slice_end, :]
+            local_sin_slice = self.rope_local_setup.sin_matrix_prefill[:, :, slice_start:local_slice_end, :]
             if local_pad_len > 0:
                 # pad at end of 3rd dim (dim=2) by local_pad_len
                 local_padding = [(0, 0)] * 4
