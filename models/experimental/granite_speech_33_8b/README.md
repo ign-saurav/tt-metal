@@ -55,3 +55,4 @@ Wormhole(N150),
 ## Issues
 
 - [36541](https://github.com/tenstorrent/tt-metal/issues/36541) - N300 hang issue
+- [37902](https://github.com/tenstorrent/tt-metal/issues/37902) - Precision accumulation issue
