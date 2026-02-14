@@ -143,7 +143,7 @@ def draw_detections(
     # Save output
     os.makedirs(output_path, exist_ok=True)
     output_file = os.path.join(output_path, f"{model_name}.png")
-    debugger.save_all_imgs(output_path, prefix=model_name)
+    debugger.save_all_imgs(output_path, prefix="")  # img_id already contains model_name
     logger.info(f"Saved output to {output_file} with {len(detections)} detections")
 
     return output_file

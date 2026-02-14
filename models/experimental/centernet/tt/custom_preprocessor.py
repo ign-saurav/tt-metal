@@ -189,15 +189,6 @@ def _extract_dla_up(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
     return parameters
 
 
-def fill_fc_weights(layers):
-    """Initialize weights with std=0.001 and biases to 0."""
-    for m in layers.modules():
-        if isinstance(m, nn.Conv2d):
-            nn.init.normal_(m.weight, std=0.001)
-            if m.bias is not None:
-                nn.init.constant_(m.bias, 0)
-
-
 def _extract_dla_seg(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
     """Extract and preprocess DLASeg model parameters."""
     from models.experimental.centernet.reference.dlav0 import DLASeg
@@ -231,27 +222,11 @@ def _extract_dla_seg(model, parameters, dtype=ttnn.bfloat16, mesh_mapper=None):
             head_params["conv2"]["bias"] = ttnn.from_torch(
                 conv2_bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper
             )
-
-            fill_fc_weights(head_module)
-
-            if "hm" in head_name:
-                head_module[-1].bias.data.fill_(-2.19)
-                head_params["conv2"]["bias"] = ttnn.from_torch(
-                    head_module[2].bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper
-                )
         else:
             conv_weight = head_module.weight
             conv_bias = head_module.bias
             head_params["weight"] = ttnn.from_torch(conv_weight, dtype=dtype, mesh_mapper=mesh_mapper)
             head_params["bias"] = ttnn.from_torch(conv_bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper)
-
-            fill_fc_weights(head_module)
-
-            if "hm" in head_name:
-                head_module.bias.data.fill_(-2.19)
-                head_params["bias"] = ttnn.from_torch(
-                    head_module.bias.reshape(1, 1, 1, -1), dtype=dtype, mesh_mapper=mesh_mapper
-                )
 
         parameters["heads"][head_name] = head_params
 

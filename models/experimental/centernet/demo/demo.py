@@ -6,7 +6,7 @@ import argparse
 import os
 import time
 from pathlib import Path
-from typing import Any, Optional, Dict
+from typing import Any, Optional
 
 import torch
 import ttnn
@@ -154,88 +154,6 @@ class Demo:
 
         logger.info("TTNN inference completed in {:.4f}s", time.time() - start)
         return outputs
-
-    def preprocess_image(self, image_path: str):
-        """Preprocess image for CenterNet using original CenterNet preprocessing."""
-        img = np.array(Image.open(image_path).convert("RGB"))
-        height, width = img.shape[0], img.shape[1]
-
-        c = np.array([width / 2.0, height / 2.0], dtype=np.float32)
-        s = max(height, width) * 1.0
-        input_h, input_w = self.input_size, self.input_size
-
-        trans_input = get_affine_transform(c, s, 0, [input_w, input_h])
-        inp = cv2.warpAffine(img, trans_input, (input_w, input_h), flags=cv2.INTER_LINEAR)
-
-        inp = inp.astype(np.float32) / 255.0
-        inp = (inp - np.array([0.408, 0.447, 0.470])) / np.array([0.289, 0.274, 0.278])
-        inp = inp.transpose(2, 0, 1)
-
-        torch_input = torch.from_numpy(inp).unsqueeze(0).float()
-
-        ttnn_input = None
-        if self.ttnn_device is not None:
-            ttnn_input = ttnn.from_torch(torch_input.permute(0, 2, 3, 1), dtype=ttnn.bfloat16)
-            # Keep on host for pipeline - don't move to device yet
-
-        meta = {
-            "c": c,
-            "s": s,
-            "out_height": self.input_size // self.down_ratio,
-            "out_width": self.input_size // self.down_ratio,
-        }
-        return torch_input, ttnn_input, meta
-
-    def postprocess_output(self, output_dict: Dict[str, torch.Tensor], K=100):
-        """Post-process model outputs to get detections using CenterNet decode."""
-        hm = output_dict["hm"]
-        wh = output_dict["wh"]
-        reg = output_dict["reg"]
-        detections = ctdet_decode(hm, wh, reg, K=K)
-        return detections
-
-    def draw_detections(
-        self,
-        image_path: str,
-        output_path: str,
-        detections: torch.Tensor,
-        model_name: str,
-        meta: dict = None,
-        score_threshold: float = 0.3,
-    ):
-        """Draw bounding boxes on image using CenterNet's Debugger."""
-        debugger = Debugger(dataset="coco", theme="black")
-        img = cv2.imread(image_path)
-
-        detections = detections[0].cpu().numpy()
-        valid_mask = detections[:, 4] > score_threshold
-        detections = detections[valid_mask]
-
-        logger.info(f"Total detections: {len(detections)}")
-
-        if meta is not None:
-            c = meta["c"]
-            s = meta["s"]
-            out_h = meta["out_height"]
-            out_w = meta["out_width"]
-
-            for i in range(len(detections)):
-                detections[i, :2] = transform_preds(detections[i, :2].reshape(1, 2), c, s, (out_w, out_h)).reshape(-1)
-                detections[i, 2:4] = transform_preds(detections[i, 2:4].reshape(1, 2), c, s, (out_w, out_h)).reshape(-1)
-
-        debugger.add_img(img, img_id=model_name)
-        for det in detections:
-            x1, y1, x2, y2, score, cls_id = det
-            cls_id = int(cls_id)
-            logger.info(
-                f"Detection: class={cls_id} ({debugger.names[cls_id]}), score={score:.3f}, bbox=[{x1:.1f}, {y1:.1f}, {x2:.1f}, {y2:.1f}]"
-            )
-            debugger.add_coco_bbox([int(x1), int(y1), int(x2), int(y2)], cls_id, score, img_id=model_name)
-
-        os.makedirs(output_path, exist_ok=True)
-        output_file = os.path.join(output_path, f"{model_name}.png")
-        cv2.imwrite(output_file, debugger.imgs[model_name])
-        logger.info(f"Saved output to {output_file} with {len(detections)} detections")
 
     def run_demo(self, image_path: str, weights_path: str, output_dir: str) -> None:
         """Run the full demo pipeline end-to-end."""

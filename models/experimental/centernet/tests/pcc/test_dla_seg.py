@@ -86,13 +86,13 @@ def test_dla_seg(device):
     for head_name in heads:
         if head_name in pytorch_output[0] and head_name in tt_output_torch:
             passing, pcc_value = comp_pcc(
-                pytorch_output[0][head_name], tt_output_torch[head_name], pcc=0.94 if head_name == "reg" else 0.99
+                pytorch_output[0][head_name], tt_output_torch[head_name], pcc=0.97 if head_name == "reg" else 0.99
             )
             logger.info(f"DLASeg Head '{head_name}' PCC: {pcc_value}")
             if not passing:
                 all_passed = False
                 logger.warning(
-                    f"Head '{head_name}' PCC check failed: {pcc_value} < {0.94 if head_name == 'reg' else 0.99}"
+                    f"Head '{head_name}' PCC check failed: {pcc_value} < {0.97 if head_name == 'reg' else 0.99}"
                 )
         else:
             all_passed = False

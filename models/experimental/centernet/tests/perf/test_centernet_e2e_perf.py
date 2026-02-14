@@ -18,14 +18,6 @@ from ttnn.model_preprocessing import preprocess_model_parameters, infer_ttnn_mod
 from models.demos.utils.common_demo_utils import get_mesh_mappers
 
 
-def pad_channels(x, target_channels):
-    N, C, H, W = x.shape
-    if C >= target_channels:
-        return x
-    pad = torch.zeros(N, target_channels - C, H, W, device=x.device, dtype=x.dtype)
-    return torch.cat([x, pad], dim=1)
-
-
 @run_for_wormhole_b0()
 @pytest.mark.parametrize(
     "device_params",
@@ -33,7 +25,7 @@ def pad_channels(x, target_channels):
     indirect=True,
 )
 @pytest.mark.parametrize("num_iterations", [32])
-@pytest.mark.parametrize("batch_size, size, expected_compile_time, expected_throughput_fps", [(1, 512, 30.0, 90.0)])
+@pytest.mark.parametrize("batch_size, size, expected_compile_time, expected_throughput_fps", [(1, 512, 30.0, 91.0)])
 @pytest.mark.models_performance_bare_metal
 def test_centernet_e2e_performant(
     device,
