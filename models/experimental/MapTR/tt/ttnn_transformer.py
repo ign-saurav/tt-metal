@@ -1,11 +1,9 @@
 # SPDX-FileCopyrightText: © 2026 Tenstorrent AI ULC
 # SPDX-License-Identifier: Apache-2.0
 
-
 import torch
 import ttnn
 import numpy as np
-from scipy.ndimage import rotate as scipy_rotate
 from typing import List, Optional, Tuple
 
 
@@ -142,20 +140,21 @@ class TtMapTRPerceptionTransformer:
             if prev_bev.shape[1] == bev_h * bev_w:
                 prev_bev = ttnn.permute(prev_bev, (1, 0, 2))
             if self.rotate_prev_bev:
-                prev_bev_torch = ttnn.to_torch(prev_bev)
-                for i in range(bs):
-                    rotation_angle = img_metas[i].get("can_bus", np.zeros(18))[-1]
-                    tmp_prev_bev = prev_bev_torch[:, i].reshape(bev_h, bev_w, -1).permute(2, 0, 1)
-                    # Use scipy for rotation (operates on numpy)
-                    tmp_prev_bev_np = tmp_prev_bev.float().numpy()
-                    tmp_prev_bev_np = scipy_rotate(
-                        tmp_prev_bev_np, rotation_angle, axes=(1, 2), reshape=False, order=1, mode="constant", cval=0.0
-                    )
-                    tmp_prev_bev = torch.from_numpy(tmp_prev_bev_np).permute(1, 2, 0).reshape(bev_h * bev_w, -1)
-                    prev_bev_torch[:, i] = tmp_prev_bev
-                prev_bev = ttnn.from_torch(
-                    prev_bev_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
+                # Extract rotation angles for the batch
+                rotation_angles = [img_metas[i].get("can_bus", np.zeros(18))[-1] for i in range(bs)]
+
+                # Reshape to NHWC format for batched rotation: (bs, bev_h, bev_w, C)
+                prev_bev_nhwc = ttnn.permute(prev_bev, (1, 0, 2))  # (bev_h*bev_w, bs, C) -> (bs, bev_h*bev_w, C)
+                prev_bev_nhwc = ttnn.reshape(prev_bev_nhwc, (bs, bev_h, bev_w, -1))
+
+                # Apply batched rotation with bilinear interpolation (order=1)
+                rotated_nhwc = ttnn.rotate(
+                    prev_bev_nhwc, angle=rotation_angles, interpolation_mode="bilinear", fill=0.0
                 )
+
+                # Reshape back to original format: (bev_h*bev_w, bs, C)
+                prev_bev = ttnn.reshape(rotated_nhwc, (bs, bev_h * bev_w, -1))
+                prev_bev = ttnn.permute(prev_bev, (1, 0, 2))
 
         # Convert list to numpy array
         can_bus_list = [each.get("can_bus", np.zeros(18)) for each in img_metas]
