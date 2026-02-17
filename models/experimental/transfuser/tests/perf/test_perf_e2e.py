@@ -25,6 +25,23 @@ from models.perf.perf_utils import prep_perf_report
 from models.tt_cnn.tt.pipeline import PipelineConfig, create_pipeline_from_config
 
 
+def get_mesh_mappers(device):
+    # Single-device path returns no sharding/concat mappers
+    try:
+        num = device.get_num_devices()
+    except Exception:
+        # Some builds expose .num_devices
+        num = getattr(device, "num_devices", 1)
+
+    if num != 1:
+        return (
+            ttnn.ShardTensorToMesh(device, dim=0),
+            None,
+            ttnn.ConcatMeshToTensor(device, dim=0),
+        )
+    return None, None, None
+
+
 def create_lidar_center_net_head_preprocessor(device, weight_dtype=ttnn.bfloat16):
     def custom_preprocessor(torch_model, name, ttnn_module_args):
         parameters = {}
@@ -117,18 +134,11 @@ def create_transfuser_pipeline_model(ttnn_model, tt_image, tt_lidar_bev, tt_velo
     """Wrapper to adapt transfuser model inputsfor pipeline interface."""
 
     def run(pipeline_input):
-        logger.info(f"RUN")
         ttnn.deallocate(pipeline_input)
         tt_features, tt_fused_features = ttnn_model.forward_ego(tt_image, tt_lidar_bev, tt_velocity, target_point)
         return [tt_features, tt_fused_features]
 
     return run
-
-
-"""
-        PYTEST E2E transfuser
-"""
-SEED = 42
 
 
 @pytest.mark.parametrize(
@@ -147,6 +157,7 @@ SEED = 42
 @pytest.mark.parametrize("lidar_architecture", ["regnety_032"])
 @pytest.mark.parametrize("n_layer", [4])
 @pytest.mark.parametrize("frame", ["0120"])
+@pytest.mark.parametrize("SEED", [42])
 @pytest.mark.parametrize("use_optimized_self_attn", [False])
 @pytest.mark.parametrize(
     "batch_size, expected_compile_time, expected_throughput_fps",
@@ -159,6 +170,7 @@ def test_perf_transfuser_ttnn(
     lidar_architecture,
     n_layer,
     frame,
+    SEED,
     use_optimized_self_attn,
     batch_size,
     expected_compile_time,
@@ -166,6 +178,7 @@ def test_perf_transfuser_ttnn(
 ):
     torch.manual_seed(SEED)
     torch.use_deterministic_algorithms(True)
+    inputs_mesh_mapper, weights_mesh_mapper, output_mesh_composer = get_mesh_mappers(device)
 
     data_root = ensure_scenario3_town01_curved_route0()
     weights_path = ensure_transfuser_checkpoint_2022()
@@ -221,23 +234,12 @@ def test_perf_transfuser_ttnn(
         ],
     )
     ref_layer.load_state_dict(modified_state_dict, strict=True)
-
-    # with torch.no_grad():
-    #     (
-    #         ref_fused_features,
-    #         ref_feature,
-    #         pred_wp,
-    #         ref_head_results,
-    #         ref_boxes,
-    #         ref_rotated_bboxes,
-    #     ) = ref_layer.forward_ego(image, lidar_bev, target_point, velocity)
-
     torch_model = ref_layer._model
 
     # Preprocess parameters for TTNN
     parameters = preprocess_model_parameters(
         initialize_model=lambda: torch_model,
-        custom_preprocessor=create_custom_mesh_preprocessor(None),
+        custom_preprocessor=create_custom_mesh_preprocessor(weights_mesh_mapper),
         device=None,
     )
 
@@ -279,46 +281,78 @@ def test_perf_transfuser_ttnn(
         image.permute(0, 2, 3, 1),
         dtype=ttnn.bfloat16,
         device=device,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=inputs_mesh_mapper,
     )
+    # Pad the last dimension to a multiple of 32 before converting to TTNN
+    B, C, H, W = lidar_bev.shape
+    pad_c = (32 - C % 32) % 32
+    if pad_c > 0:
+        zeros = torch.zeros(B, pad_c, H, W, dtype=lidar_bev.dtype, device=lidar_bev.device)
+        lidar_bev_padded = torch.cat([lidar_bev, zeros], dim=1)
+    else:
+        lidar_bev_padded = lidar_bev
+
+    tt_lidar_input_pipeline = ttnn.from_torch(
+        lidar_bev_padded.permute(0, 2, 3, 1),
+        dtype=ttnn.bfloat16,
+        layout=ttnn.TILE_LAYOUT,
+        device=device,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=inputs_mesh_mapper,
+    )
+
     tt_lidar_input = ttnn.from_torch(
         lidar_bev.permute(0, 2, 3, 1),
         dtype=ttnn.bfloat16,
         layout=ttnn.TILE_LAYOUT,
         device=device,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=inputs_mesh_mapper,
     )
-    tt_velocity_input = ttnn.from_torch(velocity, device=device, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT)
 
-    image_shape = tt_image_input.shape
+    tt_velocity_input = ttnn.from_torch(
+        velocity,
+        device=device,
+        dtype=ttnn.bfloat16,
+        layout=ttnn.ROW_MAJOR_LAYOUT,
+        memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        mesh_mapper=inputs_mesh_mapper,
+    )
+
+    input_pipline = tt_lidar_input_pipeline
+    image_shape = input_pipline.shape
     dram_grid_size = device.dram_grid_size()
 
-    # Calculate physical 2D dimensions for WIDTH_SHARDED layout
+    # Calculate physical 2D dimensions for HEIGHT_SHARDED layout
     width = image_shape[-1]
     volume = image_shape[0] * image_shape[1] * image_shape[2] * image_shape[3]
     physical_height = volume // width
-    max_cores = dram_grid_size.x
+    max_cores = 8
 
     # Find optimal cores ensuring tile-aligned shards (multiple of 32)
     dram_cores = 1
     for cores in range(max_cores, 0, -1):
-        if width % cores == 0 and (width // cores) % 32 == 0:
+        if physical_height % cores == 0 and (physical_height // cores) % 32 == 0:
             dram_cores = cores
             break
 
     # Create sharded memory configs for DRAM and L1
-    shard_width = width // dram_cores
+
+    shard_height = physical_height // dram_cores
     dram_shard_spec = ttnn.ShardSpec(
         ttnn.CoreRangeSet({ttnn.CoreRange(ttnn.CoreCoord(0, 0), ttnn.CoreCoord(dram_cores - 1, 0))}),
-        [physical_height, shard_width],
+        [shard_height, width],
         ttnn.ShardOrientation.ROW_MAJOR,
     )
     dram_input_memory_config = ttnn.MemoryConfig(
-        ttnn.TensorMemoryLayout.WIDTH_SHARDED, ttnn.BufferType.DRAM, dram_shard_spec
+        ttnn.TensorMemoryLayout.HEIGHT_SHARDED, ttnn.BufferType.DRAM, dram_shard_spec
     )
 
     l1_input_memory_config = ttnn.create_sharded_memory_config(
-        shape=(physical_height, shard_width),
+        shape=(shard_height, width),
         core_grid=ttnn.CoreGrid(y=1, x=dram_cores),
-        strategy=ttnn.ShardStrategy.WIDTH,
+        strategy=ttnn.ShardStrategy.HEIGHT,
         orientation=ttnn.ShardOrientation.ROW_MAJOR,
         use_height_and_width_as_shard_shape=True,
     )
@@ -327,7 +361,7 @@ def test_perf_transfuser_ttnn(
         ttnn_model, tt_image_input, tt_lidar_input, tt_velocity_input, target_point
     )
     config_pipeline = PipelineConfig(
-        use_trace=True, num_command_queues=2, all_transfers_on_separate_command_queue=False
+        use_trace=False, num_command_queues=2, all_transfers_on_separate_command_queue=False
     )
     pipeline = create_pipeline_from_config(
         config_pipeline,
@@ -337,7 +371,7 @@ def test_perf_transfuser_ttnn(
         l1_input_memory_config=l1_input_memory_config,
     )
 
-    image_host = tt_image_input.cpu()
+    image_host = input_pipline.cpu()
     host_inputs = [image_host] * num_iterations
 
     start = time.time()
