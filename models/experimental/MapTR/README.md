@@ -115,7 +115,12 @@ MapTR/
 
 1. Ensure you're in the TTNN environment.
 
-2. The checkpoint will be automatically downloaded when you run the demo or tests.
+2. Install required Python packages:
+```bash
+pip install pyquaternion nuscenes-devkit gdown
+```
+
+3. The checkpoint will be automatically downloaded when you run the demo or tests.
 
 ## Quick Start
 

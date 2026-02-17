@@ -66,17 +66,42 @@ def load_torch_transformer_model(torch_model: MapTRPerceptionTransformer, weight
     model_state_dict = torch_model.state_dict()
     new_state_dict = {}
 
+    def map_ffn_key(relative_key):
+        """Map model FFN key format to checkpoint key format.
+
+        Model format: ffns.0.layers.0.weight/bias (first linear) and ffns.0.layers.3.weight/bias (second linear)
+        Checkpoint format: ffns.0.layers.0.0.weight/bias (first linear) and ffns.0.layers.1.weight/bias (second linear)
+        """
+        checkpoint_key = relative_key
+        if "ffns.0.layers.0.weight" in relative_key:
+            checkpoint_key = relative_key.replace("ffns.0.layers.0.weight", "ffns.0.layers.0.0.weight")
+        elif "ffns.0.layers.0.bias" in relative_key:
+            checkpoint_key = relative_key.replace("ffns.0.layers.0.bias", "ffns.0.layers.0.0.bias")
+        elif "ffns.0.layers.3.weight" in relative_key:
+            checkpoint_key = relative_key.replace("ffns.0.layers.3.weight", "ffns.0.layers.1.weight")
+        elif "ffns.0.layers.3.bias" in relative_key:
+            checkpoint_key = relative_key.replace("ffns.0.layers.3.bias", "ffns.0.layers.1.bias")
+        return checkpoint_key
+
     for model_key in model_state_dict.keys():
         if model_key.startswith("encoder.layers."):
             encoder_key = model_key[len("encoder.layers.") :]
-            if encoder_key in encoder_weights:
+            # Map FFN keys from model format to checkpoint format, then try both mapped and original keys
+            checkpoint_key = map_ffn_key(encoder_key)
+            if checkpoint_key in encoder_weights:
+                new_state_dict[model_key] = encoder_weights[checkpoint_key]
+            elif encoder_key in encoder_weights:
                 new_state_dict[model_key] = encoder_weights[encoder_key]
             else:
                 logger.warning(f"Encoder weight not found: {model_key}")
                 new_state_dict[model_key] = model_state_dict[model_key]
         elif model_key.startswith("decoder.layers."):
             decoder_key = model_key[len("decoder.layers.") :]
-            if decoder_key in decoder_weights:
+            # Map FFN keys from model format to checkpoint format, then try both mapped and original keys
+            checkpoint_key = map_ffn_key(decoder_key)
+            if checkpoint_key in decoder_weights:
+                new_state_dict[model_key] = decoder_weights[checkpoint_key]
+            elif decoder_key in decoder_weights:
                 new_state_dict[model_key] = decoder_weights[decoder_key]
             else:
                 logger.warning(f"Decoder weight not found: {model_key}")

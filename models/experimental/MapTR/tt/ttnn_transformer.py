@@ -132,8 +132,9 @@ class TtMapTRPerceptionTransformer:
         shift_y = shift_y * self.use_shift
         shift_x = shift_x * self.use_shift
 
-        # Create shift tensor (vadv2 pattern: use new_tensor then permute)
-        shift = bev_queries_torch.new_tensor([shift_x, shift_y]).permute(1, 0)  # [bs, 2]
+        # Convert list to numpy array
+        shift_array = np.array([shift_x, shift_y])  # [2, bs]
+        shift = bev_queries_torch.new_tensor(shift_array).permute(1, 0)  # [bs, 2]
         shift = ttnn.from_torch(shift, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
 
         # Handle previous BEV features with rotation
@@ -156,8 +157,10 @@ class TtMapTRPerceptionTransformer:
                     prev_bev_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
                 )
 
-        # Add CAN bus signals (vadv2 pattern: direct linear layers)
-        can_bus = bev_queries_torch.new_tensor([each.get("can_bus", np.zeros(18)) for each in img_metas])
+        # Convert list to numpy array
+        can_bus_list = [each.get("can_bus", np.zeros(18)) for each in img_metas]
+        can_bus_array = np.array(can_bus_list)
+        can_bus = bev_queries_torch.new_tensor(can_bus_array)
         can_bus = ttnn.from_torch(can_bus, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
         bev_queries = ttnn.from_torch(
             bev_queries_torch, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device
@@ -215,11 +218,11 @@ class TtMapTRPerceptionTransformer:
         # Convert spatial shapes to tensor (vadv2 pattern)
         spatial_shapes_tensor = torch.as_tensor(spatial_shapes, dtype=torch.long, device="cpu")
         spatial_shapes_ttnn = ttnn.from_torch(
-            spatial_shapes_tensor, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
+            spatial_shapes_tensor, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
         )
 
         # Level start index (simple zeros for single level)
-        level_start_index = ttnn.zeros((1,), dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT, device=self.device)
+        level_start_index = ttnn.zeros((1,), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
 
         # Call encoder
         bev_embed = self.encoder(
@@ -383,17 +386,17 @@ class TtMapTRPerceptionTransformer:
         spatial_shapes = ttnn.from_torch(
             spatial_shapes, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
         )
-        level_start_index = ttnn.zeros((1,), dtype=ttnn.uint32, layout=ttnn.TILE_LAYOUT, device=self.device)
+        level_start_index = ttnn.zeros((1,), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=self.device)
 
         # Call decoder
-        # NOTE: decoder expects map_reg_branches, not reg_branches
+        # NOTE: decoder expects map_reg_branches
         inter_states, inter_references = self.decoder(
             query=query,
             key=None,
             value=bev_embed,
             query_pos=query_pos,
             reference_points=reference_points,
-            map_reg_branches=reg_branches,  # Fix: was reg_branches, decoder expects map_reg_branches
+            map_reg_branches=reg_branches,
             cls_branches=cls_branches,
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,

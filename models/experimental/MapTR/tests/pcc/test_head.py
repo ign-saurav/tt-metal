@@ -11,6 +11,7 @@ from loguru import logger
 
 # Import reference MapTRHead from MapTR reference folder
 from models.experimental.MapTR.reference.maptr import MapTRHead
+from models.experimental.MapTR.reference.bevformer_encoder import BEVFormerEncoder  # noqa: F401
 from models.experimental.MapTR.resources.download_chkpoint import ensure_checkpoint_downloaded, MAPTR_WEIGHTS_PATH
 
 # Import TTNN implementation

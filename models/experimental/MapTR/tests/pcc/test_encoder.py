@@ -10,6 +10,8 @@ from loguru import logger
 
 from models.experimental.MapTR.reference.bevformer_encoder import BEVFormerEncoder
 from models.experimental.MapTR.resources.download_chkpoint import ensure_checkpoint_downloaded, MAPTR_WEIGHTS_PATH
+from models.experimental.MapTR.reference.bevformer_temporal_attention import TemporalSelfAttention  # noqa: F401
+from models.experimental.MapTR.reference.bevformer_spatial_attention import SpatialCrossAttention  # noqa: F401
 from models.experimental.MapTR.tt.ttnn_encoder import TtBEVFormerEncoder
 from tests.ttnn.utils_for_testing import assert_with_pcc
 from ttnn.model_preprocessing import (

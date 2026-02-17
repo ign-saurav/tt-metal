@@ -119,11 +119,9 @@ def main():
                         _module_path = _module_dir
                 else:
                     _module_path = "models.experimental.MapTR.projects.mmdet3d_plugin"
-                print(f"Importing plugin from: {_module_path}")
                 plg_lib = importlib.import_module(_module_path)
             except Exception as e:
-                print(f"Warning: Failed to import plugin module {_module_path}: {e}")
-                print("Trying default plugin path...")
+                mmlogger.warning(f"Failed to import plugin module {_module_path}: {e}, trying default plugin path...")
                 _module_path = "models.experimental.MapTR.projects.mmdet3d_plugin"
                 plg_lib = importlib.import_module(_module_path)
 
@@ -154,7 +152,6 @@ def main():
     with open(osp.join(args.show_dir, osp.basename(args.config)), "w") as f:
         json.dump(dict(cfg), f, indent=2)
     mmlogger = get_logger("demo")
-    mmlogger.info(f"DONE create vis_pred dir: {args.show_dir}")
 
     # Generate data files from processing.py instead of loading from external JSON/pickle files
     if write_map_annotations_to_file is not None and write_sample_info_to_file is not None:
@@ -201,8 +198,6 @@ def main():
         shuffle=False,
         nonshuffler_sampler=cfg.data.nonshuffler_sampler,
     )
-    mmlogger.info("Done build test data set")
-
     cfg.model.train_cfg = None
     torch_model = build_model(cfg.model, test_cfg=cfg.get("test_cfg"))
     fp16_cfg = cfg.get("fp16", None)
@@ -214,7 +209,6 @@ def main():
     if checkpoint_path == MAPTR_WEIGHTS_PATH or not os.path.exists(checkpoint_path):
         ensure_checkpoint_downloaded(checkpoint_path)
 
-    mmlogger.info("loading checkpoint")
     checkpoint = load_checkpoint(torch_model, checkpoint_path, map_location="cpu")
     if "CLASSES" in checkpoint.get("meta", {}):
         torch_model.CLASSES = checkpoint["meta"]["CLASSES"]
@@ -224,12 +218,10 @@ def main():
         torch_model.PALETTE = checkpoint["meta"]["PALETTE"]
     elif hasattr(dataset, "PALETTE"):
         torch_model.PALETTE = dataset.PALETTE
-    mmlogger.info("DONE load checkpoint")
     torch_model.eval()
 
     device_params = json.loads(args.device_params)
     device = ttnn.open_device(device_id=0, l1_small_size=device_params.get("l1_small_size", 24576))
-    mmlogger.info("DONE open TTNN device")
 
     bev_h = cfg.bev_h_ if hasattr(cfg, "bev_h_") else 200
     bev_w = cfg.bev_w_ if hasattr(cfg, "bev_w_") else 100
@@ -254,9 +246,6 @@ def main():
                 if isinstance(img_scale, (list, tuple)):
                     expected_img_h, expected_img_w = img_scale[0], img_scale[1]
                 break
-    mmlogger.info(f"Expected input image size: {expected_img_h}x{expected_img_w}")
-
-    mmlogger.info("Creating TTNN model parameters...")
     dummy_input = torch.randn(1, 6, 3, expected_img_h, expected_img_w)
     parameters = create_maptr_model_parameters(
         torch_model,
@@ -264,7 +253,6 @@ def main():
         device,
     )
 
-    mmlogger.info("Creating TTNN MapTR model...")
     tt_model = TtMapTR(
         device=device,
         params=parameters,
@@ -292,7 +280,6 @@ def main():
         num_classes=num_classes,
         embed_dims=embed_dims,
     )
-    mmlogger.info("DONE create TTNN MapTR model")
 
     img_norm_cfg = cfg.img_norm_cfg
 
@@ -303,12 +290,11 @@ def main():
     car_img = Image.open("models/experimental/MapTR/figs/lidar_car.png")
     colors_plt = ["orange", "b", "g"]
 
-    mmlogger.info("BEGIN vis test dataset samples gt label & pred using TTNN model")
-
     bbox_results = []
     mask_results = []
     dataset = data_loader.dataset
     have_mask = False
+    processed_samples = []  # Track processed samples for final output
 
     if len(CANDIDATE) == 0:
         for i in range(min(len(dataset), 10)):
@@ -327,11 +313,16 @@ def main():
             if (
                 "gt_labels_3d" in data
                 and hasattr(data["gt_labels_3d"], "data")
+                and len(data["gt_labels_3d"].data) > 0
                 and len(data["gt_labels_3d"].data[0]) > 0
             ):
                 has_gt = (data["gt_labels_3d"].data[0][0] != -1).any()
             if not has_gt:
-                mmlogger.warning(f"\n empty gt for index {i}, will visualize predictions only")
+                mmlogger.warning(
+                    f"\n empty gt for index {i}, will visualize predictions only. "
+                    f"This may happen if: (1) the sample location has no map annotations, "
+                    f"(2) the vector map data is not available, or (3) the vectormap_pipeline returned empty results."
+                )
 
             if "img" not in data:
                 mmlogger.warning(
@@ -425,13 +416,9 @@ def main():
 
                 if sample_token not in [c.split("_")[0] if "_" in c else c for c in normalized_candidates]:
                     if pts_filename_processed not in normalized_candidates:
-                        mmlogger.debug(f"Skipping sample {pts_filename_processed} - not in CANDIDATE list")
                         continue
 
             pts_filename = pts_filename_processed
-
-            mmlogger.info(f"=== Processing sample {pts_filename} with TTNN model ===")
-            mmlogger.info(f"Data keys: {list(data.keys())}")
 
             def extract_data_value(data, key):
                 if key not in data:
@@ -495,7 +482,6 @@ def main():
             for shape_key in ["img_shape", "ori_shape", "pad_shape"]:
                 if shape_key in constructed_img_metas:
                     shape_val = constructed_img_metas[shape_key]
-                    mmlogger.info(f"{shape_key} raw: {shape_val}")
 
                     if isinstance(shape_val, np.ndarray):
                         if shape_val.ndim == 1 and len(shape_val) >= 2:
@@ -509,15 +495,8 @@ def main():
                             elif not isinstance(shape_val[0], (list, tuple)):
                                 constructed_img_metas[shape_key] = [tuple(shape_val)] * 6
 
-                    mmlogger.info(f"{shape_key} processed: {constructed_img_metas.get(shape_key)}")
-
             if "lidar2img" in constructed_img_metas:
                 lidar2img_val = constructed_img_metas["lidar2img"]
-                mmlogger.info(f"Raw lidar2img type: {type(lidar2img_val)}")
-                if hasattr(lidar2img_val, "shape"):
-                    mmlogger.info(f"Raw lidar2img shape: {lidar2img_val.shape}")
-                elif hasattr(lidar2img_val, "__len__"):
-                    mmlogger.info(f"Raw lidar2img len: {len(lidar2img_val)}")
 
                 while isinstance(lidar2img_val, (list, tuple)) and len(lidar2img_val) == 1:
                     inner = lidar2img_val[0]
@@ -542,15 +521,12 @@ def main():
                     lidar2img_val = lidar2img_val.numpy()
 
                 if isinstance(lidar2img_val, np.ndarray):
-                    mmlogger.info(f"lidar2img after conversion shape: {lidar2img_val.shape}")
-
                     while lidar2img_val.ndim > 3:
                         # Find singleton dimensions to squeeze
                         squeezed = False
                         for dim in range(lidar2img_val.ndim):
                             if lidar2img_val.shape[dim] == 1:
                                 lidar2img_val = np.squeeze(lidar2img_val, axis=dim)
-                                mmlogger.info(f"Squeezed dim {dim}, new shape: {lidar2img_val.shape}")
                                 squeezed = True
                                 break
                         if not squeezed:
@@ -559,10 +535,8 @@ def main():
 
                     if lidar2img_val.ndim == 3 and lidar2img_val.shape[1:] == (4, 4):
                         constructed_img_metas["lidar2img"] = lidar2img_val
-                        mmlogger.info(f"Final lidar2img shape: {lidar2img_val.shape}")
                     elif lidar2img_val.ndim == 2 and lidar2img_val.shape == (4, 4):
                         constructed_img_metas["lidar2img"] = np.stack([lidar2img_val] * 6)
-                        mmlogger.info(f"Final lidar2img shape (duplicated): {constructed_img_metas['lidar2img'].shape}")
                     else:
                         mmlogger.warning(f"Unexpected final lidar2img shape: {lidar2img_val.shape}, using as-is")
                         constructed_img_metas["lidar2img"] = lidar2img_val
@@ -577,54 +551,34 @@ def main():
             else:
                 final_img_metas = [[constructed_img_metas]]
 
-            mmlogger.info(f"Constructed img_metas keys: {list(final_img_metas[0][0].keys())}")
-
             img_tensor = None
             if "img" in data:
                 img_data = data["img"]
-                mmlogger.info(f"=== DEBUG: Image Data Structure ===")
-                mmlogger.info(f"data['img'] type: {type(img_data)}")
 
                 if isinstance(img_data, (list, tuple)) and len(img_data) == 6:
-                    mmlogger.info(f"data['img'] is list of {len(img_data)} camera images")
                     first_elem = img_data[0]
                     if hasattr(first_elem, "shape"):
-                        mmlogger.info(f"Each camera image shape: {first_elem.shape}")
                         img_tensor = torch.stack(list(img_data), dim=0)
-                        mmlogger.info(f"Stacked images shape: {img_tensor.shape}")
 
                         if img_tensor.dim() == 5:
                             img_tensor = img_tensor.squeeze(1)
-                            mmlogger.info(f"After squeeze(1): {img_tensor.shape}")
 
                         if img_tensor.dim() == 4 and img_tensor.shape[-1] == 3:
                             img_tensor = img_tensor.permute(0, 3, 1, 2)
-                            mmlogger.info(f"After permute to (N, C, H, W): {img_tensor.shape}")
                 elif isinstance(img_data, (list, tuple)) and len(img_data) > 0:
-                    mmlogger.info(f"data['img'] is list/tuple of length: {len(img_data)}")
                     if hasattr(img_data[0], "data"):
                         inner_tensor = img_data[0].data[0] if len(img_data[0].data) > 0 else None
                         if inner_tensor is not None:
-                            mmlogger.info(f"DataContainer inner tensor shape: {inner_tensor.shape}")
                             img_tensor = inner_tensor
                     elif hasattr(img_data[0], "shape"):
-                        mmlogger.info(f"data['img'][0] is tensor with shape: {img_data[0].shape}")
                         img_tensor = img_data[0]
                 elif hasattr(img_data, "data"):
-                    mmlogger.info(f"data['img'] is DataContainer")
                     if len(img_data.data) > 0:
-                        inner_tensor = img_data.data[0]
-                        mmlogger.info(f"DataContainer inner tensor shape: {inner_tensor.shape}")
-                        img_tensor = inner_tensor
+                        img_tensor = img_data.data[0]
                 elif hasattr(img_data, "shape"):
-                    mmlogger.info(f"data['img'] is tensor with shape: {img_data.shape}")
                     img_tensor = img_data
 
             if img_tensor is not None:
-                mmlogger.info(
-                    f"Raw image tensor shape: {img_tensor.shape if hasattr(img_tensor, 'shape') else type(img_tensor)}"
-                )
-
                 if len(img_tensor.shape) == 3:
                     H, W, C = img_tensor.shape
                     mmlogger.warning(f"Single camera image detected ({H}x{W}), duplicating for 6 cameras")
@@ -644,10 +598,8 @@ def main():
                 resize_scale_h = 1.0
                 resize_scale_w = 1.0
                 if curr_h != expected_img_h or curr_w != expected_img_w:
-                    mmlogger.info(f"Resizing images from {curr_h}x{curr_w} to {expected_img_h}x{expected_img_w}")
                     resize_scale_h = expected_img_h / curr_h
                     resize_scale_w = expected_img_w / curr_w
-                    mmlogger.info(f"Resize scale factors: H={resize_scale_h:.4f}, W={resize_scale_w:.4f}")
                     import torch.nn.functional as F
 
                     img_tensor = F.interpolate(
@@ -664,14 +616,10 @@ def main():
                             lidar2img_scaled[:, 0, :] *= resize_scale_w
                             lidar2img_scaled[:, 1, :] *= resize_scale_h
                             final_img_metas[0][0]["lidar2img"] = lidar2img_scaled
-                            mmlogger.info(f"Scaled lidar2img matrices for resize: shape {lidar2img_scaled.shape}")
                         else:
                             mmlogger.warning(f"Could not scale lidar2img - unexpected type: {type(lidar2img_orig)}")
 
                     final_img_metas[0][0]["img_shape"] = [(expected_img_h, expected_img_w, 3)] * 6
-                    mmlogger.info(f"Updated img_shape to: {final_img_metas[0][0]['img_shape'][0]}")
-
-                mmlogger.info(f"Processed image tensor shape: {img_tensor.shape}")
 
                 img_tt = ttnn.from_torch(
                     img_tensor.float(),
@@ -690,13 +638,6 @@ def main():
                     img=img_tt,
                     img_metas=final_img_metas,
                 )
-
-            mmlogger.info(f"=== DEBUG: TTNN Model Output Analysis ===")
-            mmlogger.info(
-                f"Result type: {type(result)}, length: {len(result) if isinstance(result, (list, tuple)) else 'N/A'}"
-            )
-            if isinstance(result, (list, tuple)) and len(result) > 0:
-                mmlogger.info(f"Result[0] keys: {list(result[0].keys()) if isinstance(result[0], dict) else 'N/A'}")
 
             sample_dir = osp.join(args.show_dir, pts_filename)
             os.makedirs(osp.abspath(sample_dir), exist_ok=True)
@@ -887,18 +828,6 @@ def main():
             labels_3d = result_dic["labels_3d"]
             pts_3d = result_dic["pts_3d"]
 
-            mmlogger.info(f"=== DEBUG: Raw TTNN Model Output ===")
-            mmlogger.info(
-                f"boxes_3d type: {type(boxes_3d)}, shape: {boxes_3d.shape if hasattr(boxes_3d, 'shape') else 'N/A'}"
-            )
-            mmlogger.info(
-                f"scores_3d type: {type(scores_3d)}, shape: {scores_3d.shape if hasattr(scores_3d, 'shape') else 'N/A'}"
-            )
-            mmlogger.info(
-                f"labels_3d type: {type(labels_3d)}, shape: {labels_3d.shape if hasattr(labels_3d, 'shape') else 'N/A'}"
-            )
-            mmlogger.info(f"pts_3d type: {type(pts_3d)}, shape: {pts_3d.shape if hasattr(pts_3d, 'shape') else 'N/A'}")
-
             if hasattr(scores_3d, "cpu"):
                 scores_3d = scores_3d.cpu().numpy()
             elif hasattr(scores_3d, "numpy"):
@@ -915,18 +844,9 @@ def main():
 
             keep = scores_3d > args.score_thresh
             num_predictions = keep.sum()
-            mmlogger.info(
-                f"Found {num_predictions} predictions above threshold {args.score_thresh} (out of {len(scores_3d)} total)"
-            )
-            if len(scores_3d) > 0:
-                mmlogger.info(f"All scores range: [{scores_3d.min():.4f}, {scores_3d.max():.4f}]")
-                mmlogger.info(f"Unique labels: {np.unique(labels_3d)}")
 
             if num_predictions == 0:
                 mmlogger.warning(f"No predictions above threshold {args.score_thresh} for sample {pts_filename}")
-                if len(scores_3d) > 0:
-                    max_score = float(scores_3d.max())
-                    mmlogger.info(f"Max prediction score: {max_score:.4f}")
 
             plt.figure(figsize=(2, 4))
             plt.xlim(pc_range[0], pc_range[3])
@@ -947,25 +867,11 @@ def main():
                 elif not isinstance(pred_pts_3d, np.ndarray):
                     pred_pts_3d = np.array(pred_pts_3d)
 
-                if pred_count < 3:
-                    mmlogger.info(f"=== DEBUG: Prediction {pred_count} ===")
-                    mmlogger.info(f"pred_pts_3d shape: {pred_pts_3d.shape}")
-                    mmlogger.info(f"pred_pts_3d sample (first 5):\n{pred_pts_3d[:5]}")
-                    mmlogger.info(f"pred_label_3d: {pred_label_3d}, pred_score_3d: {pred_score_3d:.4f}")
-
                 pts_x = pred_pts_3d[:, 0]
                 pts_y = pred_pts_3d[:, 1]
 
                 all_pred_x.extend(pts_x)
                 all_pred_y.extend(pts_y)
-
-                if pred_count == 0:
-                    mmlogger.info(
-                        f"First prediction coordinate ranges - X: [{pts_x.min():.2f}, {pts_x.max():.2f}], Y: [{pts_y.min():.2f}, {pts_y.max():.2f}]"
-                    )
-                    mmlogger.info(
-                        f"PC range: X: [{pc_range[0]:.2f}, {pc_range[3]:.2f}], Y: [{pc_range[1]:.2f}, {pc_range[4]:.2f}]"
-                    )
 
                 pred_label_idx = int(pred_label_3d) if hasattr(pred_label_3d, "__int__") else pred_label_3d
                 if pred_label_idx < 0 or pred_label_idx >= len(colors_plt):
@@ -975,50 +881,31 @@ def main():
                 plt.scatter(pts_x, pts_y, color=colors_plt[pred_label_idx], s=2, alpha=0.8, zorder=-1)
                 pred_count += 1
 
-            mmlogger.info(f"Visualized {pred_count} predictions for sample {pts_filename}")
-
-            if has_gt and gt_bboxes_3d is not None and gt_labels_3d is not None and len(all_pred_x) > 0:
-                try:
-                    gt_lines_fixed_num_pts = gt_bboxes_3d[0].fixed_num_sampled_points
-                    gt_all_x = []
-                    gt_all_y = []
-                    for gt_bbox_3d in gt_lines_fixed_num_pts:
-                        pts = gt_bbox_3d.numpy()
-                        gt_all_x.extend([pt[0] for pt in pts])
-                        gt_all_y.extend([pt[1] for pt in pts])
-                    if len(gt_all_x) > 0:
-                        mmlogger.info(f"=== DEBUG: GT vs Pred Comparison ===")
-                        mmlogger.info(
-                            f"GT X: [{min(gt_all_x):.2f}, {max(gt_all_x):.2f}], Y: [{min(gt_all_y):.2f}, {max(gt_all_y):.2f}]"
-                        )
-                        mmlogger.info(
-                            f"Pred X: [{min(all_pred_x):.2f}, {max(all_pred_x):.2f}], Y: [{min(all_pred_y):.2f}, {max(all_pred_y):.2f}]"
-                        )
-                        mmlogger.info(f"GT center: ({np.mean(gt_all_x):.2f}, {np.mean(gt_all_y):.2f})")
-                        mmlogger.info(f"Pred center: ({np.mean(all_pred_x):.2f}, {np.mean(all_pred_y):.2f})")
-                        mmlogger.info(
-                            f"GT span: X={max(gt_all_x)-min(gt_all_x):.2f}, Y={max(gt_all_y)-min(gt_all_y):.2f}"
-                        )
-                        mmlogger.info(
-                            f"Pred span: X={max(all_pred_x)-min(all_pred_x):.2f}, Y={max(all_pred_y)-min(all_pred_y):.2f}"
-                        )
-                except Exception as e:
-                    mmlogger.debug(f"Could not compare with GT: {e}")
-
             plt.imshow(car_img, extent=[-1.2, 1.2, -1.5, 1.5])
 
             map_path = osp.join(sample_dir, "PRED_MAP_plot.png")
             plt.savefig(map_path, bbox_inches="tight", format="png", dpi=1200)
             plt.close()
 
-            if (i + 1) % 10 == 0:
-                mmlogger.info(f"Processed {i + 1}/{len(dataset)} samples")
+            # Track processed sample
+            processed_samples.append(pts_filename)
 
-        mmlogger.info("\n DONE vis test dataset samples gt label & pred using TTNN model")
+        # Print output information at the end
+        print(f"\n{'='*60}")
+        print(f"Demo completed successfully!")
+        print(f"Output folder: {osp.abspath(args.show_dir)}")
+        if processed_samples:
+            print(f"Processed {len(processed_samples)} sample(s)")
+            for sample in processed_samples:
+                pred_png_path = osp.join(args.show_dir, sample, "PRED_MAP_plot.png")
+                if osp.exists(pred_png_path):
+                    print(f"Prediction output PNG: {osp.abspath(pred_png_path)}")
+        else:
+            print(f"Prediction output PNG pattern: {osp.abspath(args.show_dir)}/<sample_name>/PRED_MAP_plot.png")
+        print(f"{'='*60}\n")
 
     finally:
         ttnn.close_device(device)
-        mmlogger.info("TTNN device closed")
 
 
 if __name__ == "__main__":

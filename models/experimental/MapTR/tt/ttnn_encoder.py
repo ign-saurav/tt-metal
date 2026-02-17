@@ -425,7 +425,7 @@ class TtBEVFormerLayer:
             if layer == "self_attn":
                 spatial_shapes_1 = torch.tensor([[bev_h, bev_w]])
                 spatial_shapes_1 = ttnn.from_torch(
-                    spatial_shapes_1, dtype=ttnn.uint32, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
+                    spatial_shapes_1, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT, device=self.device
                 )
                 query = self.attentions[attn_index](
                     query,
@@ -453,7 +453,7 @@ class TtBEVFormerLayer:
                 )
                 norm_index += 1
 
-            # spaital cross attention
+            # spatial cross attention
             elif layer == "cross_attn":
                 query = self.attentions[attn_index](
                     query,
