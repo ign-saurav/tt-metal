@@ -146,7 +146,7 @@ def create_transfuser_pipeline_model(ttnn_model, tt_image, tt_lidar_bev, tt_velo
     [
         {
             "l1_small_size": 16384,
-            "trace_region_size": 400,
+            "trace_region_size": 6000000,
             "num_command_queues": 2,
         }
     ],
@@ -361,7 +361,7 @@ def test_perf_transfuser_ttnn(
         ttnn_model, tt_image_input, tt_lidar_input, tt_velocity_input, target_point
     )
     config_pipeline = PipelineConfig(
-        use_trace=False, num_command_queues=2, all_transfers_on_separate_command_queue=False
+        use_trace=True, num_command_queues=2, all_transfers_on_separate_command_queue=False
     )
     pipeline = create_pipeline_from_config(
         config_pipeline,
