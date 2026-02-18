@@ -2,7 +2,6 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-import torch
 import ttnn
 from models.experimental.transfuser.tt.gpt import TTGpt
 from models.experimental.transfuser.tt.topdown import TtTopDown
@@ -263,32 +262,6 @@ class TtTransfuserBackbone:
             enable_act_double_buffer=False,
         )
 
-    def normalize_imagenet_ttnn(self, x):
-        """Normalize input images according to ImageNet standards using TTNN operations."""
-        # Convert from [0,255] to [0,1]
-        x = ttnn.multiply(x, 1.0 / 255.0)
-
-        # Create normalization constants as tensors
-        # Mean: [0.485, 0.456, 0.406], Std: [0.229, 0.224, 0.225]
-        mean = ttnn.from_torch(
-            torch.tensor([0.485, 0.456, 0.406]).reshape(1, 1, 1, 3),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device,
-        )
-        std_inv = ttnn.from_torch(
-            torch.tensor([1.0 / 0.229, 1.0 / 0.224, 1.0 / 0.225]).reshape(1, 1, 1, 3),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            device=self.device,
-        )
-
-        # Normalize all channels at once (no slice/concat needed)
-        x = ttnn.subtract(x, mean)
-        x = ttnn.multiply(x, std_inv)
-
-        return x
-
     def __call__(self, image_x, lidar_x, velocity, device):
         def _avgpool_to_L1(x, shape, out_hw):
             return ttnn.sharded_to_interleaved(
@@ -328,8 +301,7 @@ class TtTransfuserBackbone:
                 out = ttnn.slice(out, [0, 0, 0, 0], slice_to)
             return ttnn.to_layout(out, ttnn.TILE_LAYOUT)
 
-        # ---------- input normalize (unchanged) ----------
-        image_x = self.normalize_imagenet_ttnn(image_x)
+        # Image normalization is done in the test (test_transfuser_backbone / test_lidar_center_net); input is expected already normalized.
 
         # image_encoder_conv1
         image_out = self.conv1(image_x)

@@ -14,6 +14,7 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 
 from models.experimental.transfuser.reference.config import GlobalConfig
 from models.experimental.transfuser.reference.lidar_center_net import LidarCenterNet, process_input
+from models.experimental.transfuser.reference.transfuser_backbone import normalize_imagenet
 from models.experimental.transfuser.tt.lidar_center_net import LidarCenterNet as TtLidarCenterNet
 from models.experimental.transfuser.tests.pcc.test_gpt import create_gpt_preprocessor
 
@@ -430,9 +431,11 @@ def test_lidar_center_net(
         model_args=model_args,
     )
 
+    # Normalize image for TT backbone (same ImageNet norm as ref does inside; backbone no longer normalizes)
+    image_normalized = normalize_imagenet(image.clone())
     # Convert input to TTNN format
     tt_image_input = ttnn.from_torch(
-        image.permute(0, 2, 3, 1),
+        image_normalized.permute(0, 2, 3, 1),
         memory_config=ttnn.L1_MEMORY_CONFIG,
         device=device,
         dtype=ttnn.bfloat16,

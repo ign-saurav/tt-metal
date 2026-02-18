@@ -226,6 +226,10 @@ pytest models/experimental/transfuser/tests/test_topdown.py
 
 All tests use PCC (Pearson Correlation Coefficient) validation to compare TTNN outputs with PyTorch reference outputs.
 
+## Performance
+- Device FPS: `28.08`
+- E2E FPS (2CQ + no trace): `25.96`
+
 ### Backbone PCC Scores
 
 The TransFuserBackbone TTNN implementation achieves the following PCC scores compared to the PyTorch reference:
