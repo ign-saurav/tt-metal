@@ -1278,30 +1278,39 @@ class TTNNMoE(TTNNModule):
     def from_torch(cls, torch_moe):
         """
         Create TTNNMoE from PyTorch MoE module.
-
-        Args:
-            torch_moe: PyTorch DeepseekV3MoE module
         """
         module = cls(torch_moe.config)
         module._fallback_torch_layer = torch_moe
 
-        # Create submodules
-        module.gate = TTNNGlm4MoeTopkRouter.from_parameters(
-            torch_moe.gate.weight, torch_moe.gate.e_score_correction_bias
-        )
-        # Convert router to TTNN
-        module.route_tokens_to_experts = TTNNMoERouterDecode.from_torch(
-            Glm4MoeRouteTokenToExperts(
-                torch_moe.gate.e_score_correction_bias,
-                torch_moe.n_routed_experts,
-                torch_moe.n_group,
-                torch_moe.topk_group,
-                torch_moe.top_k,
-                torch_moe.norm_topk_prob,
-                torch_moe.routed_scaling_factor,
+        # Create gate router - adapt based on actual torch model structure
+        if hasattr(torch_moe.gate, "weight"):
+            # If gate has weight attribute (linear layer)
+            module.gate = TTNNGlm4MoeTopkRouter.from_parameters(
+                torch_moe.gate.weight, getattr(torch_moe.gate, "e_score_correction_bias", None)
             )
-        )
-        module.experts = TTNNExperts.from_torch(torch_moe.experts)
+        else:
+            # Fallback for different gate structures
+            module.gate = TTNNGlm4MoeTopkRouter.from_torch(torch_moe.gate)
+
+        # Create route_tokens_to_experts - only if needed
+        # Skip if torch model doesn't have group-based routing
+        if hasattr(torch_moe, "n_group") and torch_moe.n_group > 1:
+            module.route_tokens_to_experts = TTNNGlm4MoeRouteTokenToExperts.from_torch(
+                torch_moe  # Pass the entire torch_moe if it has routing logic
+            )
+        else:
+            # Use simpler router decode for non-grouped routing
+            module.route_tokens_to_experts = TTNNMoERouterDecode.from_torch(torch_moe.gate)
+
+        # Create experts - adapt for Glm4MoeLiteNaiveMoe structure
+        if hasattr(torch_moe.experts, "gate_up_proj"):
+            # Glm4MoeLiteNaiveMoe structure
+            module.experts = TTNNExperts.from_torch(torch_moe.experts)
+        else:
+            # Fallback for different expert structures
+            module.experts = TTNNExperts.from_torch(torch_moe.experts)
+
+        # Create shared experts - this looks correct
         module.shared_experts = TTNNGlm4MoeMLP.from_torch(torch_moe.shared_experts)
 
         return module

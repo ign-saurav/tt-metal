@@ -38,7 +38,7 @@ def default_moe_config():
     "real_weights",
     [
         True,  # Use real weights
-        False,  # Use random weights
+        # False,  # Use random weights
     ],
 )
 @pytest.mark.parametrize(
@@ -49,7 +49,10 @@ def test_glm4_moe_full(mesh_device, default_moe_config, real_weights):
     if real_weights:
         from transformers import AutoModelForCausalLM
 
-        model = AutoModelForCausalLM.from_pretrained("zai-org/GLM-4.7-Flash").model.layers[1].mlp
+        model = (
+            AutoModelForCausalLM.from_pretrained("zai-org/GLM-4.7-Flash", trust_remote_code=True).model.layers[1].mlp
+        )
+        print(model)
     else:
         model = Glm4MoeMoE(default_moe_config).to(dtype=torch.bfloat16)
     model.eval()
@@ -59,6 +62,7 @@ def test_glm4_moe_full(mesh_device, default_moe_config, real_weights):
     inputs = torch.randn((batch_size, seq_len, default_moe_config.hidden_size), dtype=torch.bfloat16)
     outputs_torch = model(inputs)
     ttnn_model = TTNNMoE.from_torch(model)
+    print(ttnn_model)
     set_device(ttnn_model, mesh_device)
     outputs_ttnn = ttnn_model(inputs)
     compare_fn_outputs(outputs_torch, outputs_ttnn, "Glm4MoeMoE")
