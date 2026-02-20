@@ -45,20 +45,16 @@ The EfficientDet D0 model consists of three main components:
 ## References
 
 - **Original Paper**: [EfficientDet: Scalable and Efficient Object Detection](https://arxiv.org/abs/1911.09070)
-- **Reference Implementation**: [Yet-Another-EfficientDet-Pytorch](https://github.com/zylo117/Yet-Another-EfficientDet-Pytorch)
+- **Reference Implementation**: [Yet-Another-EfficientDet-Pytorch](https://github.com/zylo117/Yet-Another-Efficient-Pytorch)
 - **EfficientNet Paper**: [EfficientNet: Rethinking Model Scaling for Convolutional Neural Networks](https://arxiv.org/abs/1905.11946)
 
-## Performance (on N150)
+## Performance(on N150)
 
-### Inference Performance
+### E2E Performance (2CQ + Trace)
+- **Batch Size 1, 512×512**: 36 FPS
 
-##### Device Time
-
-- **Batch Size 1, 512×512**: ~36 FPS (27.16 ms per inference)
-
-##### End-to-End (E2E) Pipeline
-
-- **Batch Size 1, 512×512**: 11.3 FPS (88.31 ms per inference)
+### Device Performance
+- **Batch Size 1, 512×512**: 41.8 FPS
 
 **Measurement Configuration:**
 - Input size: 512×512
@@ -86,22 +82,23 @@ models/experimental/efficientdetd0/
 │
 ├── resources/                         # Resources and weights
 │   ├── efficientdetd0_weights_download.sh  # Script to download weights
-│   ├── efficientdet-d0.pth           # Pre-trained model weights
+|   ├── efficientdet-d0.pth               # Pre-trained model weights
 │   └── *.jpg                         # Sample test images
 │
-├── tests/                             # Test suite
-│   ├── pcc/                          # PCC tests
-│   │   ├── test_efficient_det.py     # Main integration test
-│   │   ├── test_bifpn.py             # BiFPN component test
-│   │   ├── test_classifier.py        # Classifier component test
-│   │   ├── test_regressor.py         # Regressor component test
-│   │   └── evaluate_coco.py          # COCO evaluation script
-│   └── perf/                         # Performance tests
-│       └── test_e2e_performant.py    # E2E performance benchmark
+├── tests/
+|   └──pcc/                             # Test suite
+│      ├── test_efficient_det.py         # Main integration test
+│      ├── test_bifpn.py                 # BiFPN component test
+│      ├── test_classifier.py            # Classifier component test
+│      ├── test_regressor.py             # Regressor component test
+│      └── evaluate_coco.py              # COCO evaluation script
+|   └──perf/
+|      ├── test_e2e_performant.py         # E2E Performance Test (2CQ + Trace)
+|      └── test_device_perf.py            # Device Performance Test
 │
 └── tt/                                # TTNN implementation
-    ├── efficientdetd0.py             # Main TTNN EfficientDet model
-    ├── efficientnetb0.py             # TTNN EfficientNet-B0
+    ├── efficient_det.py              # Main TTNN EfficientDet model
+    ├── efficient_netb0.py            # TTNN EfficientNet-B0
     ├── bifpn.py                      # TTNN BiFPN implementation
     ├── classifier.py                 # TTNN Classifier implementation
     ├── regressor.py                  # TTNN Regressor implementation
