@@ -29,18 +29,11 @@ TRACE_FILE = "models/experimental/parakeet/tests/parakeet_trace.txt"
 import nemo.collections.asr as nemo_asr
 
 asr_model = nemo_asr.models.ASRModel.from_pretrained(model_name="nvidia/parakeet-tdt-0.6b-v2", map_location="cpu")
-import pdb
 
-pdb.set_trace()
 asr_model.eval()
-
-
 # sys.settrace(trace_calls)
-
 output = asr_model.transcribe(["models/experimental/parakeet/tests/2086-149220-0033.wav"])
 
 # Disable tracing after inference
 # sys.settrace(None)
 print(output[0].text)
-
-print(f"\nTrace saved to {TRACE_FILE}")
