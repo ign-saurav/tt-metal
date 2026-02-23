@@ -665,10 +665,28 @@ class TTNNGlm4MoeMLP(TTNNModule):
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
         x_gate = self.gate_proj(x)
         x_up = self.up_proj(x)
-        x = ttnn.mul(
-            x_gate.to_ttnn,
-            x_up.to_ttnn,
-        )
+        # Upcast to float32 before the SiLU(gate)*up element-wise multiply so that
+        # the gated activation is computed at higher precision before the down-projection.
+        x_gate_t = x_gate.to_ttnn
+        x_up_t = x_up.to_ttnn
+        if x_gate_t.dtype != ttnn.float32:
+            x_gate_f32 = ttnn.typecast(x_gate_t, ttnn.float32)
+            ttnn.deallocate(x_gate_t)
+        else:
+            x_gate_f32 = x_gate_t
+        if x_up_t.dtype != ttnn.float32:
+            x_up_f32 = ttnn.typecast(x_up_t, ttnn.float32)
+            ttnn.deallocate(x_up_t)
+        else:
+            x_up_f32 = x_up_t
+        x = ttnn.mul(x_gate_f32, x_up_f32)
+        ttnn.deallocate(x_gate_f32)
+        ttnn.deallocate(x_up_f32)
+        # Cast back to bfloat16 for the down-projection linear layer
+        if x.dtype != ttnn.bfloat16:
+            x_bf16 = ttnn.typecast(x, ttnn.bfloat16)
+            ttnn.deallocate(x)
+            x = x_bf16
         x = self.down_proj(x)
         return x
 
@@ -718,8 +736,8 @@ class TTNNGlm4MoeRouteTokenToExperts(TTNNModule):
         scores = ttnn.sigmoid(router_logits)
         ttnn.deallocate(router_logits)
 
-        T = scores_f32.shape[2]
-        n_experts = scores_f32.shape[3]
+        T = scores.shape[2]
+        n_experts = scores.shape[3]
         experts_per_group = n_experts // self.torch_layer.n_group
 
         # ------------------------------------------------------------
@@ -1104,17 +1122,12 @@ class TTNNMoERouterDecode(TTNNModule):
         topk_weights = ttnn.mul(topk_weights, scale_f32)
         ttnn.deallocate(scale_f32)
 
-        # Reshape outputs to (T, top_k)
-        # convert weights back to bf16 for downstream compatibility
-        if topk_weights.dtype != ttnn.bfloat16:
-            topk_weights_bf16 = ttnn.typecast(topk_weights, ttnn.bfloat16)
-            ttnn.deallocate(topk_weights)
-        else:
-            topk_weights_bf16 = topk_weights
-
+        # Reshape outputs to (T, top_k).
+        # Keep weights in float32 so the downstream weighted expert sum is computed
+        # at full float32 precision rather than being rounded to bfloat16 first.
         topk_expert_idx = ttnn.reshape(topk_expert_idx, ttnn.Shape((T, r.top_k)))
-        topk_weights_bf16 = ttnn.reshape(topk_weights_bf16, ttnn.Shape((T, r.top_k)))
-        return topk_expert_idx, topk_weights_bf16
+        topk_weights = ttnn.reshape(topk_weights, ttnn.Shape((T, r.top_k)))
+        return topk_expert_idx, topk_weights
 
 
 class TTNNExperts(TTNNModule):
@@ -1400,11 +1413,27 @@ class TTNNExperts(TTNNModule):
             is_input_b_sparse=True,
         )
 
-        # Activation and multiply
+        # Activation and element-wise multiply (SiLU(gate) * up).
+        # Cast both to float32 before the multiply: the sparse matmuls produce BF16
+        # outputs, and a BF16*BF16 product here would further reduce precision before
+        # the down-projection.  The float32 result is cast back to BF16 for w2.
         w1_activated = ttnn.silu(w1_out)
-        intermediate = ttnn.mul(w1_activated, w3_out)
         ttnn.deallocate(w1_out)
-        ttnn.deallocate(w3_out)
+        if w1_activated.dtype != ttnn.float32:
+            w1_activated_f32 = ttnn.typecast(w1_activated, ttnn.float32)
+            ttnn.deallocate(w1_activated)
+        else:
+            w1_activated_f32 = w1_activated
+        if w3_out.dtype != ttnn.float32:
+            w3_out_f32 = ttnn.typecast(w3_out, ttnn.float32)
+            ttnn.deallocate(w3_out)
+        else:
+            w3_out_f32 = w3_out
+        intermediate_f32 = ttnn.mul(w1_activated_f32, w3_out_f32)
+        ttnn.deallocate(w1_activated_f32)
+        ttnn.deallocate(w3_out_f32)
+        intermediate = ttnn.typecast(intermediate_f32, ttnn.bfloat16)
+        ttnn.deallocate(intermediate_f32)
 
         # Reshape for w2
         intermediate = ttnn.squeeze(intermediate, 0)
@@ -1451,7 +1480,16 @@ class TTNNExperts(TTNNModule):
         )
         combined_output = ttnn.to_layout(combined_output, ttnn.TILE_LAYOUT)
 
-        # 9. Apply expert weights
+        # 9. Apply expert weights in float32 to accumulate with higher precision.
+        # Expert outputs arrive as BF16; up-casting before the weighted sum avoids
+        # rounding when combining num_experts_per_tok outputs, which would otherwise
+        # compound on top of the already-BF16 matmul results.
+        if combined_output.dtype != ttnn.float32:
+            combined_output_f32 = ttnn.typecast(combined_output, ttnn.float32)
+            ttnn.deallocate(combined_output)
+        else:
+            combined_output_f32 = combined_output
+
         topk_experts_weights_rm = ttnn.to_layout(topk_experts_weights, ttnn.ROW_MAJOR_LAYOUT)
         topk_experts_weights_rm = ttnn.unsqueeze(topk_experts_weights_rm, 0)
         topk_experts_weights_rm = ttnn.unsqueeze(topk_experts_weights_rm, 0)
@@ -1459,14 +1497,21 @@ class TTNNExperts(TTNNModule):
         topk_experts_weights_rm = ttnn.permute(topk_experts_weights_rm, (3, 1, 2, 0))
         topk_experts_weights_tile = ttnn.to_layout(topk_experts_weights_rm, ttnn.TILE_LAYOUT)
         ttnn.deallocate(topk_experts_weights_rm)
+        if topk_experts_weights_tile.dtype != ttnn.float32:
+            topk_experts_weights_f32 = ttnn.typecast(topk_experts_weights_tile, ttnn.float32)
+            ttnn.deallocate(topk_experts_weights_tile)
+        else:
+            topk_experts_weights_f32 = topk_experts_weights_tile
 
-        weighted_output = ttnn.mul(
-            combined_output,
-            topk_experts_weights_tile,
-        )
+        weighted_output = ttnn.mul(combined_output_f32, topk_experts_weights_f32)
+        ttnn.deallocate(topk_experts_weights_f32)
 
-        # 10. Sum over experts dimension
-        final_output = ttnn.sum(weighted_output, dim=0, keepdim=True)
+        # 10. Sum over experts dimension (float32 accumulation for accuracy)
+        final_output_f32 = ttnn.sum(weighted_output, dim=0, keepdim=True)
+
+        # Cast back to bfloat16 for downstream compatibility (reduce_scatter, shared expert add)
+        final_output = ttnn.typecast(final_output_f32, ttnn.bfloat16)
+        ttnn.deallocate(final_output_f32)
 
         # 11. Remove padding if it was added
         if pad_amount > 0:
@@ -1599,6 +1644,12 @@ class TTNNMoE(TTNNModule):
             x_f32,
             self._gate_weight_tt,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            compute_kernel_config=ttnn.WormholeComputeKernelConfig(
+                math_fidelity=ttnn.MathFidelity.HiFi4,
+                math_approx_mode=False,
+                fp32_dest_acc_en=True,
+                packer_l1_acc=True,
+            ),
         )
         if x_f32 is not x:
             ttnn.deallocate(x_f32)
@@ -1620,9 +1671,27 @@ class TTNNMoE(TTNNModule):
 
         routed_output = self.experts(x, topk_experts_indices, topk_experts_weights)
 
-        # 4. Reduce-scatter final output
+        # 4. Reduce-scatter final output.
+        #
+        # Why we must pre-divide:
+        # The all_gather_async above gives every dispatch device the same full-H
+        # input x.  Consequently, each of the N = device.shape[1] devices independently
+        # computes the same complete expert contribution routed_output(1,1,T,H).
+        # The reduce_scatter (cluster_axis=1) SUMS contributions from all N devices for
+        # each H/N slice before scattering.  With N identical copies that sum becomes
+        # N × correct_value instead of 1 × correct_value.
+        #
+        # The shared expert is unaffected: TTNNLinearIColShardedWRowSharded has
+        # row-sharded weights so each device only contributes its H/N partial result;
+        # the reduce_scatter there legitimately reduces partial sums.
+        #
+        # Fix: divide routed_output by N first so that sum-of-N-copies = correct_value.
+        n_rs = self.device.shape[1]  # devices along cluster_axis=1 (e.g. 8 for 1×8 mesh)
+        routed_out = routed_output.to_ttnn
+        if n_rs > 1:
+            routed_out = ttnn.mul(routed_out, 1.0 / float(n_rs))
         routed_output = ttnn.experimental.reduce_scatter_minimal_async(
-            routed_output.to_ttnn,
+            routed_out,
             persistent_output_buffers=None,
             dim=3,
             multi_device_global_semaphore=self.device_state.ccl_manager.get_and_cycle_rs_semaphore_handles(1),

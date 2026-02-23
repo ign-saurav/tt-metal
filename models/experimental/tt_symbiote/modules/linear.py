@@ -11,6 +11,15 @@ import ttnn
 from models.experimental.tt_symbiote.core.module import TTNNModule, deallocate_weights_after, run_on_devices, DeviceArch
 from models.experimental.tt_symbiote.core.run_config import trace_enabled
 
+# Shared high-fidelity compute kernel config used for all linear layers that need
+# maximum numerical accuracy (shared expert, attention projections, etc.).
+_HIFI4_COMPUTE_CFG = ttnn.WormholeComputeKernelConfig(
+    math_fidelity=ttnn.MathFidelity.HiFi4,
+    math_approx_mode=False,
+    fp32_dest_acc_en=True,
+    packer_l1_acc=True,
+)
+
 
 @trace_enabled
 class TTNNLinear(TTNNModule):
@@ -154,7 +163,12 @@ class TTNNLinearIColShardedWRowSharded(TTNNLinearInputShardedWeightSharded):
         while len(input_shape) < 4:
             input_shape.insert(1, 1)  # Add batch dimensions if needed
         input_tensor = ttnn.reshape(input_tensor, input_shape)
-        tt_output = ttnn.linear(input_tensor, self.tt_weight, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        tt_output = ttnn.linear(
+            input_tensor,
+            self.tt_weight,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            compute_kernel_config=_HIFI4_COMPUTE_CFG,
+        )
         tt_output = ttnn.experimental.reduce_scatter_minimal_async(
             tt_output,
             persistent_output_buffers=None,
