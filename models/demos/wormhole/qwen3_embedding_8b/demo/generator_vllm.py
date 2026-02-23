@@ -42,7 +42,7 @@ class Qwen3ForEmbedding:
         max_seq_len: int = 8192,  # Qwen3-Embedding supports up to 8192
         act_dtype=ttnn.bfloat16,
         weight_dtype=ttnn.bfloat8_b,
-        model_name: str = "Qwen/Qwen3-Embedding-8B",
+        model_name: str = "Qwen/Qwen3-Embedding-0.6B",
         vllm_config=None,
         prefix: str = "",
         **kwargs,
@@ -62,6 +62,7 @@ class Qwen3ForEmbedding:
             prefix: Model prefix (passed by vLLM wrapper)
             **kwargs: Additional arguments passed by vLLM wrapper
         """
+        logger.info("Initializing Qwen3ForEmbedding from models.demos.wormhole.qwen3_embedding_8b.demo.generator_vllm")
         # Extract device from vllm_config if provided (vLLM wrapper case)
         if vllm_config is not None and device is None:
             device = vllm_config.device_config.device
