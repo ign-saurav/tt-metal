@@ -90,6 +90,7 @@ def compare_fn_outputs(torch_output, ttnn_output, func_name):
         n_tensor = n_tensor.to(torch.float32)
         assert t_tensor.shape == n_tensor.shape, "Mismatched output shapes between TTNN and Torch."
         pcc = torch.corrcoef(torch.stack([t_tensor.flatten(), n_tensor.flatten()]))[0, 1]
+        print(f"PCC: {pcc.item()}")
         diff = torch.abs(t_tensor - n_tensor)
         if (
             pcc < 0.999
