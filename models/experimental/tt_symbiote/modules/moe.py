@@ -15,6 +15,7 @@ from models.experimental.tt_symbiote.core.tensor import TorchTTNNTensor
 from ttnn.model_preprocessing import preprocess_linear_weight
 from models.experimental.tt_symbiote.core.module import TTNNModule, run_on_devices, DeviceArch
 from models.experimental.tt_symbiote.modules.linear import (
+    TTNNLinear,
     TTNNLinearSilu,
     TTNNLinearLLamaIColShardedWRowSharded,
     TTNNLinearIColShardedWRowSharded,
@@ -349,7 +350,7 @@ class Glm4MoeTopkRouter(nn.Module):
         self.norm_topk_prob = config.norm_topk_prob
 
         self.weight = nn.Parameter(torch.empty((self.n_routed_experts, config.hidden_size)))
-        self.register_buffer("e_score_correction_bias", torch.zeros((self.n_routed_experts), dtype=torch.float32))
+        self.register_buffer("e_score_correction_bias", torch.zeros((self.n_routed_experts), dtype=torch.bfloat16))
         torch.nn.init.normal_(self.weight, mean=0.0, std=self.config.initializer_range)
         torch.nn.init.zeros_(self.e_score_correction_bias)
 
@@ -628,9 +629,42 @@ class TTNNGlm4MoeNaiveMoe(TTNNModule):
         ).to_ttnn
 
 
-class TTNNGlm4MoeTopkRouter(TTNNLinearIColShardedWRowSharded):
+class TTNNGlm4MoeTopkRouter(TTNNLinear):
+    """Router for MoE that shards experts across devices.
+
+    Note: preprocess_linear_weight transposes weights from [out, in] to [in, out].
+    So gate weight [n_experts, hidden] becomes [hidden, n_experts].
+    We shard on dim=-1 (experts) so each device computes a subset of experts,
+    then all_gather combines the results.
+    """
+
+    def move_weights_to_device_impl(self):
+        """Override to shard weights on expert dimension (dim=-1 after transpose)."""
+        from ttnn.model_preprocessing import preprocess_linear_weight, preprocess_linear_bias
+
+        if isinstance(self.tt_weight_host, torch.Tensor):
+            # Shard on dim=-1 (expert dimension after transpose)
+            self.tt_weight_host = preprocess_linear_weight(
+                self.tt_weight_host,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                weights_mesh_mapper=ttnn.shard_tensor_to_mesh_mapper(self.device, dim=-1),
+            )
+        if isinstance(self.tt_bias_host, torch.Tensor):
+            self.tt_bias_host = preprocess_linear_bias(
+                self.tt_bias_host,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                weights_mesh_mapper=ttnn.shard_tensor_to_mesh_mapper(self.device, dim=-1),
+            )
+        self.tt_weight = ttnn.to_device(self.tt_weight_host, self.device)
+        self.tt_bias = ttnn.to_device(self.tt_bias_host, self.device) if self.tt_bias_host is not None else None
+
     def forward(self, input_tensor: ttnn.Tensor) -> ttnn.Tensor:
-        tt_output = super().forward(input_tensor)
+        # Use base TTNNLinear forward - input is replicated, weights are sharded
+        tt_output = ttnn.linear(input_tensor, self.tt_weight, bias=self.tt_bias, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        if self.device.get_num_devices() > 1:
+            tt_output = ttnn.all_gather(tt_output, dim=-1, num_links=1, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         tt_output = ttnn.reshape(tt_output, [-1] + [tt_output.shape[-1]])
         return tt_output
 
@@ -854,7 +888,7 @@ class TTNNMoERouterDecode(TTNNModule):
             self._fallback_torch_layer.e_score_correction_bias.reshape(1, 1, 1, -1).to(torch.bfloat16),
             dtype=ttnn.bfloat16,
             layout=ttnn.ROW_MAJOR_LAYOUT,
-            mesh_mapper=ttnn.ShardTensorToMesh(self.device, -1)
+            mesh_mapper=ttnn.ReplicateTensorToMesh(self.device)
             if self.device.__class__.__name__ == "MeshDevice"
             else None,
         )
@@ -873,15 +907,48 @@ class TTNNMoERouterDecode(TTNNModule):
         """
         if logits.layout != ttnn.TILE_LAYOUT:
             logits = ttnn.to_layout(logits, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        # Ensure bfloat16 dtype (topk requires bfloat16 or bfloat8_b)
+        if logits.dtype != ttnn.bfloat16:
+            logits = ttnn.typecast(logits, ttnn.bfloat16)
         # Sigmoid
         probabilities = ttnn.sigmoid(logits)
         probabilities = ttnn.unsqueeze(probabilities, 0)
         probabilities = ttnn.unsqueeze(probabilities, 0)
-        # Add bias (broadcast over tokens)
-        if probabilities.shape[2] > 1:
-            bias_expanded = ttnn.repeat(self.tt_bias, ttnn.Shape((1, 1, probabilities.shape[2], 1)))
+
+        # Add bias - handle different tensor configurations
+        num_tokens = probabilities.shape[2]
+        num_experts_prob = probabilities.shape[3]
+        num_experts_bias = self.tt_bias.shape[3]
+
+        if num_experts_prob == num_experts_bias:
+            # Same expert count - just repeat over tokens if needed
+            if num_tokens > 1:
+                bias_expanded = ttnn.repeat(self.tt_bias, ttnn.Shape((1, 1, num_tokens, 1)))
+            else:
+                bias_expanded = self.tt_bias
+        elif num_experts_prob > num_experts_bias:
+            # Input has more experts than bias - repeat bias to match
+            token_repeat = max(1, num_tokens // self.tt_bias.shape[2])
+            expert_repeat = num_experts_prob // num_experts_bias
+            bias_expanded = ttnn.repeat(self.tt_bias, ttnn.Shape((1, 1, token_repeat, expert_repeat)))
         else:
-            bias_expanded = self.tt_bias
+            # Input has fewer experts than bias (sharded input case) - slice bias
+            if num_tokens > 1:
+                bias_expanded = ttnn.repeat(self.tt_bias, ttnn.Shape((1, 1, num_tokens, 1)))
+            else:
+                bias_expanded = self.tt_bias
+            # Slice to match input expert count
+            bias_expanded = ttnn.slice(bias_expanded, (0, 0, 0, 0), (1, 1, num_tokens, num_experts_prob))
+
+        print(f"bias_expanded.shape: {bias_expanded.shape}")
+        print(f"probabilities.shape: {probabilities.shape}")
+
+        # Debug: check torch bias values
+        print(f"[Router] Torch e_score_correction_bias (first 10): {self.torch_layer.e_score_correction_bias[:10]}")
+        print(
+            f"[Router] Torch bias range: min={self.torch_layer.e_score_correction_bias.min():.4f}, max={self.torch_layer.e_score_correction_bias.max():.4f}"
+        )
+
         adjusted = ttnn.add(probabilities, bias_expanded)
 
         # Group-based top-k selection
@@ -1285,9 +1352,8 @@ class TTNNMoE(TTNNModule):
         # Create gate router - adapt based on actual torch model structure
         if hasattr(torch_moe.gate, "weight"):
             # If gate has weight attribute (linear layer)
-            module.gate = TTNNGlm4MoeTopkRouter.from_parameters(
-                torch_moe.gate.weight, getattr(torch_moe.gate, "e_score_correction_bias", None)
-            )
+            # NOTE: Don't pass e_score_correction_bias here - it's added in route_tokens_to_experts, not gate
+            module.gate = TTNNGlm4MoeTopkRouter.from_parameters(torch_moe.gate.weight, None)
         else:
             # Fallback for different gate structures
             module.gate = TTNNGlm4MoeTopkRouter.from_torch(torch_moe.gate)
@@ -1347,6 +1413,21 @@ class TTNNMoE(TTNNModule):
 
         # Route tokens to experts
         topk_experts_indices, topk_experts_weights = self.route_tokens_to_experts(router_logits)
+
+        # Debug: print routing outputs
+        from models.experimental.tt_symbiote.core.tensor import TorchTTNNTensor
+
+        indices_tensor = (
+            topk_experts_indices.to_torch if isinstance(topk_experts_indices, TorchTTNNTensor) else topk_experts_indices
+        )
+        weights_tensor = (
+            topk_experts_weights.to_torch if isinstance(topk_experts_weights, TorchTTNNTensor) else topk_experts_weights
+        )
+        print(f"[TTNNMoE] topk_experts_indices shape: {indices_tensor.shape}")
+        print(f"[TTNNMoE] topk_experts_weights shape: {weights_tensor.shape}")
+        print(f"[TTNNMoE] Sample indices (first 3 tokens): {indices_tensor[:3]}")
+        print(f"[TTNNMoE] Sample weights (first 3 tokens): {weights_tensor[:3]}")
+
         x = ttnn.unsqueeze(x, 1)  # Add experts dimension for compatibility with experts module
         # 3. Experts handle dispatch → compute → combine → weight internally
 
