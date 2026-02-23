@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from typing import Optional, Union
 
 import torch
+import ttnn
 
 try:
     from transformers.integrations.sdpa_attention import sdpa_attention_forward
@@ -27,6 +28,9 @@ from models.experimental.tt_symbiote.modules.rope import (
     TTNNDistributedRotaryPositionEmbedding,
 )
 from models.experimental.tt_symbiote.modules.normalization import TTNNDistributedRMSNorm
+
+from models.tt_transformers.tt.common import PagedAttentionConfig
+from models.demos.deepseek_v3.tt.mla.mla1d import even_int_div
 
 
 class TorchSDPAAttention(torch.nn.Module):
@@ -363,14 +367,7 @@ class TTNNViTSelfAttention(TTNNSelfAttention):
             k_chunk_size=256,
             exp_approx_mode=False,  # NOTE: False is more correct
         )
-        compute_kernel_config = ttnn.WormholeComputeKernelConfig(
-            math_fidelity=ttnn.MathFidelity.HiFi4,
-            math_approx_mode=False,
-            fp32_dest_acc_en=True,
-            packer_l1_acc=True,
-        )
         new_self_attention.sdpa.program_config = program_config
-        new_self_attention.sdpa.compute_kernel_config = compute_kernel_config
         return new_self_attention
 
 
@@ -736,18 +733,17 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
     with latent compression for memory-efficient KV cache.
     """
 
-    def __init__(self):
+    def __init__(
+        self, paged_attention_config: PagedAttentionConfig | None = None, mesh_device: ttnn.MeshDevice | None = None
+    ):
         super().__init__()
         # Will be set in from_torch
+        self.paged_attention_config = paged_attention_config
+        self.mesh_device = mesh_device
+        # self.device = mesh_device  # Used in _forward_prefill
+        # self.device_state = ttnn.DeviceState(self.device)
         self.q_lora_rank = None
         self.kv_lora_rank = None
-        self.qk_nope_head_dim = None
-        self.qk_rope_head_dim = None
-        self.qk_head_dim = None
-        self.v_head_dim = None
-        self.num_heads = None
-        self.scaling = None
-        self.is_causal = True
 
         # Submodules (set in from_torch)
         self.q_a_proj = None
@@ -760,8 +756,68 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
         self.rope = None
         self.sdpa = None
 
+    def init_paged_cache(self, mesh_device: ttnn.MeshDevice):
+        """Initialize paged KV cache for MLA."""
+        if self.paged_attention_config:
+            kvpe_dim = self.kv_lora_rank + self.qk_rope_head_dim
+            cache_shape = (
+                self.paged_attention_config.max_num_blocks,
+                1,
+                self.paged_attention_config.block_size,
+                kvpe_dim,
+            )
+
+            self.kvpe_cache = ttnn.zeros(
+                shape=cache_shape,
+                dtype=ttnn.bfloat8_b,
+                layout=ttnn.TILE_LAYOUT,
+                device=mesh_device,
+                memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            )
+
     @classmethod
-    def from_torch(cls, torch_attn: "Glm4MoeLiteAttention"):
+    def get_valid_paged_config(
+        cls, max_seq_len: int, batch_size_per_row: int, dp_factor: int, block_size: int = ttnn.TILE_SIZE
+    ) -> PagedAttentionConfig:
+        assert max_seq_len % block_size == 0, f"max_seq_len {max_seq_len} must be divisible by block_size {block_size}."
+        assert (
+            block_size % ttnn.TILE_SIZE == 0
+        ), f"block_size {block_size} must be a multiple of TILE_SIZE {ttnn.TILE_SIZE}."
+
+        batch_per_shard = even_int_div(batch_size_per_row, dp_factor)
+        max_num_blocks = even_int_div(max_seq_len * batch_per_shard, block_size)
+
+        return PagedAttentionConfig(block_size=block_size, max_num_blocks=max_num_blocks)
+
+    @classmethod
+    def create_page_table(
+        cls,
+        paged_attention_config: PagedAttentionConfig,
+        mesh_device: ttnn.MeshDevice,
+        page_table: torch.Tensor | None = None,
+        batch_size: int = 1,
+    ) -> ttnn.Tensor:
+        """Helper function to allocate the page table for MLA on device."""
+        if page_table is None:
+            max_num_blocks = paged_attention_config.max_num_blocks
+            _, dp_factor = mesh_device.shape
+            # batch_per_shard = batch_size // dp_factor
+            batch_per_shard = even_int_div(batch_size, dp_factor)
+
+            page_table = torch.randperm(max_num_blocks, dtype=torch.int32)
+            page_table = page_table.reshape(batch_per_shard, max_num_blocks // batch_per_shard)
+
+        return ttnn.from_torch(
+            page_table,
+            dtype=ttnn.int32,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            device=mesh_device,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(mesh_device),
+        )
+
+    @classmethod
+    def from_torch(cls, torch_attn: "Glm4MoeLiteAttention", paged_attention_config=None):
         """Create TTNNGlm4MoeLiteAttention from PyTorch Glm4MoeLiteAttention.
 
         Args:
@@ -770,7 +826,7 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
         Returns:
             TTNNGlm4MoeLiteAttention instance
         """
-        new_attn = cls()
+        new_attn = cls(paged_attention_config=paged_attention_config)
         new_attn._fallback_torch_layer = torch_attn
 
         # Copy config parameters
@@ -820,6 +876,71 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
         )
 
         return new_attn
+
+    def _forward_decode(
+        self,
+        hidden_states: ttnn.Tensor,
+        position_embeddings: tuple[torch.Tensor, torch.Tensor],
+        page_table: ttnn.Tensor,
+        position_idxs: ttnn.Tensor,
+    ) -> tuple[ttnn.Tensor, Optional[torch.Tensor]]:
+        """Forward pass for decode mode (seq_len=1) with paged attention."""
+        batch_size = hidden_states.shape[0]
+
+        # Q projection path (same as prefill)
+        if self.q_lora_rank is not None:
+            q_latent = self.q_a_proj(hidden_states)
+            q_latent = self.q_a_layernorm(q_latent)
+            q_states = self.q_b_proj(q_latent)
+        else:
+            q_states = self.q_proj(hidden_states)
+
+        # Reshape Q for decode
+        q_states = ttnn.reshape(q_states, (batch_size, 1, self.num_heads, -1))
+        q_states = ttnn.permute(q_states, (0, 2, 1, 3))
+
+        # KV projection path
+        compressed_kv = self.kv_a_proj_with_mqa(hidden_states)
+
+        # Split and process KV
+        k_pass = ttnn.slice(compressed_kv, (0, 0, 0), (batch_size, 1, self.kv_lora_rank))
+        k_rot = ttnn.slice(
+            compressed_kv, (0, 0, self.kv_lora_rank), (batch_size, 1, self.kv_lora_rank + self.qk_rope_head_dim)
+        )
+
+        k_pass = ttnn.rms_norm(k_pass)
+        k_pass = self.kv_b_proj(k_pass)
+
+        # Create KVPE for decode
+        kvpe = ttnn.concat([k_pass, k_rot], dim=-1)
+        kvpe = ttnn.typecast(kvpe, self.kvpe_cache.dtype)
+
+        # Update paged cache
+        ttnn.experimental.paged_update_cache(
+            self.kvpe_cache,
+            kvpe,
+            update_idxs_tensor=position_idxs,
+            page_table=page_table,
+        )
+
+        # Apply RoPE to Q
+        cos, sin = position_embeddings
+        q_rot = self.rope(q_states, k_rot, cos, sin)
+
+        # Paged Flash MLA decode
+        attn_output = ttnn.transformer.paged_flash_multi_latent_attention_decode(
+            q_rot,
+            self.kvpe_cache,
+            page_table_tensor=page_table,
+            cur_pos_tensor=position_idxs,
+            **self.sdpa.program_config.__dict__,
+        )
+
+        # Output projection
+        attn_output = ttnn.reshape(attn_output, (batch_size, 1, self.num_heads * self.v_head_dim))
+        attn_output = self.o_proj(attn_output)
+
+        return attn_output, None
 
     def _forward_prefill(
         self,
@@ -955,37 +1076,49 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
 
         # Update KV cache if provided
         if past_key_values is not None:
-            cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-            torch_tensors = [TorchTTNNTensor(key_states), TorchTTNNTensor(value_states)]
-            orig_shapes = [key_states.shape, value_states.shape]
-            torch_tensors = [
-                torch_tensor.to_torch[: orig_shape[0], : orig_shape[1], : orig_shape[2], : orig_shape[3]]
-                for orig_shape, torch_tensor in zip(orig_shapes, torch_tensors)
-            ]
-            key_states, value_states = past_key_values.update(
-                *torch_tensors,
-                self._fallback_torch_layer.layer_idx,
-                cache_kwargs,
-            )
-            key_states, value_states = [TorchTTNNTensor(key_states), TorchTTNNTensor(value_states)]
-            key_states = ttnn.to_device(key_states.to_ttnn, self.device)
-            value_states = ttnn.to_device(value_states.to_ttnn, self.device)
-            key_states = ttnn.experimental.all_gather_async(
-                key_states,
-                dim=-1,
-                multi_device_global_semaphore=self.device_state.ccl_manager.get_and_cycle_ag_semaphore_handles(1),
-                barrier_semaphore=self.device_state.ccl_manager.get_and_cycle_barrier_semaphore_handle(1),
-                num_links=1,
-                topology=ttnn.Topology.Linear,
-            )
-            value_states = ttnn.experimental.all_gather_async(
-                value_states,
-                dim=-1,
-                multi_device_global_semaphore=self.device_state.ccl_manager.get_and_cycle_ag_semaphore_handles(1),
-                barrier_semaphore=self.device_state.ccl_manager.get_and_cycle_barrier_semaphore_handle(1),
-                num_links=1,
-                topology=ttnn.Topology.Linear,
-            )
+            if self.paged_attention_config:
+                # Create KVPE tensor for paged cache
+                kvpe = ttnn.concat([key_nope, k_rot, value_states], dim=-1)
+                kvpe = ttnn.typecast(kvpe, self.kvpe_cache.dtype)
+
+                ttnn.experimental.paged_fill_cache(
+                    self.kvpe_cache,
+                    kvpe,
+                    page_table=past_key_values.page_table,
+                    batch_idx=0,  # Adjust for your use case
+                )
+            else:
+                cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
+                torch_tensors = [TorchTTNNTensor(key_states), TorchTTNNTensor(value_states)]
+                orig_shapes = [key_states.shape, value_states.shape]
+                torch_tensors = [
+                    torch_tensor.to_torch[: orig_shape[0], : orig_shape[1], : orig_shape[2], : orig_shape[3]]
+                    for orig_shape, torch_tensor in zip(orig_shapes, torch_tensors)
+                ]
+                key_states, value_states = past_key_values.update(
+                    *torch_tensors,
+                    self._fallback_torch_layer.layer_idx,
+                    cache_kwargs,
+                )
+                key_states, value_states = [TorchTTNNTensor(key_states), TorchTTNNTensor(value_states)]
+                key_states = ttnn.to_device(key_states.to_ttnn, self.device)
+                value_states = ttnn.to_device(value_states.to_ttnn, self.device)
+                key_states = ttnn.experimental.all_gather_async(
+                    key_states,
+                    dim=-1,
+                    multi_device_global_semaphore=self.device_state.ccl_manager.get_and_cycle_ag_semaphore_handles(1),
+                    barrier_semaphore=self.device_state.ccl_manager.get_and_cycle_barrier_semaphore_handle(1),
+                    num_links=1,
+                    topology=ttnn.Topology.Linear,
+                )
+                value_states = ttnn.experimental.all_gather_async(
+                    value_states,
+                    dim=-1,
+                    multi_device_global_semaphore=self.device_state.ccl_manager.get_and_cycle_ag_semaphore_handles(1),
+                    barrier_semaphore=self.device_state.ccl_manager.get_and_cycle_barrier_semaphore_handle(1),
+                    num_links=1,
+                    topology=ttnn.Topology.Linear,
+                )
 
         # Pad value_states if needed
         if self.qk_head_dim != self.v_head_dim:
@@ -1023,6 +1156,8 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
         past_key_values: Optional["Cache"] = None,
         cache_position: Optional[torch.LongTensor] = None,
         position_ids: Optional[torch.LongTensor] = None,
+        page_table: Optional[ttnn.Tensor] = None,
+        position_idxs: Optional[ttnn.Tensor] = None,
         **kwargs,
     ) -> tuple[ttnn.Tensor, Optional[torch.Tensor]]:
         """Forward pass with automatic decode/prefill dispatch.
@@ -1039,10 +1174,20 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
             Tuple of (output_tensor, attention_weights)
         """
 
-        return self._forward_prefill(
-            hidden_states,
-            position_embeddings,
-            attention_mask,
-            past_key_values,
-            cache_position,
-        )
+        seq_len = hidden_states.shape[1]
+
+        if seq_len == 1 and self.paged_attention_config and page_table is not None:
+            return self._forward_decode(
+                hidden_states,
+                position_embeddings,
+                page_table,
+                position_idxs,
+            )
+        else:
+            return self._forward_prefill(
+                hidden_states,
+                position_embeddings,
+                attention_mask,
+                past_key_values,
+                cache_position,
+            )

@@ -133,16 +133,22 @@ class TTNNLinearIColShardedWRowSharded(TTNNLinearInputShardedWeightSharded):
     def forward(self, input_tensor: ttnn.Tensor) -> ttnn.Tensor:
         """Forward pass through linear layer."""
         if len(input_tensor.tensor_topology().placements()) == 1:
-            assert (
-                input_tensor.tensor_topology().placements()[0].dim == self.input_dim
-            ), f"Input tensor must be sharded on dimension {self.input_dim}."
+            placement = input_tensor.tensor_topology().placements()[0]
+            if isinstance(placement, ttnn.PlacementShard):
+                assert placement.dim == self.input_dim, f"Expected shard dim {self.input_dim}, got {placement.dim}"
+            else:
+                # For PlacementReplicate, no dim validation needed
+                pass
         elif len(input_tensor.tensor_topology().placements()) == 2:
-            assert (
-                input_tensor.tensor_topology().placements()[0].dim == 0
-            ), f"Input tensor must be sharded on batch dim (0)."
-            assert (
-                input_tensor.tensor_topology().placements()[1].dim == self.input_dim
-            ), f"Input tensor must be sharded on dimension {self.input_dim}."
+            # Check each placement type before accessing dim
+            placement0 = input_tensor.tensor_topology().placements()[0]
+            placement1 = input_tensor.tensor_topology().placements()[1]
+
+            if isinstance(placement0, ttnn.PlacementShard):
+                assert placement0.dim == 0, f"Input tensor must be sharded on batch dim (0)."
+
+            if isinstance(placement1, ttnn.PlacementShard):
+                assert placement1.dim == self.input_dim, f"Input tensor must be sharded on dimension {self.input_dim}."
         else:
             raise RuntimeError(
                 f"Input tensor must be sharded on either batch dim (0) or input dim ({self.input_dim}), but got tensor with placements: {input_tensor.tensor_topology().placements()}"
