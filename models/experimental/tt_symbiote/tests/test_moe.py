@@ -2,26 +2,7 @@
 
 # SPDX-License-Identifier: Apache-2.0
 
-"""Tests MoE modules with TTNN acceleration.
-
-Distributed-equivalent test setup
-----------------------------------
-TTNNMoE is a tensor-parallel (T3K, 8-device) implementation.  The TTNN forward:
-
-  1. All-gather input along hidden_size (each device: H/8 → H).
-  2. Gate routing via PyTorch CPU fallback on the *full* assembled input so that
-     routing decisions are bit-identical to the single-device PyTorch reference.
-  3. Expert computation distributed via all-to-all dispatch/combine.
-  4. Reduce-scatter output (H → H/8 per device).
-  5. Add shared-expert output.
-
-The framework's DistributedConfig automatically:
-  * shards the input tensor (ShardTensor2dMesh, dim=-1) when sending to TTNN, and
-  * gathers the output tensor (ConcatMesh2dToTensor, dim=-1) when converting back.
-
-So the test sends a full (B, T, H) torch tensor; each device sees (B, T, H/8); the
-gathered TTNN output is (B, T, H) — directly comparable with ``model(inputs)``.
-"""
+"""Tests MoE modules with TTNN acceleration."""
 
 import pytest
 import torch
@@ -34,11 +15,6 @@ from models.experimental.tt_symbiote.modules.moe import (
 from models.experimental.tt_symbiote.utils.device_management import set_device
 from models.experimental.tt_symbiote.core.utils import compare_fn_outputs
 import ttnn
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
 
 
 def _to_float32(t) -> torch.Tensor:
@@ -60,11 +36,6 @@ def _pcc(a: torch.Tensor, b: torch.Tensor) -> float:
     return float(pcc.item())
 
 
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-
 @pytest.fixture
 def default_moe_config():
     """Default MoE configuration for testing."""
@@ -82,18 +53,14 @@ def default_moe_config():
     )
 
 
-# ---------------------------------------------------------------------------
-# Test
-# ---------------------------------------------------------------------------
-
-PCC_THRESHOLD = 0.99  # target minimum Pearson correlation coefficient
+PCC_THRESHOLD = 0.99
 
 
 @pytest.mark.parametrize(
     "real_weights",
     [
-        True,  # load from pretrained checkpoint
-        False,  # random initialisation
+        True,
+        False,
     ],
 )
 @pytest.mark.parametrize(
@@ -102,18 +69,7 @@ PCC_THRESHOLD = 0.99  # target minimum Pearson correlation coefficient
     indirect=True,
 )
 def test_glm4_moe_full(mesh_device, default_moe_config, real_weights):
-    """Test full Glm4MoeMoE module with TTNN tensor-parallel acceleration.
-
-    Distributed-equivalent comparison
-    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-    * PyTorch reference: ``model(inputs)`` on the full ``(B, T, H)`` tensor.
-    * TTNN path: input automatically sharded to ``(B, T, H/8)`` per device by the
-      DistributedConfig mesh_mapper, all-gathered to ``(B, T, H)`` inside the forward,
-      experts computed, reduce-scattered; output gathered back to ``(B, T, H)`` by the
-      mesh_composer before comparison.
-    * Routing in TTNN uses the PyTorch gate on the full assembled input → identical
-      expert selection as the reference → eliminates routing-induced PCC loss.
-    """
+    """Test full Glm4MoeMoE module with TTNN tensor-parallel acceleration."""
     if real_weights:
         from transformers import AutoModelForCausalLM
 
@@ -129,28 +85,21 @@ def test_glm4_moe_full(mesh_device, default_moe_config, real_weights):
     torch.set_grad_enabled(False)
 
     batch_size, seq_len = 1, 115
-    # Full input — DistributedConfig shards along hidden_size across 8 devices.
     inputs = torch.randn((batch_size, seq_len, default_moe_config.hidden_size), dtype=torch.bfloat16)
 
-    # ---- PyTorch single-device reference --------------------------------
     outputs_torch = model(inputs)
 
-    # Optional debug: compare router topk between PyTorch and TTNN implementation.
-    # Set MOE_DEBUG=1 in the environment to enable.
     import os
 
     if os.environ.get("MOE_DEBUG"):
-        # PyTorch routing
         router_logits_torch = model.gate(inputs)
         topk_i_torch, topk_w_torch = model.route_tokens_to_experts(router_logits_torch)
 
-        # TTNN routing (convert logits to ttnn.Tensor)
         router_logits_ttnn = ttnn.from_torch(router_logits_torch.to(torch.bfloat16))
         ttnn_model = TTNNMoE.from_torch(model)
         set_device(ttnn_model, mesh_device)
         topk_i_ttnn, topk_w_ttnn = ttnn_model.route_tokens_to_experts(router_logits_ttnn)
 
-        # Convert TTNN results to torch for comparison
         from models.experimental.tt_symbiote.core.tensor import TorchTTNNTensor
 
         def _to_torch_any(t):
@@ -163,17 +112,14 @@ def test_glm4_moe_full(mesh_device, default_moe_config, real_weights):
         topk_i_ttnn_t = _to_torch_any(topk_i_ttnn).to(torch.int32)
         topk_w_ttnn_t = _to_torch_any(topk_w_ttnn).to(torch.float32)
 
-        # Count mismatching index rows and report max weight diff
         mismatches = (topk_i_ttnn_t != topk_i_torch).any(dim=-1).sum().item()
         max_w_diff = (topk_w_ttnn_t - topk_w_torch).abs().max().item()
         print("MOE_DEBUG: topk_index_mismatches={}, max_weight_diff={:.6f}".format(mismatches, max_w_diff))
 
-    # ---- TTNN distributed forward (8 devices) ---------------------------
     ttnn_model = TTNNMoE.from_torch(model)
     set_device(ttnn_model, mesh_device)
     outputs_ttnn = ttnn_model(inputs)
 
-    # ---- Convert outputs to float32 tensors for comparison --------------
     ref = _to_float32(outputs_torch)
     out = _to_float32(outputs_ttnn)
 
@@ -188,7 +134,6 @@ def test_glm4_moe_full(mesh_device, default_moe_config, real_weights):
         f"PCC={pcc:.6f}  max_diff={max_diff:.4f}  mean_diff={mean_diff:.4f}"
     )
 
-    # Forward the detailed per-op comparison to the existing utility (logs warnings).
     compare_fn_outputs(outputs_torch, outputs_ttnn, "Glm4MoeMoE")
 
     assert pcc >= PCC_THRESHOLD, (

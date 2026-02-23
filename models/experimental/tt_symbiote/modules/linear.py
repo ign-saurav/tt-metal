@@ -11,8 +11,7 @@ import ttnn
 from models.experimental.tt_symbiote.core.module import TTNNModule, deallocate_weights_after, run_on_devices, DeviceArch
 from models.experimental.tt_symbiote.core.run_config import trace_enabled
 
-# Shared high-fidelity compute kernel config used for all linear layers that need
-# maximum numerical accuracy (shared expert, attention projections, etc.).
+# Shared high-fidelity kernel for numerically sensitive projections.
 _HIFI4_COMPUTE_CFG = ttnn.WormholeComputeKernelConfig(
     math_fidelity=ttnn.MathFidelity.HiFi4,
     math_approx_mode=False,
@@ -90,7 +89,7 @@ class TTNNLinear(TTNNModule):
         input_tensor_shape = list(input_tensor.shape)
         input_shape = list(input_tensor_shape)
         while len(input_shape) < 4:
-            input_shape.insert(1, 1)  # Add batch dimensions if needed
+            input_shape.insert(1, 1)
         input_tensor = ttnn.reshape(input_tensor, input_shape)
         tt_output = ttnn.linear(input_tensor, self.tt_weight, bias=self.tt_bias, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         tt_output = ttnn.reshape(tt_output, input_tensor_shape[:-1] + [self.out_features])
@@ -161,7 +160,7 @@ class TTNNLinearIColShardedWRowSharded(TTNNLinearInputShardedWeightSharded):
         input_tensor_shape = list(input_tensor.shape)
         input_shape = list(input_tensor_shape)
         while len(input_shape) < 4:
-            input_shape.insert(1, 1)  # Add batch dimensions if needed
+            input_shape.insert(1, 1)
         input_tensor = ttnn.reshape(input_tensor, input_shape)
         tt_output = ttnn.linear(
             input_tensor,

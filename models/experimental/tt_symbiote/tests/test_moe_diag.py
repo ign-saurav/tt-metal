@@ -59,8 +59,8 @@ def default_moe_config():
 @pytest.mark.parametrize(
     "real_weights",
     [
-        True,  # load from pretrained checkpoint
-        False,  # random initialisation
+        True,
+        False,
     ],
 )
 @pytest.mark.parametrize(
@@ -87,33 +87,25 @@ def test_experts_with_forced_routing(mesh_device, default_moe_config, real_weigh
     B, T, H = 1, 115, default_moe_config.hidden_size
     inputs = torch.randn(B, T, H, dtype=torch.bfloat16)
 
-    # PyTorch reference
     pt_logits = model.gate(inputs)
     pt_idx, pt_w = model.route_tokens_to_experts(pt_logits)
     pt_full = model(inputs)
 
-    # Also compute PyTorch routed-only and shared-only
     pt_hidden = inputs.view(-1, H)
     pt_routed = model.experts(pt_hidden, pt_idx, pt_w).view(B, T, H)
     pt_shared = model.shared_experts(inputs)
 
     print(f"\n=== Expert Computation Diagnostic ({'real_weights' if real_weights else 'random_weights'}) ===")
 
-    # Build TTNN model
     ttnn_model = TTNNMoE.from_torch(model)
     set_device(ttnn_model, mesh_device)
 
-    # --- Test A: Normal TTNN forward (TTNN routing) ---
     outputs_normal = ttnn_model(inputs)
     pcc_normal = _pcc(_to_f32(pt_full), _to_f32(outputs_normal))
     print(f"\n(A) Normal TTNN pipeline:    PCC = {pcc_normal:.6f}")
 
-    # Compare routing decisions between PT and TTNN
-    # Use the same router logits for fair comparison (PyTorch logits converted to TTNN)
     try:
-        # Reshape to match expected format: (T, n_routed_experts)
         pt_logits_reshaped = pt_logits.view(-1, pt_logits.shape[-1]).to(torch.bfloat16)
-        # Create TTNN tensor directly on the device with replication
         router_logits_ttnn = ttnn.from_torch(
             pt_logits_reshaped,
             dtype=ttnn.bfloat16,
@@ -124,10 +116,8 @@ def test_experts_with_forced_routing(mesh_device, default_moe_config, real_weigh
         ttnn_model.route_tokens_to_experts.preprocess_weights()
         ttnn_model.route_tokens_to_experts.move_weights_to_device()
         ttnn_idx, ttnn_w = ttnn_model.route_tokens_to_experts.forward(router_logits_ttnn)
-        # Convert back to torch with mesh composer for multi-device tensors
         ttnn_idx_torch = ttnn.to_torch(ttnn_idx, mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0))
         ttnn_w_torch = ttnn.to_torch(ttnn_w, mesh_composer=ttnn.ConcatMeshToTensor(mesh_device, dim=0))
-        # Take only first device's results since input was replicated
         num_tokens = pt_idx.shape[0]
         ttnn_idx_torch = ttnn_idx_torch[:num_tokens].to(torch.int32)
         ttnn_w_torch = ttnn_w_torch[:num_tokens].to(torch.float32)
@@ -139,8 +129,6 @@ def test_experts_with_forced_routing(mesh_device, default_moe_config, real_weigh
     except Exception as e:
         print(f"    Routing comparison skipped due to error: {e}")
 
-    # --- Test B: Force TTNN to use PT routing ---
-    # We monkey-patch the forward to inject PT routing decisions
     original_forward = TTNNMoE.forward
 
     def forced_routing_forward(self, x):
@@ -158,7 +146,6 @@ def test_experts_with_forced_routing(mesh_device, default_moe_config, real_weigh
         if x.layout != ttnn.TILE_LAYOUT:
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-        # Inject PyTorch routing decisions (replicated to all devices)
         topk_idx_tt = ttnn.from_torch(pt_idx.to(torch.int32), dtype=ttnn.int32, layout=ttnn.ROW_MAJOR_LAYOUT)
         topk_idx_tt = ttnn.to_device(topk_idx_tt, x.device())
         topk_w_tt = ttnn.from_torch(pt_w.to(torch.bfloat16), dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
@@ -188,7 +175,6 @@ def test_experts_with_forced_routing(mesh_device, default_moe_config, real_weigh
 
     TTNNMoE.forward = forced_routing_forward
     try:
-        # Need a fresh model to avoid stale state
         ttnn_model2 = TTNNMoE.from_torch(model)
         set_device(ttnn_model2, mesh_device)
         outputs_forced = ttnn_model2(inputs)
@@ -207,7 +193,6 @@ def test_experts_with_forced_routing(mesh_device, default_moe_config, real_weigh
     pcc_forced = _pcc(ref_f, out_f)
     print(f"(B) TTNN with PT routing:   PCC = {pcc_forced:.6f}")
 
-    # Shared experts PCC (should be high)
     ttnn_shared = _to_f32(ttnn_model.shared_experts(inputs))
     pt_shared_f = _to_f32(pt_shared)
     if ttnn_shared.shape != pt_shared_f.shape:
@@ -217,9 +202,6 @@ def test_experts_with_forced_routing(mesh_device, default_moe_config, real_weigh
     pcc_shared = _pcc(pt_shared_f, ttnn_shared)
     print(f"(C) Shared experts only:    PCC = {pcc_shared:.6f}")
 
-    # Routed-only PCC (derived from full - shared)
-    # This isolates the expert matmul precision
-    # Flatten all tensors to ensure shape compatibility
     out_f_flat = out_f.reshape(-1)
     ref_f_flat = ref_f.reshape(-1)
     ttnn_shared_flat = ttnn_shared.reshape(-1)
