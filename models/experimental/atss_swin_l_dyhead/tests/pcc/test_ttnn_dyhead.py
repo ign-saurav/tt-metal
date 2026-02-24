@@ -49,14 +49,17 @@ def test_ttnn_dyhead_vs_reference(device, atss_ckpt_path, atss_ref_model):
     )
 
     # 4. Run TTNN Forward Pass
-    # The hybrid head accepts the torch fpn_feats and handles internal ttnn transfers
-    actual_dy_feats = ttnn_head(list(fpn_feats))
+    # Simulate the TTNN FPN output by permuting the PyTorch NCHW feats to NHWC
+    fpn_feats_nhwc = [f.permute(0, 2, 3, 1).contiguous() for f in fpn_feats]
+    actual_dy_feats = ttnn_head(fpn_feats_nhwc)
 
     # 5. Compare Results using PCC
     # DyHead returns a list of tensors (one per pyramid level)
     pcc_threshold = 0.98
 
     for i, (golden, actual) in enumerate(zip(expected_dy_feats, actual_dy_feats)):
+        # Convert actual from NHWC back to NCHW for comparison against golden ref
+        actual = actual.permute(0, 3, 1, 2)
         passing, pcc_val = comp_pcc(golden, actual, pcc_threshold)
         assert (
             golden.shape == actual.shape
