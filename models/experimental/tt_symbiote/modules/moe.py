@@ -1305,30 +1305,20 @@ class TTNNExperts(TTNNModule):
             is_input_b_sparse=True,
         )
 
-        # Activation and multiply.
+        # Activation and multiply (BF16, no float32 casts).
         w1_activated = ttnn.silu(w1_out)
         ttnn.deallocate(w1_out)
-        if w1_activated.dtype != ttnn.float32:
-            w1_activated_f32 = ttnn.typecast(w1_activated, ttnn.float32)
-            ttnn.deallocate(w1_activated)
-        else:
-            w1_activated_f32 = w1_activated
-        if w3_out.dtype != ttnn.float32:
-            w3_out_f32 = ttnn.typecast(w3_out, ttnn.float32)
-            ttnn.deallocate(w3_out)
-        else:
-            w3_out_f32 = w3_out
-        intermediate_f32 = ttnn.mul(w1_activated_f32, w3_out_f32)
-        ttnn.deallocate(w1_activated_f32)
-        ttnn.deallocate(w3_out_f32)
+        intermediate = ttnn.mul(w1_activated, w3_out)
+        ttnn.deallocate(w1_activated)
+        ttnn.deallocate(w3_out)
 
-        # Keep w2 input in f32 to avoid BF16 quantization before down-projection.
-        intermediate_f32 = ttnn.squeeze(intermediate_f32, 0)
-        intermediate_f32 = ttnn.squeeze(intermediate_f32, 1)
+        # Reshape for w2
+        intermediate = ttnn.squeeze(intermediate, 0)
+        intermediate = ttnn.squeeze(intermediate, 1)
 
-        # w2 projection.
+        # w2 projection (BF16).
         expert_output = ttnn.sparse_matmul(
-            intermediate_f32,
+            intermediate,
             self.tt_w2_proj,
             sparsity=sparsity_t,
             output_tile=ttnn.Tile([SPARSITY_BLOCK_SIZE, ttnn.TILE_SIZE]),
@@ -1337,11 +1327,7 @@ class TTNNExperts(TTNNModule):
             is_input_a_sparse=True,
             is_input_b_sparse=False,
         )
-        ttnn.deallocate(intermediate_f32)
-        if expert_output.dtype != ttnn.bfloat16:
-            expert_output_bf16 = ttnn.typecast(expert_output, ttnn.bfloat16)
-            ttnn.deallocate(expert_output)
-            expert_output = expert_output_bf16
+        ttnn.deallocate(intermediate)
 
         # Reshape to expected format.
         expert_output = ttnn.permute(expert_output, (1, 0, 2, 3))
@@ -1445,16 +1431,16 @@ class TTNNMoE(TTNNModule):
         module.experts = TTNNExperts.from_torch(torch_moe.experts)
         module.shared_experts = TTNNGlm4MoeMLP.from_torch(torch_moe.shared_experts)
 
-        # Replicate gate weight and keep it in f32 to match PyTorch routing logits.
-        module._gate_weight_torch = torch_moe.gate.weight.float()  # float32
+        # Replicate gate weight in bfloat16 for end-to-end BF16 routing.
+        module._gate_weight_torch = torch_moe.gate.weight.to(torch.bfloat16)
 
         return module
 
     def preprocess_weights_impl(self):
         # Replicate gate weight (f32) and transpose for ttnn.linear A @ B.
         self._gate_weight_tt = ttnn.from_torch(
-            self._gate_weight_torch.T.contiguous(),  # (hidden_size, n_experts) float32
-            dtype=ttnn.float32,
+            self._gate_weight_torch.T.contiguous(),  # (hidden_size, n_experts) bfloat16
+            dtype=ttnn.bfloat16,
             layout=ttnn.TILE_LAYOUT,
         )
 
