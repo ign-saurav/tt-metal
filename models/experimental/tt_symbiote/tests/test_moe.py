@@ -49,7 +49,6 @@ def test_glm4_moe_full(mesh_device, default_moe_config, real_weights):
             AutoModelForCausalLM.from_pretrained("zai-org/GLM-4.7-Flash", trust_remote_code=True).model.layers[1].mlp
         )
         model = model.to(dtype=torch.bfloat16)
-        print(model)
     else:
         model = Glm4MoeMoE(default_moe_config).to(dtype=torch.bfloat16)
     model.eval()
@@ -58,7 +57,6 @@ def test_glm4_moe_full(mesh_device, default_moe_config, real_weights):
     inputs = torch.randn((batch_size, seq_len, default_moe_config.hidden_size), dtype=torch.bfloat16)
     outputs_torch = model(inputs)
     ttnn_model = TTNNMoE.from_torch(model)
-    print(ttnn_model)
     set_device(ttnn_model, mesh_device)
     outputs_ttnn = ttnn_model(inputs)
     compare_fn_outputs(outputs_torch, outputs_ttnn, "Glm4MoeMoE")
