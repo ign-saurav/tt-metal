@@ -58,9 +58,7 @@ def _make_sparse_matmul_program_config(
     core_x = int(getattr(grid, "x"))
     core_y = int(getattr(grid, "y"))
     n_tiles = (int(out_features) + ttnn.TILE_SIZE - 1) // ttnn.TILE_SIZE
-    # The sparse matmul 1D program assigns 2D blocks across a 2D core grid and requires the
-    # number of blocks not to exceed the number of available cores. Use a conservative
-    # per_core_N based on ceil-div to keep num_blocks_x small when out_features > num_cores.
+    # Keep num_blocks_x <= num_cores using conservative per_core_N.
     num_cores = max(1, core_x * core_y)
     per_core_N = max(1, int(math.ceil(n_tiles / num_cores)))
     return ttnn.MatmulMultiCoreReuseMultiCast1DProgramConfig(
@@ -721,39 +719,29 @@ class TTNNGlm4MoeRouteTokenToExperts(TTNNModule):
         n_experts = scores.shape[3]
         experts_per_group = n_experts // self.torch_layer.n_group
 
-        # ------------------------------------------------------------
-        # Add correction bias
-        # ------------------------------------------------------------
+        # Add correction bias.
         bias = ttnn.repeat(self.e_score_correction_bias, ttnn.Shape((1, 1, T, 1)))
         bias = ttnn.to_layout(bias, ttnn.TILE_LAYOUT)
 
         scores_with_bias = ttnn.add(scores, bias)
         ttnn.deallocate(bias)
 
-        # ------------------------------------------------------------
-        # Reshape into groups: (1,T,n_group,experts_per_group)
-        # ------------------------------------------------------------
+        # Reshape into groups: (1, T, n_group, experts_per_group).
         grouped = ttnn.reshape(scores_with_bias, ttnn.Shape((1, T, self.torch_layer.n_group, experts_per_group)))
 
-        # ------------------------------------------------------------
-        # Top-2 experts per group
-        # ------------------------------------------------------------
+        # Top-2 experts per group.
         top2_scores, _ = ttnn.topk(grouped, k=2, dim=3)
         ttnn.deallocate(grouped)
 
-        # group_scores: (1,T,n_group)
+        # group_scores: (1, T, n_group).
         group_scores = ttnn.sum(top2_scores, dim=3)
         ttnn.deallocate(top2_scores)
 
-        # ------------------------------------------------------------
-        # Top-k groups
-        # ------------------------------------------------------------
+        # Top-k groups.
         _, topk_group_idx = ttnn.topk(group_scores, k=self.torch_layer.topk_group, dim=2)
         ttnn.deallocate(group_scores)
 
-        # ------------------------------------------------------------
-        # Build group mask via scatter
-        # ------------------------------------------------------------
+        # Build group mask via scatter.
         input_mask = ttnn.repeat(self.scatter_input, ttnn.Shape((1, 1, T, 1)))
 
         src_tensor = ttnn.repeat(self.scatter_src, ttnn.Shape((1, 1, T, 1)))
@@ -763,46 +751,34 @@ class TTNNGlm4MoeRouteTokenToExperts(TTNNModule):
         ttnn.deallocate(src_tensor)
         ttnn.deallocate(topk_group_idx)
 
-        # reshape: (1,T,n_group,1)
+        # reshape: (1, T, n_group, 1).
         active_groups_mask = ttnn.reshape(active_groups_mask, ttnn.Shape((1, T, self.torch_layer.n_group, 1)))
 
-        # ------------------------------------------------------------
-        # Expand group mask → expert mask
-        # ------------------------------------------------------------
+        # Expand group mask to expert mask.
         active_experts_mask = ttnn.repeat(active_groups_mask, ttnn.Shape((1, 1, 1, experts_per_group)))
         ttnn.deallocate(active_groups_mask)
 
-        # reshape back: (1,1,T,16)
+        # reshape back: (1, 1, T, n_experts).
         active_experts_mask = ttnn.reshape(active_experts_mask, ttnn.Shape((1, 1, T, n_experts)))
 
-        # ------------------------------------------------------------
-        # Zero out inactive experts
-        # ------------------------------------------------------------
+        # Zero out inactive experts.
         masked_scores = ttnn.mul(scores_with_bias, active_experts_mask)
         ttnn.deallocate(active_experts_mask)
 
-        # ------------------------------------------------------------
-        # Top-k experts from active experts
-        # ------------------------------------------------------------
+        # Top-k experts from active experts.
         _, topk_expert_idx = ttnn.topk(masked_scores, k=self.torch_layer.top_k, dim=3)
         ttnn.deallocate(masked_scores)
 
-        # ------------------------------------------------------------
-        # Gather original sigmoid scores (NO bias)
-        # ------------------------------------------------------------
+        # Gather original sigmoid scores (no bias).
         topk_weights = ttnn.gather(scores, dim=3, index=topk_expert_idx)
         ttnn.deallocate(scores)
 
-        # ------------------------------------------------------------
-        # Normalize weights
-        # ------------------------------------------------------------
+        # Normalize weights.
         denom = ttnn.sum(topk_weights, dim=3, keepdim=True) + 1e-20
         topk_weights = ttnn.div(topk_weights, denom)
         ttnn.deallocate(denom)
 
-        # ------------------------------------------------------------
-        # Apply scaling factor
-        # ------------------------------------------------------------
+        # Apply scaling factor.
         scale = ttnn.repeat(self.expert_scale, ttnn.Shape((1, 1, T, 1)))
         scale = ttnn.to_layout(scale, ttnn.TILE_LAYOUT)
 
@@ -814,15 +790,13 @@ class TTNNGlm4MoeRouteTokenToExperts(TTNNModule):
 
         topk_weights = ttnn.reshape(topk_weights, ttnn.Shape((T, self.torch_layer.top_k)))
 
-        # Canonicalize ordering: sort experts per-token by descending weight to ensure
-        # deterministic ordering between Torch and TTNN implementations.
-        # Convert to torch, sort, then convert back.
+        # Canonicalize ordering: sort per-token by weight for deterministic output.
         topk_idx_t = _to_torch_any(topk_expert_idx).to(torch.int64)
         topk_w_t = _to_torch_any(topk_weights).to(torch.float32)
-        # sort weights descending and permute indices accordingly
+        # Sort weights descending and permute indices.
         sorted_w, sorted_pos = torch.sort(topk_w_t, dim=1, descending=True)
         sorted_idx = torch.gather(topk_idx_t, 1, sorted_pos)
-        # convert back to ttnn formats
+        # Convert back to ttnn formats.
         topk_expert_idx = ttnn.from_torch(sorted_idx.to(torch.int32))
         topk_weights = ttnn.from_torch(sorted_w.to(torch.bfloat16))
         return topk_expert_idx, topk_weights
@@ -858,9 +832,7 @@ class TTNNGlm4MoeMoE(TTNNModule):
         residuals = hidden_states
         orig_shape = list(hidden_states.shape)
         router_logits = self.gate(hidden_states)
-        # Use the TTNN implementation of the router (not the fallback torch method).
-        # Calling the torch-layer route_tokens_to_experts here passes a TTNN tensor into
-        # a PyTorch implementation and causes mismatched routing/weights.
+        # Use TTNN router; torch fallback expects torch tensors.
         topk_indices, topk_weights = self.route_tokens_to_experts(router_logits)
         hidden_states = hidden_states.view(-1, hidden_states.shape[-1])
         hidden_states = self.experts(hidden_states, topk_indices.to(dtype=torch.int64), topk_weights).view(*orig_shape)
@@ -886,27 +858,25 @@ class TTNNMoERouterDecode(TTNNModule):
     def preprocess_weights_impl(self):
         r = self._fallback_torch_layer
 
-        # Correction bias: (1, 1, 1, n_experts) — ROW_MAJOR so repeat is exact
+        # Correction bias template (ROW_MAJOR for exact repeat).
         self.bias_rm = ttnn.from_torch(
             r.e_score_correction_bias.reshape(1, 1, 1, -1).to(torch.bfloat16),
             dtype=ttnn.bfloat16,
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
-        # Group mask template: (1, 1, 1, n_group) filled with 0.0 — inactive groups.
-        # Matches reference masked_fill(~mask, 0.0): inactive experts become 0.0 so
-        # topk picks them only if all active experts have negative scores (unlikely).
+        # Group mask template for inactive groups (matches masked_fill(~mask, 0.0)).
         self.scatter_input_rm = ttnn.from_torch(
             torch.zeros(1, 1, 1, r.n_group, dtype=torch.bfloat16),
             dtype=ttnn.bfloat16,
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
-        # Scatter src: (1, 1, 1, topk_group) filled with ones
+        # Scatter src template for selected groups.
         self.scatter_src_rm = ttnn.from_torch(
             torch.ones(1, 1, 1, r.topk_group, dtype=torch.bfloat16),
             dtype=ttnn.bfloat16,
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
-        # Routing scale: (1, 1, 1, top_k) — routed_scaling_factor broadcast
+        # Routing scale template (broadcasted).
         self.scale_rm = ttnn.from_torch(
             torch.full((1, 1, 1, r.top_k), r.routed_scaling_factor, dtype=torch.bfloat16),
             dtype=ttnn.bfloat16,
@@ -922,16 +892,15 @@ class TTNNMoERouterDecode(TTNNModule):
     def forward(self, logits: ttnn.Tensor) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         r = self._fallback_torch_layer
 
-        # Ensure TILE_LAYOUT for sigmoid / topk
+        # Ensure TILE_LAYOUT for sigmoid/topk.
         if logits.layout != ttnn.TILE_LAYOUT:
             logits = ttnn.to_layout(logits, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        # Work in 4D: (1, 1, T, n_experts)
+        # Work in 4D: (1, 1, T, n_experts).
         logits = ttnn.reshape(logits, ttnn.Shape((1, 1, logits.shape[0], logits.shape[1])))
-        # Compute sigmoid in float32 for numerical stability, then use a bfloat16 copy
-        # only for topk which requires BF16.
+        # Sigmoid in f32 for stability; topk consumes BF16.
         if logits.dtype != ttnn.float32:
             logits_f32 = ttnn.typecast(logits, ttnn.float32)
-            # original logits not needed after conversion
+            # Original logits not needed after conversion.
             ttnn.deallocate(logits)
         else:
             logits_f32 = logits
@@ -942,11 +911,11 @@ class TTNNMoERouterDecode(TTNNModule):
         n_group = r.n_group
         experts_per_group = n_experts // n_group
 
-        # ── correction bias ─────────────────────────────────────────────────
+        # Add correction bias (f32).
         bias_rep_rm = ttnn.repeat(self.bias_rm, ttnn.Shape((1, 1, T, 1)))
         bias = ttnn.to_layout(bias_rep_rm, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         ttnn.deallocate(bias_rep_rm)
-        # convert bias to float32 for stable addition
+        # Bias add in f32 for stability.
         if bias.dtype != ttnn.float32:
             bias_f32 = ttnn.typecast(bias, ttnn.float32)
             ttnn.deallocate(bias)
@@ -959,25 +928,25 @@ class TTNNMoERouterDecode(TTNNModule):
         top_k = r.top_k
 
         if n_group <= r.topk_group:
-            # --- Pass 1: rough BF16 topk(k+1) to find coarse threshold -------
+            # Pass 1: BF16 topk(k+1) for coarse threshold.
             scores_bf16_p1 = ttnn.typecast(scores_with_bias_f32, ttnn.bfloat16)
             rough_vals, _ = ttnn.topk(scores_bf16_p1, k=top_k + 1, dim=3, largest=True, sorted=True)
             ttnn.deallocate(scores_bf16_p1)
-            # Extract the (k+1)-th value: shape (1, 1, T, 1)
+            # (k+1)-th value gives coarse threshold.
             rough_thr_bf16 = ttnn.slice(rough_vals, [0, 0, 0, top_k], [1, 1, T, top_k + 1])
             ttnn.deallocate(rough_vals)
             rough_thr_f32 = ttnn.typecast(rough_thr_bf16, ttnn.float32)
             ttnn.deallocate(rough_thr_bf16)
-            # Center scores around the decision boundary (float32 precision preserved)
+            # Center scores in f32 around the threshold.
             scores_c1 = ttnn.sub(scores_with_bias_f32, rough_thr_f32)
             ttnn.deallocate(rough_thr_f32)
             ttnn.deallocate(scores_with_bias_f32)
 
-            # --- Pass 2: refined BF16 topk(k+1) on centered scores -----------
+            # Pass 2: BF16 topk(k+1) on centered scores.
             scores_bf16_p2 = ttnn.typecast(scores_c1, ttnn.bfloat16)
             refined_vals, _ = ttnn.topk(scores_bf16_p2, k=top_k + 1, dim=3, largest=True, sorted=True)
             ttnn.deallocate(scores_bf16_p2)
-            # Second threshold is now near 0 → BF16 step ≈ 0.0001 (very precise)
+            # Refined threshold is near zero; BF16 is much finer there.
             refined_thr_bf16 = ttnn.slice(refined_vals, [0, 0, 0, top_k], [1, 1, T, top_k + 1])
             ttnn.deallocate(refined_vals)
             refined_thr_f32 = ttnn.typecast(refined_thr_bf16, ttnn.float32)
@@ -986,28 +955,28 @@ class TTNNMoERouterDecode(TTNNModule):
             ttnn.deallocate(scores_c1)
             ttnn.deallocate(refined_thr_f32)
 
-            # --- Final pass: exact topk(k) on doubly-centered scores ---------
+            # Pass 3: final BF16 topk(k) on doubly-centered scores.
             scores_bf16_final = ttnn.typecast(scores_c2, ttnn.bfloat16)
             ttnn.deallocate(scores_c2)
             _, topk_expert_idx = ttnn.topk(scores_bf16_final, k=top_k, dim=3, largest=True, sorted=True)
             ttnn.deallocate(scores_bf16_final)
         else:
-            # Group-based selection: apply same 3-pass centering after masking
+            # Grouped selection path (masking + topk).
             scores_bf16 = ttnn.typecast(scores_with_bias_f32, ttnn.bfloat16)
             ttnn.deallocate(scores_with_bias_f32)
 
-            # ── group scores ──────────────────────────────────────────────────
+            # Group scores.
             grouped = ttnn.reshape(scores_bf16, ttnn.Shape((1, T, n_group, experts_per_group)))
             top2_scores, _ = ttnn.topk(grouped, k=2, dim=3)
             ttnn.deallocate(grouped)
             group_scores = ttnn.sum(top2_scores, dim=3)
             ttnn.deallocate(top2_scores)
 
-            # ── top-k groups ──────────────────────────────────────────────────
+            # Top-k groups.
             _, topk_group_idx = ttnn.topk(group_scores, k=r.topk_group, dim=2)
             ttnn.deallocate(group_scores)
 
-            # ── group mask via scatter ─────────────────────────────────────────
+            # Group mask via scatter.
             input_mask_rm = ttnn.repeat(self.scatter_input_rm, ttnn.Shape((1, 1, T, 1)))
             src_rm = ttnn.repeat(self.scatter_src_rm, ttnn.Shape((1, 1, T, 1)))
             idx_rm = ttnn.to_layout(topk_group_idx, ttnn.ROW_MAJOR_LAYOUT)
@@ -1019,7 +988,7 @@ class TTNNMoERouterDecode(TTNNModule):
             ttnn.deallocate(src_rm)
             ttnn.deallocate(idx_4d)
 
-            # ── expert mask ────────────────────────────────────────────────────
+            # Expand to expert mask.
             active_groups_rm = ttnn.reshape(active_groups_rm, ttnn.Shape((1, T, n_group, 1)))
             expert_mask_rm = ttnn.repeat(active_groups_rm, ttnn.Shape((1, 1, 1, experts_per_group)))
             ttnn.deallocate(active_groups_rm)
@@ -1027,24 +996,22 @@ class TTNNMoERouterDecode(TTNNModule):
             expert_mask = ttnn.to_layout(expert_mask_rm, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
             ttnn.deallocate(expert_mask_rm)
 
-            # ── top-k active experts ───────────────────────────────────────────
+            # Top-k active experts.
             masked_scores = ttnn.mul(scores_bf16, expert_mask)
             ttnn.deallocate(scores_bf16)
             ttnn.deallocate(expert_mask)
             _, topk_expert_idx = ttnn.topk(masked_scores, k=top_k, dim=3)
             ttnn.deallocate(masked_scores)
 
-        # ── gather raw sigmoid scores (no bias) for weights ───────────────────
-        # Gather weights from the float32 scores for better precision
+        # Gather weights from f32 sigmoid scores (no bias).
         topk_weights = ttnn.gather(scores_f32, dim=3, index=topk_expert_idx)
 
-        # ── normalise ─────────────────────────────────────────────────────────
+        # Normalize weights.
         denom = ttnn.sum(topk_weights, dim=3, keepdim=True)
         topk_weights = ttnn.div(topk_weights, denom)
         ttnn.deallocate(denom)
 
-        # ── apply routing scale ───────────────────────────────────────────────
-        # Convert routing scale to float32 before applying
+        # Apply routing scale in f32.
         scale_rep_rm = ttnn.repeat(self.scale_rm, ttnn.Shape((1, 1, T, 1)))
         scale_bf16 = ttnn.to_layout(scale_rep_rm, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
         ttnn.deallocate(scale_rep_rm)
@@ -1056,9 +1023,7 @@ class TTNNMoERouterDecode(TTNNModule):
         topk_weights = ttnn.mul(topk_weights, scale_f32)
         ttnn.deallocate(scale_f32)
 
-        # Reshape outputs to (T, top_k).
-        # Keep weights in float32 so the downstream weighted expert sum is computed
-        # at full float32 precision rather than being rounded to bfloat16 first.
+        # Reshape outputs; keep weights in f32 for the downstream sum.
         topk_expert_idx = ttnn.reshape(topk_expert_idx, ttnn.Shape((T, r.top_k)))
         topk_weights = ttnn.reshape(topk_weights, ttnn.Shape((T, r.top_k)))
         return topk_expert_idx, topk_weights
@@ -1080,19 +1045,18 @@ class TTNNExperts(TTNNModule):
         self.num_experts = config.n_routed_experts
         self.num_experts_per_tok = config.num_experts_per_tok
 
-        # Will be set in preprocess_weights_impl
-        # Separate weights for sparse matmul: w1 (gate), w3 (up), w2 (down)
+        # Set in preprocess_weights_impl: w1 (gate), w3 (up), w2 (down).
         self.tt_w1_proj = None
         self.tt_w3_proj = None
         self.tt_w2_proj = None
-        # Keep fused version for dense fallback
+        # Fused version for dense fallback.
         self.tt_gate_up_proj = None
 
-        # Will be set in move_weights_to_device_impl
+        # Set in move_weights_to_device_impl.
         self.expert_mapping_tensors = None
         self.remap_topk_mask = None
 
-        # Control flags
+        # Control flags.
         self.use_sparsity = True
 
     @staticmethod
@@ -1111,20 +1075,16 @@ class TTNNExperts(TTNNModule):
         """
         module = cls(torch_experts.config)
         module._fallback_torch_layer = torch_experts
-        # Allow forcing dense expert path for debugging via environment variable.
-        # Set MOE_USE_DENSE_EXPERTS=1 to disable sparse matmul and use dense matmuls
-        # which can help isolate numerical divergence from the sparse kernel.
+        # Set MOE_USE_DENSE_EXPERTS=1 to force dense matmuls for debugging.
         import os
 
         if os.environ.get("MOE_USE_DENSE_EXPERTS"):
             module.use_sparsity = False
 
-        # Extract expert weights from module
-        # Shape: (num_experts, 2*intermediate_size, hidden_size) for gate_up
-        # Shape: (num_experts, hidden_size, intermediate_size) for down
+        # Extract expert weights from module.
 
         module.torch_gate_up_proj = torch_experts.gate_up_proj
-        # Split into w1 (gate) and w3 (up) for sparse matmul
+        # Split into w1 (gate) and w3 (up).
         module.torch_w1_proj = module.torch_gate_up_proj[:, : torch_experts.config.moe_intermediate_size, :].permute(
             [0, 2, 1]
         )
@@ -1138,7 +1098,7 @@ class TTNNExperts(TTNNModule):
 
     def preprocess_weights_impl(self):
         """Preprocess expert weights: convert to bfloat16 and TILE_LAYOUT."""
-        # w1 (gate): (num_experts, intermediate_size, hidden_size)
+        # w1 (gate) weight.
         self.tt_w1_proj = ttnn.from_torch(
             self.torch_w1_proj.to(torch.bfloat16),
             dtype=ttnn.bfloat16,
@@ -1146,7 +1106,7 @@ class TTNNExperts(TTNNModule):
             mesh_mapper=ttnn.ShardTensorToMesh(self.device, dim=0),
         )
 
-        # w3 (up): (num_experts, intermediate_size, hidden_size)
+        # w3 (up) weight.
         self.tt_w3_proj = ttnn.from_torch(
             self.torch_w3_proj.to(torch.bfloat16),
             dtype=ttnn.bfloat16,
@@ -1154,7 +1114,7 @@ class TTNNExperts(TTNNModule):
             mesh_mapper=ttnn.ShardTensorToMesh(self.device, dim=0),
         )
 
-        # w2 (down): (num_experts, hidden_size, intermediate_size)
+        # w2 (down) weight.
         self.tt_w2_proj = ttnn.from_torch(
             self.torch_w2_proj.to(torch.bfloat16),
             dtype=ttnn.bfloat16,
@@ -1162,7 +1122,7 @@ class TTNNExperts(TTNNModule):
             mesh_mapper=ttnn.ShardTensorToMesh(self.device, dim=0),
         )
 
-        # Also keep fused version for dense fallback
+        # Keep fused version for dense fallback.
         self.tt_gate_up_proj = ttnn.from_torch(
             self.torch_gate_up_proj.to(torch.bfloat16),
             dtype=ttnn.bfloat16,
@@ -1170,7 +1130,7 @@ class TTNNExperts(TTNNModule):
             mesh_mapper=ttnn.ShardTensorToMesh(self.device, dim=0),
         )
 
-        # Clean up torch weights
+        # Clean up torch weights.
         del self.torch_w1_proj
         del self.torch_w3_proj
         del self.torch_w2_proj
@@ -1188,7 +1148,7 @@ class TTNNExperts(TTNNModule):
         self.tt_w2_proj = ttnn.to_device(self.tt_w2_proj, self.device)
         self.tt_gate_up_proj = ttnn.to_device(self.tt_gate_up_proj, self.device)
 
-        # Create expert mapping tensors for all-to-all ops
+        # Mapping tensors for all-to-all ops.
         self.expert_mapping_tensors = ttnn.from_torch(
             torch.eye(self.num_devices, dtype=torch.int32)
             .repeat_interleave(self.num_experts_per_device, dim=0)
@@ -1201,7 +1161,7 @@ class TTNNExperts(TTNNModule):
             layout=ttnn.ROW_MAJOR_LAYOUT,
         )
 
-        # Create remap topk mask for expert token remap
+        # Remap topk mask for expert token remap.
         self.remap_topk_mask = ttnn.from_torch(
             torch.ones((1, self.num_dispatch_devices, 1, self.num_experts), dtype=torch.bfloat16),
             device=self.device,
@@ -1227,12 +1187,12 @@ class TTNNExperts(TTNNModule):
             Output tensor of shape (1, 1, batch_size_per_device*seq_len, hidden_size)
         """
 
-        # Extract dimensions
+        # Extract dimensions.
         batch_size_per_device = x.shape[0]
         seq_len = x.shape[2]
         batch_size = batch_size_per_device * self.num_dispatch_devices
 
-        # Store original num_tokens for unpadding later
+        # Store original num_tokens for unpadding.
         original_num_tokens = batch_size_per_device * seq_len
 
         if topk_experts_indices.dtype != ttnn.uint16:
@@ -1243,30 +1203,30 @@ class TTNNExperts(TTNNModule):
                     memory_config=ttnn.DRAM_MEMORY_CONFIG,
                 )
             topk_experts_indices = ttnn.typecast(topk_experts_indices, ttnn.uint16)
-        # Pad to nearest multiple of SPARSITY_BLOCK_SIZE if needed
+        # Pad to nearest SPARSITY_BLOCK_SIZE if needed.
         num_tokens = original_num_tokens
         pad_amount = 0
         if num_tokens % SPARSITY_BLOCK_SIZE != 0:
             pad_amount = SPARSITY_BLOCK_SIZE - (num_tokens % SPARSITY_BLOCK_SIZE)
             num_tokens += pad_amount
 
-            # Pad x in seq_len dimension
+            # Pad x in seq_len.
             x = ttnn.pad(x, padding=((0, 0), (0, 0), (0, pad_amount), (0, 0)), value=0.0)
 
-            # Pad topk_experts_indices
+            # Pad topk_experts_indices.
             topk_experts_indices = ttnn.pad(
-                topk_experts_indices, padding=((0, pad_amount), (0, 0)), value=0  # Pad with expert 0
+                topk_experts_indices, padding=((0, pad_amount), (0, 0)), value=0  # Pad with expert 0.
             )
 
-            # Pad topk_experts_weights
+            # Pad topk_experts_weights.
             topk_experts_weights = ttnn.pad(
-                topk_experts_weights, padding=((0, pad_amount), (0, 0)), value=0.0  # Pad with zero weight
+                topk_experts_weights, padding=((0, pad_amount), (0, 0)), value=0.0  # Pad with zero weight.
             )
 
-            # Update seq_len to include padding
+            # Update seq_len to include padding.
             seq_len = num_tokens // batch_size_per_device
 
-        # 1. Prepare tensors for all-to-all dispatch (convert to ROW_MAJOR)
+        # 1. Prepare tensors for all-to-all dispatch (ROW_MAJOR).
         x_rm = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
 
         x_rm = ttnn.reshape(x_rm, shape=(batch_size_per_device, 1, seq_len, self.hidden_size))
@@ -1276,7 +1236,7 @@ class TTNNExperts(TTNNModule):
         topk_experts_indices_rm = ttnn.reshape(
             topk_experts_indices_rm, shape=(batch_size_per_device, 1, seq_len, self.num_experts_per_tok)
         )
-        # 2. All-to-all dispatch: distribute tokens to expert devices
+        # 2. All-to-all dispatch to expert devices.
         all_to_all_dispatch_output, all_to_all_dispatch_metadata = ttnn.all_to_all_dispatch(
             x_rm,
             topk_experts_indices_rm,
@@ -1284,13 +1244,13 @@ class TTNNExperts(TTNNModule):
             cluster_axis=1,
         )
 
-        # 3. Reshape for expert computation
+        # 3. Reshape for expert computation.
         post_dispatch = ttnn.reshape(all_to_all_dispatch_output, shape=(1, 1, batch_size * seq_len, self.hidden_size))
         post_dispatch = ttnn.to_layout(post_dispatch, ttnn.TILE_LAYOUT)
 
         num_tokens = batch_size * seq_len
 
-        # 4. Generate sparsity tensor if using sparse matmul
+        # 4. Generate sparsity tensor.
         remap_topk_mask_expanded = ttnn.repeat(self.remap_topk_mask, ttnn.Shape((1, batch_size_per_device, 1, 1)))
         _, sparsity_t = ttnn.moe_expert_token_remap(
             remap_topk_mask_expanded,
@@ -1299,7 +1259,7 @@ class TTNNExperts(TTNNModule):
             reduction_size=SPARSITY_BLOCK_SIZE,
         )
 
-        # Sparse path
+        # Sparse path.
         num_sparse_blocks = num_tokens // SPARSITY_BLOCK_SIZE
         x_sparse = ttnn.reshape(post_dispatch, shape=(1, num_sparse_blocks, SPARSITY_BLOCK_SIZE, self.hidden_size))
 
@@ -1315,9 +1275,7 @@ class TTNNExperts(TTNNModule):
             in0_block_w=1,
             per_core_M=1,
         )
-        # fp32 destination accumulation to match PyTorch float32-accumulated matmul.
-        # Without this, bfloat16 accumulated expert matmuls diverge significantly
-        # from the reference for real trained weights (larger magnitudes).
+        # Use f32 destination accumulation to reduce divergence vs PyTorch.
         expert_compute_cfg = ttnn.WormholeComputeKernelConfig(
             math_fidelity=ttnn.MathFidelity.HiFi4,
             math_approx_mode=False,
@@ -1325,7 +1283,7 @@ class TTNNExperts(TTNNModule):
             packer_l1_acc=True,
         )
 
-        # w1 and w3 projections
+        # w1 and w3 projections.
         w1_out = ttnn.sparse_matmul(
             x_sparse,
             self.tt_w1_proj,
@@ -1347,7 +1305,7 @@ class TTNNExperts(TTNNModule):
             is_input_b_sparse=True,
         )
 
-        # Activation and multiply
+        # Activation and multiply.
         w1_activated = ttnn.silu(w1_out)
         ttnn.deallocate(w1_out)
         if w1_activated.dtype != ttnn.float32:
@@ -1364,15 +1322,11 @@ class TTNNExperts(TTNNModule):
         ttnn.deallocate(w1_activated_f32)
         ttnn.deallocate(w3_out_f32)
 
-        # Reshape for w2 — keep in float32 to avoid BF16 quantisation of the
-        # SiLU(gate)·up product before the down-projection.  The BF16 recast
-        # introduces ~0.4 % relative error per element that composes with the
-        # BF16·BF16 product error in w2, and is the dominant remaining source
-        # of PCC loss for random-initialised weights (large activation magnitudes).
+        # Keep w2 input in f32 to avoid BF16 quantization before down-projection.
         intermediate_f32 = ttnn.squeeze(intermediate_f32, 0)
         intermediate_f32 = ttnn.squeeze(intermediate_f32, 1)
 
-        # w2 projection
+        # w2 projection.
         expert_output = ttnn.sparse_matmul(
             intermediate_f32,
             self.tt_w2_proj,
@@ -1389,7 +1343,7 @@ class TTNNExperts(TTNNModule):
             ttnn.deallocate(expert_output)
             expert_output = expert_output_bf16
 
-        # Reshape to expected format
+        # Reshape to expected format.
         expert_output = ttnn.permute(expert_output, (1, 0, 2, 3))
         expert_output = ttnn.reshape(
             expert_output, shape=(1, self.num_experts_per_device, num_tokens, self.hidden_size)
@@ -1397,13 +1351,13 @@ class TTNNExperts(TTNNModule):
 
         ttnn.deallocate(post_dispatch)
 
-        # 6. Prepare for all-to-all combine (convert to ROW_MAJOR)
+        # 6. Prepare for all-to-all combine (ROW_MAJOR).
         expert_output = ttnn.to_layout(expert_output, ttnn.ROW_MAJOR_LAYOUT)
         expert_output = ttnn.reshape(
             expert_output, shape=(self.num_experts_per_device, batch_size, seq_len, self.hidden_size)
         )
 
-        # 7. All-to-all combine: gather results back
+        # 7. All-to-all combine.
         combined_output = ttnn.all_to_all_combine(
             expert_output,
             all_to_all_dispatch_metadata,
@@ -1411,13 +1365,13 @@ class TTNNExperts(TTNNModule):
             cluster_axis=1,
         )
 
-        # 8. Reshape combined output
+        # 8. Reshape combined output.
         combined_output = ttnn.reshape(
             combined_output, shape=(self.num_experts_per_tok, 1, batch_size_per_device * seq_len, self.hidden_size)
         )
         combined_output = ttnn.to_layout(combined_output, ttnn.TILE_LAYOUT)
 
-        # 9. Apply expert weights
+        # 9. Apply expert weights.
         topk_experts_weights_rm = ttnn.to_layout(topk_experts_weights, ttnn.ROW_MAJOR_LAYOUT)
         topk_experts_weights_rm = ttnn.unsqueeze(topk_experts_weights_rm, 0)
         topk_experts_weights_rm = ttnn.unsqueeze(topk_experts_weights_rm, 0)
@@ -1431,13 +1385,12 @@ class TTNNExperts(TTNNModule):
             topk_experts_weights_tile,
         )
 
-        # 10. Sum over experts dimension
+        # 10. Sum over experts dimension.
         final_output = ttnn.sum(weighted_output, dim=0, keepdim=True)
 
-        # 11. Remove padding if it was added
+        # 11. Remove padding if it was added.
         if pad_amount > 0:
-            # Slice to remove padding: final_output shape is (1, 1, batch_size_per_device*seq_len, hidden_size)
-            # We need to slice the seq dimension from [0:original_num_tokens]
+            # Slice off padding in seq dimension.
             final_output = ttnn.slice(final_output, (0, 0, 0, 0), (1, 1, original_num_tokens, self.hidden_size))
 
         return final_output
@@ -1473,11 +1426,11 @@ class TTNNMoE(TTNNModule):
         module = cls(torch_moe.config)
         module._fallback_torch_layer = torch_moe
 
-        # Create submodules
+        # Create submodules.
         module.gate = TTNNGlm4MoeTopkRouter.from_parameters(
             torch_moe.gate.weight, torch_moe.gate.e_score_correction_bias
         )
-        # Convert router to TTNN
+        # Convert router to TTNN.
         module.route_tokens_to_experts = TTNNMoERouterDecode.from_torch(
             Glm4MoeRouteTokenToExperts(
                 torch_moe.gate.e_score_correction_bias,
@@ -1492,25 +1445,13 @@ class TTNNMoE(TTNNModule):
         module.experts = TTNNExperts.from_torch(torch_moe.experts)
         module.shared_experts = TTNNGlm4MoeMLP.from_torch(torch_moe.shared_experts)
 
-        # Gate weight replicated to all devices for accurate routing.
-        # The TP gate (TTNNGlm4MoeTopkRouter) accumulates 8 bfloat16 partial sums
-        # which differs from single-device PyTorch; after all-gathering x we can
-        # compute the same logits as PyTorch by replicating the weight.
-        #
-        # Keep the weight in float32: Glm4MoeLiteTopkRouter.forward explicitly casts
-        # both hidden_states AND weight to float32 (line 382 in transformers), so we
-        # must match that precision to get identical logits and identical routing.
+        # Replicate gate weight and keep it in f32 to match PyTorch routing logits.
         module._gate_weight_torch = torch_moe.gate.weight.float()  # float32
 
         return module
 
     def preprocess_weights_impl(self):
-        # Replicate gate weight on all devices (not TP-sharded) so routing logits
-        # exactly match PyTorch single-device → maximises routing accuracy and PCC.
-        # ttnn.linear computes A @ B, so weight must be (hidden_size, n_experts).
-        # PyTorch gate.weight is (n_experts, hidden_size); transpose it here.
-        # Use float32 to match Glm4MoeLiteTopkRouter which casts both input and
-        # weight to float32 before F.linear (see modeling_glm4_moe_lite.py:382).
+        # Replicate gate weight (f32) and transpose for ttnn.linear A @ B.
         self._gate_weight_tt = ttnn.from_torch(
             self._gate_weight_torch.T.contiguous(),  # (hidden_size, n_experts) float32
             dtype=ttnn.float32,
@@ -1535,7 +1476,7 @@ class TTNNMoE(TTNNModule):
         self.num_devices = self.device.get_num_devices()
         self.num_dispatch_devices = self.device.shape[0]
         self.num_experts_per_device = even_int_div(self.config.n_routed_experts, self.num_devices)
-        # Store original input for shared experts
+        # Store original input for shared experts.
         residual = x
 
         # 1. All-gather to revert tensor parallelism
@@ -1548,15 +1489,10 @@ class TTNNMoE(TTNNModule):
             topology=ttnn.Topology.Linear,
         )
 
-        # 2. MoE gate: compute routing logits on the already all-gathered x.
-        # Using a replicated (non-TP) weight means every device computes the same
-        # full (T, n_experts) logits independently, identical to PyTorch routing.
-        # x shape after all-gather: (1, 1, T, hidden_size) on each device.
+        # 2. MoE gate: compute routing logits on all-gathered x (f32).
         if x.layout != ttnn.TILE_LAYOUT:
             x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        # Cast x to float32 to match Glm4MoeLiteTopkRouter which does
-        # F.linear(hidden_states.type(float32), weight.type(float32)).
-        # The gate weight is stored as float32 in self._gate_weight_tt.
+        # Cast x to f32 for routing logits.
         if x.dtype != ttnn.float32:
             x_f32 = ttnn.typecast(x, ttnn.float32)
         else:
@@ -1574,40 +1510,24 @@ class TTNNMoE(TTNNModule):
         )
         if x_f32 is not x:
             ttnn.deallocate(x_f32)
-        # Convert back to bfloat16 for router (ttnn.sigmoid / ttnn.topk require bf16)
+        # Router ops require BF16.
         router_logits = ttnn.typecast(router_logits_f32, ttnn.bfloat16)
         ttnn.deallocate(router_logits_f32)
 
         T = router_logits.shape[-2]
         router_logits = ttnn.reshape(router_logits, ttnn.Shape((T, self.n_routed_experts)))
 
-        # Call router forward DIRECTLY (not through module_run / __call__) to avoid
-        # the framework's mesh_mapper sharding the replicated logits across devices.
+        # Call router forward directly to avoid mesh sharding of replicated logits.
         self.route_tokens_to_experts.preprocess_weights()
         self.route_tokens_to_experts.move_weights_to_device()
         topk_experts_indices, topk_experts_weights = self.route_tokens_to_experts.forward(router_logits)
 
-        x = ttnn.unsqueeze(x, 1)  # Add experts dimension for compatibility with experts module
-        # Add experts dimension for compatibility with experts module
+        x = ttnn.unsqueeze(x, 1)  # Add experts dimension for experts module.
         # 3. Experts handle dispatch → compute → combine → weight internally
 
         routed_output = self.experts(x, topk_experts_indices, topk_experts_weights)
 
-        # 4. Reduce-scatter final output.
-        #
-        # Why we must pre-divide:
-        # The all_gather_async above gives every dispatch device the same full-H
-        # input x.  Consequently, each of the N = device.shape[1] devices independently
-        # computes the same complete expert contribution routed_output(1,1,T,H).
-        # The reduce_scatter (cluster_axis=1) SUMS contributions from all N devices for
-        # each H/N slice before scattering.  With N identical copies that sum becomes
-        # N × correct_value instead of 1 × correct_value.
-        #
-        # The shared expert is unaffected: TTNNLinearIColShardedWRowSharded has
-        # row-sharded weights so each device only contributes its H/N partial result;
-        # the reduce_scatter there legitimately reduces partial sums.
-        #
-        # Fix: divide routed_output by N first so that sum-of-N-copies = correct_value.
+        # Reduce-scatter sums replicas; pre-divide by N to preserve the correct value.
         n_rs = self.device.shape[1]  # devices along cluster_axis=1 (e.g. 8 for 1×8 mesh)
         routed_out = routed_output.to_ttnn
         if n_rs > 1:
