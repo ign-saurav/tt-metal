@@ -1240,6 +1240,7 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
         )
 
         use_paged = isinstance(past_key_values, TTNNPagedAttentionKVCache)
+        print(f"use_paged: {use_paged}")
 
         if past_key_values is not None:
             layer_idx = self._fallback_torch_layer.layer_idx
@@ -1309,7 +1310,13 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
         past_key_values: "TTNNPagedAttentionKVCache",
         cache_position: Optional[torch.LongTensor],
     ) -> tuple[ttnn.Tensor, Optional[torch.Tensor]]:
-        """Decode path using paged attention with on-device KV cache."""
+        """Decode path using paged attention with on-device KV cache.
+
+        Writes the new token's K/V directly into the on-device paged cache
+        via paged_update_on_device, then runs paged SDPA decode which reads
+        K/V from the same device cache through the page table.  No CPU
+        round-trip is needed.
+        """
         batch_size, seq_length = hidden_states.shape[0], hidden_states.shape[1]
 
         query_states, key_states, value_states, cos, sin = self._project_qkv(
@@ -1317,59 +1324,44 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
         )
 
         layer_idx = self._fallback_torch_layer.layer_idx
-        cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
 
-        torch_k = TorchTTNNTensor(key_states).to_torch
-        torch_v = TorchTTNNTensor(value_states).to_torch
-        orig_k_shape = key_states.shape
-        orig_v_shape = value_states.shape
-        torch_k = torch_k[: orig_k_shape[0], : orig_k_shape[1], : orig_k_shape[2], : orig_k_shape[3]]
-        torch_v = torch_v[: orig_v_shape[0], : orig_v_shape[1], : orig_v_shape[2], : orig_v_shape[3]]
-        key_states, value_states = past_key_values.update(
-            torch_k,
-            torch_v,
-            layer_idx,
-            cache_kwargs,
+        if cache_position is None:
+            cur_pos = past_key_values.get_seq_length(layer_idx)
+            cache_position_tensor = torch.tensor([cur_pos], dtype=torch.int32)
+        else:
+            cache_position_tensor = cache_position.flatten().to(torch.int32)
+
+        cur_pos_tt = ttnn.from_torch(
+            cache_position_tensor.unsqueeze(0),
+            device=self.device,
+            dtype=ttnn.int32,
+            layout=ttnn.ROW_MAJOR_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
-
-        key_states = TorchTTNNTensor(key_states)
-        value_states = TorchTTNNTensor(value_states)
-        key_states = ttnn.to_device(key_states.to_ttnn, self.device)
-        value_states = ttnn.to_device(value_states.to_ttnn, self.device)
-
-        key_states = self._maybe_all_gather(key_states)
-        value_states = self._maybe_all_gather(value_states)
 
         if self.qk_head_dim != self.v_head_dim:
             pad_size = self.qk_head_dim - self.v_head_dim
             value_states = ttnn.pad(value_states, ((0, 0), (0, 0), (0, 0), (0, pad_size)), value=0.0)
 
-        original_q_len = query_states.shape[2]
-        kv_len = key_states.shape[2]
+        past_key_values.paged_update_on_device(
+            key_states,
+            value_states,
+            layer_idx=layer_idx,
+            current_pos=cur_pos_tt,
+        )
 
-        if self.is_causal and original_q_len < kv_len:
-            pad_len = kv_len - original_q_len
-            pad_shape = (query_states.shape[0], query_states.shape[1], pad_len, query_states.shape[3])
-            zero_pad = ttnn.zeros(
-                pad_shape,
-                device=hidden_states.device(),
-                layout=ttnn.TILE_LAYOUT,
-                memory_config=ttnn.DRAM_MEMORY_CONFIG,
-                dtype=hidden_states.dtype,
-            )
-            query_states = ttnn.concat([zero_pad, query_states], dim=2)
+        past_key_values._seq_lengths[layer_idx] += seq_length
+        if layer_idx == 0:
+            past_key_values._seen_tokens += seq_length
 
         attn_output = past_key_values.paged_sdpa_decode(
             query_states,
             layer_idx,
-            current_pos=ttnn.from_torch(cache_position, device=self.device, dtype=ttnn.int32),
+            current_pos=cur_pos_tt,
             scale=self.scaling,
             program_config=self.sdpa.program_config,
             compute_kernel_config=self.sdpa.compute_kernel_config,
         )
-
-        if self.is_causal and original_q_len < kv_len:
-            attn_output = attn_output[:, -original_q_len:, :, :]
 
         if self.qk_head_dim != self.v_head_dim:
             attn_output = attn_output[:, :, :, : self.v_head_dim]
