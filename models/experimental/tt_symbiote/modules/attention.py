@@ -36,7 +36,7 @@ except ImportError:
 
 
 class _PagedCacheLayer(CacheLayerMixin if CacheLayerMixin is not None else object):
-    """Minimal CacheLayerMixin stub so HF Cache.__init__ is satisfied."""
+    """CacheLayerMixin stub so HF Cache.__init__ is satisfied."""
 
     def lazy_initialization(self, key_states, value_states):
         pass
@@ -61,7 +61,7 @@ class PagedAttentionConfig:
 
 
 class TTNNPagedAttentionKVCache(Cache):
-    """HF-compatible paged KV cache backed by TTNN tensors.
+    """Paged KV cache backed by TTNN tensors.
 
     Stores key/value states in fixed-size blocks (pages) on device.
     Provides the standard ``update`` / ``get_seq_length`` interface so it
@@ -271,7 +271,7 @@ class TTNNPagedAttentionKVCache(Cache):
         ttnn.experimental.paged_fill_cache(k_cache, k_fill, page_table, batch_idx=batch_idx)
         ttnn.experimental.paged_fill_cache(v_cache, v_fill, page_table, batch_idx=batch_idx)
 
-        # Update sequence length bookkeeping (same as update() for HF generate compatibility)
+        # Update sequence length bookkeeping (same as update() for HF generate mode)
         seq_len = k_fill.shape[2]
         start_pos = self._seq_lengths[layer_idx]
         self._seq_lengths[layer_idx] = start_pos + seq_len
@@ -1246,10 +1246,7 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
             layer_idx = self._fallback_torch_layer.layer_idx
 
             if use_paged:
-                # Fill paged cache on-device for future decode steps.
-                # K/V for this prefill's SDPA come from _project_qkv directly;
-                # reading back from the paged layout would require page-table
-                # aware de-interleaving which SDPA doesn't support.
+                # Fill paged cache on-device
                 past_key_values.paged_fill_on_device(
                     key_states,
                     value_states,
