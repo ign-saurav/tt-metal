@@ -126,7 +126,7 @@ def test_deepseek_ocr(device):
 
     # prompt = "<image>\nFree OCR. "
     prompt = "<image>\n<|grounding|>Convert the document to markdown. "
-    image_file = "test.jpg"
+    image_file = "models/experimental/tt_symbiote/tests/test.png"
     output_path = "output_deepseek_ocr/"
 
     # infer(self, tokenizer, prompt='', image_file='', output_path = ' ', base_size = 1024, image_size = 640, crop_mode = True, test_compress = False, save_results = False):
