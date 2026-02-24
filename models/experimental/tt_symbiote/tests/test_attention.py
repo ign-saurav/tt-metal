@@ -114,7 +114,7 @@ def test_glm4_flash_attention_with_paged_kv_cache(device):
         device=None,
         batch_size=1,
         dtype=torch.bfloat16,
-    )
+    ).to_device(device)
 
     from transformers.cache_utils import DynamicCache
 
@@ -137,10 +137,12 @@ def test_glm4_flash_attention_with_paged_kv_cache(device):
     ttnn_attn.move_weights_to_device()
 
     inputs = TorchTTNNTensor(hidden)
+    cache_position = torch.arange(5).unsqueeze(0)
     ttnn_out_prefill = ttnn_attn(
         inputs,
         position_embeddings=(cos, sin),
         past_key_values=paged_cache,
+        cache_position=cache_position,
     )
 
     compare_fn_outputs(torch_out_prefill, ttnn_out_prefill, "Glm4MoeLiteAttention_PagedPrefill")

@@ -228,6 +228,9 @@ class TTNNPagedAttentionKVCache(Cache):
         v_cache = self._tt_value_cache[layer_idx]
         page_table = self._tt_page_table
 
+        if k_cache is None or v_cache is None or page_table is None:
+            raise RuntimeError("KV cache not initialized on device. Call to_device() before using paged operations.")
+
         ttnn.experimental.paged_update_cache(
             k_cache,
             key_states,
@@ -253,6 +256,9 @@ class TTNNPagedAttentionKVCache(Cache):
         v_cache = self._tt_value_cache[layer_idx]
         page_table = self._tt_page_table
 
+        if k_cache is None or v_cache is None or page_table is None:
+            raise RuntimeError("KV cache not initialized on device. Call to_device() before using paged operations.")
+
         block_size = k_cache.shape[2]
         page_len = page_table.shape[-1] * block_size
 
@@ -265,6 +271,13 @@ class TTNNPagedAttentionKVCache(Cache):
         ttnn.experimental.paged_fill_cache(k_cache, k_fill, page_table, batch_idx=batch_idx)
         ttnn.experimental.paged_fill_cache(v_cache, v_fill, page_table, batch_idx=batch_idx)
 
+        # Update sequence length bookkeeping (same as update() for HF generate compatibility)
+        seq_len = k_fill.shape[2]
+        start_pos = self._seq_lengths[layer_idx]
+        self._seq_lengths[layer_idx] = start_pos + seq_len
+        if layer_idx == 0:
+            self._seen_tokens += seq_len
+
     def paged_sdpa_decode(
         self,
         query: ttnn.Tensor,
@@ -275,11 +288,18 @@ class TTNNPagedAttentionKVCache(Cache):
         compute_kernel_config=None,
     ) -> ttnn.Tensor:
         """Run paged SDPA decode against on-device caches."""
+        k_cache = self._tt_key_cache[layer_idx]
+        v_cache = self._tt_value_cache[layer_idx]
+        page_table = self._tt_page_table
+
+        if k_cache is None or v_cache is None or page_table is None:
+            raise RuntimeError("KV cache not initialized on device. Call to_device() before using paged operations.")
+
         return ttnn.transformer.paged_scaled_dot_product_attention_decode(
             query,
-            self._tt_key_cache[layer_idx],
-            self._tt_value_cache[layer_idx],
-            page_table_tensor=self._tt_page_table,
+            k_cache,
+            v_cache,
+            page_table_tensor=page_table,
             cur_pos_tensor=current_pos,
             scale=scale,
             program_config=program_config,
@@ -1222,36 +1242,32 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
         use_paged = isinstance(past_key_values, TTNNPagedAttentionKVCache)
 
         if past_key_values is not None:
+            layer_idx = self._fallback_torch_layer.layer_idx
+
             if use_paged:
-                layer_idx = self._fallback_torch_layer.layer_idx
-                cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
-                torch_k = TorchTTNNTensor(key_states).to_torch
-                torch_v = TorchTTNNTensor(value_states).to_torch
-                orig_k_shape = key_states.shape
-                orig_v_shape = value_states.shape
-                torch_k = torch_k[: orig_k_shape[0], : orig_k_shape[1], : orig_k_shape[2], : orig_k_shape[3]]
-                torch_v = torch_v[: orig_v_shape[0], : orig_v_shape[1], : orig_v_shape[2], : orig_v_shape[3]]
-                key_states, value_states = past_key_values.update(
-                    torch_k,
-                    torch_v,
-                    layer_idx,
-                    cache_kwargs,
+                # Fill paged cache on-device for future decode steps.
+                # K/V for this prefill's SDPA come from _project_qkv directly;
+                # reading back from the paged layout would require page-table
+                # aware de-interleaving which SDPA doesn't support.
+                past_key_values.paged_fill_on_device(
+                    key_states,
+                    value_states,
+                    layer_idx=layer_idx,
+                    batch_idx=0,
                 )
-                key_states = TorchTTNNTensor(key_states)
-                value_states = TorchTTNNTensor(value_states)
-                key_states = ttnn.to_device(key_states.to_ttnn, self.device)
-                value_states = ttnn.to_device(value_states.to_ttnn, self.device)
             else:
                 cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
                 torch_tensors = [TorchTTNNTensor(key_states), TorchTTNNTensor(value_states)]
                 orig_shapes = [key_states.shape, value_states.shape]
+
                 torch_tensors = [
                     torch_tensor.to_torch[: orig_shape[0], : orig_shape[1], : orig_shape[2], : orig_shape[3]]
                     for orig_shape, torch_tensor in zip(orig_shapes, torch_tensors)
                 ]
+
                 key_states, value_states = past_key_values.update(
                     *torch_tensors,
-                    self._fallback_torch_layer.layer_idx,
+                    layer_idx,
                     cache_kwargs,
                 )
                 key_states, value_states = [TorchTTNNTensor(key_states), TorchTTNNTensor(value_states)]
@@ -1343,17 +1359,14 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
             )
             query_states = ttnn.concat([zero_pad, query_states], dim=2)
 
-        attn_output = self.sdpa(
-            self,
+        attn_output = past_key_values.paged_sdpa_decode(
             query_states,
-            key_states,
-            value_states,
-            attention_mask,
-            dropout=0.0,
-            scaling=self.scaling,
-            is_causal=self.is_causal,
-            transpose_output=True,
-        ).to_ttnn
+            layer_idx,
+            current_pos=ttnn.from_torch(cache_position, device=self.device, dtype=ttnn.int32),
+            scale=self.scaling,
+            program_config=self.sdpa.program_config,
+            compute_kernel_config=self.sdpa.compute_kernel_config,
+        )
 
         if self.is_causal and original_q_len < kv_len:
             attn_output = attn_output[:, -original_q_len:, :, :]
