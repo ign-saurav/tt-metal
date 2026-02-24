@@ -1014,14 +1014,8 @@ class TTNNMoERouterDecode(TTNNModule):
         # Apply routing scale in f32.
         scale_rep_rm = ttnn.repeat(self.scale_rm, ttnn.Shape((1, 1, T, 1)))
         scale_bf16 = ttnn.to_layout(scale_rep_rm, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        ttnn.deallocate(scale_rep_rm)
-        if scale_bf16.dtype != ttnn.float32:
-            scale_f32 = ttnn.typecast(scale_bf16, ttnn.float32)
-            ttnn.deallocate(scale_bf16)
-        else:
-            scale_f32 = scale_bf16
-        topk_weights = ttnn.mul(topk_weights, scale_f32)
-        ttnn.deallocate(scale_f32)
+        topk_weights = ttnn.mul(topk_weights, scale_bf16)
+        ttnn.deallocate(scale_bf16)
 
         # Reshape outputs; keep weights in f32 for the downstream sum.
         topk_expert_idx = ttnn.reshape(topk_expert_idx, ttnn.Shape((T, r.top_k)))
