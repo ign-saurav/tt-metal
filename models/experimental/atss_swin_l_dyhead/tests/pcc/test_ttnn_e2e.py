@@ -65,6 +65,9 @@ def test_ttnn_atss_e2e_pcc(device, atss_ckpt_path, atss_ref_model):
         device=device,
         memory_config=ttnn.DRAM_MEMORY_CONFIG,
     )
+    import tracy
+
+    tracy.signpost("start")
     ttnn_backbone_feats = ttnn_model.backbone(x_on_device)
     ttnn_backbone_feats_nhwc = []
 
@@ -136,6 +139,7 @@ def test_ttnn_atss_e2e_pcc(device, atss_ckpt_path, atss_ref_model):
         ref_cls, ref_reg, ref_cent = atss_ref_model.head(tuple(ref_dy_feats))
 
     ttnn_cls, ttnn_reg, ttnn_cent = ttnn_model.forward_head(ttnn_dy_feats_nhwc)
+    tracy.signpost("stop")
     ttnn_cls_rp = []
     ttnn_reg_rp = []
     ttnn_cent_rp = []
