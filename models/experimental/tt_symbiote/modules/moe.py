@@ -905,38 +905,17 @@ class TTNNMoERouterDecode(TTNNModule):
     def preprocess_weights_impl(self):
         r = self._fallback_torch_layer
 
-        # Correction bias: (1, 1, 1, n_experts) — ROW_MAJOR so repeat is exact
-        self.bias_rm = ttnn.from_torch(
-            r.e_score_correction_bias.reshape(1, 1, 1, -1).to(torch.bfloat16),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.ROW_MAJOR_LAYOUT,
-        )
-        # Group mask template: (1, 1, 1, n_group) filled with 0.0 — inactive groups.
-        # Matches reference masked_fill(~mask, 0.0): inactive experts become 0.0 so
-        # topk picks them only if all active experts have negative scores (unlikely).
-        self.scatter_input_rm = ttnn.from_torch(
-            torch.zeros(1, 1, 1, r.n_group, dtype=torch.bfloat16),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.ROW_MAJOR_LAYOUT,
-        )
-        # Scatter src: (1, 1, 1, topk_group) filled with ones
-        self.scatter_src_rm = ttnn.from_torch(
-            torch.ones(1, 1, 1, r.topk_group, dtype=torch.bfloat16),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.ROW_MAJOR_LAYOUT,
-        )
-        # Routing scale: (1, 1, 1, top_k) — routed_scaling_factor broadcast
-        self.scale_rm = ttnn.from_torch(
-            torch.full((1, 1, 1, r.top_k), r.routed_scaling_factor, dtype=torch.bfloat16),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.ROW_MAJOR_LAYOUT,
-        )
+        # Cache the raw torch tensors. The TTNN device tensors are created
+        # fresh in each forward() call because ttnn.deallocate on a
+        # ttnn.repeat output can invalidate the source tensor's buffer,
+        # making cached device tensors unsafe across calls.
+        self._bias_torch = r.e_score_correction_bias.reshape(1, 1, 1, -1).to(torch.bfloat16)
+        self._scatter_input_torch = torch.zeros(1, 1, 1, r.n_group, dtype=torch.bfloat16)
+        self._scatter_src_torch = torch.ones(1, 1, 1, r.topk_group, dtype=torch.bfloat16)
+        self._scale_torch = torch.full((1, 1, 1, r.top_k), r.routed_scaling_factor, dtype=torch.bfloat16)
 
     def move_weights_to_device_impl(self):
-        self.bias_rm = ttnn.to_device(self.bias_rm, self.device)
-        self.scatter_input_rm = ttnn.to_device(self.scatter_input_rm, self.device)
-        self.scatter_src_rm = ttnn.to_device(self.scatter_src_rm, self.device)
-        self.scale_rm = ttnn.to_device(self.scale_rm, self.device)
+        pass
 
     def forward(self, logits: ttnn.Tensor) -> tuple[ttnn.Tensor, ttnn.Tensor]:
         r = self._fallback_torch_layer
@@ -973,10 +952,19 @@ class TTNNMoERouterDecode(TTNNModule):
         n_group = r.n_group
         experts_per_group = n_experts // n_group
 
+        # Create fresh device tensors from cached torch data each call.
+        # ttnn.deallocate on a ttnn.repeat output can invalidate the source
+        # tensor's buffer, so we cannot cache device tensors across calls.
+        def _to_device_rm(torch_tensor):
+            return ttnn.to_device(
+                ttnn.from_torch(torch_tensor, dtype=ttnn.bfloat16, layout=ttnn.ROW_MAJOR_LAYOUT),
+                self.device,
+            )
+
         # ── correction bias ─────────────────────────────────────────────────
-        bias_rep_rm = ttnn.repeat(self.bias_rm, ttnn.Shape((1, 1, T, 1)))
+        bias_rm = _to_device_rm(self._bias_torch)
+        bias_rep_rm = ttnn.repeat(bias_rm, ttnn.Shape((1, 1, T, 1)))
         bias = ttnn.to_layout(bias_rep_rm, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        ttnn.deallocate(bias_rep_rm)
         # convert bias to float32 for stable addition
         if bias.dtype != ttnn.float32:
             bias_f32 = ttnn.typecast(bias, ttnn.float32)
@@ -1062,8 +1050,10 @@ class TTNNMoERouterDecode(TTNNModule):
             ttnn.deallocate(group_scores)
 
             # ── group mask via scatter ─────────────────────────────────────────
-            input_mask_rm = ttnn.repeat(self.scatter_input_rm, ttnn.Shape((1, 1, T, 1)))
-            src_rm = ttnn.repeat(self.scatter_src_rm, ttnn.Shape((1, 1, T, 1)))
+            scatter_input_rm = _to_device_rm(self._scatter_input_torch)
+            input_mask_rm = ttnn.repeat(scatter_input_rm, ttnn.Shape((1, 1, T, 1)))
+            scatter_src_rm = _to_device_rm(self._scatter_src_torch)
+            src_rm = ttnn.repeat(scatter_src_rm, ttnn.Shape((1, 1, T, 1)))
             idx_rm = ttnn.to_layout(topk_group_idx, ttnn.ROW_MAJOR_LAYOUT)
             ttnn.deallocate(topk_group_idx)
             idx_4d = ttnn.unsqueeze(idx_rm, dim=1)
@@ -1111,9 +1101,9 @@ class TTNNMoERouterDecode(TTNNModule):
 
         # ── apply routing scale ───────────────────────────────────────────────
         # Convert routing scale to float32 before applying
-        scale_rep_rm = ttnn.repeat(self.scale_rm, ttnn.Shape((1, 1, T, 1)))
+        scale_rm = _to_device_rm(self._scale_torch)
+        scale_rep_rm = ttnn.repeat(scale_rm, ttnn.Shape((1, 1, T, 1)))
         scale_bf16 = ttnn.to_layout(scale_rep_rm, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        ttnn.deallocate(scale_rep_rm)
         if scale_bf16.dtype != ttnn.float32:
             scale_f32 = ttnn.typecast(scale_bf16, ttnn.float32)
             ttnn.deallocate(scale_bf16)
