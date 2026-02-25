@@ -105,7 +105,7 @@ class TTNNPagedAttentionKVCache(Cache):
             paged_config.max_num_blocks,
             num_kv_heads,
             paged_config.block_size,
-            head_dim_v,
+            head_dim_k,
         )
 
         self.key_cache: list[torch.Tensor] = []
@@ -124,12 +124,14 @@ class TTNNPagedAttentionKVCache(Cache):
 
     def to_device(self, device):
         self._device = device
+        mesh_mapper = ttnn.ReplicateTensorToMesh(device) if device.get_num_devices() > 1 else None
         for layer_idx in range(self.num_layers):
             self._tt_key_cache[layer_idx] = ttnn.from_torch(
                 self.key_cache[layer_idx],
                 dtype=ttnn.bfloat16,
                 layout=ttnn.TILE_LAYOUT,
                 device=device,
+                mesh_mapper=mesh_mapper,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
             self._tt_value_cache[layer_idx] = ttnn.from_torch(
@@ -137,6 +139,7 @@ class TTNNPagedAttentionKVCache(Cache):
                 dtype=ttnn.bfloat16,
                 layout=ttnn.TILE_LAYOUT,
                 device=device,
+                mesh_mapper=mesh_mapper,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
         self._tt_page_table = ttnn.from_torch(
@@ -144,6 +147,7 @@ class TTNNPagedAttentionKVCache(Cache):
             dtype=ttnn.int32,
             layout=ttnn.ROW_MAJOR_LAYOUT,
             device=device,
+            mesh_mapper=mesh_mapper,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
         return self
@@ -184,7 +188,7 @@ class TTNNPagedAttentionKVCache(Cache):
                 offset = global_pos % block_size
                 physical_block = self.page_table[b, page_idx].item()
                 k_cache[physical_block, :, offset, :] = key_states[b, :, t, : self.head_dim_k]
-                v_cache[physical_block, :, offset, :] = value_states[b, :, t, : self.head_dim_v]
+                v_cache[physical_block, :, offset, : self.head_dim_v] = value_states[b, :, t, : self.head_dim_v]
 
         self._seq_lengths[layer_idx] = start_pos + seq_len
         if layer_idx == 0:
@@ -268,6 +272,10 @@ class TTNNPagedAttentionKVCache(Cache):
             k_fill = key_states[:, :, :page_len, :]
             v_fill = value_states[:, :, :page_len, :]
 
+        if self.head_dim_v < self.head_dim_k:
+            pad_size = self.head_dim_k - self.head_dim_v
+            v_fill = ttnn.pad(v_fill, ((0, 0), (0, 0), (0, 0), (0, pad_size)), value=0.0)
+
         ttnn.experimental.paged_fill_cache(k_cache, k_fill, page_table, batch_idx=batch_idx)
         ttnn.experimental.paged_fill_cache(v_cache, v_fill, page_table, batch_idx=batch_idx)
 
@@ -287,7 +295,15 @@ class TTNNPagedAttentionKVCache(Cache):
         program_config=None,
         compute_kernel_config=None,
     ) -> ttnn.Tensor:
-        """Run paged SDPA decode against on-device caches."""
+        """Run paged SDPA decode against on-device caches.
+
+        All tensors must follow the TTNN decode convention:
+          Q  : [1, batch, num_heads, head_dim]
+          K/V: paged cache [max_blocks, heads, block_size, head_dim]
+
+        V cache is padded to head_dim_k so that Q, K, V all share the
+        same last dimension (required by paged_scaled_dot_product_attention_decode).
+        """
         k_cache = self._tt_key_cache[layer_idx]
         v_cache = self._tt_value_cache[layer_idx]
         page_table = self._tt_page_table
@@ -423,7 +439,12 @@ class TTNNSDPAAttention(TTNNModule):
                 if transpose_output:
                     attn_output = ttnn.permute(attn_output, (0, 2, 1, 3))
                 return attn_output
-            except RuntimeError:
+            except RuntimeError as e:
+                print(
+                    f"TTNNSDPAAttention: ttnn SDPA failed, falling back to matmul attention. "
+                    f"Q={query.shape} K={key.shape} V={value.shape} is_causal={is_causal} "
+                    f"Error: {e}"
+                )
                 self._sdpa_available = False
 
         return self._matmul_attention(query, key, value, is_causal, scaling, attention_mask, transpose_output)
@@ -1246,13 +1267,14 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
             layer_idx = self._fallback_torch_layer.layer_idx
 
             if use_paged:
-                # Fill paged cache on-device
                 past_key_values.paged_fill_on_device(
                     key_states,
                     value_states,
                     layer_idx=layer_idx,
                     batch_idx=0,
                 )
+                # key_states / value_states are already all-gathered from
+                # _project_qkv — no second all-gather needed.
             else:
                 cache_kwargs = {"sin": sin, "cos": cos, "cache_position": cache_position}
                 torch_tensors = [TorchTTNNTensor(key_states), TorchTTNNTensor(value_states)]
@@ -1271,9 +1293,8 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
                 key_states, value_states = [TorchTTNNTensor(key_states), TorchTTNNTensor(value_states)]
                 key_states = ttnn.to_device(key_states.to_ttnn, self.device)
                 value_states = ttnn.to_device(value_states.to_ttnn, self.device)
-
-            key_states = self._maybe_all_gather(key_states)
-            value_states = self._maybe_all_gather(value_states)
+                key_states = self._maybe_all_gather(key_states)
+                value_states = self._maybe_all_gather(value_states)
 
         if self.qk_head_dim != self.v_head_dim:
             pad_size = self.qk_head_dim - self.v_head_dim
@@ -1299,6 +1320,32 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
 
         return attn_output, None
 
+    def _to_replicated(self, tensor: ttnn.Tensor) -> ttnn.Tensor:
+        """Convert a multi-device tensor to an explicitly replicated tensor.
+
+        After all-gather the data is identical on every device but the mesh
+        topology metadata differs from ReplicateTensorToMesh.  Paged-attention
+        kernels require the replicated topology, so we round-trip through the
+        host for decode tokens (tiny tensors, negligible overhead).
+        """
+        if self.device.get_num_devices() <= 1:
+            return tensor
+        t = tensor
+        if isinstance(t, TorchTTNNTensor):
+            t = t.to_ttnn
+        orig_shape = list(t.shape)
+        mesh_composer = ttnn.ConcatMeshToTensor(self.device, dim=0)
+        t_torch = ttnn.to_torch(t, mesh_composer=mesh_composer)
+        t_torch = t_torch[: orig_shape[0]]
+        return ttnn.from_torch(
+            t_torch,
+            device=self.device,
+            mesh_mapper=ttnn.ReplicateTensorToMesh(self.device),
+            dtype=t.dtype,
+            layout=t.layout,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
     def _forward_decode_paged(
         self,
         hidden_states: ttnn.Tensor,
@@ -1309,48 +1356,94 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
     ) -> tuple[ttnn.Tensor, Optional[torch.Tensor]]:
         """Decode path using paged attention with on-device KV cache.
 
-        Writes the new token's K/V directly into the on-device paged cache
-        via paged_update_on_device, then runs paged SDPA decode which reads
-        K/V from the same device cache through the page table.  No CPU
-        round-trip is needed.
+        TTNN paged kernels require tensors in [1, batch, heads, head_dim]
+        layout (``S B H D``) whereas ``_project_qkv`` returns the standard
+        [batch, heads, seq, head_dim] (``B H S D``).  This method handles
+        the permute, L1 sharding required by ``paged_update_cache``, and
+        the MLA-aware SDPA decode call.
         """
         batch_size, seq_length = hidden_states.shape[0], hidden_states.shape[1]
 
         query_states, key_states, value_states, cos, sin = self._project_qkv(
             hidden_states, batch_size, seq_length, position_embeddings
         )
+        # _project_qkv returns [B, H, S, D]:
+        #   Q : [B, num_heads, 1, qk_head_dim]
+        #   K : [B, num_heads, 1, qk_head_dim]
+        #   V : [B, num_heads, 1, v_head_dim]
 
         layer_idx = self._fallback_torch_layer.layer_idx
 
+        # --- resolve cache position to a 1-D torch int32 tensor [batch] ---
         if cache_position is None:
             cur_pos = past_key_values.get_seq_length(layer_idx)
             cache_position_tensor = torch.tensor([cur_pos], dtype=torch.int32)
         else:
-            cache_position_tensor = cache_position.flatten().to(torch.int32)
+            cp = cache_position
+            if isinstance(cp, TorchTTNNTensor):
+                cp = cp.to_torch
+            if isinstance(cp, ttnn.Tensor):
+                mesh_composer = None
+                if hasattr(cp, "device") and cp.device() is not None and cp.device().get_num_devices() > 1:
+                    mesh_composer = ttnn.ConcatMeshToTensor(cp.device(), dim=0)
+                cp = ttnn.to_torch(cp, mesh_composer=mesh_composer)
+            cache_position_tensor = cp.flatten()[:batch_size].to(torch.int32)
 
+        mesh_mapper = ttnn.ReplicateTensorToMesh(self.device) if self.device.get_num_devices() > 1 else None
+
+        # 1-D [batch_size] tensor for paged_update_cache & paged_sdpa_decode
         cur_pos_tt = ttnn.from_torch(
-            cache_position_tensor.unsqueeze(0),
+            cache_position_tensor,
             device=self.device,
             dtype=ttnn.int32,
             layout=ttnn.ROW_MAJOR_LAYOUT,
+            mesh_mapper=mesh_mapper,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
+        # --- permute B H S D  →  S B H D  (the layout paged kernels expect) ---
+        query_states = ttnn.permute(query_states, (2, 0, 1, 3))
+        key_states = ttnn.permute(key_states, (2, 0, 1, 3))
+        value_states = ttnn.permute(value_states, (2, 0, 1, 3))
+
+        # --- pad V to qk_head_dim so K/V caches share the same last dim ---
         if self.qk_head_dim != self.v_head_dim:
             pad_size = self.qk_head_dim - self.v_head_dim
             value_states = ttnn.pad(value_states, ((0, 0), (0, 0), (0, 0), (0, pad_size)), value=0.0)
 
+        # --- multi-device: convert all-gathered topology → replicated ---
+        if self.device.get_num_devices() > 1:
+            query_states = self._to_replicated(query_states)
+            key_states = self._to_replicated(key_states)
+            value_states = self._to_replicated(value_states)
+
+        # --- L1 HEIGHT_SHARDED config required by paged_update_cache ---
+        tile_size = 32
+        shard_h = ((self.num_heads + tile_size - 1) // tile_size) * tile_size
+        shard_cfg = ttnn.create_sharded_memory_config(
+            shape=(shard_h, self.qk_head_dim),
+            core_grid=ttnn.CoreGrid(y=1, x=batch_size),
+            strategy=ttnn.ShardStrategy.HEIGHT,
+            orientation=ttnn.ShardOrientation.ROW_MAJOR,
+        )
+        key_states = ttnn.to_memory_config(key_states, shard_cfg)
+        value_states = ttnn.to_memory_config(value_states, shard_cfg)
+
+        # --- update the on-device paged KV cache ---
         past_key_values.paged_update_on_device(
             key_states,
             value_states,
             layer_idx=layer_idx,
             current_pos=cur_pos_tt,
         )
+        ttnn.deallocate(key_states)
+        ttnn.deallocate(value_states)
 
         past_key_values._seq_lengths[layer_idx] += seq_length
         if layer_idx == 0:
             past_key_values._seen_tokens += seq_length
 
+        # --- paged SDPA decode (Q stays in DRAM) ---
         attn_output = past_key_values.paged_sdpa_decode(
             query_states,
             layer_idx,
@@ -1359,10 +1452,12 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
             program_config=self.sdpa.program_config,
             compute_kernel_config=self.sdpa.compute_kernel_config,
         )
+        # attn_output: [1, B, H, qk_head_dim]
 
+        # --- convert back to [B, S, H*D_v] for the output projection ---
+        attn_output = ttnn.permute(attn_output, (1, 0, 2, 3))  # [B, 1, H, qk_head_dim]
         if self.qk_head_dim != self.v_head_dim:
             attn_output = attn_output[:, :, :, : self.v_head_dim]
-
         attn_output = ttnn.reshape(attn_output, (batch_size, seq_length, self.num_heads * self.v_head_dim))
         attn_output = self.o_proj(attn_output)
 

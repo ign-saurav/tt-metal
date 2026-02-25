@@ -4,6 +4,7 @@
 import pytest
 import torch
 from models.experimental.tt_symbiote.modules.moe import (
+    Glm4MoeConfig,
     Glm4MoeMoE,
     TTNNMoE,
 )
@@ -33,7 +34,7 @@ def default_moe_config():
     "real_weights",
     [
         True,  # Use real weights
-        # False,  # Use random weights
+        False,  # Use random weights
     ],
 )
 @pytest.mark.parametrize(

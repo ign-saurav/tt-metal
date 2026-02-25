@@ -1218,13 +1218,15 @@ class TTNNExperts(TTNNModule):
             mesh_mapper=ttnn.ShardTensorToMesh(self.device, dim=0),
         )
 
-        # Also keep fused version for dense fallback
-        self.tt_gate_up_proj = ttnn.from_torch(
-            self.torch_gate_up_proj.to(torch.bfloat16),
-            dtype=ttnn.bfloat16,
-            layout=ttnn.TILE_LAYOUT,
-            mesh_mapper=ttnn.ShardTensorToMesh(self.device, dim=0),
-        )
+        if not self.use_sparsity:
+            self.tt_gate_up_proj = ttnn.from_torch(
+                self.torch_gate_up_proj.to(torch.bfloat16),
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                mesh_mapper=ttnn.ShardTensorToMesh(self.device, dim=0),
+            )
+        else:
+            self.tt_gate_up_proj = None
 
         # Clean up torch weights
         del self.torch_w1_proj
@@ -1242,7 +1244,8 @@ class TTNNExperts(TTNNModule):
         self.tt_w1_proj = ttnn.to_device(self.tt_w1_proj, self.device)
         self.tt_w3_proj = ttnn.to_device(self.tt_w3_proj, self.device)
         self.tt_w2_proj = ttnn.to_device(self.tt_w2_proj, self.device)
-        self.tt_gate_up_proj = ttnn.to_device(self.tt_gate_up_proj, self.device)
+        if self.tt_gate_up_proj is not None:
+            self.tt_gate_up_proj = ttnn.to_device(self.tt_gate_up_proj, self.device)
 
         # Create expert mapping tensors for all-to-all ops
         self.expert_mapping_tensors = ttnn.from_torch(
