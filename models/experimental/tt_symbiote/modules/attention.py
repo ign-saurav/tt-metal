@@ -271,7 +271,7 @@ class TTNNPagedAttentionKVCache(Cache):
         ttnn.experimental.paged_fill_cache(k_cache, k_fill, page_table, batch_idx=batch_idx)
         ttnn.experimental.paged_fill_cache(v_cache, v_fill, page_table, batch_idx=batch_idx)
 
-        # Update sequence length bookkeeping (same as update() for HF generate mode)
+        # Update sequence length(same as update() for HF generate)
         seq_len = k_fill.shape[2]
         start_pos = self._seq_lengths[layer_idx]
         self._seq_lengths[layer_idx] = start_pos + seq_len
