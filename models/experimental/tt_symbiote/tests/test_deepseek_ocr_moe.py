@@ -4,7 +4,6 @@ import pytest
 import torch
 from transformers import AutoModel
 from loguru import logger
-import ttnn
 
 from tests.ttnn.utils_for_testing import check_with_pcc
 
@@ -50,11 +49,7 @@ def test_deepseek_ocr_moe(device, ocr_model):
     ttnn_model.init_parameters()
     ttnn_model.move_weights_to_device_impl()
 
-    ttnn_input = ttnn.from_torch(
-        inputs, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG
-    )
-
-    tt_out = ttnn_model(ttnn_input)
+    tt_out = ttnn_model(inputs)
 
     passed, message = check_with_pcc(ref_out.float(), tt_out.float(), pcc=0.99)
     logger.info(f"TT MOE PCC: {message}")

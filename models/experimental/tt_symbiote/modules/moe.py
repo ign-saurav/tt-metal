@@ -1436,6 +1436,12 @@ class TTNNDeepseekOCRMoEGate(TTNNModule):
         #     hidden_states = ttnn.to_layout(hidden_states, ttnn.TILE_LAYOUT)
         # logits = ttnn.matmul(hidden_states, self.weight) #Found invalid TTNN dispatch for matmul operation. Please check input dtypes and layouts.
 
-        logits = self.linear(hidden_states).squeeze(0)
+        logits = self.linear(hidden_states).to_ttnn
 
-        return logits
+        if self.scoring_func == "softmax":
+            scores = ttnn.softmax(logits, dim=0)
+        elif self.scoring_func == "sigmoid":
+            scores = ttnn.sigmoid(logits)
+        else:
+            raise NotImplementedError(f"insupportable scoring function for MoE gating: {self.scoring_func}")
+        return ttnn.squeeze(logits, 0)
