@@ -1352,3 +1352,90 @@ class TTNNMoE(TTNNModule):
         output = ttnn.add(routed_output, shared_output.to_ttnn)
         output = ttnn.squeeze(output, 1)  # Remove experts dimension
         return output
+
+
+from models.experimental.tt_symbiote.modules.linear import TTNNLinear
+
+
+class TTNNDeepseekOCRMoEGate(TTNNModule):
+    """
+    MoEGate module for DeepSeek OCR.
+    """
+
+    def __init__(self, config, use_bitonic_sort=True):
+        super().__init__()
+        self.config = config
+        self.top_k = config.num_experts_per_tok
+        self.n_routed_experts = config.n_routed_experts
+        self.routed_scaling_factor = config.routed_scaling_factor
+        self.scoring_func = config.scoring_func
+        self.alpha = config.aux_loss_alpha
+        self.seq_aux = config.seq_aux
+        self.topk_method = config.topk_method
+        self.n_group = config.n_group
+        self.topk_group = config.topk_group
+
+        # topk selection algorithm
+        self.norm_topk_prob = config.norm_topk_prob
+        self.gating_dim = config.hidden_size
+
+        # TTNN tensors
+
+    @classmethod
+    def from_torch(cls, torch_gate):
+        ttnn_gate = cls(torch_gate.config)
+        ttnn_gate._fallback_torch_layer = torch_gate
+        return ttnn_gate
+
+    def init_parameters(self):
+        """
+        Load weights from PyTorch to Host memory (Tile Layout).
+        """
+        # 1. Gate Weight: Transpose for TTNN Matmul [Hidden, Experts]
+        # weight_t = self._fallback_torch_layer.weight.T.contiguous()
+        # self.weight = ttnn.from_torch(
+        #     weight_t,
+        #     dtype=ttnn.bfloat16,
+        #     layout=ttnn.TILE_LAYOUT
+        # )
+        self.linear = TTNNLinear.from_parameters(weight=self._fallback_torch_layer.weight, bias=None)
+        self.linear.preprocess_weights()
+        # # 2. Bias (Specific to DeepSeek 'noaux_tc')
+        # if self.topk_method == "noaux_tc" and hasattr(self._fallback_torch_layer, "e_score_correction_bias"):
+        #     bias = self._fallback_torch_layer.e_score_correction_bias
+        #     # Reshape to 4D for TTNN broadcasting: [1, 1, 1, Experts]
+        #     bias = bias.reshape(1, 1, 1, -1)
+        #     self.e_score_correction_bias = ttnn.from_torch(
+        #         bias,
+        #         dtype=ttnn.bfloat16,
+        #         layout=ttnn.TILE_LAYOUT
+        #     )
+
+    def move_weights_to_device_impl(self):
+        """
+        Move weights from Host to Device.
+        """
+        # Move Weight
+        if self.linear is not None:
+            self.linear.to_device(self.device)  # Tell submodule which device to use
+            self.linear.move_weights_to_device()
+
+    #     # Move Bias
+    #     if self.e_score_correction_bias is not None:
+    #         self.e_score_correction_bias = ttnn.to_device(self.e_score_correction_bias, self.device)
+
+    def forward(self, hidden_states: ttnn.Tensor):
+        """
+        Forward logic matching DeepSeek V3/OCR.
+        Input: [Batch, 1, Seq, Hidden]
+        Output: indices, weights
+        """
+        # 1. Linear Projection (Compute Logits)
+        # hidden_states: [B, 1, S, H] @ weight: [H, E] -> [B, 1, S, E]
+        # if hidden_states.layout != ttnn.TILE_LAYOUT:
+        #     hidden_states = ttnn.to_layout(hidden_states, ttnn.TILE_LAYOUT)
+        # logits = ttnn.matmul(hidden_states, self.weight) #Found invalid TTNN dispatch for matmul operation. Please check input dtypes and layouts.
+
+        logits = self.linear(hidden_states).squeeze(0)
+
+        return logits
