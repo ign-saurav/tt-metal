@@ -301,10 +301,10 @@ class TtMSDeformAttn:
         bs, num_keys, _ = value.shape
 
         logger.info("  MSDeformAttn: linear projections on device...")
-        value = ttnn.to_layout(value, ttnn.TILE_LAYOUT)
+        # value = ttnn.to_layout(value, ttnn.TILE_LAYOUT)
         value = ttnn.linear(value, self.params["value_proj"]["weight"], bias=self.params["value_proj"]["bias"])
 
-        query = ttnn.to_layout(query, ttnn.TILE_LAYOUT)
+        # query = ttnn.to_layout(query, ttnn.TILE_LAYOUT)
         sampling_offsets_flat = ttnn.linear(
             query, self.params["sampling_offsets"]["weight"], bias=self.params["sampling_offsets"]["bias"]
         )

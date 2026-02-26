@@ -531,7 +531,10 @@ class TtDINO:
 
         backbone_feats_torch = None
         if return_intermediates:
-            backbone_feats_torch = [ttnn.to_torch(ttnn.from_device(bf)).float() for bf in backbone_feats_tt]
+            # Backbone returns NHWC [B,H,W,C]; reference uses NCHW [B,C,H,W]. Permute for PCC.
+            backbone_feats_torch = [
+                ttnn.to_torch(ttnn.from_device(bf)).float().permute(0, 3, 1, 2) for bf in backbone_feats_tt
+            ]
 
         # --- Neck ---
         logger.info("Neck: ChannelMapper...")

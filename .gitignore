@@ -149,5 +149,6 @@ Testing
 .auto_triage/output
 .github/actions/*/node_modules/
 models/experimental/petr/resources/*.pth
+models/experimental/dino_5scale_swin_l/checkpoints/
 
 .claude

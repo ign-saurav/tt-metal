@@ -126,6 +126,7 @@ def _match_detections(ref_boxes, ref_scores, ref_labels, tt_boxes, tt_scores, tt
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 32768}], indirect=True)
+@pytest.mark.timeout(600)  # Device forward ~5min + PCC assertions; default 300s is too short
 def test_ttnn_dino_e2e_pcc(device, reset_seeds):
     """
     Stage-by-stage PCC: Image → Backbone → Neck → Encoder → Decoder → Heads.

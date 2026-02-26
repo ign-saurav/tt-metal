@@ -105,53 +105,73 @@ class TtMultiheadAttention:
             value = key
         if identity is None:
             identity = query
+
+        # Convert to TILE_LAYOUT once, avoiding redundant conversions
+        query = ttnn.to_layout(query, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
+        key = ttnn.to_layout(key, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
+        value = ttnn.to_layout(value, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
+
         if query_pos is not None:
-            query = ttnn.to_layout(query, ttnn.TILE_LAYOUT)
-            query_pos = ttnn.to_layout(query_pos, ttnn.TILE_LAYOUT)
-            query = query + query_pos
+            query_pos = ttnn.to_layout(query_pos, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
+            query = ttnn.add(query, query_pos, memory_config=ttnn.L1_MEMORY_CONFIG)
         if key_pos is not None:
-            key = ttnn.to_layout(key, ttnn.TILE_LAYOUT)
-            key_pos = ttnn.to_layout(key_pos, ttnn.TILE_LAYOUT)
-            key = key + key_pos
+            key_pos = ttnn.to_layout(key_pos, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
+            key = ttnn.add(key, key_pos, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         bs, tgt_len, embed_dim = query.shape
         src_len = key.shape[1]
 
-        query = ttnn.to_layout(query, ttnn.TILE_LAYOUT)
-        key = ttnn.to_layout(key, ttnn.TILE_LAYOUT)
-        value = ttnn.to_layout(value, ttnn.TILE_LAYOUT)
+        q = ttnn.linear(query, self.q_w, bias=self.q_b, memory_config=ttnn.L1_MEMORY_CONFIG)
+        k = ttnn.linear(key, self.k_w, bias=self.k_b, memory_config=ttnn.L1_MEMORY_CONFIG)
+        v = ttnn.linear(value, self.v_w, bias=self.v_b, memory_config=ttnn.L1_MEMORY_CONFIG)
 
-        q = ttnn.linear(query, self.q_w, bias=self.q_b)
-        k = ttnn.linear(key, self.k_w, bias=self.k_b)
-        v = ttnn.linear(value, self.v_w, bias=self.v_b)
+        # # 3D head reshape (UniAD pattern): [bs, seq, E] → [seq, bs*heads, head_dim] → [bs*heads, seq, head_dim]
+        # q = ttnn.reshape(q, (tgt_len, bs * self.num_heads, self.head_dim))
+        # q = ttnn.permute(q, (1, 0, 2))
+        # k = ttnn.reshape(k, (src_len, bs * self.num_heads, self.head_dim))
+        # k = ttnn.permute(k, (1, 0, 2))
+        # v = ttnn.reshape(v, (src_len, bs * self.num_heads, self.head_dim))
+        # v = ttnn.permute(v, (1, 0, 2))
+        # Reshape 3D -> 4D for SDPA: [bs, seq, E] -> [bs, heads, seq, head_dim]
+        # This prepares the data for the specialized hardware attention kernel
+        head_dim = self.embed_dims // self.num_heads
+        q = ttnn.reshape(q, (bs, tgt_len, self.num_heads, head_dim), memory_config=ttnn.L1_MEMORY_CONFIG)
+        q = ttnn.permute(q, (0, 2, 1, 3), memory_config=ttnn.L1_MEMORY_CONFIG)
 
-        # 3D head reshape (UniAD pattern): [bs, seq, E] → [seq, bs*heads, head_dim] → [bs*heads, seq, head_dim]
-        q = ttnn.reshape(q, (tgt_len, bs * self.num_heads, self.head_dim))
-        q = ttnn.permute(q, (1, 0, 2))
-        k = ttnn.reshape(k, (src_len, bs * self.num_heads, self.head_dim))
-        k = ttnn.permute(k, (1, 0, 2))
-        v = ttnn.reshape(v, (src_len, bs * self.num_heads, self.head_dim))
-        v = ttnn.permute(v, (1, 0, 2))
+        k = ttnn.reshape(k, (bs, -1, self.num_heads, head_dim), memory_config=ttnn.L1_MEMORY_CONFIG)
+        k = ttnn.permute(k, (0, 2, 1, 3), memory_config=ttnn.L1_MEMORY_CONFIG)
+
+        v = ttnn.reshape(v, (bs, -1, self.num_heads, head_dim), memory_config=ttnn.L1_MEMORY_CONFIG)
+        v = ttnn.permute(v, (0, 2, 1, 3), memory_config=ttnn.L1_MEMORY_CONFIG)
 
         # Scaled dot-product attention — all 3D
-        q_scaled = q * math.sqrt(1.0 / float(self.head_dim))
-        k_t = ttnn.permute(k, (0, 2, 1))
-        attn_weights = ttnn.matmul(q_scaled, k_t)
+        # q_scaled = q * math.sqrt(1.0 / float(self.head_dim))
+        # k_t = ttnn.permute(k, (0, 2, 1))
+        # attn_weights = ttnn.matmul(q_scaled, k_t)
 
-        if attn_mask is not None:
-            attn_weights = attn_weights + attn_mask
+        # if attn_mask is not None:
+        #     attn_weights = attn_weights + attn_mask
 
-        attn_weights = ttnn.softmax(attn_weights, dim=-1)
-        attn_out = ttnn.matmul(attn_weights, v)
+        # attn_weights = ttnn.softmax(attn_weights, dim=-1)
+        # attn_out = ttnn.matmul(attn_weights, v)
+        attn_out = ttnn.transformer.scaled_dot_product_attention(
+            q, k, v, attn_mask=attn_mask, is_causal=False, memory_config=ttnn.L1_MEMORY_CONFIG
+        )
 
-        # Merge heads: [bs*heads, seq, head_dim] → [seq, bs*heads, head_dim] → [bs*seq, E] → [bs, seq, E]
-        attn_out = ttnn.permute(attn_out, (1, 0, 2))
-        attn_out = ttnn.reshape(attn_out, (tgt_len * bs, embed_dim))
-        attn_out = ttnn.linear(attn_out, self.out_proj_weight, bias=self.out_proj_bias)
-        attn_out = ttnn.reshape(attn_out, (bs, tgt_len, embed_dim))
+        # Collapse Heads 4D -> 3D: [bs, heads, seq, head_dim] -> [bs, seq, E]
+        attn_out = ttnn.permute(
+            attn_out, (0, 2, 1, 3), memory_config=ttnn.L1_MEMORY_CONFIG
+        )  # [bs, tgt_len, num_heads, head_dim]
+        attn_out = ttnn.reshape(attn_out, (bs, tgt_len, self.embed_dims), memory_config=ttnn.L1_MEMORY_CONFIG)
 
-        identity = ttnn.to_layout(identity, ttnn.TILE_LAYOUT)
-        return attn_out + identity
+        # Output projection
+        attn_out = ttnn.linear(
+            attn_out, self.out_proj_weight, bias=self.out_proj_bias, memory_config=ttnn.L1_MEMORY_CONFIG
+        )
+
+        # Identity should already be in TILE_LAYOUT from input, but ensure it's in L1
+        identity = ttnn.to_layout(identity, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
+        return ttnn.add(attn_out, identity, memory_config=ttnn.L1_MEMORY_CONFIG)
 
 
 class TtRefPointHeadMLP:
@@ -168,10 +188,10 @@ class TtRefPointHeadMLP:
         self.b1 = params["layers"][1]["bias"]
 
     def __call__(self, x):
-        x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
-        x = ttnn.linear(x, self.w0, bias=self.b0)
-        x = ttnn.relu(x)
-        x = ttnn.linear(x, self.w1, bias=self.b1)
+        x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
+        x = ttnn.linear(x, self.w0, bias=self.b0, memory_config=ttnn.L1_MEMORY_CONFIG)
+        x = ttnn.relu(x, memory_config=ttnn.L1_MEMORY_CONFIG)
+        x = ttnn.linear(x, self.w1, bias=self.b1, memory_config=ttnn.L1_MEMORY_CONFIG)
         return x
 
 
@@ -186,11 +206,11 @@ class TtRegBranch:
         self.layers = params
 
     def __call__(self, x):
-        x = ttnn.to_layout(x, ttnn.TILE_LAYOUT)
+        x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
         for i, layer_params in enumerate(self.layers):
-            x = ttnn.linear(x, layer_params["weight"], bias=layer_params["bias"])
+            x = ttnn.linear(x, layer_params["weight"], bias=layer_params["bias"], memory_config=ttnn.L1_MEMORY_CONFIG)
             if i < len(self.layers) - 1:
-                x = ttnn.relu(x)
+                x = ttnn.relu(x, memory_config=ttnn.L1_MEMORY_CONFIG)
         return x
 
 
@@ -245,7 +265,7 @@ class TtDINODecoderLayer:
             key_pos=query_pos,
             attn_mask=self_attn_mask,
         )
-        query = ttnn.layer_norm(query, weight=self.norm1_w, bias=self.norm1_b)
+        query = ttnn.layer_norm(query, weight=self.norm1_w, bias=self.norm1_b, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         logger.info("  DecoderLayer: cross-attention...")
         query = self.cross_attn(
@@ -257,10 +277,10 @@ class TtDINODecoderLayer:
             spatial_shapes=spatial_shapes,
             level_start_index=level_start_index,
         )
-        query = ttnn.layer_norm(query, weight=self.norm2_w, bias=self.norm2_b)
+        query = ttnn.layer_norm(query, weight=self.norm2_w, bias=self.norm2_b, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         query = self.ffn(query)
-        query = ttnn.layer_norm(query, weight=self.norm3_w, bias=self.norm3_b)
+        query = ttnn.layer_norm(query, weight=self.norm3_w, bias=self.norm3_b, memory_config=ttnn.L1_MEMORY_CONFIG)
 
         return query
 
@@ -343,7 +363,11 @@ class TtDINODecoder:
                 temperature=10000,
             )
             query_sine_embed_tt = ttnn.from_torch(
-                query_sine_embed, device=self.device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+                query_sine_embed,
+                device=self.device,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                memory_config=ttnn.L1_MEMORY_CONFIG,
             )
             query_pos = self.ref_point_head(query_sine_embed_tt)
 
@@ -354,6 +378,7 @@ class TtDINODecoder:
                     device=self.device,
                     dtype=ttnn.bfloat16,
                     layout=ttnn.TILE_LAYOUT,
+                    memory_config=ttnn.L1_MEMORY_CONFIG,
                 )
 
             output = layer(
@@ -376,7 +401,7 @@ class TtDINODecoder:
                 new_ref = new_ref.sigmoid()
                 reference_points = new_ref.detach()
 
-            normed = ttnn.layer_norm(output, weight=self.norm_w, bias=self.norm_b)
+            normed = ttnn.layer_norm(output, weight=self.norm_w, bias=self.norm_b, memory_config=ttnn.L1_MEMORY_CONFIG)
             intermediate.append(normed)
             intermediate_reference_points.append(reference_points)
             logger.info(f"Decoder layer {lid} done.")
