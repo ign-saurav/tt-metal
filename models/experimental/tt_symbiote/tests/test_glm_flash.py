@@ -5,6 +5,7 @@
 """Test for GLM 4.7 Flash model with TTNN backend."""
 
 import os
+import time
 
 import pytest
 import torch
@@ -72,7 +73,8 @@ MESH_DEVICE_MAP = {
     indirect=True,
 )
 @pytest.mark.parametrize("use_paged_attention", [True], ids=["paged"])
-def test_glm(mesh_device, use_paged_attention):
+@pytest.mark.parametrize("max_new_tokens", [128], ids=["128tok"])
+def test_glm(mesh_device, use_paged_attention, max_new_tokens):
     """Test GLM model with TTNN acceleration."""
 
     tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
@@ -121,7 +123,28 @@ def test_glm(mesh_device, use_paged_attention):
     if use_paged_attention:
         cache_kwargs["past_key_values"] = create_paged_kv_cache(model.config, mesh_device)
 
-    outputs = model.generate(**inputs, max_new_tokens=128, use_cache=True, **cache_kwargs)
-    print(f"GLM OUTPUT: {tokenizer.decode(outputs[0][inputs['input_ids'].shape[-1]:])}")
+    prompt_tokens = inputs["input_ids"].shape[-1]
+
+    start_time = time.perf_counter()
+    outputs = model.generate(**inputs, max_new_tokens=max_new_tokens, use_cache=True, **cache_kwargs)
+    ttnn.synchronize_device(mesh_device)
+    end_time = time.perf_counter()
+
+    total_time = end_time - start_time
+    generated_tokens = outputs.shape[-1] - prompt_tokens
+    tokens_per_second = generated_tokens / total_time
+
+    decoded_output = tokenizer.decode(outputs[0][prompt_tokens:])
+    print(f"\n{'='*80}")
+    print(f"GLM OUTPUT: {decoded_output}")
+    print(f"{'='*80}")
+    print(f"\nPERFORMANCE METRICS:")
+    print(f"  Prompt tokens:        {prompt_tokens}")
+    print(f"  Generated tokens:     {generated_tokens}")
+    print(f"  Total time:           {total_time:.3f}s")
+    print(f"  Throughput:           {tokens_per_second:.2f} tokens/s")
+    print(f"  Time per token:       {(total_time / generated_tokens * 1000):.2f}ms")
+    print(f"{'='*80}\n")
+
     DispatchManager.save_stats_to_file("glm_timing_stats.csv")
     TracedRun.release_all()
