@@ -47,6 +47,20 @@ def create_paged_kv_cache(model_config, device, batch_size=1):
     ).to_device(device)
 
 
+MESH_DEVICE_MAP = {
+    "N150": (1, 1),
+    "N300": (1, 2),
+    "N150x4": (1, 4),
+    "T3K": (1, 8),
+    "TG": (8, 4),
+    "P150": (1, 1),
+    "P300": (1, 2),
+    "P150x4": (1, 4),
+    "P150x8": (1, 8),
+    "BHGLX": (8, 4),
+}
+
+
 @pytest.mark.parametrize(
     "device_params",
     [{"trace_region_size": 50000000, "num_command_queues": 1, "fabric_config": ttnn.FabricConfig.FABRIC_1D_RING}],
@@ -54,33 +68,21 @@ def create_paged_kv_cache(model_config, device, batch_size=1):
 )
 @pytest.mark.parametrize(
     "mesh_device",
-    [
-        {
-            "N150": (1, 1),
-            "N300": (1, 2),
-            "N150x4": (1, 4),
-            "T3K": (1, 8),
-            "TG": (8, 4),
-            "P150": (1, 1),
-            "P300": (1, 2),
-            "P150x4": (1, 4),
-            "P150x8": (1, 8),
-            "BHGLX": (8, 4),
-        }.get(os.environ.get("MESH_DEVICE"), len(ttnn.get_device_ids()))
-    ],
+    [MESH_DEVICE_MAP.get(os.environ.get("MESH_DEVICE"), len(ttnn.get_device_ids()))],
     indirect=True,
 )
-def test_glm(mesh_device):
+@pytest.mark.parametrize("use_paged_attention", [True], ids=["paged"])
+def test_glm(mesh_device, use_paged_attention):
     """Test GLM model with TTNN acceleration."""
 
     tokenizer = AutoTokenizer.from_pretrained("zai-org/GLM-4.7-Flash")
     model = AutoModelForCausalLM.from_pretrained("zai-org/GLM-4.7-Flash")
     nn_to_ttnn = {
-        model.model.layers[0].self_attn.__class__: TTNNGlm4MoeLiteAttention,  # Add TTNNGlm4MoeLiteAttention module
-        model.model.layers[1].mlp.__class__: TTNNMoE,  # Add TTNNMoE module
+        model.model.layers[0].self_attn.__class__: TTNNGlm4MoeLiteAttention,
+        model.model.layers[1].mlp.__class__: TTNNMoE,
     }
     nn_to_ttnn2 = {
-        nn.Linear: TTNNLinearIColShardedWRowSharded,  # TTNNLinearLLamaIColShardedWRowSharded
+        nn.Linear: TTNNLinearIColShardedWRowSharded,
     }
 
     messages = [
@@ -108,12 +110,18 @@ def test_glm(mesh_device):
     model.eval()
     torch.set_grad_enabled(False)
 
-    paged_cache = create_paged_kv_cache(model.config, mesh_device)
-    outputs = model.generate(**inputs, max_new_tokens=2, use_cache=True, past_key_values=paged_cache)
+    cache_kwargs = {}
+    if use_paged_attention:
+        cache_kwargs["past_key_values"] = create_paged_kv_cache(model.config, mesh_device)
+
+    outputs = model.generate(**inputs, max_new_tokens=2, use_cache=True, **cache_kwargs)
     DispatchManager.clear_timings()
 
-    paged_cache = create_paged_kv_cache(model.config, mesh_device)
-    outputs = model.generate(**inputs, max_new_tokens=128, use_cache=True, past_key_values=paged_cache)
+    cache_kwargs = {}
+    if use_paged_attention:
+        cache_kwargs["past_key_values"] = create_paged_kv_cache(model.config, mesh_device)
+
+    outputs = model.generate(**inputs, max_new_tokens=128, use_cache=True, **cache_kwargs)
     print(f"GLM OUTPUT: {tokenizer.decode(outputs[0][inputs['input_ids'].shape[-1]:])}")
     DispatchManager.save_stats_to_file("glm_timing_stats.csv")
     TracedRun.release_all()

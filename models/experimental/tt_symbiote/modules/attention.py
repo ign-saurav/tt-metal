@@ -1156,6 +1156,18 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
                 packer_l1_acc=True,
             )
 
+        kv_a_ln = self._fallback_torch_layer.kv_a_layernorm
+        mesh_mapper = ttnn.ReplicateTensorToMesh(self.device) if self.device.get_num_devices() > 1 else None
+        self._kv_a_ln_weight = ttnn.from_torch(
+            kv_a_ln.weight.unsqueeze(0).expand(32, -1),
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            device=self.device,
+            mesh_mapper=mesh_mapper,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        self._kv_a_ln_eps = kv_a_ln.variance_epsilon
+
     @property
     def _is_distributed(self):
         return (
@@ -1176,6 +1188,47 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
             num_links=1,
             topology=ttnn.Topology.Linear,
         )
+
+    def _permute_cos_sin_to_meta_format(self, cos, sin):
+        """Convert cos/sin from HF doubled-half format to Meta interleaved-pair format.
+
+        HF format:  [c(f0), c(f1), ..., c(f_{d/2-1}), c(f0), c(f1), ..., c(f_{d/2-1})]
+        Meta format: [c(f0), c(f0), c(f1), c(f1), ..., c(f_{d/2-1}), c(f_{d/2-1})]
+
+        rotary_embedding_llama expects Meta format where each adjacent pair shares
+        the same frequency, matching its interleaved rotation convention.
+        """
+        half_dim = self.qk_rope_head_dim // 2
+        mesh_mapper = ttnn.ReplicateTensorToMesh(self.device) if self.device.get_num_devices() > 1 else None
+
+        if self._is_distributed:
+            mesh_composer = ttnn.ConcatMeshToTensor(self.device, dim=0)
+            cos_t = ttnn.to_torch(cos, mesh_composer=mesh_composer)[:1]
+            sin_t = ttnn.to_torch(sin, mesh_composer=mesh_composer)[:1]
+        else:
+            cos_t = ttnn.to_torch(cos)
+            sin_t = ttnn.to_torch(sin)
+
+        cos_t = cos_t[..., :half_dim].repeat_interleave(2, dim=-1)
+        sin_t = sin_t[..., :half_dim].repeat_interleave(2, dim=-1)
+
+        cos = ttnn.from_torch(
+            cos_t,
+            device=self.device,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            mesh_mapper=mesh_mapper,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        sin = ttnn.from_torch(
+            sin_t,
+            device=self.device,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            mesh_mapper=mesh_mapper,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        return cos, sin
 
     def _project_qkv(self, hidden_states, batch_size, seq_length, position_embeddings):
         if hidden_states.layout != ttnn.TILE_LAYOUT:
@@ -1210,7 +1263,10 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
             (batch_size, seq_length, self.kv_lora_rank + self.qk_rope_head_dim),
         )
 
-        k_pass_flat = ttnn.rms_norm(k_pass_flat)
+        if len(k_pass_flat.shape) == 3:
+            k_pass_flat = ttnn.unsqueeze(k_pass_flat, 1)
+        k_pass_flat = ttnn.rms_norm(k_pass_flat, weight=self._kv_a_ln_weight, epsilon=self._kv_a_ln_eps)
+        k_pass_flat = ttnn.squeeze(k_pass_flat, 1)
         kv_full = self.kv_b_proj(k_pass_flat)
         kv_full = self._maybe_all_gather(kv_full)
 
@@ -1237,6 +1293,9 @@ class TTNNGlm4MoeLiteAttention(TTNNModule):
             sin = ttnn.unsqueeze(sin, 1)
         if self._is_distributed:
             sin = self._maybe_all_gather(sin)
+
+        cos, sin = self._permute_cos_sin_to_meta_format(cos, sin)
+
         q_rot, k_rot = self.rope(q_rot, k_rot, cos, sin)
 
         k_rot = ttnn.repeat(k_rot.to_ttnn, (1, self.num_heads, 1, 1))
