@@ -1427,21 +1427,35 @@ class TTNNDeepseekOCRMoEGate(TTNNModule):
     def forward(self, hidden_states: ttnn.Tensor):
         """
         Forward logic matching DeepSeek V3/OCR.
-        Input: [Batch, 1, Seq, Hidden]
-        Output: indices, weights
+        Input: [Batch, 1, Seq, Hidden] or (Batch, Seq, Hidden)
+        Output: (topk_weight, topk_idx) same as HF gate.
         """
-        # 1. Linear Projection (Compute Logits)
-        # hidden_states: [B, 1, S, H] @ weight: [H, E] -> [B, 1, S, E]
-        # if hidden_states.layout != ttnn.TILE_LAYOUT:
-        #     hidden_states = ttnn.to_layout(hidden_states, ttnn.TILE_LAYOUT)
-        # logits = ttnn.matmul(hidden_states, self.weight) #Found invalid TTNN dispatch for matmul operation. Please check input dtypes and layouts.
-
         logits = self.linear(hidden_states).to_ttnn
 
         if self.scoring_func == "softmax":
-            scores = ttnn.softmax(logits, dim=0)
+            scores = ttnn.softmax(logits, dim=-1)
         elif self.scoring_func == "sigmoid":
             scores = ttnn.sigmoid(logits)
         else:
             raise NotImplementedError(f"insupportable scoring function for MoE gating: {self.scoring_func}")
-        return ttnn.squeeze(logits, 0)
+
+        if self.topk_method == "greedy":
+            topk_weight, topk_idx = ttnn.topk(scores, k=self.top_k, dim=-1, sorted=False)
+        else:
+            raise NotImplementedError(f"topk_method {self.topk_method!r} not supported")
+
+        ### norm gate to sum 1 (match HF lines 502-507)
+        if self.top_k > 1 and self.norm_topk_prob:
+            denominator = ttnn.sum(topk_weight, dim=-1, keepdim=True)
+            denominator = ttnn.add(denominator, 1e-20)
+            topk_weight = ttnn.div(topk_weight, denominator)
+        topk_weight = ttnn.mul(topk_weight, self.routed_scaling_factor)
+
+        ### expert-level auxiliary loss: only when training and alpha > 0 (HF 508-536)
+        if getattr(self, "training", False) and self.alpha > 0.0:
+            # TODO: implement aux_loss with ttnn (scatter_add / one_hot / mean)
+            aux_loss = None
+        else:
+            aux_loss = None
+
+        return topk_idx, topk_weight, aux_loss
