@@ -6,7 +6,7 @@ import torch
 import math
 
 from models.experimental.tt_symbiote.core.module import TTNNModule
-from typing import Optional
+from typing import Optional, Dict
 
 
 ########## QUICK GELU ############
@@ -84,6 +84,7 @@ class TTNNClipVisionEmbeddings(TTNNModule):
         """Create TTNN module from PyTorch equivalent."""
         new_clip = cls()
         new_clip._fallback_torch_layer = visionEmbedding
+        return new_clip
 
     def preprocess_weights_impl(self):
         """Convert PyTorch weights to TTNN format (called once)."""
@@ -142,7 +143,8 @@ class TTNNClipVisionEmbeddings(TTNNModule):
         ttnn.deallocate(self.class_embedding)
         ttnn.deallocate(self.patch_embedding_weight)
         ttnn.deallocate(self.position_embedding)
-        ttnn.deallocate(self.patch_embedding_bias)
+        if self.patch_embedding_bias is not None:
+            ttnn.deallocate(self.patch_embedding_bias)
 
     def tensor_1d_to_2d_ttnn(tensor_1d: torch.Tensor, dtype: ttnn.DataType = ttnn.bfloat16) -> ttnn.Tensor:
         """
@@ -312,3 +314,182 @@ class TTNNClipVisionEmbeddings(TTNNModule):
         ttnn.deallocate(pos_embeds)
 
         return embeddings
+
+
+########## No Tensor Parallelism Attention ############
+class TTNNNoTPAttention:
+    """
+    No Tensor Parallelism Attention using TTNN operations.
+
+    Implements multi-head self-attention with QKV projection and scaled dot product attention.
+    """
+
+    def __init__(
+        self,
+        old_module,
+        cfg,
+        weights: Optional[Dict[str, torch.Tensor]] = None,
+        device: ttnn.Device = None,
+    ):
+        """
+        Initialize attention layer.
+
+        Args:
+            cfg: Configuration dict with num_attention_heads, hidden_size, etc.
+            weights: PyTorch weights dict (optional)
+            device: TTNN device
+        """
+        self.num_heads = cfg.num_attention_heads
+        self.head_dim = cfg.hidden_size // cfg.num_attention_heads
+        self.hidden_size = cfg.hidden_size
+        self.device = device
+        self.use_flash_attention = cfg.get("use_flash_attn", False)
+        self.torch_layer = old_module
+
+    @classmethod
+    def from_torch(cls, NoTPAttention):
+        """Create TTNN module from PyTorch equivalent."""
+        new_Attn = cls()
+        new_Attn._fallback_torch_layer = NoTPAttention
+        return new_Attn
+
+    def preprocess_weights_impl(self):
+        """Convert PyTorch weights to TTNN format (called once)."""
+        # Load QKV projection weights
+        qkv_weight = self.torch_layer.self_attn.qkv_proj.weight.data  # (hidden_size * 3, hidden_size)
+        qkv_bias = self.torch_layer.self_attn.qkv_proj.bias.data
+
+        # Split into Q, K, V
+        q_weight = qkv_weight[: self.hidden_size, :].T  # (hidden_size, hidden_size)
+        k_weight = qkv_weight[self.hidden_size : 2 * self.hidden_size, :].T
+        v_weight = qkv_weight[2 * self.hidden_size :, :].T
+
+        # Convert to TTNN
+        self.q_weight = ttnn.from_torch(
+            q_weight,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        self.k_weight = ttnn.from_torch(
+            k_weight,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        self.v_weight = ttnn.from_torch(
+            v_weight,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+        if qkv_bias is not None:
+            q_bias = qkv_bias[: self.hidden_size]
+            k_bias = qkv_bias[self.hidden_size : 2 * self.hidden_size]
+            v_bias = qkv_bias[2 * self.hidden_size :]
+
+            self.q_bias = self.tensor_1d_to_2d_ttnn(q_bias)
+            self.k_bias = self.tensor_1d_to_2d_ttnn(k_bias)
+            self.v_bias = self.tensor_1d_to_2d_ttnn(v_bias)
+        else:
+            self.q_bias = None
+            self.k_bias = None
+            self.v_bias = None
+
+        # Output projection
+        out_weight = self.torch_layer.self_attn.out_proj.weight.data.T  # (hidden_size, hidden_size)
+        self.out_weight = ttnn.from_torch(
+            out_weight,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+        out_bias = self.torch_layer.self_attn.out_proj.bias.data
+        if out_bias is not None:
+            self.out_bias = self.tensor_1d_to_2d_ttnn(out_bias)
+        else:
+            self.out_bias = None
+
+    def tensor_1d_to_2d_ttnn(tensor_1d: torch.Tensor, dtype: ttnn.DataType = ttnn.bfloat16) -> ttnn.Tensor:
+        """
+        Convert 1D PyTorch tensor to 2D TTNN tensor (1, N) for bias operations.
+
+        Args:
+            tensor_1d: 1D PyTorch tensor
+            device: TTNN device
+            dtype: TTNN data type
+
+        Returns:
+            2D TTNN tensor of shape (1, N)
+        """
+        tensor_2d = tensor_1d.unsqueeze(0)
+        return ttnn.from_torch(
+            tensor_2d,
+            dtype=dtype,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+    def move_weights_to_device_impl(self):
+        """Move preprocessed weights to device."""
+        self.q_weight = ttnn.to_device(self.q_weight, self.device)
+        self.k_weight = ttnn.to_device(self.k_weight, self.device)
+        self.v_weight = ttnn.to_device(self.v_weight, self.device)
+        self.out_weight = ttnn.to_device(self.out_weight, self.device)
+
+        if self.q_bias is not None and self.k_bias is not None and self.v_bias is not None:
+            self.q_bias = ttnn.to_device(self.q_bias, self.device)
+            self.k_bias = ttnn.to_device(self.k_bias, self.device)
+            self.v_bias = ttnn.to_device(self.v_bias, self.device)
+        if self.out_bias is not None:
+            self.out_bias = ttnn.to_device(self.out_bias, self.device)
+
+    def deallocate_weights_impl(self):
+        """Deallocate device memory."""
+
+        ttnn.deallocate(self.q_weight)
+        ttnn.deallocate(self.k_weight)
+        ttnn.deallocate(self.v_weight)
+        ttnn.deallocate(self.out_weight)
+        if self.q_bias is not None and self.k_bias is not None and self.v_bias is not None:
+            ttnn.deallocate(self.q_bias)
+            ttnn.deallocate(self.k_bias)
+            ttnn.deallocate(self.v_bias)
+        if self.out_bias is not None:
+            ttnn.deallocate(self.out_bias)
+
+    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        """
+        Forward pass of transformer block.
+
+        Args:
+            x: TTNN tensor (batch_size, seq_len, hidden_size)
+
+        Returns:
+            TTNN tensor (batch_size, seq_len, hidden_size)
+        """
+        # Pre-norm attention
+        residual = ttnn.layer_norm(
+            x,
+            weight=self.layer_norm1_weight,
+            bias=self.layer_norm1_bias,
+            epsilon=self.layernorm_epsilon,
+        )
+        residual = self.self_attn.forward(residual)
+        h = ttnn.add(x, residual, memory_config=ttnn.L1_MEMORY_CONFIG)
+        ttnn.deallocate(residual)
+
+        # Pre-norm feedforward
+        out = ttnn.layer_norm(
+            h,
+            weight=self.layer_norm2_weight,
+            bias=self.layer_norm2_bias,
+            epsilon=self.layernorm_epsilon,
+        )
+        out = self.mlp.forward(out)
+        out = ttnn.add(h, out, memory_config=ttnn.L1_MEMORY_CONFIG)
+        ttnn.deallocate(h)
+
+        return out
