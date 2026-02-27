@@ -1400,16 +1400,17 @@ class TTNNDeepseekOCRMoEGate(TTNNModule):
         # )
         self.linear = TTNNLinear.from_parameters(weight=self._fallback_torch_layer.weight, bias=None)
         self.linear.preprocess_weights()
-        # # 2. Bias (Specific to DeepSeek 'noaux_tc')
-        # if self.topk_method == "noaux_tc" and hasattr(self._fallback_torch_layer, "e_score_correction_bias"):
-        #     bias = self._fallback_torch_layer.e_score_correction_bias
-        #     # Reshape to 4D for TTNN broadcasting: [1, 1, 1, Experts]
-        #     bias = bias.reshape(1, 1, 1, -1)
-        #     self.e_score_correction_bias = ttnn.from_torch(
-        #         bias,
-        #         dtype=ttnn.bfloat16,
-        #         layout=ttnn.TILE_LAYOUT
-        #     )
+        # Buffers for group_limited_greedy and noaux_tc
+        self.scatter_input = None
+        self.scatter_src = None
+        self.e_score_correction_bias = None
+        if self.topk_method in ("group_limited_greedy", "noaux_tc"):
+            self.scatter_input = ttnn.from_torch(torch.zeros((1, 1, 1, self.n_group), dtype=torch.bfloat16))
+            self.scatter_src = ttnn.from_torch(torch.ones((1, 1, 1, self.topk_group), dtype=torch.bfloat16))
+        if self.topk_method == "noaux_tc" and hasattr(self._fallback_torch_layer, "e_score_correction_bias"):
+            bias = self._fallback_torch_layer.e_score_correction_bias
+            bias = bias.reshape(1, 1, 1, -1).to(torch.bfloat16)
+            self.e_score_correction_bias = ttnn.from_torch(bias, dtype=ttnn.bfloat16)
 
     def move_weights_to_device_impl(self):
         """
@@ -1419,10 +1420,101 @@ class TTNNDeepseekOCRMoEGate(TTNNModule):
         if self.linear is not None:
             self.linear.to_device(self.device)  # Tell submodule which device to use
             self.linear.move_weights_to_device()
+        if self.scatter_input is not None:
+            self.scatter_input = ttnn.to_device(self.scatter_input, self.device)
+            self.scatter_input = ttnn.to_layout(
+                self.scatter_input, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG
+            )
+        if self.scatter_src is not None:
+            self.scatter_src = ttnn.to_device(self.scatter_src, self.device)
+            self.scatter_src = ttnn.to_layout(self.scatter_src, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        if self.e_score_correction_bias is not None:
+            self.e_score_correction_bias = ttnn.to_device(self.e_score_correction_bias, self.device)
+            self.e_score_correction_bias = ttnn.to_layout(
+                self.e_score_correction_bias, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG
+            )
 
-    #     # Move Bias
-    #     if self.e_score_correction_bias is not None:
-    #         self.e_score_correction_bias = ttnn.to_device(self.e_score_correction_bias, self.device)
+    def _forward_group_limited_greedy(self, scores: ttnn.Tensor):
+        """Group-limited greedy: max per group -> top-k groups -> top-k experts within those groups."""
+        if scores.layout != ttnn.TILE_LAYOUT:
+            scores = ttnn.to_layout(scores, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        # Ensure 4D (batch, 1, seq, experts) for shape[i] and downstream ops
+        if len(scores.shape) == 3:
+            scores = ttnn.unsqueeze(scores, 1)
+        T = scores.shape[2]
+        n_experts = scores.shape[3]
+        experts_per_group = n_experts // self.n_group
+        grouped = ttnn.reshape(scores, ttnn.Shape((1, T, self.n_group, experts_per_group)))
+        group_scores = ttnn.max(grouped, dim=3, keepdim=True)  # (1, T, n_group, 1) - keep 4D for downstream
+        ttnn.deallocate(grouped)
+        _, topk_group_idx = ttnn.topk(group_scores, k=self.topk_group, dim=2, sorted=False)  # (1, T, topk_group, 1)
+        ttnn.deallocate(group_scores)
+        topk_group_idx = ttnn.typecast(topk_group_idx, ttnn.uint32)  # scatter expects integer index dtype
+        # Scatter requires index shape to match source (1, 1, T, topk_group). Topk returns (1, T, topk_group) or (1, T, topk_group, 1).
+        if len(topk_group_idx.shape) == 4 and topk_group_idx.shape[-1] == 1:
+            topk_group_idx = ttnn.squeeze(topk_group_idx, -1)
+        if len(topk_group_idx.shape) == 3:
+            topk_group_idx = ttnn.unsqueeze(topk_group_idx, 1)  # (1, 1, T, topk_group)
+        input_mask = ttnn.repeat(self.scatter_input, ttnn.Shape((1, 1, T, 1)))
+        src_tensor = ttnn.repeat(self.scatter_src, ttnn.Shape((1, 1, T, 1)))
+        active_groups_mask = ttnn.scatter(input=input_mask, index=topk_group_idx, src=src_tensor, dim=3)
+        ttnn.deallocate(input_mask)
+        ttnn.deallocate(src_tensor)
+        ttnn.deallocate(topk_group_idx)
+        active_groups_mask = ttnn.reshape(active_groups_mask, ttnn.Shape((1, T, self.n_group, 1)))
+        active_experts_mask = ttnn.repeat(active_groups_mask, ttnn.Shape((1, 1, 1, experts_per_group)))
+        ttnn.deallocate(active_groups_mask)
+        active_experts_mask = ttnn.reshape(active_experts_mask, ttnn.Shape((1, 1, T, n_experts)))
+        masked_scores = ttnn.mul(scores, active_experts_mask)
+        ttnn.deallocate(active_experts_mask)
+        topk_weight, topk_idx = ttnn.topk(masked_scores, k=self.top_k, dim=3, sorted=False)
+        ttnn.deallocate(masked_scores)
+        return topk_idx, topk_weight
+
+    def _forward_noaux_tc(self, scores: ttnn.Tensor):
+        """No-aux TC: bias-adjusted scores for group choice, top-2 sum per group -> top-k groups -> top-k experts; weights from original scores."""
+        if scores.layout != ttnn.TILE_LAYOUT:
+            scores = ttnn.to_layout(scores, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        # Ensure 4D (batch, 1, seq, experts) for shape[i] and downstream ops
+        if len(scores.shape) == 3:
+            scores = ttnn.unsqueeze(scores, 1)
+        T = scores.shape[2]
+        n_experts = scores.shape[3]
+        experts_per_group = n_experts // self.n_group
+        bias = ttnn.repeat(self.e_score_correction_bias, ttnn.Shape((1, 1, T, 1)))
+        bias = ttnn.to_layout(bias, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        scores_for_choice = ttnn.add(scores, bias)
+        ttnn.deallocate(bias)
+        grouped = ttnn.reshape(scores_for_choice, ttnn.Shape((1, T, self.n_group, experts_per_group)))
+        top2_scores, _ = ttnn.topk(grouped, k=2, dim=3)
+        ttnn.deallocate(grouped)
+        group_scores = ttnn.sum(top2_scores, dim=3, keepdim=True)  # (1, T, n_group, 1) - keep 4D
+        ttnn.deallocate(top2_scores)
+        _, topk_group_idx = ttnn.topk(group_scores, k=self.topk_group, dim=2, sorted=False)  # (1, T, topk_group, 1)
+        ttnn.deallocate(group_scores)
+        topk_group_idx = ttnn.typecast(topk_group_idx, ttnn.uint32)  # scatter expects integer index dtype
+        # Scatter requires index shape (1, 1, T, topk_group) to match source. Topk may return (1, T, topk_group) or (1, T, topk_group, 1).
+        if len(topk_group_idx.shape) == 4 and topk_group_idx.shape[-1] == 1:
+            topk_group_idx = ttnn.squeeze(topk_group_idx, -1)
+        if len(topk_group_idx.shape) == 3:
+            topk_group_idx = ttnn.unsqueeze(topk_group_idx, 1)
+        input_mask = ttnn.repeat(self.scatter_input, ttnn.Shape((1, 1, T, 1)))
+        src_tensor = ttnn.repeat(self.scatter_src, ttnn.Shape((1, 1, T, 1)))
+        active_groups_mask = ttnn.scatter(input=input_mask, index=topk_group_idx, src=src_tensor, dim=3)
+        ttnn.deallocate(input_mask)
+        ttnn.deallocate(src_tensor)
+        ttnn.deallocate(topk_group_idx)
+        active_groups_mask = ttnn.reshape(active_groups_mask, ttnn.Shape((1, T, self.n_group, 1)))
+        active_experts_mask = ttnn.repeat(active_groups_mask, ttnn.Shape((1, 1, 1, experts_per_group)))
+        ttnn.deallocate(active_groups_mask)
+        active_experts_mask = ttnn.reshape(active_experts_mask, ttnn.Shape((1, 1, T, n_experts)))
+        masked_scores = ttnn.mul(scores_for_choice, active_experts_mask)
+        ttnn.deallocate(active_experts_mask)
+        _, topk_idx = ttnn.topk(masked_scores, k=self.top_k, dim=3, sorted=False)
+        ttnn.deallocate(masked_scores)
+        ttnn.deallocate(scores_for_choice)
+        topk_weight = ttnn.gather(scores, dim=3, index=topk_idx)
+        return topk_idx, topk_weight
 
     def forward(self, hidden_states: ttnn.Tensor):
         """
@@ -1441,6 +1533,10 @@ class TTNNDeepseekOCRMoEGate(TTNNModule):
 
         if self.topk_method == "greedy":
             topk_weight, topk_idx = ttnn.topk(scores, k=self.top_k, dim=-1, sorted=False)
+        elif self.topk_method == "group_limited_greedy":
+            topk_idx, topk_weight = self._forward_group_limited_greedy(scores)
+        elif self.topk_method == "noaux_tc":
+            topk_idx, topk_weight = self._forward_noaux_tc(scores)
         else:
             raise NotImplementedError(f"topk_method {self.topk_method!r} not supported")
 
