@@ -35,16 +35,17 @@ assert transformers.__version__.startswith(
 
 
 def create_paged_kv_cache(model_config, device, batch_size=1):
-    """Create a fresh TTNNPagedAttentionKVCache sized for the model."""
-    paged_config = PagedAttentionConfig(block_size=64, max_num_blocks=32)
+    config = PagedAttentionConfig(
+        block_size=64,
+        max_num_blocks=32,
+        batch_size=batch_size,
+    )
     return TTNNPagedAttentionKVCache(
         num_layers=model_config.num_hidden_layers,
         num_kv_heads=model_config.num_key_value_heads,
-        head_dim_k=model_config.qk_head_dim,
-        head_dim_v=model_config.v_head_dim,
-        paged_config=paged_config,
+        head_dim=model_config.qk_head_dim,
+        config=config,
         device=None,
-        batch_size=batch_size,
     ).to_device(device)
 
 

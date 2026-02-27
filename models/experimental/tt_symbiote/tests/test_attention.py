@@ -104,15 +104,13 @@ def test_glm4_flash_attention_with_paged_kv_cache(device):
     torch.set_grad_enabled(False)
     torch_attn = model.model.layers[0].self_attn
 
-    paged_config = PagedAttentionConfig(block_size=32, max_num_blocks=64)
+    paged_config = PagedAttentionConfig(block_size=32, max_num_blocks=64, batch_size=1)
     paged_cache = TTNNPagedAttentionKVCache(
         num_layers=2,
         num_kv_heads=4,
-        head_dim_k=128,
-        head_dim_v=128,
-        paged_config=paged_config,
+        head_dim=128,
+        config=paged_config,
         device=None,
-        batch_size=1,
         dtype=torch.bfloat16,
     ).to_device(device)
 

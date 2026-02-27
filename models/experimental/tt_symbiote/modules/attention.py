@@ -54,94 +54,83 @@ class _PagedCacheLayer(CacheLayerMixin if CacheLayerMixin is not None else objec
         return 0
 
 
+@dataclass
 class PagedAttentionConfig:
-    def __init__(self, block_size=64, max_num_blocks=2048):
-        self.block_size = block_size
-        self.max_num_blocks = max_num_blocks
+    block_size: int = 64
+    max_num_blocks: int = 2048
+    batch_size: int = 1
+
+    @property
+    def max_seq_length(self) -> int:
+        return self.max_num_blocks * self.block_size
+
+    @property
+    def blocks_per_sequence(self) -> int:
+        return self.max_num_blocks // self.batch_size
 
 
 class TTNNPagedAttentionKVCache(Cache):
-    """Paged KV cache backed by TTNN tensors.
-
-    Stores key/value states in fixed-size blocks (pages) on device.
-    Provides the standard ``update`` / ``get_seq_length`` interface so it
-    can be passed as ``past_key_values`` to any HF generate loop.
-    """
-
     def __init__(
         self,
         num_layers: int,
         num_kv_heads: int,
-        head_dim_k: int,
-        head_dim_v: int,
-        paged_config: PagedAttentionConfig,
-        device,
-        batch_size: int = 1,
+        head_dim: int,
+        config: PagedAttentionConfig,
+        device=None,
         dtype: torch.dtype = torch.bfloat16,
     ):
         if Cache is not object:
             super().__init__(layer_class_to_replicate=_PagedCacheLayer)
         else:
             super().__init__()
+
         self.num_layers = num_layers
         self.num_kv_heads = num_kv_heads
-        self.head_dim_k = head_dim_k
-        self.head_dim_v = head_dim_v
-        self.paged_config = paged_config
-        self.batch_size = batch_size
+        self.head_dim = head_dim
+        self.config = config
+        self.dtype = dtype
         self._device = device
-        self._dtype = dtype
-
-        self._seen_tokens = 0
         self._seq_lengths: list[int] = [0] * num_layers
+        self._seen_tokens = 0
 
-        k_cache_shape = (
-            paged_config.max_num_blocks,
-            num_kv_heads,
-            paged_config.block_size,
-            head_dim_k,
-        )
-        v_cache_shape = (
-            paged_config.max_num_blocks,
-            num_kv_heads,
-            paged_config.block_size,
-            head_dim_k,
-        )
-
-        self.key_cache: list[torch.Tensor] = []
-        self.value_cache: list[torch.Tensor] = []
-        for _ in range(num_layers):
-            self.key_cache.append(torch.zeros(k_cache_shape, dtype=dtype))
-            self.value_cache.append(torch.zeros(v_cache_shape, dtype=dtype))
-
-        blocks_per_user = paged_config.max_num_blocks // batch_size
-        page_table = torch.arange(paged_config.max_num_blocks, dtype=torch.int32)
-        self.page_table = page_table.reshape(batch_size, blocks_per_user)
+        page_table = torch.arange(config.max_num_blocks, dtype=torch.int32)
+        self.page_table = page_table.reshape(config.batch_size, config.blocks_per_sequence)
 
         self._tt_key_cache: list[Optional[ttnn.Tensor]] = [None] * num_layers
         self._tt_value_cache: list[Optional[ttnn.Tensor]] = [None] * num_layers
         self._tt_page_table: Optional[ttnn.Tensor] = None
+        self._is_on_device = False
 
-    def to_device(self, device):
+    def to_device(self, device) -> "TTNNPagedAttentionKVCache":
+        if self._is_on_device and self._device == device:
+            return self
+
         self._device = device
         mesh_mapper = ttnn.ReplicateTensorToMesh(device) if device.get_num_devices() > 1 else None
+
+        cache_shape = (
+            self.config.max_num_blocks,
+            self.num_kv_heads,
+            self.config.block_size,
+            self.head_dim,
+        )
+
         for layer_idx in range(self.num_layers):
-            self._tt_key_cache[layer_idx] = ttnn.from_torch(
-                self.key_cache[layer_idx],
+            self._tt_key_cache[layer_idx] = ttnn.zeros(
+                cache_shape,
                 dtype=ttnn.bfloat16,
                 layout=ttnn.TILE_LAYOUT,
                 device=device,
-                mesh_mapper=mesh_mapper,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
-            self._tt_value_cache[layer_idx] = ttnn.from_torch(
-                self.value_cache[layer_idx],
+            self._tt_value_cache[layer_idx] = ttnn.zeros(
+                cache_shape,
                 dtype=ttnn.bfloat16,
                 layout=ttnn.TILE_LAYOUT,
                 device=device,
-                mesh_mapper=mesh_mapper,
                 memory_config=ttnn.DRAM_MEMORY_CONFIG,
             )
+
         self._tt_page_table = ttnn.from_torch(
             self.page_table,
             dtype=ttnn.int32,
@@ -150,75 +139,37 @@ class TTNNPagedAttentionKVCache(Cache):
             mesh_mapper=mesh_mapper,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
+
+        self._is_on_device = True
         return self
 
-    def get_tt_caches(self, layer_idx: int):
-        return self._tt_key_cache[layer_idx], self._tt_value_cache[layer_idx]
-
-    def get_tt_page_table(self):
-        return self._tt_page_table
-
-    def update(
+    def paged_fill_on_device(
         self,
-        key_states: torch.Tensor,
-        value_states: torch.Tensor,
+        key_states: ttnn.Tensor,
+        value_states: ttnn.Tensor,
         layer_idx: int,
-        cache_kwargs: Optional[dict] = None,
+        batch_idx: int = 0,
     ):
-        if isinstance(key_states, TorchTTNNTensor):
-            key_states = key_states.to_torch
-        if isinstance(value_states, TorchTTNNTensor):
-            value_states = value_states.to_torch
-        if isinstance(key_states, ttnn.Tensor):
-            key_states = ttnn.to_torch(key_states)
-        if isinstance(value_states, ttnn.Tensor):
-            value_states = ttnn.to_torch(value_states)
+        if not self._is_on_device:
+            raise RuntimeError("KV cache not on device. Call to_device(device).")
 
+        k_cache = self._tt_key_cache[layer_idx]
+        v_cache = self._tt_value_cache[layer_idx]
+        page_table = self._tt_page_table
+
+        max_len = self.config.blocks_per_sequence * self.config.block_size
         seq_len = key_states.shape[2]
-        start_pos = self._seq_lengths[layer_idx]
+        if seq_len > max_len:
+            key_states = key_states[:, :, :max_len, :]
+            value_states = value_states[:, :, :max_len, :]
+            seq_len = max_len
 
-        k_cache = self.key_cache[layer_idx]
-        v_cache = self.value_cache[layer_idx]
-        block_size = self.paged_config.block_size
+        ttnn.experimental.paged_fill_cache(k_cache, key_states, page_table, batch_idx=batch_idx)
+        ttnn.experimental.paged_fill_cache(v_cache, value_states, page_table, batch_idx=batch_idx)
 
-        for b in range(key_states.shape[0]):
-            for t in range(seq_len):
-                global_pos = start_pos + t
-                page_idx = global_pos // block_size
-                offset = global_pos % block_size
-                physical_block = self.page_table[b, page_idx].item()
-                k_cache[physical_block, :, offset, :] = key_states[b, :, t, : self.head_dim_k]
-                v_cache[physical_block, :, offset, : self.head_dim_v] = value_states[b, :, t, : self.head_dim_v]
-
-        self._seq_lengths[layer_idx] = start_pos + seq_len
+        self._seq_lengths[layer_idx] += seq_len
         if layer_idx == 0:
             self._seen_tokens += seq_len
-
-        cached_k = self._read_cache(k_cache, layer_idx, is_key=True)
-        cached_v = self._read_cache(v_cache, layer_idx, is_key=False)
-        return cached_k, cached_v
-
-    def _read_cache(self, cache: torch.Tensor, layer_idx: int, is_key: bool):
-        total_len = self._seq_lengths[layer_idx]
-        block_size = self.paged_config.block_size
-        batch_size = self.page_table.shape[0]
-        head_dim = self.head_dim_k if is_key else self.head_dim_v
-        num_heads = cache.shape[1]
-
-        out = torch.zeros(batch_size, num_heads, total_len, head_dim, dtype=self._dtype)
-        for b in range(batch_size):
-            for t in range(total_len):
-                page_idx = t // block_size
-                offset = t % block_size
-                physical_block = self.page_table[b, page_idx].item()
-                out[b, :, t, :] = cache[physical_block, :, offset, :head_dim]
-        return out
-
-    def get_seq_length(self, layer_idx: int = 0) -> int:
-        return self._seq_lengths[layer_idx]
-
-    def get_max_cache_shape(self) -> Optional[int]:
-        return self.paged_config.max_num_blocks * self.paged_config.block_size
 
     def paged_update_on_device(
         self,
@@ -227,13 +178,12 @@ class TTNNPagedAttentionKVCache(Cache):
         layer_idx: int,
         current_pos: ttnn.Tensor,
     ):
-        """Update KV cache directly on device using paged_update_cache."""
+        if not self._is_on_device:
+            raise RuntimeError("KV cache not on device. Call to_device(device).")
+
         k_cache = self._tt_key_cache[layer_idx]
         v_cache = self._tt_value_cache[layer_idx]
         page_table = self._tt_page_table
-
-        if k_cache is None or v_cache is None or page_table is None:
-            raise RuntimeError("KV cache not initialized on device. Call to_device() before using paged operations.")
 
         ttnn.experimental.paged_update_cache(
             k_cache,
@@ -248,41 +198,8 @@ class TTNNPagedAttentionKVCache(Cache):
             page_table=page_table,
         )
 
-    def paged_fill_on_device(
-        self,
-        key_states: ttnn.Tensor,
-        value_states: ttnn.Tensor,
-        layer_idx: int,
-        batch_idx: int = 0,
-    ):
-        """Fill KV cache for prefill using paged_fill_cache on device."""
-        k_cache = self._tt_key_cache[layer_idx]
-        v_cache = self._tt_value_cache[layer_idx]
-        page_table = self._tt_page_table
-
-        if k_cache is None or v_cache is None or page_table is None:
-            raise RuntimeError("KV cache not initialized on device. Call to_device() before using paged operations.")
-
-        block_size = k_cache.shape[2]
-        page_len = page_table.shape[-1] * block_size
-
-        k_fill = key_states
-        v_fill = value_states
-        if page_len < key_states.shape[2]:
-            k_fill = key_states[:, :, :page_len, :]
-            v_fill = value_states[:, :, :page_len, :]
-
-        if self.head_dim_v < self.head_dim_k:
-            pad_size = self.head_dim_k - self.head_dim_v
-            v_fill = ttnn.pad(v_fill, ((0, 0), (0, 0), (0, 0), (0, pad_size)), value=0.0)
-
-        ttnn.experimental.paged_fill_cache(k_cache, k_fill, page_table, batch_idx=batch_idx)
-        ttnn.experimental.paged_fill_cache(v_cache, v_fill, page_table, batch_idx=batch_idx)
-
-        # Update sequence length(same as update() for HF generate)
-        seq_len = k_fill.shape[2]
-        start_pos = self._seq_lengths[layer_idx]
-        self._seq_lengths[layer_idx] = start_pos + seq_len
+        seq_len = key_states.shape[0]
+        self._seq_lengths[layer_idx] += seq_len
         if layer_idx == 0:
             self._seen_tokens += seq_len
 
@@ -295,21 +212,12 @@ class TTNNPagedAttentionKVCache(Cache):
         program_config=None,
         compute_kernel_config=None,
     ) -> ttnn.Tensor:
-        """Run paged SDPA decode against on-device caches.
+        if not self._is_on_device:
+            raise RuntimeError("KV cache not on device. Call to_device(device).")
 
-        All tensors must follow the TTNN decode convention:
-          Q  : [1, batch, num_heads, head_dim]
-          K/V: paged cache [max_blocks, heads, block_size, head_dim]
-
-        V cache is padded to head_dim_k so that Q, K, V all share the
-        same last dimension (required by paged_scaled_dot_product_attention_decode).
-        """
         k_cache = self._tt_key_cache[layer_idx]
         v_cache = self._tt_value_cache[layer_idx]
         page_table = self._tt_page_table
-
-        if k_cache is None or v_cache is None or page_table is None:
-            raise RuntimeError("KV cache not initialized on device. Call to_device() before using paged operations.")
 
         return ttnn.transformer.paged_scaled_dot_product_attention_decode(
             query,
@@ -322,6 +230,35 @@ class TTNNPagedAttentionKVCache(Cache):
             compute_kernel_config=compute_kernel_config,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
+
+    def update(
+        self,
+        key_states: torch.Tensor,
+        value_states: torch.Tensor,
+        layer_idx: int,
+        cache_kwargs: Optional[dict] = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if isinstance(key_states, TorchTTNNTensor):
+            key_states = key_states.to_torch
+        if isinstance(value_states, TorchTTNNTensor):
+            value_states = value_states.to_torch
+        if isinstance(key_states, ttnn.Tensor):
+            key_states = ttnn.to_torch(key_states)
+        if isinstance(value_states, ttnn.Tensor):
+            value_states = ttnn.to_torch(value_states)
+
+        seq_len = key_states.shape[2]
+        self._seq_lengths[layer_idx] += seq_len
+        if layer_idx == 0:
+            self._seen_tokens += seq_len
+
+        return key_states, value_states
+
+    def get_seq_length(self, layer_idx: int = 0) -> int:
+        return self._seq_lengths[layer_idx]
+
+    def get_max_cache_shape(self) -> Optional[int]:
+        return self.config.max_seq_length
 
 
 class TorchSDPAAttention(torch.nn.Module):
