@@ -10,8 +10,11 @@ from torch import nn
 import ttnn
 from models.tt_cnn.tt.builder import Conv2dConfiguration, MaxPool2dConfiguration, TtConv2d, TtMaxPool2d
 from models.experimental.tt_symbiote.core.module import TTNNModule
-from models.experimental.tt_symbiote.modules.activation import TTNNReLU
+from models.experimental.tt_symbiote.modules.activation import TTNNReLU, TTNNGelu
 from models.experimental.tt_symbiote.modules.tensor import TTNNPermute, TTNNReshape
+from models.experimental.tt_symbiote.modules.linear import TTNNLinear
+from models.experimental.tt_symbiote.modules.normalization import TTNNLayerNorm
+from models.experimental.tt_symbiote.modules.attention import TTNNSAMAttention
 
 
 def fold_batch_norm2d_into_conv2d(weight, bias, scale, shift, running_mean, running_var, eps):
@@ -442,6 +445,92 @@ class TTNNBottleneck(TTNNModule):
         out = self.relu(out)
         out = self.permute(out, perm=[0, 3, 1, 2])
         return out
+
+
+class TTNNSAMMLPBlock(TTNNModule):
+    """TTNN version of SAM MLPBlock (lin1 -> act -> lin2). Input/output shape (B, H, W, C)."""
+
+    def __init__(self):
+        super().__init__()
+
+    def initialize_submodules(self):
+        assert (
+            self._fallback_torch_layer is not None
+        ), "Fallback torch layer must be set before initializing submodules."
+        self.lin1 = TTNNLinear.from_torch(self.torch_layer.lin1)
+        self.lin2 = TTNNLinear.from_torch(self.torch_layer.lin2)
+        self.act = TTNNGelu()
+
+    @classmethod
+    def from_torch(cls, mlp_block: "nn.Module") -> "TTNNSAMMLPBlock":
+        """Create from SAM Block.mlp (MLPBlock)."""
+        new_mlp = cls()
+        new_mlp._fallback_torch_layer = mlp_block
+        new_mlp.initialize_submodules()
+        return new_mlp
+
+    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        """Forward: lin2(act(lin1(x)))."""
+        out = self.lin1(x)
+        out = out.ttnn_tensor if hasattr(out, "ttnn_tensor") else out
+        out = self.act(out)
+        out = self.lin2(out)
+        return out.ttnn_tensor if hasattr(out, "ttnn_tensor") else out
+
+
+class TTNNSAMBlock(TTNNModule):
+    """TTNN version of SAM Block (deepencoder.py).
+    Residual: norm1 -> attn -> +shortcut; norm2 -> mlp -> +shortcut.
+    Uses TTNNSAMAttention; supports window_size=0 only (no window partition).
+    """
+
+    def __init__(self, window_size: int = 0):
+        super().__init__()
+        self.window_size = window_size
+
+    def initialize_submodules(self):
+        assert (
+            self._fallback_torch_layer is not None
+        ), "Fallback torch layer must be set before initializing submodules."
+        blk = self.torch_layer
+        self.norm1 = TTNNLayerNorm.from_torch(blk.norm1)
+        self.attn = TTNNSAMAttention.from_torch(blk.attn)
+        self.norm2 = TTNNLayerNorm.from_torch(blk.norm2)
+        self.mlp = TTNNSAMMLPBlock.from_torch(blk.mlp)
+
+    @classmethod
+    def from_torch(cls, block: "nn.Module", window_size: int = 0) -> "TTNNSAMBlock":
+        """Create TTNNSAMBlock from SAM Block (blocks[i])."""
+        new_block = cls(window_size=window_size)
+        new_block._fallback_torch_layer = block
+        new_block.initialize_submodules()
+        return new_block
+
+    def forward(self, x):
+        """x: (B, H, W, C). Output: (B, H, W, C)."""
+        if hasattr(x, "to_ttnn"):
+            x = x.to_ttnn
+        elif isinstance(x, torch.Tensor):
+            x = ttnn.from_torch(x, device=self.device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+        if x.layout != ttnn.TILE_LAYOUT:
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+        shortcut = x
+        x = self.norm1(x)
+        x = self.attn(x)
+        # Unwrap so ttnn.add receives two ttnn.Tensor (run_config may wrap submodule outputs as TorchTTNNTensor)
+        x = ttnn.add(
+            shortcut.to_ttnn if hasattr(shortcut, "to_ttnn") else shortcut,
+            x.to_ttnn if hasattr(x, "to_ttnn") else x,
+        )
+        shortcut = x
+        x = self.norm2(x)
+        x = self.mlp(x)
+        x = ttnn.add(
+            shortcut.to_ttnn if hasattr(shortcut, "to_ttnn") else shortcut,
+            x.to_ttnn if hasattr(x, "to_ttnn") else x,
+        )
+        return x
 
 
 class TorchPatchEmbeddings(nn.Module):
