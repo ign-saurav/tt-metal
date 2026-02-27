@@ -13,7 +13,7 @@ from tests.ttnn.utils_for_testing import check_with_pcc
 
 from models.experimental.tt_symbiote.modules.activation import TTNNSilu, TTNNGelu
 from models.experimental.tt_symbiote.modules.attention import TTNNSAMAttention
-from models.experimental.tt_symbiote.modules.conv import TTNNSAMBlock
+from models.experimental.tt_symbiote.modules.conv import TTNNSAMBlock, TTNNImageEncoderViT
 from models.experimental.tt_symbiote.modules.normalization import TTNNLayerNorm
 from models.experimental.tt_symbiote.modules.linear import TTNNLinear
 from models.experimental.tt_symbiote.modules.conv import TTNNConv2dNHWC
@@ -220,3 +220,34 @@ def test_tt_sam_block_pcc(device, ocr_model, image_size):
     passed, message = check_with_pcc(ref_out_float, tt_out_torch, pcc=0.99)
     logger.info(f"TT SAM block PCC (image_size={image_size}): {message}")
     assert passed, f"TT SAM block PCC check failed: {message}"
+
+
+@pytest.mark.parametrize("image_size", [640])
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 245760}], indirect=True)
+def test_tt_sam_module_pcc(device, ocr_model, image_size):
+    """Run torch SAM and TTNN SAM (TTNNImageEncoderViT) with same input; assert PCC >= 0.99.
+    DPL run mode compares torch vs TTNN at the replaced module boundary; set TT_SYMBIOTE_RUN_MODE=DPL
+    to run both and see PCC. All TTNN symbiote classes must have fallback (torch_layer) set.
+    """
+    sam_model = ocr_model.model.sam_model
+    model = SAMWrapper(sam_model)
+    torch.manual_seed(42)
+    x = torch.load("sam_input.pt")
+    # Ref expects NCHW
+    x_nchw = x.permute(0, 3, 1, 2) if x.dim() == 4 and x.shape[-1] == 3 else x
+    ref_out = sam_model(x_nchw)
+
+    nn_to_nn = {type(sam_model): TTNNImageEncoderViT}
+    modules = register_module_replacement_dict(model, nn_to_nn, model_config=None)
+    set_device(model, device)
+    for v in modules.values():
+        v.preprocess_weights()
+        v.move_weights_to_device()
+    model.eval()
+    torch.set_grad_enabled(False)
+    tt_out = model(x_nchw)
+    tt_out = tt_out.to_torch if hasattr(tt_out, "to_torch") else ttnn.to_torch(tt_out)
+
+    passed, message = check_with_pcc(ref_out.float(), tt_out.float(), pcc=0.99)
+    logger.info(f"TT SAM PCC (image_size={image_size}): {message}")
+    assert passed, f"TT SAM PCC check failed: {message}"

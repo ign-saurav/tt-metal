@@ -12,6 +12,7 @@ import torch
 try:
     from transformers.integrations.sdpa_attention import sdpa_attention_forward
 except ImportError:
+    sdpa_attention_forward = None
     print("Could not import sdpa_attention_forward from transformers.integrations.sdpa_attention. ")
 
 import ttnn
@@ -19,6 +20,23 @@ from models.experimental.tt_symbiote.core.module import TTNNModule
 from models.experimental.tt_symbiote.core.tensor import TorchTTNNTensor
 from models.experimental.tt_symbiote.modules.linear import TTNNLinear
 from models.experimental.tt_symbiote.modules.rope import TTNNRotaryPositionEmbedding
+
+
+def _scaled_dot_product_attention_fallback(
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor | None,
+    scaling: float | None,
+    is_causal: bool | None,
+) -> torch.Tensor:
+    """Fallback when transformers.integrations.sdpa_attention is not available (e.g. DPL torch path)."""
+    scale = scaling if scaling is not None else (query.size(-1) ** -0.5)
+    if scale != 1.0:
+        query = query * scale
+    return torch.nn.functional.scaled_dot_product_attention(
+        query, key, value, attn_mask=attention_mask, dropout_p=0.0, is_causal=is_causal or False
+    )
 
 
 class TorchSDPAAttention(torch.nn.Module):
@@ -35,18 +53,25 @@ class TorchSDPAAttention(torch.nn.Module):
         transpose_output: bool = True,
         **kwargs,
     ) -> torch.Tensor:
-        attn_output = sdpa_attention_forward(
-            module,
-            query,
-            key,
-            value,
-            attention_mask,
-            dropout=dropout,
-            scaling=scaling,
-            is_causal=is_causal,
-            **kwargs,
-        )[0]
-        if not transpose_output:  # revert the transpose in sdpa_attention_forward
+        if sdpa_attention_forward is not None:
+            attn_output = sdpa_attention_forward(
+                module,
+                query,
+                key,
+                value,
+                attention_mask,
+                dropout=dropout,
+                scaling=scaling,
+                is_causal=is_causal,
+                **kwargs,
+            )[0]
+            # transformers returns (B, S, H, D); normalize to (B, H, S, D) to match TTNN
+            attn_output = attn_output.transpose(1, 2)
+        else:
+            # Fallback when transformers SDPA integration not available (e.g. DPL); already (B, H, S, D)
+            attn_output = _scaled_dot_product_attention_fallback(query, key, value, attention_mask, scaling, is_causal)
+        # TTNN returns (B, H, S, D) when transpose_output=False, (B, S, H, D) when True
+        if transpose_output:
             attn_output = attn_output.transpose(1, 2)
         return attn_output
 

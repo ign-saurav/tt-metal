@@ -17,6 +17,28 @@ from models.experimental.tt_symbiote.modules.normalization import TTNNLayerNorm
 from models.experimental.tt_symbiote.modules.attention import TTNNSAMAttention
 
 
+class NHWCLayerNorm2dWrapper(nn.Module):
+    """Wraps LayerNorm2d so that when called with NHWC (from TTNN path in DPL), it permutes to NCHW and back."""
+
+    def __init__(self, layer_norm_2d: nn.Module):
+        super().__init__()
+        self.layer_norm_2d = layer_norm_2d
+
+    @property
+    def weight(self) -> torch.Tensor:
+        return self.layer_norm_2d.weight
+
+    @property
+    def bias(self) -> torch.Tensor:
+        return self.layer_norm_2d.bias
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # x: (B, H, W, C) from TTNN neck path
+        x = x.permute(0, 3, 1, 2)  # -> (B, C, H, W)
+        x = self.layer_norm_2d(x)
+        return x.permute(0, 2, 3, 1)  # -> (B, H, W, C)
+
+
 def fold_batch_norm2d_into_conv2d(weight, bias, scale, shift, running_mean, running_var, eps):
     weight = weight * (scale / torch.sqrt(running_var + eps))[:, None, None, None]
     if bias is not None:
@@ -530,6 +552,126 @@ class TTNNSAMBlock(TTNNModule):
             shortcut.to_ttnn if hasattr(shortcut, "to_ttnn") else shortcut,
             x.to_ttnn if hasattr(x, "to_ttnn") else x,
         )
+        return x
+
+
+class TTNNImageEncoderViT(TTNNModule):
+    """TTNN SAM ImageEncoderViT: patch_embed, pos_embed, blocks, neck, net_2, net_3.
+    Uses TTNNConv2dNHWC for patch_embed (SAM PatchEmbed is just .proj Conv2d), TTNNSAMBlock, TTNN Conv/LayerNorm for neck.
+    Input NCHW, output BCHW.
+    """
+
+    def __init__(self, depth: int, window_size: int = 0):
+        super().__init__()
+        self.depth = depth
+        self.window_size = window_size
+
+    def initialize_submodules(self):
+        assert (
+            self._fallback_torch_layer is not None
+        ), "Fallback torch layer must be set before initializing submodules."
+        enc = self.torch_layer
+        # SAM patch_embed is PatchEmbed(proj=Conv2d); reuse existing TTNNConv2dNHWC
+        self.patch_embed = TTNNConv2dNHWC.from_torch(enc.patch_embed.proj)
+        # Use list (not nn.ModuleList): TTNNSAMBlock is TTNNModule, not nn.Module
+        self.blocks = []
+        for i in range(self.depth):
+            self.blocks.append(TTNNSAMBlock.from_torch(enc.blocks[i], window_size=self.window_size))
+        # neck: Sequential(Conv2d, LayerNorm2d, Conv2d, LayerNorm2d)
+        neck_list = list(enc.neck.children())
+        self.neck_conv1 = TTNNConv2dNHWC.from_torch(neck_list[0])
+        self.neck_ln1 = TTNNLayerNorm.from_torch(neck_list[1])
+        self.neck_ln1._fallback_torch_layer = NHWCLayerNorm2dWrapper(neck_list[1])  # DPL: neck receives NHWC
+        self.neck_conv2 = TTNNConv2dNHWC.from_torch(neck_list[2])
+        self.neck_ln2 = TTNNLayerNorm.from_torch(neck_list[3])
+        self.neck_ln2._fallback_torch_layer = NHWCLayerNorm2dWrapper(neck_list[3])  # DPL: neck receives NHWC
+        self.net_2 = TTNNConv2dNHWC.from_torch(enc.net_2)
+        self.net_3 = TTNNConv2dNHWC.from_torch(enc.net_3)
+
+    @classmethod
+    def from_torch(cls, encoder: "nn.Module", window_size: int = 0) -> "TTNNImageEncoderViT":
+        """Create from SAM ImageEncoderViT (encoder)."""
+        depth = len(encoder.blocks)
+        new_enc = cls(depth=depth, window_size=window_size)
+        new_enc._fallback_torch_layer = encoder
+        new_enc.initialize_submodules()
+        return new_enc
+
+    def preprocess_weights_impl(self):
+        """Recurse into blocks (ModuleList) and other children."""
+        for child in self.__dict__.values():
+            if isinstance(child, TTNNModule):
+                child.preprocess_weights()
+        for blk in self.blocks:
+            if isinstance(blk, TTNNModule):
+                blk.preprocess_weights()
+        return self
+
+    def move_weights_to_device_impl(self):
+        """Recurse into blocks (ModuleList) and other children."""
+        for child in self.__dict__.values():
+            if isinstance(child, TTNNModule):
+                child.move_weights_to_device()
+        for blk in self.blocks:
+            if isinstance(blk, TTNNModule):
+                blk.move_weights_to_device()
+        return self
+
+    def forward(self, x):
+        """x: NCHW. Output: BCHW (same as ref)."""
+        if hasattr(x, "to_ttnn"):
+            x = x.to_ttnn
+        elif isinstance(x, torch.Tensor):
+            x = ttnn.from_torch(x, device=self.device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+        if x.layout != ttnn.TILE_LAYOUT:
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+        # Patch embed: NCHW -> NHWC then TTNNConv2dNHWC (reuse existing conv)
+        x = ttnn.permute(x, (0, 2, 3, 1))
+        x = self.patch_embed(x)
+        x = x.to_ttnn if hasattr(x, "to_ttnn") else x
+
+        # Pos embed: add on host if needed (get_abs_pos_sam) then add on device
+        if self.torch_layer.pos_embed is not None:
+            from torch.nn import functional as F
+
+            B, H, W, C = x.shape
+            pos = self.torch_layer.pos_embed
+            src_size = pos.shape[1]
+            if src_size != H:
+                pos_nchw = pos.permute(0, 3, 1, 2).float()
+                pos_resized = F.interpolate(
+                    pos_nchw, size=(H, W), mode="bicubic", antialias=True, align_corners=False
+                ).to(pos.dtype)
+                pos = pos_resized.permute(0, 2, 3, 1)
+            else:
+                pos = pos
+            pos_tt = ttnn.from_torch(
+                pos.expand(B, -1, -1, -1), device=self.device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT
+            )
+            x = ttnn.add(x, pos_tt)
+
+        for blk in self.blocks:
+            x = blk(x)
+            x = x.to_ttnn if hasattr(x, "to_ttnn") else x
+
+        # Neck: BHWC -> conv1 -> ln1 -> conv2 -> ln2
+        x = self.neck_conv1(x)
+        x = x.to_ttnn if hasattr(x, "to_ttnn") else x
+        x = self.neck_ln1(x)
+        x = x.to_ttnn if hasattr(x, "to_ttnn") else x
+        x = self.neck_conv2(x)
+        x = x.to_ttnn if hasattr(x, "to_ttnn") else x
+        x = self.neck_ln2(x)
+        x = x.to_ttnn if hasattr(x, "to_ttnn") else x
+
+        x = self.net_2(x)
+        x = x.to_ttnn if hasattr(x, "to_ttnn") else x
+        x = self.net_3(x)
+        x = x.to_ttnn if hasattr(x, "to_ttnn") else x
+
+        # B H W C -> B C H W
+        x = ttnn.permute(x, (0, 3, 1, 2))
         return x
 
 
