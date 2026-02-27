@@ -719,3 +719,88 @@ class LlamaAttention(TTNNModule):
             attn_out = attn_out[:, -original_q_len:, :]
 
         return self.o_proj(attn_out), None
+
+
+class TTNNSAMAttention(TTNNModule):
+    """TTNN version of SAM image encoder Attention (deepencoder.py).
+    Input shape (B, H, W, C); single qkv linear (dim -> 3*dim), SDPA (no causal), proj.
+    Supports use_rel_pos=False only (no relative position bias in TTNN path for now).
+    """
+
+    def __init__(self, dim: int, num_heads: int, head_dim: int, scale: float):
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = head_dim
+        self.scaling = scale
+        self.core_grid = ttnn.CoreGrid(y=8, x=8)
+        self.sdpa = TTNNSDPAAttention()
+        self.sdpa.program_config = ttnn.SDPAProgramConfig(
+            compute_with_storage_grid_size=(self.core_grid.x, self.core_grid.y),
+            q_chunk_size=256,
+            k_chunk_size=256,
+            exp_approx_mode=False,
+        )
+        self.sdpa.compute_kernel_config = ttnn.WormholeComputeKernelConfig(
+            math_fidelity=ttnn.MathFidelity.HiFi4,
+            math_approx_mode=False,
+            fp32_dest_acc_en=True,
+            packer_l1_acc=True,
+        )
+
+    @classmethod
+    def from_torch(cls, sam_attn: "torch.nn.Module"):
+        """Build from SAM Attention (blocks[i].attn)."""
+        dim = sam_attn.qkv.in_features
+        num_heads = sam_attn.num_heads
+        head_dim = dim // num_heads
+        scale = head_dim**-0.5
+        new_attn = cls(dim=dim, num_heads=num_heads, head_dim=head_dim, scale=scale)
+        new_attn._fallback_torch_layer = sam_attn
+        new_attn.qkv = TTNNLinear.from_torch(sam_attn.qkv)
+        new_attn.proj = TTNNLinear.from_torch(sam_attn.proj)
+        return new_attn
+
+    def forward(self, x):
+        """x: (B, H, W, C) torch or TorchTTNNTensor or ttnn.Tensor. Output: ttnn.Tensor (B, H, W, C)."""
+        if hasattr(x, "to_ttnn"):
+            x = x.to_ttnn
+        elif isinstance(x, torch.Tensor):
+            x = ttnn.from_torch(x, device=self.device, dtype=ttnn.bfloat16, layout=ttnn.TILE_LAYOUT)
+        B, H, W, C = x.shape
+        seq_len = H * W
+        # (B, H, W, C) -> (B, H*W, C)
+        x = ttnn.reshape(x, ttnn.Shape((B, seq_len, C)))
+        # Add seq dim for linear: (B, 1, H*W, C)
+        x = ttnn.unsqueeze(x, 1)
+        if x.layout != ttnn.TILE_LAYOUT:
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        qkv_out = self.qkv(x)
+        qkv_t = qkv_out.ttnn_tensor if hasattr(qkv_out, "ttnn_tensor") else qkv_out
+        qkv_t = ttnn.to_memory_config(qkv_t, ttnn.L1_MEMORY_CONFIG)
+        q, k, v = ttnn.experimental.nlp_create_qkv_heads(
+            qkv_t,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            num_heads=self.num_heads,
+            num_kv_heads=self.num_heads,
+            transpose_k_heads=False,
+        )
+        ttnn.deallocate(qkv_t)
+        attn_out = self.sdpa(
+            self,
+            q,
+            k,
+            v,
+            None,
+            dropout=0.0,
+            scaling=self.scaling,
+            is_causal=False,
+            transpose_output=False,
+        )
+        attn_out = attn_out.to_ttnn if hasattr(attn_out, "to_ttnn") else attn_out
+        attn_out = ttnn.experimental.nlp_concat_heads(attn_out)
+        attn_out = ttnn.squeeze(attn_out, 1)
+        # (B, H*W, C) -> (B, H, W, C)
+        attn_out = ttnn.reshape(attn_out, ttnn.Shape((B, H, W, C)))
+        out = self.proj(attn_out)
+        return out.ttnn_tensor if hasattr(out, "ttnn_tensor") else out

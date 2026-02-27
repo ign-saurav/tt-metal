@@ -5,12 +5,14 @@ import torch
 from torch import nn
 from transformers import AutoModel
 from loguru import logger
+import ttnn
 
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 # from models.experimental.deepseek_ocr.tt.tt_sam import run_tt_sam
 
 from models.experimental.tt_symbiote.modules.activation import TTNNSilu, TTNNGelu
+from models.experimental.tt_symbiote.modules.attention import TTNNSAMAttention
 from models.experimental.tt_symbiote.modules.normalization import TTNNLayerNorm
 from models.experimental.tt_symbiote.modules.linear import TTNNLinear
 from models.experimental.tt_symbiote.modules.conv import TTNNConv2dNHWC
@@ -161,3 +163,31 @@ def test_tt_sam_pcc(device, ocr_model, image_size):
     passed, message = check_with_pcc(ref_out.float(), tt_out.float(), pcc=0.99)
     logger.info(f"TT SAM PCC (image_size={image_size}): {message}")
     assert passed, f"TT SAM PCC check failed: {message}"
+
+
+@pytest.mark.parametrize("image_size", [640])
+@pytest.mark.parametrize("device_params", [{"l1_small_size": 245760}], indirect=True)
+def test_tt_sam_attention_pcc(device, ocr_model, image_size):
+    """Run torch SAM attention and TTNN SAM attention with same input; assert PCC >= 0.99."""
+    torch.manual_seed(42)
+    torch.set_grad_enabled(False)
+
+    attn = ocr_model.model.sam_model.blocks[0].attn
+    # SAM attention input shape (B, H, W, C) e.g. (6, 40, 40, 768) or (54, 14, 14, 768)
+    B, H, W, C = 2, 14, 14, 768
+    x = torch.randn((B, H, W, C), dtype=torch.bfloat16)
+
+    ref_out = attn(x)
+
+    ttnn_attn = TTNNSAMAttention.from_torch(attn)
+    set_device(ttnn_attn, device)
+    ttnn_attn.preprocess_weights()
+    ttnn_attn.move_weights_to_device()
+
+    tt_out = ttnn_attn(x)
+    tt_out_torch = (tt_out.to_torch if hasattr(tt_out, "to_torch") else ttnn.to_torch(tt_out)).float()
+    ref_out_float = ref_out.float()
+
+    passed, message = check_with_pcc(ref_out_float, tt_out_torch, pcc=0.99)
+    logger.info(f"TT SAM attention PCC (image_size={image_size}): {message}")
+    assert passed, f"TT SAM attention PCC check failed: {message}"
