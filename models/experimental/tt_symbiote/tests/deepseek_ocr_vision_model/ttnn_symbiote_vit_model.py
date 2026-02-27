@@ -625,7 +625,7 @@ class TTNNNoTPFeedForward:
         )
 
         # Quick GELU
-        output = quick_gelu_ttnn(output)
+        output = self.quick_gelu_ttnn(output)
 
         # FC2
         output = ttnn.linear(
@@ -659,3 +659,126 @@ class TTNNNoTPFeedForward:
         ttnn.deallocate(sigmoid_output)
 
         return result
+
+
+########## No Tensor Parallelism Transformer Block ############
+
+
+class TTNNNoTPTransformerBlock:
+    """
+    No Tensor Parallelism Transformer Block using TTNN operations.
+
+    Implements pre-norm transformer block with attention and feedforward.
+    """
+
+    def __init__(
+        self,
+        old_module,
+        cfg,
+        layer_id: int,
+        device: ttnn.Device = None,
+    ):
+        """
+        Initialize transformer block.
+
+        Args:
+            cfg: Configuration dict
+            layer_id: Layer index
+            weights: PyTorch weights dict (optional)
+            device: TTNN device
+        """
+        self.layer_id = layer_id
+        self.device = device
+        self.hidden_size = cfg.hidden_size
+        self.layernorm_epsilon = cfg.layernorm_epsilon
+        self.torch_layer = old_module
+        self.self_attn = TTNNNoTPAttention.from_torch()
+        self.mlp = TTNNNoTPFeedForward.from_torch()
+
+    @classmethod
+    def from_torch(cls, NoTPTransformer):
+        """Create TTNN module from PyTorch equivalent."""
+        new_TPTransformer = cls()
+        new_TPTransformer._fallback_torch_layer = NoTPTransformer
+        return new_TPTransformer
+
+    def preprocess_weights_impl(self):
+        """Convert PyTorch weights to TTNN format (called once)."""
+        ln1_weight = self.torch_layer.layer_norm1.weight.data
+        ln1_bias = self.torch_layer.layer_norm1.bias.data
+        ln2_weight = self.torch_layer.layer_norm2.weight.data
+        ln2_bias = self.torch_layer.layer_norm2.bias.data
+
+        self.layer_norm1_weight = ttnn.from_torch(
+            ln1_weight,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        self.layer_norm1_bias = ttnn.from_torch(
+            ln1_bias,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        self.layer_norm2_weight = ttnn.from_torch(
+            ln2_weight,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        self.layer_norm2_bias = ttnn.from_torch(
+            ln2_bias,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+    def move_weights_to_device_impl(self):
+        """Move preprocessed weights to device."""
+
+        self.layer_norm1_weight = ttnn.to_device(self.layer_norm1_weight, self.device)
+        self.layer_norm1_bias = ttnn.to_device(self.layer_norm1_bias, self.device)
+        self.layer_norm2_weight = ttnn.to_device(self.layer_norm2_weight, self.device)
+        self.layer_norm2_bias = ttnn.to_device(self.layer_norm2_bias, self.device)
+
+    def deallocate_weights_impl(self):
+        """Deallocate device memory."""
+        ttnn.deallocate(self.layer_norm1_weight)
+        ttnn.deallocate(self.layer_norm1_bias)
+        ttnn.deallocate(self.layer_norm2_weight)
+        ttnn.deallocate(self.layer_norm2_bias)
+
+    def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
+        """
+        Forward pass of transformer block.
+
+        Args:
+            x: TTNN tensor (batch_size, seq_len, hidden_size)
+
+        Returns:
+            TTNN tensor (batch_size, seq_len, hidden_size)
+        """
+        # Pre-norm attention
+        residual = ttnn.layer_norm(
+            x,
+            weight=self.layer_norm1_weight,
+            bias=self.layer_norm1_bias,
+            epsilon=self.layernorm_epsilon,
+        )
+        residual = self.self_attn.forward(residual)
+        h = ttnn.add(x, residual, memory_config=ttnn.L1_MEMORY_CONFIG)
+        ttnn.deallocate(residual)
+
+        # Pre-norm feedforward
+        out = ttnn.layer_norm(
+            h,
+            weight=self.layer_norm2_weight,
+            bias=self.layer_norm2_bias,
+            epsilon=self.layernorm_epsilon,
+        )
+        out = self.mlp.forward(out)
+        out = ttnn.add(h, out, memory_config=ttnn.L1_MEMORY_CONFIG)
+        ttnn.deallocate(h)
+
+        return out
