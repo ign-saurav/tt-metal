@@ -15,6 +15,9 @@ Architecture (from mmdet config):
 All ops on device. GroupNorm uses DRAM multi-core with Welford reciprocals
 (same approach as SDXL VAE) to handle large spatial dimensions.
 P6 conv uses BLOCK_SHARDED to avoid NOC burst size limit with 1536 in_channels.
+
+Memory: For small spatial levels (P4/P5/P6, H*W < L1_SPATIAL_THRESHOLD), conv output,
+tilized GN input, group_norm output, and final NCHW permute use L1 to reduce DRAM traffic.
 """
 
 import math
@@ -28,6 +31,10 @@ def _nearest_32_per_core(x, core):
     """Round up x to the nearest multiple of (32 * core)."""
     return math.ceil(x / core / 32) * 32 * core
 
+
+# Use L1 for GroupNorm and related tensors when spatial (H*W) is below this.
+# Reduces DRAM traffic for P4 (4200), P5 (1050), P6 (273).
+L1_SPATIAL_THRESHOLD = 5000
 
 # Spatial shapes for each level at 800x1333 input (backbone output shapes)
 # These are used to precompute reciprocals for Welford GN.
@@ -159,7 +166,9 @@ class TtDINONeck:
         spatial = out_h * out_w
 
         # Untilize to ROW_MAJOR so we can cleanly reshape/slice
-        x = ttnn.to_memory_config(x_nhwc, ttnn.DRAM_MEMORY_CONFIG)
+        # Use same config as rest of path (L1 for small spatial) to avoid extra move
+        gn_mem_config = ttnn.L1_MEMORY_CONFIG if spatial < L1_SPATIAL_THRESHOLD else ttnn.DRAM_MEMORY_CONFIG
+        x = ttnn.to_memory_config(x_nhwc, gn_mem_config)
         x = ttnn.to_layout(x, ttnn.ROW_MAJOR_LAYOUT)
 
         # Slice to valid spatial positions only: [N, 1, spatial, C]
@@ -173,7 +182,7 @@ class TtDINONeck:
         out_shape = [N, 1, padded_h, padded_w]
         x = ttnn.tilize_with_val_padding(x, output_tensor_shape=out_shape, pad_value=0, use_multicore=True)
 
-        x = ttnn.to_memory_config(x, ttnn.DRAM_MEMORY_CONFIG)
+        x = ttnn.to_memory_config(x, gn_mem_config)
 
         recip_sharded = self.reciprocals_sharded[level_idx]
         gn_level = self.gn_params_per_level[level_idx]
@@ -184,7 +193,7 @@ class TtDINONeck:
             input_mask=gn_level["input_mask"],
             weight=gn_level["weight"],
             bias=gn_level["bias"],
-            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+            memory_config=gn_mem_config,
             output_layout=ttnn.TILE_LAYOUT,
             core_grid=self.gn_core_grid,
             inplace=False,
@@ -200,7 +209,7 @@ class TtDINONeck:
         # Reshape [N, 1, padded_spatial, C] -> slice -> [N, H, W, C] -> [N, C, H, W]
         x = x[:, :, :spatial, :C]
         x = ttnn.reshape(x, (N, out_h, out_w, C))
-        x = ttnn.permute(x, (0, 3, 1, 2), memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        x = ttnn.permute(x, (0, 3, 1, 2), memory_config=gn_mem_config)
         return x
 
     def _conv1x1_gn(self, x, conv_params, in_ch, level_idx):
@@ -240,7 +249,9 @@ class TtDINONeck:
             return_weights_and_bias=True,
             dtype=ttnn.bfloat16,
         )
-        output = ttnn.sharded_to_interleaved(output, ttnn.DRAM_MEMORY_CONFIG)
+        # L1 for P4/P5/P6 (level_idx >= 2) to keep conv→GN pipeline in L1
+        out_mem = ttnn.L1_MEMORY_CONFIG if (out_h * out_w) < L1_SPATIAL_THRESHOLD else ttnn.DRAM_MEMORY_CONFIG
+        output = ttnn.sharded_to_interleaved(output, out_mem)
 
         return self._group_norm_dram(output, level_idx, out_h, out_w)
 
@@ -279,7 +290,9 @@ class TtDINONeck:
             return_weights_and_bias=True,
             dtype=ttnn.bfloat16,
         )
-        output = ttnn.sharded_to_interleaved(output, ttnn.DRAM_MEMORY_CONFIG)
+        # L1 for P6 (small spatial) to keep conv→GN pipeline in L1
+        out_mem = ttnn.L1_MEMORY_CONFIG if (out_h * out_w) < L1_SPATIAL_THRESHOLD else ttnn.DRAM_MEMORY_CONFIG
+        output = ttnn.sharded_to_interleaved(output, out_mem)
 
         return self._group_norm_dram(output, level_idx, out_h, out_w)
 

@@ -16,47 +16,119 @@ import ttnn
 from loguru import logger
 
 
+def decoder_deformable_attn_compute_optimized(
+    sampling_offsets_flat,
+    attention_weights_flat,
+    reference_points,
+    spatial_shapes,
+    bs,
+    num_queries,
+    num_heads,
+    num_levels,
+    num_points,
+    device,
+):
+    # Use interleaved DRAM for large decoder buffers to avoid L1 OOM.
+    # Sharded reshape triggers kernels that allocate ~73MB L1 circular buffers.
+    dram_cfg = ttnn.DRAM_MEMORY_CONFIG
+
+    so_tt = ttnn.reshape(
+        sampling_offsets_flat, (bs, num_queries, num_heads, num_levels, num_points, 2), memory_config=dram_cfg
+    )
+    aw_tt = ttnn.reshape(
+        attention_weights_flat, (bs, num_queries, num_heads, num_levels * num_points), memory_config=dram_cfg
+    )
+
+    aw_tt = ttnn.softmax_in_place(aw_tt)
+    aw_tt = ttnn.reshape(aw_tt, (bs, num_queries, num_heads, num_levels, num_points), memory_config=dram_cfg)
+
+    # Reference points in L1 (must be ttnn.Tensor for all downstream ttnn ops)
+    if isinstance(reference_points, ttnn.Tensor):
+        ref_pts = reference_points
+    else:
+        ref_pts = ttnn.from_torch(reference_points, device=device, memory_config=ttnn.L1_MEMORY_CONFIG)
+
+    # All arithmetic in L1
+    if ref_pts.shape[-1] == 2:
+        spatial_shapes_tt = ttnn.from_torch(spatial_shapes, device=device, memory_config=ttnn.L1_MEMORY_CONFIG)
+        offset_normalizer = ttnn.stack(
+            [spatial_shapes_tt[..., 1], spatial_shapes_tt[..., 0]], dim=-1, memory_config=ttnn.L1_MEMORY_CONFIG
+        )
+        so_tt = ttnn.divide(so_tt, offset_normalizer[None, None, None, :, None, :], memory_config=dram_cfg)
+        ref_xy = ttnn.reshape(
+            ref_pts, (bs, num_queries, 1, ref_pts.shape[2], 1, 2), memory_config=ttnn.L1_MEMORY_CONFIG
+        )
+        sampling_locations = ttnn.add(ref_xy, so_tt, memory_config=dram_cfg)
+    else:
+        # ttnn __getitem__ allows at most rank indices; ref_pts is 4D so use 4-index slice then reshape
+        ref_xy_4d = ref_pts[:, :, :, :2]
+        ref_xy = ttnn.reshape(
+            ref_xy_4d, (bs, num_queries, 1, ref_pts.shape[2], 1, 2), memory_config=ttnn.L1_MEMORY_CONFIG
+        )
+        if isinstance(ref_xy, torch.Tensor):
+            ref_xy = ttnn.from_torch(ref_xy, device=device, memory_config=ttnn.L1_MEMORY_CONFIG)
+        ref_wh_4d = ref_pts[:, :, :, 2:]
+        ref_wh = ttnn.reshape(
+            ref_wh_4d, (bs, num_queries, 1, ref_pts.shape[2], 1, 2), memory_config=ttnn.L1_MEMORY_CONFIG
+        )
+        # ttnn.multiply expects (ttnn.Tensor, float); ensure ref_wh is ttnn
+        if isinstance(ref_wh, torch.Tensor):
+            ref_wh = ttnn.from_torch(ref_wh, device=device, memory_config=ttnn.L1_MEMORY_CONFIG)
+
+        # Compute (so_tt / num_points) * ref_wh * 0.5
+        term1 = ttnn.divide(so_tt, num_points, memory_config=dram_cfg)
+        term2 = ttnn.multiply(ref_wh, 0.5, memory_config=ttnn.L1_MEMORY_CONFIG)
+        offset_term = ttnn.multiply(term1, term2, memory_config=dram_cfg)
+
+        sampling_locations = ttnn.add(ref_xy, offset_term, memory_config=dram_cfg)
+
+    return sampling_locations, aw_tt
+
+
 def multi_scale_deformable_attn_uniad_style(
     value_tt,
     value_spatial_shapes,
-    sampling_locations_torch,
-    attention_weights_torch,
+    sampling_locations_tt,
+    attention_weights_tt,
     device,
     num_heads,
     head_dim,
 ):
     """
-    UniAD-style multi-scale deformable attention — batches all sampling points
-    per level into a single grid_sample call (vs per-point loop).
-
-    For the decoder (900 queries): 5 grid_sample calls instead of 20.
-    Matches UniAD's multi_scale_deformable_attn_pytorch.
-
-    Args:
-        value_tt: ttnn [bs, num_keys, num_heads, head_dim] ROW_MAJOR on device
-        value_spatial_shapes: torch.Tensor [num_levels, 2]
-        sampling_locations_torch: torch [bs, Q, heads, levels, points, 2] in [0,1]
-        attention_weights_torch: torch [bs, Q, heads, levels, points]
-        device: ttnn device
-        num_heads, head_dim: attention config
-
-    Returns:
-        ttnn [bs, num_queries, embed_dims] TILE on device
+    Optimized UniAD-style multi-scale deformable attention for decoder.
+    Uses DRAM for large buffers (sampling_grids, output) to avoid L1 OOM.
     """
-    bs = sampling_locations_torch.shape[0]
-    num_queries = sampling_locations_torch.shape[1]
-    num_points = sampling_locations_torch.shape[4]
+    # Ensure ttnn tensors (caller may pass torch in some paths)
+    if isinstance(sampling_locations_tt, torch.Tensor):
+        sampling_locations_tt = ttnn.from_torch(
+            sampling_locations_tt, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG
+        )
+    if isinstance(attention_weights_tt, torch.Tensor):
+        attention_weights_tt = ttnn.from_torch(
+            attention_weights_tt, device=device, memory_config=ttnn.DRAM_MEMORY_CONFIG
+        )
 
+    bs = sampling_locations_tt.shape[0]
+    num_queries = sampling_locations_tt.shape[1]
+    num_points = sampling_locations_tt.shape[4]
+
+    # Use DRAM for all large decoder buffers (grid_sample output shape doesn't match L1 width-shard)
+    dram_cfg = ttnn.DRAM_MEMORY_CONFIG
+    # Grid shape is [..., 2] (x,y); width 2 is not tile-aligned (32), so use interleaved DRAM only
     split_sizes = [int(H) * int(W) for H, W in value_spatial_shapes]
     value_level_list = ttnn.split(value_tt, split_sizes, dim=1)
 
-    sampling_grids = sampling_locations_torch * 2.0 - 1.0
+    # Convert sampling locations from [0,1] to [-1,1] on device (use DRAM for large grid)
+    sampling_grids = ttnn.multiply(sampling_locations_tt, 2.0, memory_config=dram_cfg)
+    sampling_grids = ttnn.add(sampling_grids, -1.0, memory_config=dram_cfg)
 
+    # Output accumulator in DRAM to avoid L1 OOM over 5 levels
     output = ttnn.zeros(
         [bs, num_queries, num_heads, head_dim],
         device=device,
         dtype=ttnn.bfloat16,
         layout=ttnn.TILE_LAYOUT,
+        memory_config=dram_cfg,
     )
 
     for level, (H_, W_) in enumerate(value_spatial_shapes):
@@ -66,46 +138,41 @@ def multi_scale_deformable_attn_uniad_style(
         val_l = value_level_list[level]
         val_l = ttnn.permute(val_l, (0, 2, 1, 3))  # [bs, heads, H*W, dim]
         val_l = ttnn.reshape(val_l, (bs * num_heads, H_, W_, head_dim))
+        val_l = ttnn.to_memory_config(val_l, ttnn.L1_MEMORY_CONFIG)
 
-        # Grid: batch ALL points together → [bs*heads, Q*points, 1, 2]
+        # Grid: extract level and reshape → [bs*heads, Q*points, 1, 2]
         grid = sampling_grids[:, :, :, level, :, :]  # [bs, Q, heads, points, 2]
-        grid = grid.permute(0, 2, 1, 3, 4).reshape(bs * num_heads, num_queries * num_points, 1, 2).contiguous()
-        grid_tt = ttnn.from_torch(
-            grid.to(torch.bfloat16),
-            device=device,
-            layout=ttnn.ROW_MAJOR_LAYOUT,
-        )
+        grid = ttnn.permute(grid, (0, 2, 1, 3, 4))
+        grid = ttnn.reshape(grid, (bs * num_heads, num_queries * num_points, 1, 2))
+        grid = ttnn.to_memory_config(grid, dram_cfg)
+        grid = ttnn.to_layout(grid, ttnn.ROW_MAJOR_LAYOUT)  # grid_sample requires ROW_MAJOR grid
 
-        sampled = ttnn.grid_sample(val_l, grid_tt)  # [bs*heads, Q*points, 1, dim]
-        ttnn.deallocate(grid_tt)
+        # Grid sample output is [bs*heads, Q*points, 1, head_dim] (28800, 32); use DRAM to avoid shard-shape mismatch
+        sampled = ttnn.grid_sample(val_l, grid, memory_config=dram_cfg)
+        ttnn.deallocate(grid)
         ttnn.deallocate(val_l)
 
-        # Reshape to [bs, Q, heads, points, dim]
+        # Reshape to [bs, Q, heads, points, dim]; keep in DRAM (L1 width-shard shape doesn't match 230400 rows)
         sampled = ttnn.squeeze(sampled, 2)  # [bs*heads, Q*points, dim]
         sampled = ttnn.to_layout(sampled, ttnn.TILE_LAYOUT)
         sampled = ttnn.reshape(sampled, (bs, num_heads, num_queries, num_points, head_dim))
         sampled = ttnn.permute(sampled, (0, 2, 1, 3, 4))  # [bs, Q, heads, points, dim]
+        sampled = ttnn.to_memory_config(sampled, dram_cfg)
 
         # Attention weights for this level: [bs, Q, heads, points, 1]
-        attn = attention_weights_torch[:, :, :, level, :]
-        attn = attn.unsqueeze(-1).contiguous()
-        attn_tt = ttnn.from_torch(
-            attn.to(torch.bfloat16),
-            device=device,
-            layout=ttnn.TILE_LAYOUT,
-        )
+        attn = attention_weights_tt[:, :, :, level, :]
+        attn = ttnn.unsqueeze(attn, -1)
+        attn = ttnn.to_memory_config(attn, dram_cfg)
 
         # Weighted sum over points
-        weighted = ttnn.mul(sampled, attn_tt)
+        weighted = ttnn.mul(sampled, attn, memory_config=dram_cfg)
         ttnn.deallocate(sampled)
-        ttnn.deallocate(attn_tt)
+        ttnn.deallocate(attn)
 
-        level_out = ttnn.sum(weighted, dim=-2)  # [bs, Q, heads, dim]
+        level_out = ttnn.sum(weighted, dim=-2, memory_config=dram_cfg)
         ttnn.deallocate(weighted)
 
-        old_output = output
-        output = ttnn.add(output, level_out)
-        ttnn.deallocate(old_output)
+        output = ttnn.add(output, level_out, memory_config=dram_cfg)
         ttnn.deallocate(level_out)
 
     output = ttnn.reshape(output, (bs, num_queries, num_heads * head_dim))
@@ -204,11 +271,11 @@ def multi_scale_deformable_attn_ttnn(
                 layout=ttnn.TILE_LAYOUT,
             )
 
-            # Weighted sum over points — all on device
             level_out = None
             for p in range(num_points):
-                attn_p = attn_tt[:, :, p : p + 1]
+                attn_p = ttnn.slice(attn_tt, [0, 0, p], [bs * num_heads, Q, p + 1])
                 weighted_p = ttnn.mul(point_chunks[p], attn_p)
+                ttnn.deallocate(attn_p)
                 if level_out is None:
                     level_out = weighted_p
                 else:
@@ -320,51 +387,63 @@ class TtMSDeformAttn:
         if key_padding_mask is not None:
             mask = ttnn.reshape(key_padding_mask, (bs, num_keys, 1))
             value = ttnn.where(mask, ttnn.zeros_like(value), value)
-
-        # Offsets and weights still go to host for 6D reshape + softmax
-        logger.info("  MSDeformAttn: moving offsets/weights to host...")
-        so_torch = ttnn.to_torch(sampling_offsets_flat).float()
-        aw_torch = ttnn.to_torch(attention_weights_flat).float()
-
-        so_torch = so_torch[:, :num_queries, :].reshape(
-            bs, num_queries, self.num_heads, self.num_levels, self.num_points, 2
-        )
-        aw_torch = aw_torch[:, :num_queries, :].reshape(
-            bs, num_queries, self.num_heads, self.num_levels * self.num_points
-        )
-        aw_torch = torch.softmax(aw_torch, dim=-1)
-        aw_torch = aw_torch.reshape(bs, num_queries, self.num_heads, self.num_levels, self.num_points)
-
-        if isinstance(reference_points, ttnn.Tensor):
-            ref_pts = ttnn.to_torch(reference_points).float()
-        else:
-            ref_pts = reference_points.float()
-
-        logger.info("  MSDeformAttn: computing sampling locations on host...")
-        if ref_pts.shape[-1] == 2:
-            offset_normalizer = torch.stack([spatial_shapes[..., 1].float(), spatial_shapes[..., 0].float()], dim=-1)
-            so_torch = so_torch / offset_normalizer[None, None, None, :, None, :]
-            ref_xy = ref_pts.reshape(bs, num_queries, 1, ref_pts.shape[2], 1, 2)
-            sampling_locations = ref_xy + so_torch
-        elif ref_pts.shape[-1] == 4:
-            ref_xy = ref_pts[:, :, None, :, None, :2]
-            ref_wh = ref_pts[:, :, None, :, None, 2:]
-            sampling_locations = ref_xy + (so_torch / self.num_points) * ref_wh * 0.5
-        else:
-            raise ValueError(f"reference_points last dim must be 2 or 4, got {ref_pts.shape[-1]}")
-
         if num_queries <= 2048:
+            sampling_locations, aw_tt = decoder_deformable_attn_compute_optimized(
+                sampling_offsets_flat,
+                attention_weights_flat,
+                reference_points,
+                spatial_shapes,
+                bs,
+                num_queries,
+                self.num_heads,
+                self.num_levels,
+                self.num_points,
+                self.device,
+            )
             logger.info(f"  MSDeformAttn: UniAD-style batched grid_sample ({num_queries} queries)...")
             output = multi_scale_deformable_attn_uniad_style(
                 value_tt=value,
                 value_spatial_shapes=spatial_shapes,
-                sampling_locations_torch=sampling_locations,
-                attention_weights_torch=aw_torch,
+                sampling_locations_tt=sampling_locations,
+                attention_weights_tt=aw_tt,
                 device=self.device,
                 num_heads=self.num_heads,
                 head_dim=self.head_dim,
             )
         else:
+            # Offsets and weights still go to host for 6D reshape + softmax
+            logger.info("  MSDeformAttn: moving offsets/weights to host...")
+            so_torch = ttnn.to_torch(sampling_offsets_flat).float()
+            aw_torch = ttnn.to_torch(attention_weights_flat).float()
+
+            so_torch = so_torch[:, :num_queries, :].reshape(
+                bs, num_queries, self.num_heads, self.num_levels, self.num_points, 2
+            )
+            aw_torch = aw_torch[:, :num_queries, :].reshape(
+                bs, num_queries, self.num_heads, self.num_levels * self.num_points
+            )
+            aw_torch = torch.softmax(aw_torch, dim=-1)
+            aw_torch = aw_torch.reshape(bs, num_queries, self.num_heads, self.num_levels, self.num_points)
+
+            if isinstance(reference_points, ttnn.Tensor):
+                ref_pts = ttnn.to_torch(reference_points).float()
+            else:
+                ref_pts = reference_points.float()
+
+            logger.info("  MSDeformAttn: computing sampling locations on host...")
+            if ref_pts.shape[-1] == 2:
+                offset_normalizer = torch.stack(
+                    [spatial_shapes[..., 1].float(), spatial_shapes[..., 0].float()], dim=-1
+                )
+                so_torch = so_torch / offset_normalizer[None, None, None, :, None, :]
+                ref_xy = ref_pts.reshape(bs, num_queries, 1, ref_pts.shape[2], 1, 2)
+                sampling_locations = ref_xy + so_torch
+            elif ref_pts.shape[-1] == 4:
+                ref_xy = ref_pts[:, :, None, :, None, :2]
+                ref_wh = ref_pts[:, :, None, :, None, 2:]
+                sampling_locations = ref_xy + (so_torch / self.num_points) * ref_wh * 0.5
+            else:
+                raise ValueError(f"reference_points last dim must be 2 or 4, got {ref_pts.shape[-1]}")
             logger.info(f"  MSDeformAttn: chunked grid_sample ({num_queries} queries)...")
             output = multi_scale_deformable_attn_ttnn(
                 value_tt=value,
@@ -375,7 +454,6 @@ class TtMSDeformAttn:
                 num_heads=self.num_heads,
                 head_dim=self.head_dim,
             )
-
         logger.info("  MSDeformAttn: output projection on device...")
         output = ttnn.linear(output, self.params["output_proj"]["weight"], bias=self.params["output_proj"]["bias"])
 

@@ -12,6 +12,10 @@ DINO-specific:
   - coordinate_to_encoding generates sinusoidal pos from reference points
   - Iterative box refinement via reg_branches
   - Final layer norm on outputs
+Parallelism: ttnn.linear passes core_grid for 64-core matmul; SDPA uses
+SDPAProgramConfig(compute_with_storage_grid_size=full grid) so internal matmuls
+use 64 cores. UntilizeWithUnpadding (1 core) is triggered by to_torch/from_torch
+and multicore is not configurable from this module.
 """
 
 import math
@@ -72,6 +76,14 @@ class TtMultiheadAttention:
         self.num_heads = num_heads
         self.head_dim = embed_dims // num_heads
         self.device = device
+        self.core_grid = getattr(device, "core_grid", ttnn.CoreGrid(y=8, x=8))
+        # SDPA program_config so internal matmuls use full grid (64 cores) instead of default
+        grid = device.compute_with_storage_grid_size()
+        self.sdpa_program_config = ttnn.SDPAProgramConfig(
+            compute_with_storage_grid_size=(grid.x, grid.y),
+            q_chunk_size=32,
+            k_chunk_size=32,
+        )
 
         # Pre-split QKV weights and transpose for ttnn.linear: [in, out]
         in_proj_w = ttnn.to_layout(params["in_proj_weight"], ttnn.TILE_LAYOUT)
@@ -106,11 +118,6 @@ class TtMultiheadAttention:
         if identity is None:
             identity = query
 
-        # Convert to TILE_LAYOUT once, avoiding redundant conversions
-        query = ttnn.to_layout(query, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
-        key = ttnn.to_layout(key, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
-        value = ttnn.to_layout(value, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
-
         if query_pos is not None:
             query_pos = ttnn.to_layout(query_pos, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
             query = ttnn.add(query, query_pos, memory_config=ttnn.L1_MEMORY_CONFIG)
@@ -121,9 +128,9 @@ class TtMultiheadAttention:
         bs, tgt_len, embed_dim = query.shape
         src_len = key.shape[1]
 
-        q = ttnn.linear(query, self.q_w, bias=self.q_b, memory_config=ttnn.L1_MEMORY_CONFIG)
-        k = ttnn.linear(key, self.k_w, bias=self.k_b, memory_config=ttnn.L1_MEMORY_CONFIG)
-        v = ttnn.linear(value, self.v_w, bias=self.v_b, memory_config=ttnn.L1_MEMORY_CONFIG)
+        q = ttnn.linear(query, self.q_w, bias=self.q_b, memory_config=ttnn.L1_MEMORY_CONFIG, core_grid=self.core_grid)
+        k = ttnn.linear(key, self.k_w, bias=self.k_b, memory_config=ttnn.L1_MEMORY_CONFIG, core_grid=self.core_grid)
+        v = ttnn.linear(value, self.v_w, bias=self.v_b, memory_config=ttnn.L1_MEMORY_CONFIG, core_grid=self.core_grid)
 
         # # 3D head reshape (UniAD pattern): [bs, seq, E] → [seq, bs*heads, head_dim] → [bs*heads, seq, head_dim]
         # q = ttnn.reshape(q, (tgt_len, bs * self.num_heads, self.head_dim))
@@ -155,7 +162,13 @@ class TtMultiheadAttention:
         # attn_weights = ttnn.softmax(attn_weights, dim=-1)
         # attn_out = ttnn.matmul(attn_weights, v)
         attn_out = ttnn.transformer.scaled_dot_product_attention(
-            q, k, v, attn_mask=attn_mask, is_causal=False, memory_config=ttnn.L1_MEMORY_CONFIG
+            q,
+            k,
+            v,
+            attn_mask=attn_mask,
+            is_causal=False,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            program_config=self.sdpa_program_config,
         )
 
         # Collapse Heads 4D -> 3D: [bs, heads, seq, head_dim] -> [bs, seq, E]
@@ -166,11 +179,15 @@ class TtMultiheadAttention:
 
         # Output projection
         attn_out = ttnn.linear(
-            attn_out, self.out_proj_weight, bias=self.out_proj_bias, memory_config=ttnn.L1_MEMORY_CONFIG
+            attn_out,
+            self.out_proj_weight,
+            bias=self.out_proj_bias,
+            memory_config=ttnn.L1_MEMORY_CONFIG,
+            core_grid=self.core_grid,
         )
 
         # Identity should already be in TILE_LAYOUT from input, but ensure it's in L1
-        identity = ttnn.to_layout(identity, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
+        # identity = ttnn.to_layout(identity, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
         return ttnn.add(attn_out, identity, memory_config=ttnn.L1_MEMORY_CONFIG)
 
 
@@ -182,6 +199,7 @@ class TtRefPointHeadMLP:
 
     def __init__(self, params, device):
         self.device = device
+        self.core_grid = getattr(device, "core_grid", ttnn.CoreGrid(y=8, x=8))
         self.w0 = params["layers"][0]["weight"]
         self.b0 = params["layers"][0]["bias"]
         self.w1 = params["layers"][1]["weight"]
@@ -189,9 +207,9 @@ class TtRefPointHeadMLP:
 
     def __call__(self, x):
         x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
-        x = ttnn.linear(x, self.w0, bias=self.b0, memory_config=ttnn.L1_MEMORY_CONFIG)
+        x = ttnn.linear(x, self.w0, bias=self.b0, memory_config=ttnn.L1_MEMORY_CONFIG, core_grid=self.core_grid)
         x = ttnn.relu(x, memory_config=ttnn.L1_MEMORY_CONFIG)
-        x = ttnn.linear(x, self.w1, bias=self.b1, memory_config=ttnn.L1_MEMORY_CONFIG)
+        x = ttnn.linear(x, self.w1, bias=self.b1, memory_config=ttnn.L1_MEMORY_CONFIG, core_grid=self.core_grid)
         return x
 
 
@@ -203,12 +221,19 @@ class TtRegBranch:
 
     def __init__(self, params, device):
         self.device = device
+        self.core_grid = getattr(device, "core_grid", ttnn.CoreGrid(y=8, x=8))
         self.layers = params
 
     def __call__(self, x):
         x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.L1_MEMORY_CONFIG)
         for i, layer_params in enumerate(self.layers):
-            x = ttnn.linear(x, layer_params["weight"], bias=layer_params["bias"], memory_config=ttnn.L1_MEMORY_CONFIG)
+            x = ttnn.linear(
+                x,
+                layer_params["weight"],
+                bias=layer_params["bias"],
+                memory_config=ttnn.L1_MEMORY_CONFIG,
+                core_grid=self.core_grid,
+            )
             if i < len(self.layers) - 1:
                 x = ttnn.relu(x, memory_config=ttnn.L1_MEMORY_CONFIG)
         return x
@@ -236,6 +261,7 @@ class TtDINODecoderLayer:
             num_points=num_points,
         )
         self.ffn = TtFFN(params["ffn"], device)
+        self.device = device
         self.norm1_w = params["norms"][0]["weight"]
         self.norm1_b = params["norms"][0]["bias"]
         self.norm2_w = params["norms"][1]["weight"]
