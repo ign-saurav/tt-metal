@@ -30,23 +30,7 @@ class TT_LSTMDropout:
         self,
         x: ttnn.Tensor,
         h: Optional[Tuple[ttnn.Tensor, ttnn.Tensor]] = None,
-    ) -> Tuple[ttnn.Tensor, Tuple[ttnn.Tensor, ttnn.Tensor]]:
-        # Placeholder: run torch LSTM on host; replace with ttnn LSTM when available.
-        # For now, we assume x is on torch device or we transfer back/forth.
-        if isinstance(x, ttnn.Tensor):
-            x_torch = ttnn.to_torch(x)
-        else:
-            x_torch = x
-
-        h_torch = None
-        if h is not None:
-            h_torch = (ttnn.to_torch(h[0]), ttnn.to_torch(h[1]))
-
-        out_torch, h_torch = self.lstm(x_torch, h_torch)
-
-        out = ttnn.from_torch(out_torch, dtype=x.dtype, layout=x.layout, device=self.device)
-        h_out = (
-            ttnn.from_torch(h_torch[0], dtype=h[0].dtype, layout=h[0].layout, device=self.device),
-            ttnn.from_torch(h_torch[1], dtype=h[1].dtype, layout=h[1].layout, device=self.device),
-        )
-        return out, h_out
+        c: Optional[Tuple[ttnn.Tensor, ttnn.Tensor]] = None,
+    ):
+        output, (h_tt, c_tt) = self.lstm(x, h)
+        return output, (h_tt, c_tt)

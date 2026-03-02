@@ -7,20 +7,19 @@ This script:
 3. Runs forward pass on both models
 4. Compares outputs using Pearson Correlation Coefficient (PCC)
 """
-
-import torch
-import ttnn
 import sys
 import os
 
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
+# Import RNNTJoint from nemo
+from nemo.collections.asr.modules.rnnt import RNNTJoint
+import torch
+import ttnn
 
 from models.experimental.parakeet.tt.tt_rnnjoint import TtRNNTJoint
 from models.common.metrics import compute_pcc
 
-# Import RNNTJoint from nemo
-from nemo.collections.asr.modules.rnnt import RNNTJoint
+# Add paths for imports
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
 
 def load_pretrained_rnnt_joint(model_name: str = "nvidia/parakeet-tdt-0.6b-v2", map_location: str = "cpu") -> RNNTJoint:

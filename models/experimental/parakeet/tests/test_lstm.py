@@ -8,21 +8,19 @@ This script:
 4. Runs forward passes on both implementations
 5. Compares outputs using PCC and other metrics
 """
-
-import torch
-import ttnn
-import sys
 import os
+import sys
 from typing import Optional, Dict, List
-
-# Add paths for imports
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
-
-from models.experimental.parakeet.tt.tt_lstm import TtLSTMCell
-from models.common.metrics import compute_pcc, compute_max_abs_error, compute_mean_abs_error
+import nemo.collections.asr as nemo_asr
 
 # Import NeMo LSTMDropout
 from nemo.collections.common.parts.rnn import LSTMDropout
+import torch
+import ttnn
+from models.common.metrics import compute_pcc, compute_max_abs_error, compute_mean_abs_error
+from models.experimental.parakeet.tt.tt_lstm import TtLSTMCell
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "../.."))
 
 
 def load_pretrained_nemo_lstm(
@@ -39,7 +37,6 @@ def load_pretrained_nemo_lstm(
     Returns:
         LSTMDropout module with pretrained weights
     """
-    import nemo.collections.asr as nemo_asr
 
     print(f"Loading pretrained model: {model_name}")
     asr_model = nemo_asr.models.ASRModel.from_pretrained(model_name=model_name, map_location=map_location)

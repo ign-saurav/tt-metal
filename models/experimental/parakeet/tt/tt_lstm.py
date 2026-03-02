@@ -189,6 +189,7 @@ class TtLSTMCell:
         weights = self.layer_weights[layer_idx]
 
         # Compute gates: gates = W_ih·x + W_hh·h + bias
+
         gates_x = ttnn.linear(x, weights["weight_ih"], bias=None, memory_config=self.memory_config)
         gates_h = ttnn.linear(h, weights["weight_hh"], bias=None, memory_config=self.memory_config)
 
@@ -289,6 +290,7 @@ class TtLSTMCell:
             c_layer = self._ensure_4d(c_tensor[layer_idx])
 
             # Forward pass through layer
+            # import pdb; pdb.set_trace()
             h_new, c_new = self._lstm_single_layer(x_4d, h_layer, c_layer, layer_idx)
 
             # Store new states
