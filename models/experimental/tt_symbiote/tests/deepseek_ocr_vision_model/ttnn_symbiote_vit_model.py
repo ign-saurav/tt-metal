@@ -247,9 +247,8 @@ class TTNNClipVisionEmbeddings(TTNNModule):
         if pixel_values.layout != ttnn.TILE_LAYOUT:
             pixel_values = ttnn.to_layout(pixel_values, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
-        if patch_embeds is not None:
-            if patch_embeds.layout != ttnn.TILE_LAYOUT:
-                patch_embeds = ttnn.to_layout(patch_embeds, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        if patch_embeds is not None and patch_embeds.layout != ttnn.TILE_LAYOUT:
+            patch_embeds = ttnn.to_layout(patch_embeds, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
 
         batch_size = pixel_values.shape[0]
 
@@ -989,3 +988,133 @@ class TTNNNoTPTransformer(TTNNModule):
             hidden_states = layer.forward(hidden_states)
 
         return hidden_states
+
+
+########## VitModel (VISION MODEL) ############
+class TTNNVitModel(TTNNModule):
+    """
+    Vision Transformer Model using TTNN operations.
+
+    Complete ViT model with embeddings, pre-norm, and transformer encoder.
+    """
+
+    def __init__(
+        self,
+    ):
+        """
+        Initialize ViT model.
+
+        Args:
+            cfg: Configuration dict
+            weights: PyTorch weights dict (optional)
+            device: TTNN device
+            freeze_embed: Whether to freeze embedding weights
+            freeze_pre_norm: Whether to freeze pre-norm weights
+        """
+        super().__init__()
+        self.torch_layer_cp = None
+        self.embeddings = None
+        self.transformer = None
+        self.pre_layernorm_epsilon = 1e-5
+
+    @classmethod
+    def from_torch(cls, VitModel):
+        """Create TTNN module from PyTorch equivalent."""
+        new_VitModel = cls()
+
+        new_VitModel.embeddings = TTNNClipVisionEmbeddings.from_torch(VitModel.embeddings)
+        new_VitModel.transformer = TTNNNoTPTransformer.from_torch(VitModel.transformer)
+
+        new_VitModel.torch_layer_cp = VitModel
+        new_VitModel._fallback_torch_layer = VitModel
+        return new_VitModel
+
+    def preprocess_weights_impl(self):
+        """Convert PyTorch weights to TTNN format (called once)."""
+        pre_norm_weight = self.torch_layer_cp.pre_layrnorm.weight.data
+        pre_norm_bias = self.torch_layer_cp.pre_layrnorm.bias.data
+
+        self.pre_layrnorm_weight = ttnn.from_torch(
+            pre_norm_weight,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+        self.pre_layrnorm_bias = ttnn.from_torch(
+            pre_norm_bias,
+            dtype=ttnn.bfloat16,
+            layout=ttnn.TILE_LAYOUT,
+            memory_config=ttnn.DRAM_MEMORY_CONFIG,
+        )
+
+        self.embeddings.preprocess_weights_impl()
+        self.transformer.preprocess_weights_impl()
+
+    def move_weights_to_device_impl(self):
+        """Move preprocessed weights to device."""
+        self.pre_layrnorm_weight = ttnn.to_device(self.pre_layrnorm_weight, self.device)
+        self.pre_layrnorm_bias = ttnn.to_device(self.pre_layrnorm_bias, self.device)
+        self.embeddings.move_weights_to_device_impl()
+        self.transformer.move_weights_to_device_impl()
+
+    def deallocate_weights_impl(self):
+        """Deallocate device memory."""
+        ttnn.deallocate(self.pre_layrnorm_weight)
+        ttnn.deallocate(self.pre_layrnorm_bias)
+        self.embeddings.deallocate_weights_impl()
+        self.transformer.deallocate_weights_impl()
+
+    def forward(
+        self,
+        x: ttnn.Tensor,
+        patch_embeds: Optional[ttnn.Tensor] = None,
+    ) -> ttnn.Tensor:
+        """
+        Forward pass of ViT model.
+
+        Args:
+            x: TTNN tensor (batch_size, channels, height, width) - input image
+            patch_embeds: Optional pre-computed patch embeddings
+
+        Returns:
+            TTNN tensor (batch_size, seq_len, hidden_size)
+        """
+        if isinstance(x, torch.Tensor):
+            x = ttnn.from_torch(
+                x,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+            )
+
+        if isinstance(patch_embeds, torch.Tensor):
+            patch_embeds = ttnn.from_torch(
+                patch_embeds,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+            )
+
+        if x.layout != ttnn.TILE_LAYOUT:
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+        if patch_embeds is not None and patch_embeds.layout != ttnn.TILE_LAYOUT:
+            patch_embeds = ttnn.to_layout(patch_embeds, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+        # Embeddings
+        x = self.embeddings.forward(x, patch_embeds)
+
+        # Pre-layer norm
+        hidden_states = ttnn.layer_norm(
+            x,
+            weight=self.pre_layrnorm_weight,
+            bias=self.pre_layrnorm_bias,
+            epsilon=self.pre_layernorm_epsilon,
+        )
+        ttnn.deallocate(x)
+
+        # Transformer
+        output = self.transformer.forward(hidden_states)
+        ttnn.deallocate(hidden_states)
+
+        return output
