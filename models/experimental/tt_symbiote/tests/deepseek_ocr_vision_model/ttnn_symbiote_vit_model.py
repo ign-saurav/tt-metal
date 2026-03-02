@@ -841,6 +841,8 @@ class TTNNNoTPTransformerBlock(TTNNModule):
         ttnn.deallocate(self.layer_norm1_bias)
         ttnn.deallocate(self.layer_norm2_weight)
         ttnn.deallocate(self.layer_norm2_bias)
+        self.self_attn.deallocate_weights_impl()
+        self.mlp.deallocate_weights_impl()
 
     def forward(self, x: ttnn.Tensor) -> ttnn.Tensor:
         """
@@ -904,3 +906,86 @@ class TTNNNoTPTransformerBlock(TTNNModule):
 
         out = ttnn.to_torch(out)
         return out
+
+
+########## No Tensor Parallelism Transformer ############
+class TTNNNoTPTransformer(TTNNModule):
+    """
+    No Tensor Parallelism Transformer using TTNN operations.
+
+    Stack of transformer blocks.
+    """
+
+    def __init__(
+        self,
+        cfg,
+        num_layers,
+    ):
+        """
+        Initialize transformer.
+
+        Args:
+            cfg: Configuration dict
+            weights: PyTorch weights dict (optional)
+            device: TTNN device
+        """
+        super().__init__()
+
+        self.cfg = cfg
+        self.num_layers = num_layers
+        self.torch_layer_cp = None
+        self.layers = []
+
+    @classmethod
+    def from_torch(cls, NoTPTransformer):
+        """Create TTNN module from PyTorch equivalent."""
+        new_NoTPTransformer = cls(NoTPTransformer.cfg, NoTPTransformer.num_layers)
+
+        for layer_id in range(new_NoTPTransformer.num_layers):
+            layer = TTNNNoTPTransformerBlock.from_torch(NoTPTransformer.layers[layer_id])
+            new_NoTPTransformer.layers.append(layer)
+
+        new_NoTPTransformer.torch_layer_cp = NoTPTransformer
+        new_NoTPTransformer._fallback_torch_layer = NoTPTransformer
+        return new_NoTPTransformer
+
+    def preprocess_weights_impl(self):
+        """Convert PyTorch weights to TTNN format (called once)."""
+        for layer in self.layers:
+            layer.preprocess_weights_impl()
+
+    def move_weights_to_device_impl(self):
+        """Move preprocessed weights to device."""
+        for layer in self.layers:
+            layer.move_weights_to_device_impl()
+
+    def deallocate_weights_impl(self):
+        """Deallocate device memory."""
+        for layer in self.layers:
+            layer.deallocate_weights_impl()
+
+    def forward(self, hidden_states: ttnn.Tensor) -> ttnn.Tensor:
+        """
+        Forward pass of transformer.
+
+        Args:
+            hidden_states: TTNN tensor (batch_size, seq_len, hidden_size)
+
+        Returns:
+            TTNN tensor (batch_size, seq_len, hidden_size)
+        """
+        if isinstance(hidden_states, torch.Tensor):
+            hidden_states = ttnn.from_torch(
+                hidden_states,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+            )
+
+        if hidden_states.layout != ttnn.TILE_LAYOUT:
+            hidden_states = ttnn.to_layout(hidden_states, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+        for layer in self.layers:
+            hidden_states = layer.forward(hidden_states)
+
+        return hidden_states
