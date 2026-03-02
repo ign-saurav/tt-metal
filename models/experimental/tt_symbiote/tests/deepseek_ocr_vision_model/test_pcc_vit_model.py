@@ -30,7 +30,7 @@ sys.path.insert(
 from deepencoder import build_clip_l, vit_model_cfg
 
 # Import TTNN model
-from models.experimental.deepseek_ocr.tt.ttnn_vit_model import (
+from models.experimental.tt_symbiote.tests.deepseek_ocr_vision_model.ttnn_vit_model import (
     build_clip_l_ttnn,
 )
 

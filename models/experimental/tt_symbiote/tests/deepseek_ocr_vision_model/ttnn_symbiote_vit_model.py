@@ -9,37 +9,7 @@ from models.experimental.tt_symbiote.core.module import TTNNModule
 from typing import Optional
 
 
-########## QUICK GELU ############
-class QuickGELU(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, x):
-        return x * torch.sigmoid(1.702 * x)
-
-
-class TTNNQuickGelu(TTNNModule):
-    """TTNN-accelerated Quick Gelu activation function."""
-
-    def __init__(self):
-        super().__init__()
-        self._fallback_torch_layer = QuickGELU()
-
-    def forward(self, input_tensor: ttnn.Tensor) -> ttnn.Tensor:
-        """Forward pass through Quick Gelu activation."""
-        if input_tensor.layout != ttnn.TILE_LAYOUT:
-            input_tensor = ttnn.to_layout(input_tensor, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
-        scaled = ttnn.multiply(input_tensor, 1.702)
-        sigmoid_output = ttnn.sigmoid(scaled)
-        tt_output = ttnn.multiply(input_tensor, sigmoid_output)
-        ttnn.deallocate(scaled)
-        ttnn.deallocate(sigmoid_output)
-        return tt_output
-
-
 ########## CLIP Vision Embeddings ############
-
-
 class TTNNClipVisionEmbeddings(TTNNModule):
     """
     CLIP Vision Embeddings using TTNN operations.
@@ -49,12 +19,10 @@ class TTNNClipVisionEmbeddings(TTNNModule):
 
     def __init__(
         self,
-        old_module,
         hidden_size: int = 1024,
         image_size: int = 224,
         patch_size: int = 14,
         num_channels: int = 3,
-        device: ttnn.Device = None,
     ):
         """
         Initialize CLIP vision embeddings.
@@ -74,15 +42,21 @@ class TTNNClipVisionEmbeddings(TTNNModule):
         self.image_size = image_size
         self.patch_size = patch_size
         self.num_channels = num_channels
-        self.device = device
-        self.torch_layer = old_module
         self.num_patches = (self.image_size // self.patch_size) ** 2
         self.num_positions = self.num_patches + 1
+        self.torch_layer_cp = None
 
     @classmethod
     def from_torch(cls, visionEmbedding):
         """Create TTNN module from PyTorch equivalent."""
-        new_clip = cls()
+        new_clip = cls(
+            hidden_size=visionEmbedding.embed_dim,
+            image_size=visionEmbedding.image_size,
+            patch_size=visionEmbedding.patch_size,
+            num_channels=3,
+        )
+
+        new_clip.torch_layer_cp = visionEmbedding
         new_clip._fallback_torch_layer = visionEmbedding
         return new_clip
 
@@ -90,17 +64,18 @@ class TTNNClipVisionEmbeddings(TTNNModule):
         """Convert PyTorch weights to TTNN format (called once)."""
         # Load from pretrained weights
         self.class_embedding = ttnn.from_torch(
-            self.torch_layer.embeddings.class_embedding.data,
+            self.torch_layer_cp.class_embedding.data,
             dtype=ttnn.bfloat16,
             layout=ttnn.TILE_LAYOUT,
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
         # Patch embedding: Conv2d weight (out_channels, in_channels, kernel_h, kernel_w)
-        conv_weight = (
-            self.torch_layer.embeddings.patch_embedding.weight.data
-        )  # (hidden_size, 3, patch_size, patch_size)
-        conv_bias = self.torch_layer.embeddings.patch_embedding.bias.data
+        conv_weight = self.torch_layer_cp.patch_embedding.weight.data  # (hidden_size, 3, patch_size, patch_size)
+
+        conv_bias = None
+        if self.torch_layer_cp.patch_embedding.bias is not None:
+            conv_bias = self.torch_layer_cp.patch_embedding.bias.data
 
         # Convert Conv2d to linear format for TTNN
         # Flatten kernel: (hidden_size, 3, patch_size, patch_size) -> (hidden_size, 3*patch_size*patch_size)
@@ -120,7 +95,7 @@ class TTNNClipVisionEmbeddings(TTNNModule):
             self.patch_embedding_bias = None
 
         # Position embedding - shape (num_positions, embed_dim)
-        position_embedding_weight = self.torch_layer.embeddings.position_embedding.weight.data
+        position_embedding_weight = self.torch_layer_cp.position_embedding.weight.data
         # Reshape to (1, num_positions, embed_dim) for get_abs_pos_ttnn
         position_embedding_reshaped = position_embedding_weight.unsqueeze(0)
         self.position_embedding = ttnn.from_torch(
@@ -146,7 +121,7 @@ class TTNNClipVisionEmbeddings(TTNNModule):
         if self.patch_embedding_bias is not None:
             ttnn.deallocate(self.patch_embedding_bias)
 
-    def tensor_1d_to_2d_ttnn(tensor_1d: torch.Tensor, dtype: ttnn.DataType = ttnn.bfloat16) -> ttnn.Tensor:
+    def tensor_1d_to_2d_ttnn(self, tensor_1d: torch.Tensor, dtype: ttnn.DataType = ttnn.bfloat16) -> ttnn.Tensor:
         """
         Convert 1D PyTorch tensor to 2D TTNN tensor (1, N) for bias operations.
 
@@ -199,6 +174,7 @@ class TTNNClipVisionEmbeddings(TTNNModule):
         return pixel_values
 
     def get_abs_pos_ttnn(
+        self,
         abs_pos: ttnn.Tensor,
         tgt_size: int,
         device: ttnn.Device,
@@ -267,6 +243,14 @@ class TTNNClipVisionEmbeddings(TTNNModule):
         Returns:
             TTNN tensor (batch_size, num_patches + 1, embed_dim)
         """
+
+        if pixel_values.layout != ttnn.TILE_LAYOUT:
+            pixel_values = ttnn.to_layout(pixel_values, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
+        if patch_embeds is not None:
+            if patch_embeds.layout != ttnn.TILE_LAYOUT:
+                patch_embeds = ttnn.to_layout(patch_embeds, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
         batch_size = pixel_values.shape[0]
 
         # Get patch embeddings
@@ -317,7 +301,7 @@ class TTNNClipVisionEmbeddings(TTNNModule):
 
 
 ########## No Tensor Parallelism Attention ############
-class TTNNNoTPAttention:
+class TTNNNoTPAttention(TTNNModule):
     """
     No Tensor Parallelism Attention using TTNN operations.
 
@@ -495,9 +479,7 @@ class TTNNNoTPAttention:
 
 
 ########## No Tensor Parallelism Feed Forward ############
-
-
-class TTNNNoTPFeedForward:
+class TTNNNoTPFeedForward(TTNNModule):
     """
     No Tensor Parallelism Feed Forward using TTNN operations.
 
@@ -662,9 +644,7 @@ class TTNNNoTPFeedForward:
 
 
 ########## No Tensor Parallelism Transformer Block ############
-
-
-class TTNNNoTPTransformerBlock:
+class TTNNNoTPTransformerBlock(TTNNModule):
     """
     No Tensor Parallelism Transformer Block using TTNN operations.
 
@@ -696,11 +676,11 @@ class TTNNNoTPTransformerBlock:
         self.mlp = TTNNNoTPFeedForward.from_torch()
 
     @classmethod
-    def from_torch(cls, NoTPTransformer):
+    def from_torch(cls, NoTPTransformerBlock):
         """Create TTNN module from PyTorch equivalent."""
-        new_TPTransformer = cls()
-        new_TPTransformer._fallback_torch_layer = NoTPTransformer
-        return new_TPTransformer
+        new_NoTPTransformerBlock = cls()
+        new_NoTPTransformerBlock._fallback_torch_layer = NoTPTransformerBlock
+        return new_NoTPTransformerBlock
 
     def preprocess_weights_impl(self):
         """Convert PyTorch weights to TTNN format (called once)."""
