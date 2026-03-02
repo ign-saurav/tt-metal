@@ -574,10 +574,8 @@ class TTNNNoTPFeedForward(TTNNModule):
 
     def __init__(
         self,
-        old_module,
-        dim: int,
-        hidden_dim: int,
-        device: ttnn.Device = None,
+        dim: int = 1024,
+        hidden_dim: int = 4096,
     ):
         """
         Initialize feedforward layer.
@@ -589,22 +587,24 @@ class TTNNNoTPFeedForward(TTNNModule):
             weights: PyTorch weights dict (optional)
             device: TTNN device
         """
+        super().__init__()
+
         self.dim = dim
         self.hidden_dim = hidden_dim
-        self.device = device
-        self.torch_layer = old_module
+        self.torch_layer_cp = None
 
     @classmethod
     def from_torch(cls, NoTPFeedForward):
         """Create TTNN module from PyTorch equivalent."""
-        new_TPFeedForward = cls()
+        new_TPFeedForward = cls(NoTPFeedForward.fc1.in_features, NoTPFeedForward.fc1.out_features)
+        new_TPFeedForward.torch_layer_cp = NoTPFeedForward
         new_TPFeedForward._fallback_torch_layer = NoTPFeedForward
         return new_TPFeedForward
 
     def preprocess_weights_impl(self):
         """Convert PyTorch weights to TTNN format (called once)."""
         # FC1 weights
-        fc1_weight = self.torch_layer.mlp.fc1.weight.data.T  # (hidden_dim, dim)
+        fc1_weight = self.torch_layer_cp.fc1.weight.data.T  # (hidden_dim, dim)
         self.fc1_weight = ttnn.from_torch(
             fc1_weight,
             dtype=ttnn.bfloat16,
@@ -612,14 +612,14 @@ class TTNNNoTPFeedForward(TTNNModule):
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
-        fc1_bias = self.torch_layer.mlp.fc1.bias.data
-        if fc1_bias is not None:
+        if self.torch_layer_cp.fc1.bias is not None:
+            fc1_bias = self.torch_layer_cp.fc1.bias.data
             self.fc1_bias = self.tensor_1d_to_2d_ttnn(fc1_bias)
         else:
             self.fc1_bias = None
 
         # FC2 weights
-        fc2_weight = self.torch_layer.mlp.fc2.weight.data.T  # (dim, hidden_dim)
+        fc2_weight = self.torch_layer_cp.fc2.weight.data.T  # (dim, hidden_dim)
         self.fc2_weight = ttnn.from_torch(
             fc2_weight,
             dtype=ttnn.bfloat16,
@@ -627,13 +627,13 @@ class TTNNNoTPFeedForward(TTNNModule):
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
-        fc2_bias = self.torch_layer.mlp.fc2.bias.data
-        if fc2_bias is not None:
+        if self.torch_layer_cp.fc2.bias is not None:
+            fc2_bias = self.torch_layer_cp.fc2.bias.data
             self.fc2_bias = self.tensor_1d_to_2d_ttnn(fc2_bias)
         else:
             self.fc2_bias = None
 
-    def tensor_1d_to_2d_ttnn(tensor_1d: torch.Tensor, dtype: ttnn.DataType = ttnn.bfloat16) -> ttnn.Tensor:
+    def tensor_1d_to_2d_ttnn(self, tensor_1d: torch.Tensor, dtype: ttnn.DataType = ttnn.bfloat16) -> ttnn.Tensor:
         """
         Convert 1D PyTorch tensor to 2D TTNN tensor (1, N) for bias operations.
 
@@ -683,6 +683,17 @@ class TTNNNoTPFeedForward(TTNNModule):
         Returns:
             TTNN tensor (batch_size, seq_len, dim)
         """
+        if isinstance(x, torch.Tensor):
+            x = ttnn.from_torch(
+                x,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+            )
+
+        if x.layout != ttnn.TILE_LAYOUT:
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
         # FC1
         output = ttnn.linear(
             x,
@@ -704,9 +715,10 @@ class TTNNNoTPFeedForward(TTNNModule):
             memory_config=ttnn.L1_MEMORY_CONFIG,
         )
 
+        output = ttnn.to_torch(output)
         return output
 
-    def quick_gelu_ttnn(x: ttnn.Tensor) -> ttnn.Tensor:
+    def quick_gelu_ttnn(self, x: ttnn.Tensor) -> ttnn.Tensor:
         """
         Quick GELU activation: x * sigmoid(1.702 * x)
 
@@ -753,6 +765,8 @@ class TTNNNoTPTransformerBlock(TTNNModule):
             weights: PyTorch weights dict (optional)
             device: TTNN device
         """
+        super().__init__()
+
         self.layer_id = layer_id
         self.device = device
         self.hidden_size = cfg.hidden_size
