@@ -751,10 +751,10 @@ class TTNNNoTPTransformerBlock(TTNNModule):
 
     def __init__(
         self,
-        old_module,
-        cfg,
+        n_heads,
+        dim,
+        head_dim,
         layer_id: int,
-        device: ttnn.Device = None,
     ):
         """
         Initialize transformer block.
@@ -766,28 +766,37 @@ class TTNNNoTPTransformerBlock(TTNNModule):
             device: TTNN device
         """
         super().__init__()
-
+        self.n_heads = n_heads
+        self.dim = dim
+        self.head_dim = head_dim
         self.layer_id = layer_id
-        self.device = device
-        self.hidden_size = cfg.hidden_size
-        self.layernorm_epsilon = cfg.layernorm_epsilon
-        self.torch_layer = old_module
-        self.self_attn = TTNNNoTPAttention.from_torch()
-        self.mlp = TTNNNoTPFeedForward.from_torch()
+        self.layernorm_epsilon = 1e-5
+        self.torch_layer_cp = None
+        self.self_attn = None
+        self.mlp = None
 
     @classmethod
     def from_torch(cls, NoTPTransformerBlock):
         """Create TTNN module from PyTorch equivalent."""
-        new_NoTPTransformerBlock = cls()
+        new_NoTPTransformerBlock = cls(
+            NoTPTransformerBlock.n_heads,
+            NoTPTransformerBlock.dim,
+            NoTPTransformerBlock.head_dim,
+            NoTPTransformerBlock.layer_id,
+        )
+        new_NoTPTransformerBlock.self_attn = TTNNNoTPAttention.from_torch(NoTPTransformerBlock.self_attn)
+        new_NoTPTransformerBlock.mlp = TTNNNoTPFeedForward.from_torch(NoTPTransformerBlock.mlp)
+
+        new_NoTPTransformerBlock.torch_layer_cp = NoTPTransformerBlock
         new_NoTPTransformerBlock._fallback_torch_layer = NoTPTransformerBlock
         return new_NoTPTransformerBlock
 
     def preprocess_weights_impl(self):
         """Convert PyTorch weights to TTNN format (called once)."""
-        ln1_weight = self.torch_layer.layer_norm1.weight.data
-        ln1_bias = self.torch_layer.layer_norm1.bias.data
-        ln2_weight = self.torch_layer.layer_norm2.weight.data
-        ln2_bias = self.torch_layer.layer_norm2.bias.data
+        ln1_weight = self.torch_layer_cp.layer_norm1.weight.data
+        ln1_bias = self.torch_layer_cp.layer_norm1.bias.data
+        ln2_weight = self.torch_layer_cp.layer_norm2.weight.data
+        ln2_bias = self.torch_layer_cp.layer_norm2.bias.data
 
         self.layer_norm1_weight = ttnn.from_torch(
             ln1_weight,
@@ -814,13 +823,17 @@ class TTNNNoTPTransformerBlock(TTNNModule):
             memory_config=ttnn.DRAM_MEMORY_CONFIG,
         )
 
+        self.self_attn.preprocess_weights_impl()
+        self.mlp.preprocess_weights_impl()
+
     def move_weights_to_device_impl(self):
         """Move preprocessed weights to device."""
-
         self.layer_norm1_weight = ttnn.to_device(self.layer_norm1_weight, self.device)
         self.layer_norm1_bias = ttnn.to_device(self.layer_norm1_bias, self.device)
         self.layer_norm2_weight = ttnn.to_device(self.layer_norm2_weight, self.device)
         self.layer_norm2_bias = ttnn.to_device(self.layer_norm2_bias, self.device)
+        self.self_attn.move_weights_to_device_impl()
+        self.mlp.move_weights_to_device_impl()
 
     def deallocate_weights_impl(self):
         """Deallocate device memory."""
@@ -839,6 +852,17 @@ class TTNNNoTPTransformerBlock(TTNNModule):
         Returns:
             TTNN tensor (batch_size, seq_len, hidden_size)
         """
+        if isinstance(x, torch.Tensor):
+            x = ttnn.from_torch(
+                x,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+            )
+
+        if x.layout != ttnn.TILE_LAYOUT:
+            x = ttnn.to_layout(x, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+
         # Pre-norm attention
         residual = ttnn.layer_norm(
             x,
@@ -846,7 +870,16 @@ class TTNNNoTPTransformerBlock(TTNNModule):
             bias=self.layer_norm1_bias,
             epsilon=self.layernorm_epsilon,
         )
+
         residual = self.self_attn.forward(residual)
+        if isinstance(residual, torch.Tensor):
+            residual = ttnn.from_torch(
+                residual,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+            )
+
         h = ttnn.add(x, residual, memory_config=ttnn.L1_MEMORY_CONFIG)
         ttnn.deallocate(residual)
 
@@ -858,7 +891,16 @@ class TTNNNoTPTransformerBlock(TTNNModule):
             epsilon=self.layernorm_epsilon,
         )
         out = self.mlp.forward(out)
+        if isinstance(out, torch.Tensor):
+            out = ttnn.from_torch(
+                out,
+                dtype=ttnn.bfloat16,
+                layout=ttnn.TILE_LAYOUT,
+                device=self.device,
+            )
+
         out = ttnn.add(h, out, memory_config=ttnn.L1_MEMORY_CONFIG)
         ttnn.deallocate(h)
 
+        out = ttnn.to_torch(out)
         return out
