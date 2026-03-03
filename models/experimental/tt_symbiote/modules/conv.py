@@ -17,6 +17,22 @@ from models.experimental.tt_symbiote.modules.normalization import TTNNLayerNorm
 from models.experimental.tt_symbiote.modules.attention import TTNNSAMAttention
 
 
+class TTNNSAMLayerNorm(TTNNLayerNorm):
+    """SAM-only LayerNorm: passes epsilon from torch layer (default 1e-5) for PCC match without changing shared TTNNLayerNorm."""
+
+    def forward(self, input_tensor: ttnn.Tensor) -> ttnn.Tensor:
+        if input_tensor.layout != ttnn.TILE_LAYOUT:
+            input_tensor = ttnn.to_layout(input_tensor, ttnn.TILE_LAYOUT, memory_config=ttnn.DRAM_MEMORY_CONFIG)
+        eps = getattr(self.torch_layer, "eps", 1e-5)
+        tt_output = ttnn.layer_norm(
+            input_tensor,
+            weight=self.tt_weight,
+            bias=self.tt_bias,
+            epsilon=eps,
+        )
+        return tt_output
+
+
 class NHWCLayerNorm2dWrapper(nn.Module):
     """Wraps LayerNorm2d so that when called with NHWC (from TTNN path in DPL), it permutes to NCHW and back."""
 
@@ -503,7 +519,7 @@ class TTNNSAMMLPBlock(TTNNModule):
 class TTNNSAMBlock(TTNNModule):
     """TTNN version of SAM Block (deepencoder.py).
     Residual: norm1 -> attn -> +shortcut; norm2 -> mlp -> +shortcut.
-    Uses TTNNSAMAttention; supports window_size=0 only (no window partition).
+    attn is TTNNSAMAttention (single class; window_size on attn controls global vs windowed).
     """
 
     def __init__(self, window_size: int = 0):
@@ -515,9 +531,9 @@ class TTNNSAMBlock(TTNNModule):
             self._fallback_torch_layer is not None
         ), "Fallback torch layer must be set before initializing submodules."
         blk = self.torch_layer
-        self.norm1 = TTNNLayerNorm.from_torch(blk.norm1)
-        self.attn = TTNNSAMAttention.from_torch(blk.attn)
-        self.norm2 = TTNNLayerNorm.from_torch(blk.norm2)
+        self.norm1 = TTNNSAMLayerNorm.from_torch(blk.norm1)
+        self.attn = TTNNSAMAttention.from_torch(blk.attn, window_size=self.window_size)
+        self.norm2 = TTNNSAMLayerNorm.from_torch(blk.norm2)
         self.mlp = TTNNSAMMLPBlock.from_torch(blk.mlp)
 
     @classmethod
@@ -539,19 +555,25 @@ class TTNNSAMBlock(TTNNModule):
 
         shortcut = x
         x = self.norm1(x)
-        x = self.attn(x)
-        # Unwrap so ttnn.add receives two ttnn.Tensor (run_config may wrap submodule outputs as TorchTTNNTensor)
+        x = x.ttnn_tensor if hasattr(x, "ttnn_tensor") else x
+        attn_out = self.attn(x)
+        attn_out = attn_out.ttnn_tensor if hasattr(attn_out, "ttnn_tensor") else attn_out
+        ttnn.deallocate(x)
         x = ttnn.add(
             shortcut.to_ttnn if hasattr(shortcut, "to_ttnn") else shortcut,
-            x.to_ttnn if hasattr(x, "to_ttnn") else x,
+            attn_out,
         )
+        ttnn.deallocate(attn_out)
         shortcut = x
         x = self.norm2(x)
+        x = x.ttnn_tensor if hasattr(x, "ttnn_tensor") else x
         x = self.mlp(x)
+        x = x.ttnn_tensor if hasattr(x, "ttnn_tensor") else x
         x = ttnn.add(
             shortcut.to_ttnn if hasattr(shortcut, "to_ttnn") else shortcut,
-            x.to_ttnn if hasattr(x, "to_ttnn") else x,
+            x,
         )
+        ttnn.deallocate(shortcut)
         return x
 
 
@@ -573,24 +595,26 @@ class TTNNImageEncoderViT(TTNNModule):
         enc = self.torch_layer
         # SAM patch_embed is PatchEmbed(proj=Conv2d); reuse existing TTNNConv2dNHWC
         self.patch_embed = TTNNConv2dNHWC.from_torch(enc.patch_embed.proj)
-        # Use list (not nn.ModuleList): TTNNSAMBlock is TTNNModule, not nn.Module
+        # Use list (not nn.ModuleList): TTNNSAMBlock is TTNNModule, not nn.Module.
+        # Per-block window_size to match ref (e.g. SAM: 14 for most blocks, 0 for global-attn blocks 2,5,8,11).
         self.blocks = []
         for i in range(self.depth):
-            self.blocks.append(TTNNSAMBlock.from_torch(enc.blocks[i], window_size=self.window_size))
+            win_sz = getattr(enc.blocks[i], "window_size", 0)
+            self.blocks.append(TTNNSAMBlock.from_torch(enc.blocks[i], window_size=win_sz))
         # neck: Sequential(Conv2d, LayerNorm2d, Conv2d, LayerNorm2d)
         neck_list = list(enc.neck.children())
         self.neck_conv1 = TTNNConv2dNHWC.from_torch(neck_list[0])
-        self.neck_ln1 = TTNNLayerNorm.from_torch(neck_list[1])
+        self.neck_ln1 = TTNNSAMLayerNorm.from_torch(neck_list[1])
         self.neck_ln1._fallback_torch_layer = NHWCLayerNorm2dWrapper(neck_list[1])  # DPL: neck receives NHWC
         self.neck_conv2 = TTNNConv2dNHWC.from_torch(neck_list[2])
-        self.neck_ln2 = TTNNLayerNorm.from_torch(neck_list[3])
+        self.neck_ln2 = TTNNSAMLayerNorm.from_torch(neck_list[3])
         self.neck_ln2._fallback_torch_layer = NHWCLayerNorm2dWrapper(neck_list[3])  # DPL: neck receives NHWC
         self.net_2 = TTNNConv2dNHWC.from_torch(enc.net_2)
         self.net_3 = TTNNConv2dNHWC.from_torch(enc.net_3)
 
     @classmethod
     def from_torch(cls, encoder: "nn.Module", window_size: int = 0) -> "TTNNImageEncoderViT":
-        """Create from SAM ImageEncoderViT (encoder)."""
+        """Create from SAM ImageEncoderViT (encoder); uses full depth."""
         depth = len(encoder.blocks)
         new_enc = cls(depth=depth, window_size=window_size)
         new_enc._fallback_torch_layer = encoder
