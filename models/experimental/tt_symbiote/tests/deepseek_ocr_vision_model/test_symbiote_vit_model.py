@@ -43,11 +43,18 @@ def test_tt_ClipVisionEmbeddings_pcc(device, ocr_model):
     vision_model = ocr_model.model.vision_model
 
     torch.manual_seed(42)
-    ref_input_patches = torch.randn(1, 3, 224, 224).to(torch.bfloat16)
-    ref_input_features = None
+    ref_input_patches = torch.load(
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/vision_model_input_patches.pt"
+    )
+    ref_input_features = torch.load(
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/vision_model_input_local_features.pt",
+        weights_only=False,
+    )
 
     with torch.no_grad():
         ref_out = vision_model(ref_input_patches, ref_input_features)
+
+    ref_input_features = ref_input_features.flatten(2).transpose(1, 2)
 
     nn_to_ttnn = {
         vision_model.embeddings.__class__: TTNNClipVisionEmbeddings,
@@ -65,7 +72,7 @@ def test_tt_ClipVisionEmbeddings_pcc(device, ocr_model):
     DispatchManager.clear_timings()
     tt_out = vision_model(ref_input_patches, ref_input_features)
     DispatchManager.save_stats_to_file(
-        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/deepseek_ocr_module_timing_stats.csv"
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/deepseek_ocr_module_timing_stats.csv"
     )
 
     passed, message = check_with_pcc(ref_out.float(), tt_out.float(), pcc=0.99)
@@ -93,8 +100,13 @@ def test_tt_NoTPAttention_pcc(device, ocr_model):
     vision_model = ocr_model.model.vision_model
 
     torch.manual_seed(42)
-    ref_input_patches = torch.randn(1, 3, 224, 224).to(torch.bfloat16)
-    ref_input_features = None
+    ref_input_patches = torch.load(
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/vision_model_input_patches.pt"
+    )
+    ref_input_features = torch.load(
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/vision_model_input_local_features.pt",
+        weights_only=False,
+    )
 
     with torch.no_grad():
         ref_out = vision_model(ref_input_patches, ref_input_features)
@@ -115,7 +127,7 @@ def test_tt_NoTPAttention_pcc(device, ocr_model):
     DispatchManager.clear_timings()
     tt_out = vision_model(ref_input_patches, ref_input_features)
     DispatchManager.save_stats_to_file(
-        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/deepseek_ocr_module_timing_stats.csv"
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/deepseek_ocr_module_timing_stats.csv"
     )
 
     passed, message = check_with_pcc(ref_out.float(), tt_out.float(), pcc=0.99)
@@ -143,8 +155,13 @@ def test_tt_NoTPFeedForward_pcc(device, ocr_model):
     vision_model = ocr_model.model.vision_model
 
     torch.manual_seed(42)
-    ref_input_patches = torch.randn(1, 3, 224, 224).to(torch.bfloat16)
-    ref_input_features = None
+    ref_input_patches = torch.load(
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/vision_model_input_patches.pt"
+    )
+    ref_input_features = torch.load(
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/vision_model_input_local_features.pt",
+        weights_only=False,
+    )
 
     with torch.no_grad():
         ref_out = vision_model(ref_input_patches, ref_input_features)
@@ -165,7 +182,7 @@ def test_tt_NoTPFeedForward_pcc(device, ocr_model):
     DispatchManager.clear_timings()
     tt_out = vision_model(ref_input_patches, ref_input_features)
     DispatchManager.save_stats_to_file(
-        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/deepseek_ocr_module_timing_stats.csv"
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/deepseek_ocr_module_timing_stats.csv"
     )
 
     passed, message = check_with_pcc(ref_out.float(), tt_out.float(), pcc=0.99)
@@ -193,8 +210,13 @@ def test_tt_NoTPTransformerBlock_pcc(device, ocr_model):
     vision_model = ocr_model.model.vision_model
 
     torch.manual_seed(42)
-    ref_input_patches = torch.randn(1, 3, 224, 224).to(torch.bfloat16)
-    ref_input_features = None
+    ref_input_patches = torch.load(
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/vision_model_input_patches.pt"
+    )
+    ref_input_features = torch.load(
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/vision_model_input_local_features.pt",
+        weights_only=False,
+    )
 
     with torch.no_grad():
         ref_out = vision_model(ref_input_patches, ref_input_features)
@@ -215,7 +237,7 @@ def test_tt_NoTPTransformerBlock_pcc(device, ocr_model):
     DispatchManager.clear_timings()
     tt_out = vision_model(ref_input_patches, ref_input_features)
     DispatchManager.save_stats_to_file(
-        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/deepseek_ocr_module_timing_stats.csv"
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/deepseek_ocr_module_timing_stats.csv"
     )
 
     passed, message = check_with_pcc(ref_out.float(), tt_out.float(), pcc=0.99)
@@ -243,8 +265,13 @@ def test_tt_NoTPTransformer_pcc(device, ocr_model):
     vision_model = ocr_model.model.vision_model
 
     torch.manual_seed(42)
-    ref_input_patches = torch.randn(1, 3, 224, 224).to(torch.bfloat16)
-    ref_input_features = None
+    ref_input_patches = torch.load(
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/vision_model_input_patches.pt"
+    )
+    ref_input_features = torch.load(
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/vision_model_input_local_features.pt",
+        weights_only=False,
+    )
 
     with torch.no_grad():
         ref_out = vision_model(ref_input_patches, ref_input_features)
@@ -265,7 +292,7 @@ def test_tt_NoTPTransformer_pcc(device, ocr_model):
     DispatchManager.clear_timings()
     tt_out = vision_model(ref_input_patches, ref_input_features)
     DispatchManager.save_stats_to_file(
-        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/deepseek_ocr_module_timing_stats.csv"
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/deepseek_ocr_module_timing_stats.csv"
     )
 
     passed, message = check_with_pcc(ref_out.float(), tt_out.float(), pcc=0.99)
@@ -293,11 +320,18 @@ def test_tt_vitmodel_pcc(device, ocr_model):
     vision_model = ocr_model.model.vision_model
 
     torch.manual_seed(42)
-    ref_input_patches = torch.randn(1, 3, 224, 224).to(torch.bfloat16)
-    ref_input_features = None
+    ref_input_patches = torch.load(
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/vision_model_input_patches.pt"
+    )
+    ref_input_features = torch.load(
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/vision_model_input_local_features.pt",
+        weights_only=False,
+    )
 
     with torch.no_grad():
         ref_out = vision_model(ref_input_patches, ref_input_features)
+
+    ref_input_features = ref_input_features.flatten(2).transpose(1, 2)
 
     vision_model = TTNNVitModel.from_torch(vision_model)
     set_device(vision_model, device)
@@ -306,7 +340,7 @@ def test_tt_vitmodel_pcc(device, ocr_model):
     DispatchManager.clear_timings()
     tt_out = vision_model(ref_input_patches, ref_input_features)
     DispatchManager.save_stats_to_file(
-        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/deepseek_ocr_module_timing_stats.csv"
+        "models/experimental/tt_symbiote/tests/deepseek_ocr_vision_model/extras/deepseek_ocr_module_timing_stats.csv"
     )
 
     passed, message = check_with_pcc(ref_out.float(), tt_out.float(), pcc=0.99)
