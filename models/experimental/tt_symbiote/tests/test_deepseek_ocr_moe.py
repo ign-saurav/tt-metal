@@ -6,17 +6,20 @@ DeepSeek OCR MoE gate test. TTNN gate implements the same topk methods as the re
 topk_method; the OCR model is loaded with greedy, so we set config and gate in place so this run
 uses the chosen method (and TTNN from_torch sees it).
 """
+import os
 import pytest
 import torch
 from torch import nn
 from transformers import AutoModel
 from loguru import logger
 
+import ttnn
+
 from tests.ttnn.utils_for_testing import check_with_pcc
 
 from models.experimental.tt_symbiote.utils.device_management import set_device
 
-from models.experimental.tt_symbiote.modules.moe import TTNNDeepseekOCRMoEGate
+from models.experimental.tt_symbiote.modules.moe import TTNNDeepseekOCRMoEGate, TTNNDeepseekV2MoE
 
 
 # OCR model is loaded with topk_method=greedy; for group_limited_greedy and noaux_tc we must set n_group/topk_group
@@ -97,3 +100,43 @@ def test_deepseek_ocr_moe(device, ocr_model, topk_method):
     passed, message = check_with_pcc(ref_weight_by_val, tt_weight_by_val, pcc=pcc)
     logger.info(f"TT MOE PCC: {message}")
     assert passed, f"TT MOE PCC check failed: {message}"
+
+
+@pytest.fixture(scope="module")
+def ocr_moe_layer(ocr_model):
+    """Extract the MoE layer (DeepseekV2MoE) from the OCR model."""
+    return ocr_model.model.layers[1].mlp
+
+
+@pytest.mark.parametrize(
+    "device_params",
+    [{"l1_small_size": 245760, "fabric_config": ttnn.FabricConfig.FABRIC_1D_RING}],
+    indirect=True,
+)
+def test_deepseek_ocr_moe_full(mesh_device, ocr_moe_layer):
+    """Full DeepSeek V2 MoE forward vs reference; TTNN-only on T3K (TTNNExperts is T3K-only)."""
+    if os.environ.get("MESH_DEVICE") != "T3K":
+        pytest.skip("TTNN-only full MoE requires T3K (TTNNExperts is T3K-only). Set MESH_DEVICE=T3K to run.")
+    torch.manual_seed(42)
+    torch.set_grad_enabled(False)
+
+    torch_moe = ocr_moe_layer.eval().to(torch.bfloat16)
+    batch_size, seq_len = 1, 128
+    config = torch_moe.config
+    inputs = torch.randn((batch_size, seq_len, config.hidden_size), dtype=torch.bfloat16)
+
+    with torch.no_grad():
+        reference_output = torch_moe(inputs)
+
+    ttnn_moe = TTNNDeepseekV2MoE.from_torch(torch_moe)
+    set_device(ttnn_moe, mesh_device)
+    ttnn_moe.preprocess_weights()
+    ttnn_moe.move_weights_to_device()
+
+    tt_output = ttnn_moe(inputs)
+
+    assert not getattr(
+        ttnn_moe, "_used_fallback", False
+    ), "MoE ran with PyTorch fallback; this test requires TTNN-only execution (e.g. T3K with TTNNExperts)."
+    passed, msg = check_with_pcc(reference_output.float(), tt_output.float(), pcc=0.99)
+    assert passed, f"TTNNDeepseekV2MoE PCC: {msg}"

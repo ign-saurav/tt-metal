@@ -4,7 +4,6 @@
 
 """Mixture of Experts implementations for TTNN."""
 
-
 import torch
 from torch import nn
 import ttnn
@@ -1355,6 +1354,141 @@ class TTNNMoE(TTNNModule):
 
 
 from models.experimental.tt_symbiote.modules.linear import TTNNLinear
+
+
+def _stack_deepseek_v2_experts(experts_module_list, config):
+    """
+    Build a single object with gate_up_proj and down_proj from a ModuleList of
+    DeepseekV2MLP-style experts (each with gate_proj, up_proj, down_proj).
+    Compatible with TTNNExperts.from_torch() so V2 MoE can reuse the V3 expert stack.
+    """
+    experts = list(experts_module_list)
+    gate_up_list = []
+    down_list = []
+    for expert in experts:
+        if expert is None:
+            continue
+        gate_w = expert.gate_proj.weight
+        up_w = expert.up_proj.weight
+        down_w = expert.down_proj.weight
+        gate_up_list.append(torch.cat([gate_w, up_w], dim=0))
+        down_list.append(down_w.T)
+    gate_up_proj = torch.stack(gate_up_list, dim=0)
+    down_proj = torch.stack(down_list, dim=0)
+    out = type("DeepseekV2ExpertsStack", (), {})()
+    out.config = config
+    out.gate_up_proj = gate_up_proj
+    out.down_proj = down_proj
+    return out
+
+
+class TTNNDeepseekV2MoE(TTNNModule):
+    """
+    TTNN symbiote for DeepSeek V2 MoE (e.g. DeepSeek-OCR).
+    Uses TTNNDeepseekOCRMoEGate (supports greedy, group_limited_greedy, noaux_tc),
+    reuses TTNNExperts for moe_infer (same as V3), and TTNNGlm4MoeMLP for shared expert.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.hidden_size = config.hidden_size
+        self.num_experts_per_tok = config.num_experts_per_tok
+        self.n_routed_experts = config.n_routed_experts
+
+    @classmethod
+    def from_torch(cls, torch_moe):
+        """
+        Create TTNNDeepseekV2MoE from PyTorch DeepseekV2MoE (or any MoE with
+        .gate (MoEGate), .experts (ModuleList of MLPs with gate_proj/up_proj/down_proj),
+        optional .shared_experts, and .config).
+        """
+        module = cls(torch_moe.config)
+        module._fallback_torch_layer = torch_moe
+
+        module.gate = TTNNDeepseekOCRMoEGate.from_torch(torch_moe.gate)
+
+        stacked_experts = _stack_deepseek_v2_experts(torch_moe.experts, torch_moe.config)
+        module.experts = TTNNExperts.from_torch(stacked_experts)
+
+        if getattr(torch_moe, "shared_experts", None) is not None:
+            module.shared_experts = TTNNGlm4MoeMLP.from_torch(torch_moe.shared_experts)
+        else:
+            module.shared_experts = None
+
+        return module
+
+    def preprocess_weights_impl(self):
+        if hasattr(self.gate, "init_parameters"):
+            self.gate.init_parameters()
+        self.gate.preprocess_weights()
+        self.experts.preprocess_weights()
+        if self.shared_experts is not None:
+            self.shared_experts.preprocess_weights()
+
+    def _forward_ttnn(self, hidden_states):
+        if hasattr(hidden_states, "to_ttnn"):
+            hidden_states = hidden_states.to_ttnn
+        orig_shape = list(hidden_states.shape)
+        if len(orig_shape) == 3:
+            batch, seq, hidden = orig_shape
+            hidden_states_4d = ttnn.reshape(hidden_states, (batch, 1, seq, hidden))
+        else:
+            hidden_states_4d = hidden_states
+            batch, _, seq, hidden = hidden_states_4d.shape
+            orig_shape = [batch, seq, hidden]
+
+        topk_idx, topk_weight, _ = self.gate(hidden_states)
+        routed_output = self.experts(hidden_states_4d, topk_idx, topk_weight)
+        if hasattr(routed_output, "to_ttnn"):
+            routed_output = routed_output.to_ttnn
+        if self.shared_experts is not None:
+            shared_out = self.shared_experts(hidden_states_4d)
+            if hasattr(shared_out, "to_ttnn"):
+                shared_out = shared_out.to_ttnn
+            routed_output = ttnn.add(routed_output, shared_out)
+        return ttnn.reshape(routed_output, orig_shape)
+
+    def forward(self, hidden_states):
+        self._used_fallback = False
+        device = getattr(self, "device", None)
+        if device is None:
+            self._used_fallback = True
+            inp = _to_torch_for_fallback(hidden_states)
+            with torch.no_grad():
+                return self._fallback_torch_layer(inp)
+        try:
+            return self._forward_ttnn(hidden_states)
+        except Exception:
+            self._used_fallback = True
+            inp = _to_torch_for_fallback(hidden_states)
+            with torch.no_grad():
+                return self._fallback_torch_layer(inp)
+
+
+def _to_torch_for_fallback(tensor):
+    """Convert symbiote/ttnn input to torch for fallback; ttnn.to_torch copies from device if needed."""
+    if isinstance(tensor, torch.Tensor):
+        from models.experimental.tt_symbiote.core.tensor import TorchTTNNTensor
+
+        if not isinstance(tensor, TorchTTNNTensor):
+            return tensor
+        if getattr(tensor, "ttnn_tensor", None) is not None:
+            return ttnn.to_torch(tensor.ttnn_tensor)
+        return getattr(tensor, "to_torch", tensor.elem if getattr(tensor, "elem", None) is not None else tensor)
+    if hasattr(tensor, "ttnn_tensor") and tensor.ttnn_tensor is not None:
+        return ttnn.to_torch(tensor.ttnn_tensor)
+    try:
+        if getattr(ttnn, "is_tensor_storage_on_device", None) and ttnn.is_tensor_storage_on_device(tensor):
+            return ttnn.to_torch(tensor)
+    except Exception:
+        pass
+    if hasattr(tensor, "to_torch"):
+        out = tensor.to_torch
+        if callable(out):
+            return out()
+        return out
+    return tensor
 
 
 class TTNNDeepseekOCRMoEGate(TTNNModule):
