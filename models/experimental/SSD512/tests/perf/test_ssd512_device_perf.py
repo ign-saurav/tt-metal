@@ -8,7 +8,7 @@ from models.perf.device_perf_utils import check_device_perf, prep_device_perf_re
 @pytest.mark.parametrize(
     "batch_size, model_name, expected_perf",
     [
-        (1, "ssd512", 50.0),
+        (1, "ssd512", 147.6),
     ],
 )
 @pytest.mark.models_device_performance_bare_metal
@@ -17,7 +17,7 @@ def test_perf_device_bare_metal_ssd512(batch_size, model_name, expected_perf):
     num_iterations = 1
     margin = 0.04
 
-    command = f"pytest models/experimental/SSD512/tests/pcc/test_ssd.py"
+    command = f"pytest models/experimental/SSD512/tests/pcc/test_ssd512.py"
 
     cols = ["DEVICE FW", "DEVICE KERNEL", "DEVICE BRISC KERNEL"]
 
