@@ -1,24 +1,22 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
+
 # SPDX-License-Identifier: Apache-2.0
 
+import os
 import torch
 import pytest
-import ttnn
-import tracy
 from loguru import logger
+import urllib.request
+import ttnn
 from models.experimental.petr.reference.petr import PETR
-from models.experimental.petr.tt.ttnn_petr import ttnn_PETR
-import os
-from models.experimental.petr.tt.common import get_parameters, generate_petr_inputs
+from models.experimental.petr.tt.tt_petr import ttnn_PETR
+from models.experimental.petr.tt.model_preprocessing import get_parameters, generate_petr_inputs
+from tests.ttnn.utils_for_testing import check_with_pcc, assert_with_pcc
+import tracy
 
 
 def prepare_inputs():
     inputs, modified_batch_img_metas = generate_petr_inputs()
-    inputs["imgs"] = inputs["imgs"][:, 0:1, :, :, :]
-    for meta in modified_batch_img_metas:
-        meta["cam2img"] = [meta["cam2img"][0]]
-        meta["lidar2cam"] = [meta["lidar2cam"][0]]
-        meta["img_shape"] = [meta["img_shape"][0]] if isinstance(meta["img_shape"], list) else meta["img_shape"]
     return inputs, modified_batch_img_metas
 
 
@@ -34,8 +32,6 @@ def prepare_torch_model():
     if not os.path.exists(resources_dir):
         os.makedirs(resources_dir)
     if not os.path.exists(weights_path):
-        import urllib.request
-
         logger.info(f"Downloading PETR weights from {weights_url} ...")
         urllib.request.urlretrieve(weights_url, weights_path)
         logger.info(f"Weights downloaded to {weights_path}")
@@ -44,6 +40,26 @@ def prepare_torch_model():
     torch_model.load_state_dict(weights_state_dict)
     torch_model.eval()
     return torch_model
+
+
+def verify_output(torch_output, ttnn_output):
+    ttnn_output = {
+        "all_cls_scores": ttnn.to_torch(ttnn_output["all_cls_scores"])
+        if isinstance(ttnn_output["all_cls_scores"], ttnn.Tensor)
+        else ttnn_output["all_cls_scores"],
+        "all_bbox_preds": ttnn.to_torch(ttnn_output["all_bbox_preds"])
+        if isinstance(ttnn_output["all_bbox_preds"], ttnn.Tensor)
+        else ttnn_output["all_bbox_preds"],
+    }
+
+    passed, pcc_cls = check_with_pcc(torch_output["all_cls_scores"], ttnn_output["all_cls_scores"], pcc=0.97)
+    logger.info(f"PETR all_cls_scores PCC: {float(pcc_cls):.6f}")
+
+    passed, pcc_bbox = check_with_pcc(torch_output["all_bbox_preds"], ttnn_output["all_bbox_preds"], pcc=0.97)
+    logger.info(f"PETR all_bbox_preds PCC: {float(pcc_bbox):.6f}")
+
+    assert_with_pcc(torch_output["all_cls_scores"], ttnn_output["all_cls_scores"], pcc=0.97)
+    assert_with_pcc(torch_output["all_bbox_preds"], ttnn_output["all_bbox_preds"], pcc=0.97)
 
 
 @pytest.mark.parametrize("device_params", [{"l1_small_size": 24576}], indirect=True)
@@ -68,7 +84,7 @@ def test_petr(device, reset_seeds):
         query_embedding_input=query_embedding_input,
         device=device,
     )
-
     tracy.signpost("start")
     ttnn_output = ttnn_model.predict(ttnn_inputs, ttnn_batch_img_metas, skip_post_processing=True)
     tracy.signpost("stop")
+    verify_output(torch_output, ttnn_output)
