@@ -317,7 +317,8 @@ def prepare_generator_args(
             1,
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            # True,  # enable_trace
+            False,  # enable_trace
         ),
         (  # Batch-32 run (Throughput) - 32 users, small prompt
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
@@ -334,7 +335,8 @@ def prepare_generator_args(
             1,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            # True,  # enable_trace
         ),
         (  # long-context-64k run - Single user, long prompt (may vary based on the model's tokenizer)
             "models/tt_transformers/demo/sample_prompts/input_data_long_64k.json",  # input_prompts
@@ -351,7 +353,8 @@ def prepare_generator_args(
             1,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            # True,  # enable_trace
+            False,  # enable_trace
         ),
         (  # Long-context-32k run - Single user, long prompt (may vary based on the model's tokenizer)
             "models/tt_transformers/demo/sample_prompts/input_data_long_32k.json",  # input_prompts
@@ -368,7 +371,8 @@ def prepare_generator_args(
             1,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            # True,  # enable_trace
         ),
         (  # Long-context-16k run - Single user, long prompt (may vary based on the model's tokenizer)
             "models/tt_transformers/demo/sample_prompts/input_data_long_16k.json",  # input_prompts
@@ -385,7 +389,8 @@ def prepare_generator_args(
             1,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            # True,  # enable_trace
         ),
         (  # Long-context-2k run - Single user, long prompt (may vary based on the model's tokenizer)
             "models/tt_transformers/demo/sample_prompts/input_data_long_2k.json",  # input_prompts
@@ -402,7 +407,8 @@ def prepare_generator_args(
             1,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            # True,  # enable_trace
         ),
         (  # Long-context-1k run - Single user, long prompt (may vary based on the model's tokenizer)
             "models/tt_transformers/demo/sample_prompts/input_data_long_1k.json",  # input_prompts
@@ -419,7 +425,8 @@ def prepare_generator_args(
             1,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            # True,  # enable_trace
         ),
         (  # stress test
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
@@ -436,7 +443,8 @@ def prepare_generator_args(
             1,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            # True,  # enable_trace
         ),
         (  # reasoning-1 - single user, small prompt, long thinking time
             "models/tt_transformers/demo/input_data_questions_reasoning.json",  # input_prompts
@@ -456,7 +464,8 @@ def prepare_generator_args(
             1,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            # True,  # enable_trace
         ),
         (  # ci-1 [CI-only] - Measures the performance of a single user over 2048 iterations
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
@@ -473,7 +482,8 @@ def prepare_generator_args(
             1,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            #   True,  # enable_trace
         ),
         (  # ci-32 [CI-only] - Measures the performance of 32 users over 4096 iterations
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
@@ -490,7 +500,8 @@ def prepare_generator_args(
             1,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            #   True,  # enable_trace
         ),
         (  # DP-4-b1 - single user, data-parallel=4, small prompt
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
@@ -507,7 +518,8 @@ def prepare_generator_args(
             4,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            #   True,  # enable_trace
         ),
         (  # DP-8-b1 - single user, data-parallel=8, small prompt
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
@@ -524,7 +536,8 @@ def prepare_generator_args(
             8,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            #   True,  # enable_trace
         ),
         (  # DP-4-b32 - 32 users, data-parallel=4, small prompt
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
@@ -541,7 +554,8 @@ def prepare_generator_args(
             4,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            #   True,  # enable_trace
         ),
         (  # ci-b1-DP-4 [CI-Only] - single user, data-parallel=4, small prompt
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
@@ -558,7 +572,8 @@ def prepare_generator_args(
             4,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            #   True,  # enable_trace
         ),
         (  # ci-b1-DP-8 [CI-Only] - single user, data-parallel=8, small prompt
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
@@ -575,7 +590,8 @@ def prepare_generator_args(
             8,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            #   True,  # enable_trace
         ),
         (  # ci-b1-DP-16 [CI-Only] - single user, data-parallel=16, small prompt
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
@@ -592,7 +608,8 @@ def prepare_generator_args(
             16,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            #   True,  # enable_trace
         ),
         (  # ci-b1-DP-32 [CI-Only] - single user, data-parallel=32, small prompt
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
@@ -609,7 +626,8 @@ def prepare_generator_args(
             32,  # data_parallel
             False,  # token_accuracy
             False,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            #   True,  # enable_trace
         ),
         (  # ci-stress-1 [CI-only] stress test - Runs a short prefill (128) and loops the same iteration over 50000 times
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts
@@ -626,7 +644,8 @@ def prepare_generator_args(
             1,  # data_parallel
             False,  # token_accuracy
             True,  # stress_test
-            True,  # enable_trace
+            False,  # enable_trace
+            #   True,  # enable_trace
         ),
         (  # CI Batch-1 run - Measures token matching accuracy of a single user over 500 iterations
             "models/tt_transformers/demo/sample_prompts/input_data_questions_prefill_128.json",  # input_prompts

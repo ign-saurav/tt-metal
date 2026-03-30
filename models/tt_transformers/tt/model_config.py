@@ -1432,8 +1432,13 @@ class ModelArgs:
             if seq_len >= 2048
             else min(64, chunk_start_idx & -chunk_start_idx)
         )
+        if is_blackhole() and self.mesh_device is not None:
+            grid = self.mesh_device.compute_with_storage_grid_size()
+            sdpa_grid = (grid.x, grid.y)
+        else:
+            sdpa_grid = (8, 8)
         return ttnn.SDPAProgramConfig(
-            compute_with_storage_grid_size=(8, 8),
+            compute_with_storage_grid_size=sdpa_grid,
             exp_approx_mode=False,
             q_chunk_size=q_chunk,
             k_chunk_size=k_chunk,
@@ -1456,8 +1461,15 @@ class ModelArgs:
                 k_chunk_size=0,
             )
         else:
+            # Blackhole worker grid is taller than Wormhole's classic 8x8 (e.g. P150 uses 8x10). Using
+            # (8, 8) for SDPA decode mismatches the real grid and can hang; align with device grid like prefill QKV.
+            if is_blackhole() and self.mesh_device is not None:
+                grid = self.mesh_device.compute_with_storage_grid_size()
+                sdpa_grid = (grid.x, grid.y)
+            else:
+                sdpa_grid = (8, 8)
             return ttnn.SDPAProgramConfig(
-                compute_with_storage_grid_size=(8, 8),
+                compute_with_storage_grid_size=sdpa_grid,
                 exp_approx_mode=False,
                 q_chunk_size=0,
                 k_chunk_size=0,

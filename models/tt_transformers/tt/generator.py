@@ -79,6 +79,8 @@ class Generator(WarmupForwardMixin):
         # By default, enable split sampling (break the decode trace into two parts: upto logits, then sampling step)
         self.enable_split_sampling = True
         self.mode = None
+        self._logged_blackhole_decode_trace_warning = False
+        self._logged_blackhole_decode_forward_start = False
 
     # Class-level capabilities (VLLM specific, to be overridden by subclasses)
     model_capabilities = {
@@ -107,6 +109,40 @@ class Generator(WarmupForwardMixin):
         ret["page_table"] = page_table_warmup
 
         return ret
+
+    def _zero_kv_caches(self, kv_cache):
+        """Zero on-device KV tensors. Prefill warmup fills cache; decode warmup uses start_pos=0 and must match empty cache."""
+        if kv_cache is None:
+            return
+        for model_id in range(self.data_parallel):
+            if model_id >= len(kv_cache) or kv_cache[model_id] is None:
+                continue
+            for layer in self.model[model_id].layers:
+                k_cache, v_cache = layer.attention.layer_past
+                ttnn.mul(k_cache, 0, output_tensor=k_cache)
+                ttnn.mul(v_cache, 0, output_tensor=v_cache)
+
+    def warmup_model_decode(
+        self,
+        kv_cache,
+        enable_trace,
+        max_batch_size,
+        num_blocks,
+        can_sample_on_device,
+        non_greedy_decoding_on_device,
+    ):
+        # Clear KV after prefill warmup so decode warmup sees an empty cache at start_pos=0 (matches synthetic inputs).
+        logger.info("Clearing KV cache after prefill warmup (decode warmup expects empty cache at start_pos=0).")
+        self._zero_kv_caches(kv_cache)
+
+        super().warmup_model_decode(
+            kv_cache,
+            enable_trace,
+            max_batch_size,
+            num_blocks,
+            can_sample_on_device,
+            non_greedy_decoding_on_device,
+        )
 
     def warmup_model_prefill(self, kv_cache, enable_trace, can_sample_on_device, non_greedy_decoding_on_device):
         if self.already_warmed_up_prefill:
@@ -172,8 +208,9 @@ class Generator(WarmupForwardMixin):
                 if skip_sequence_lengths:
                     break
 
-        # Vision compile for multimodal models
-        if getattr(self.model_args[0], "is_multimodal", False):
+        # Vision compile for multimodal models (only if the loaded model implements vision;
+        # e.g. Gemma text demo uses Transformer without vision_model but ModelArgs stays multimodal)
+        if getattr(self.model_args[0], "is_multimodal", False) and hasattr(self.model[0], "vision_model"):
             vision_chunk_size = getattr(self.model_args[0], "vision_chunk_size", 896)
             vision_channels = getattr(self.model_args[0], "vision_in_channels", 3)
             model_id = 0
@@ -935,9 +972,23 @@ class Generator(WarmupForwardMixin):
             self.mode = Mode.DECODE
             mode_switched = True
 
+        if ttnn.device.is_blackhole(self.mesh_device) and mode_switched:
+            logger.info(
+                "Blackhole: switching to decode mode and executing decode forward (first transition can be slow)..."
+            )
+
         # Switch to decode mode for prefetcher to reintialize sub devices
         for i in range(len(self.model)):
             self.model[i].switch_mode(Mode.DECODE)
+
+        # Blackhole (P150/P300/…): decode trace capture often hangs during warmup; use eager decode only.
+        if ttnn.device.is_blackhole(self.mesh_device):
+            if enable_trace and not self._logged_blackhole_decode_trace_warning:
+                logger.warning(
+                    "Blackhole: decode device trace is disabled (trace capture is unreliable); using eager decode."
+                )
+                self._logged_blackhole_decode_trace_warning = True
+            enable_trace = False
 
         sampling_on_device = sampling_params is not None
         split_sampling_enabled = bool(self.enable_split_sampling and sampling_on_device)
@@ -1031,6 +1082,12 @@ class Generator(WarmupForwardMixin):
         Performs text decode step.
         Returns tt_logits on device
         """
+        if ttnn.device.is_blackhole(self.mesh_device) and not self._logged_blackhole_decode_forward_start:
+            logger.info(
+                "Blackhole: running eager decode forward (first call may compile for several minutes with no further logs)."
+            )
+            self._logged_blackhole_decode_forward_start = True
+
         tt_output = []
         tt_tokens = []
         tt_current_pos = []
@@ -1085,6 +1142,9 @@ class Generator(WarmupForwardMixin):
             sampling_on_device=sampling_on_device,
         )
         logger.info("Done Compiling Model")
+
+        # Trace capture runs another full decode on device; first time can take minutes with no other output.
+        logger.info("Capturing decode trace (first capture may be slow)...")
 
         # Get inputs ready for trace run
         device_inputs = []
