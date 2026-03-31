@@ -20,7 +20,7 @@ DETR3D is a transformer-based approach for 3D object detection that extends the 
 ```
 models/experimental/detr3d/
 ├── demo/                          # Demo and inference scripts
-│   └── detr3d_demo.py            # Main demo script with AP calculation
+│   └── demo.py            # Main demo script with AP calculation
 ├── reference/                     # PyTorch reference implementation
 │   ├── model_3detr.py            # Main DETR3D model implementation
 │   ├── model_config.py            # Model configuration classes
@@ -39,15 +39,28 @@ models/experimental/detr3d/
 ├── ttnn/                          # TTNN-accelerated implementation
 │   └── model_3detr.py            # TTNN DETR3D model
 └── tests/                         # Test files
-    └── pcc/                       # Performance comparison tests
+    ├── pcc/                       # Model correctness tests
+    └── perf/                      # Device and e2e performance tests
 ```
+
+
+## Fallbacks
+
+Torch Fallback usage in code
+- Below mentioned operations in PointNet:
+  - QueryAndGroup()
+  - GatherOperation()
+  - FurthestPointSampling()
+- compute_mask() in MaskedTransformerEncoder:
+
+Note: Fallbacks can be disabled with export NO_FALLBACK=1, but the full model test gets hang.
+Issue for fallback is raised as [36719](https://github.com/tenstorrent/tt-metal/issues/36719)
+
 
 ### Dependencies
 
 ```bash
-pip install torch torchvision
-pip install numpy scipy
-pip install plyfile trimesh  # For point cloud processing
+pip install trimesh  # For point cloud processing
 ```
 
 ## Usage
@@ -79,7 +92,7 @@ test_dataset = datasets["test"]
 Run the demo script for inference with AP calculation:
 
 ```bash
-python models/experimental/detr3d/demo/detr3d_demo.py \
+python models/experimental/detr3d/demo/demo.py \
     --dataset-root-dir /path/to/sunrgbd/dataset \
     --test-ckpt /path/to/checkpoint.pth \
     --seed 0
@@ -93,7 +106,7 @@ models/experimental/detr3d/resources/detr3d_weights_download.sh
 ```
 
 ```bash
-python models/experimental/detr3d/demo/detr3d_demo.py \
+python models/experimental/detr3d/demo/demo.py \
     --dataset-root-dir  models/experimental/detr3d/resources/sunrgbd/
     --test-ckpt models/experimental/detr3d/resources/sunrgbd_masked_ep720.pth
 ```

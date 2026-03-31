@@ -1,11 +1,198 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
 
 # SPDX-License-Identifier: Apache-2.0
+
+import os
 
 import ttnn
 import torch
 import numpy as np
 from models.common.lightweightmodule import LightweightModule
+from models.tt_cnn.tt.builder import TtMaxPool2d, MaxPool2dConfiguration
+from models.experimental.detr3d.reference.model_3detr import BoxProcessor
+from ttnn.model_preprocessing import Conv2dArgs, ConvTranspose2dArgs, MaxPool2dArgs, GroupNormArgs, ModuleArgs
+from ttnn.torch_tracer import trace
+from ttnn.dot_access import make_dot_access_dict
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name, None)
+    if raw is None:
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
+
+
+NO_FALLBACK = _env_bool("NO_FALLBACK", default=False)
+
+
+def infer_ttnn_module_args(*, model, run_model, device):
+    if run_model is None:
+        return None
+
+    with trace():
+        output = run_model(model)
+
+    def _infer_ttnn_module_args(graph):
+        ttnn_module_args = {}
+        for node in graph:
+            attributes = graph.nodes[node]
+            operation = attributes["operation"]
+            if isinstance(operation, ttnn.tracer.TorchModule):
+                *_, module_name = operation.module.__ttnn_tracer_name__.split(".")
+                (input_node, _, edge_data), *_ = graph.in_edges(node, data=True)
+                input_shape = graph.nodes[input_node]["shapes"][edge_data["source_output_index"]]
+                if isinstance(operation.module, torch.nn.Conv2d):
+                    ttnn_module_args[module_name] = Conv2dArgs(
+                        in_channels=operation.module.in_channels,
+                        out_channels=operation.module.out_channels,
+                        kernel_size=operation.module.kernel_size,
+                        stride=operation.module.stride,
+                        padding=operation.module.padding,
+                        dilation=operation.module.dilation,
+                        groups=operation.module.groups,
+                        padding_mode=operation.module.padding_mode,
+                        batch_size=input_shape[0],
+                        input_height=input_shape[-2],
+                        input_width=input_shape[-1],
+                        math_fidelity=ttnn.MathFidelity.HiFi4,
+                        dtype=ttnn.bfloat16,
+                        weights_dtype=ttnn.bfloat16,
+                        use_1d_systolic_array=True,
+                        enable_auto_formatting=False,
+                        conv_blocking_and_parallelization_config_override={},
+                        device=device,
+                    )
+                elif isinstance(operation.module, torch.nn.ConvTranspose2d):
+                    ttnn_module_args[module_name] = ConvTranspose2dArgs(
+                        in_channels=operation.module.in_channels,
+                        out_channels=operation.module.out_channels,
+                        kernel_size=operation.module.kernel_size,
+                        stride=operation.module.stride,
+                        padding=operation.module.padding,
+                        output_padding=operation.module.output_padding,
+                        dilation=operation.module.dilation,
+                        groups=operation.module.groups,
+                        padding_mode=operation.module.padding_mode,
+                        batch_size=input_shape[0],
+                        input_height=input_shape[-2],
+                        input_width=input_shape[-1],
+                        math_fidelity=ttnn.MathFidelity.HiFi4,
+                        dtype=ttnn.bfloat16,
+                        weights_dtype=ttnn.bfloat16,
+                        use_1d_systolic_array=True,
+                        enable_auto_formatting=False,
+                        conv_blocking_and_parallelization_config_override={},
+                        device=device,
+                    )
+                elif isinstance(operation.module, torch.nn.MaxPool2d):
+                    ttnn_module_args[module_name] = MaxPool2dArgs(
+                        kernel_size=operation.module.kernel_size,
+                        stride=operation.module.stride,
+                        padding=operation.module.padding,
+                        dilation=operation.module.dilation,
+                        batch_size=input_shape[0],
+                        input_channels=input_shape[1],
+                        input_height=input_shape[-2],
+                        input_width=input_shape[-1],
+                        dtype=ttnn.bfloat16,
+                    )
+                elif isinstance(operation.module, torch.nn.GroupNorm):
+                    ttnn_module_args[module_name] = GroupNormArgs(
+                        num_groups=operation.module.num_groups,
+                        num_channels=operation.module.num_channels,
+                        eps=operation.module.eps,
+                        affine=operation.module.affine,
+                        batch_size=input_shape[0],
+                        input_height=input_shape[-2],
+                        input_width=input_shape[-1],
+                        dtype=ttnn.bfloat16,
+                    )
+                else:
+                    ttnn_module_args[module_name] = _infer_ttnn_module_args(operation.graph)
+
+                if module_name.isdigit():
+                    ttnn_module_args[int(module_name)] = ttnn_module_args[module_name]
+
+        return make_dot_access_dict(ttnn_module_args, ignore_types=(ModuleArgs,))
+
+    ttnn_module_args = _infer_ttnn_module_args(ttnn.tracer.get_graph(output))
+    return ttnn_module_args[""]
+
+
+def box_post_processing(
+    cls_logits,
+    center_offset,
+    size_normalized,
+    angle_logits,
+    angle_residual_normalized,
+    angle_residual,
+    num_layers,
+    torch_query_xyz,
+    torch_point_cloud_dims,
+    dataset_config,
+):
+    torch_cls_logits = ttnn.to_torch(cls_logits)
+    torch_center_offset = ttnn.to_torch(center_offset)
+    torch_size_normalized = ttnn.to_torch(size_normalized)
+    torch_angle_logits = ttnn.to_torch(angle_logits)
+    torch_angle_residual_normalized = ttnn.to_torch(angle_residual_normalized)
+    torch_angle_residual = ttnn.to_torch(angle_residual)
+    torch_query_xyz = ttnn.to_torch(torch_query_xyz)
+    for i in range(len(torch_point_cloud_dims)):
+        torch_point_cloud_dims[i] = ttnn.to_torch(torch_point_cloud_dims[i])
+
+    torch_box_processor = BoxProcessor(dataset_config)
+
+    torch_outputs = []
+    for l in range(num_layers.item()):
+        # box processor converts outputs so we can get a 3D bounding box
+        (
+            torch_center_normalized,
+            torch_center_unnormalized,
+        ) = torch_box_processor.compute_predicted_center(
+            torch_center_offset[l], torch_query_xyz, torch_point_cloud_dims
+        )
+        torch_angle_continuous = torch_box_processor.compute_predicted_angle(
+            torch_angle_logits[l], torch_angle_residual[l]
+        )
+        torch_size_unnormalized = torch_box_processor.compute_predicted_size(
+            torch_size_normalized[l], torch_point_cloud_dims
+        )
+        torch_box_corners = torch_box_processor.box_parametrization_to_corners(
+            torch_center_unnormalized, torch_size_unnormalized, torch_angle_continuous
+        )
+
+        # below are used for matching/mAP eval
+        (
+            torch_semcls_prob,
+            torch_objectness_prob,
+        ) = torch_box_processor.compute_objectness_and_cls_prob(torch_cls_logits[l])
+
+        torch_box_prediction = {
+            "sem_cls_logits": torch_cls_logits[l],
+            "center_normalized": torch_center_normalized,
+            "center_unnormalized": torch_center_unnormalized,
+            "size_normalized": torch_size_normalized[l],
+            "size_unnormalized": torch_size_unnormalized,
+            "angle_logits": torch_angle_logits[l],
+            "angle_residual": torch_angle_residual[l],
+            "angle_residual_normalized": torch_angle_residual_normalized[l],
+            "angle_continuous": torch_angle_continuous,
+            "objectness_prob": torch_objectness_prob,
+            "sem_cls_prob": torch_semcls_prob,
+            "box_corners": torch_box_corners,
+        }
+        torch_outputs.append(torch_box_prediction)
+
+    # intermediate decoder layer outputs are only used during training
+    # we use them to check for any instability in PCC
+    torch_aux_outputs = torch_outputs[:-1]
+    torch_outputs = torch_outputs[-1]
+
+    return {
+        "outputs": torch_outputs,  # output from last layer of decoder
+        "aux_outputs": torch_aux_outputs,  # output from intermediate layers of decoder
+    }
 
 
 class TtnnConv1D(LightweightModule):
@@ -93,6 +280,70 @@ class TtnnConv1D(LightweightModule):
         return tt_output_tensor_on_device
 
 
+class TtnnMaxPool2DSlice(LightweightModule):
+    def __init__(
+        self,
+        maxpool_args,
+        num_maxpool_slice,
+        device=None,
+        math_fidelity=ttnn.MathFidelity.LoFi,
+        math_approx_mode=False,
+    ):
+        super().__init__()
+        self.maxpool_args = maxpool_args
+        self.num_maxpool_slice = num_maxpool_slice
+        self.slice_h = maxpool_args.input_height // num_maxpool_slice
+        self.maxpool = TtMaxPool2d(
+            configuration=MaxPool2dConfiguration(
+                input_height=maxpool_args.input_height // num_maxpool_slice,
+                input_width=maxpool_args.input_width,
+                channels=maxpool_args.input_channels,
+                batch_size=maxpool_args.batch_size,
+                kernel_size=maxpool_args.kernel_size,
+                stride=maxpool_args.stride,
+                padding=(maxpool_args.padding, maxpool_args.padding),
+                dilation=(maxpool_args.dilation, maxpool_args.dilation),
+                deallocate_input=True,
+                output_layout=ttnn.TILE_LAYOUT,
+                dtype=ttnn.bfloat16,
+            ),
+            device=device,
+        )
+
+    def forward(self, x):
+        x = ttnn.reshape(
+            x,
+            (
+                self.maxpool_args.batch_size,
+                self.maxpool_args.input_height,
+                self.maxpool_args.input_width,
+                self.maxpool_args.input_channels,
+            ),
+        )
+        B, H, W, C = (x.shape[-4], self.slice_h, x.shape[-2], x.shape[-1])
+
+        partial_maxpool_out = []
+
+        for slice in range(self.num_maxpool_slice):
+            slice_input = x[:, self.slice_h * slice : self.slice_h * (slice + 1), :, :]
+            slice_input = ttnn.reallocate(slice_input)
+            slice_input = ttnn.reshape(slice_input, (1, 1, B * H * W, C))
+            partial_maxpool_out.append(ttnn.sharded_to_interleaved(self.maxpool(slice_input), ttnn.L1_MEMORY_CONFIG))
+
+            ttnn.deallocate(slice_input)
+
+        for i in range(len(partial_maxpool_out)):
+            partial_maxpool_out[i] = ttnn.reshape(partial_maxpool_out[i], (B, H, C))
+        new_features = ttnn.concat((partial_maxpool_out), dim=1, memory_config=ttnn.L1_MEMORY_CONFIG)
+        new_features = ttnn.permute(
+            new_features, (0, 2, 1), memory_config=ttnn.L1_MEMORY_CONFIG
+        )  # (B, mlp[-1], npoint)
+        for i in range(len(partial_maxpool_out)):
+            ttnn.deallocate(partial_maxpool_out[i])
+
+        return new_features
+
+
 def shift_scale_points_ttnn(pred_xyz, src_range, device=None):
     """
     pred_xyz: B x N x 3
@@ -124,8 +375,8 @@ def shift_scale_points_ttnn(pred_xyz, src_range, device=None):
     prop_xyz = ttnn.div(
         prop_xyz,
         src_diff,
-        accurate_mode=True,
-        rounding_mode=None,
+        fast_and_approximate_mode=True,
+        # round_mode=None,
     )
     prop_xyz = prop_xyz + dst_range[0]
 

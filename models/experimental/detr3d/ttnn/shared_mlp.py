@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: © 2025 Tenstorrent Inc.
+# SPDX-FileCopyrightText: © 2025 Tenstorrent AI ULC
 
 # SPDX-License-Identifier: Apache-2.0
 
@@ -8,7 +8,7 @@ from models.tt_cnn.tt.builder import Conv2dConfiguration, TtConv2d, AutoShardedS
 
 
 class TtnnSharedMLP(LightweightModule):
-    def __init__(self, parameters, device):
+    def __init__(self, parameters, layer_args, device):
         super().__init__()
         self.device = device
         self.parameters = parameters
@@ -16,20 +16,20 @@ class TtnnSharedMLP(LightweightModule):
         self.conv1 = TtConv2d(
             self._create_conv_config(
                 parameters=parameters.layer0.conv,
-                layer_params=parameters.conv_args.layer0.conv,
+                layer_params=layer_args.layer0.conv,
             ),
             device,
         )
         self.conv2 = TtConv2d(
             self._create_conv_config(
-                layer_params=parameters.conv_args.layer1.conv,
+                layer_params=layer_args.layer1.conv,
                 parameters=parameters.layer1.conv,
             ),
             device,
         )
         self.conv3 = TtConv2d(
             self._create_conv_config(
-                layer_params=parameters.conv_args.layer2.conv,
+                layer_params=layer_args.layer2.conv,
                 parameters=parameters.layer2.conv,
             ),
             device,
@@ -48,8 +48,8 @@ class TtnnSharedMLP(LightweightModule):
                 bias = ttnn.from_device(bias)
 
         return Conv2dConfiguration(
-            input_height=2048,
-            input_width=64,
+            input_height=layer_params.input_height,
+            input_width=layer_params.input_width,
             in_channels=layer_params.in_channels,
             out_channels=layer_params.out_channels,
             batch_size=1,
